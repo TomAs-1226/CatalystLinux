@@ -7,6 +7,7 @@
 //! floor, chosen in System, and every layout is measured from it.
 
 use bezel::{Align, Canvas, Color, Glass, GlassShape, Icons, Rect, Text, TextStyle, Tokens};
+use detent::{role, Animated};
 
 pub const W: f32 = 320.0;
 pub const H: f32 = 170.0;
@@ -108,6 +109,32 @@ pub struct Gfx {
     pub pager: Option<(usize, usize, f32)>,
     /// The width a screen title may take before it meets the island.
     pub title_room: f32,
+    /// The focus ring, which glides to whatever is focused.
+    focus: Focus,
+    /// Draw the ring where it is asked for and leave the glide alone: set
+    /// while a screen is drawn as a picture for a transition.
+    pub focus_static: bool,
+    /// Set when drawing gave something a new place to move to.
+    motion_started: bool,
+}
+
+/// The focus ring's place. It follows the focus on Bezel's hold spring (the
+/// one for a value following an input): quick, and with no bounce to speak of.
+struct Focus {
+    x: Animated,
+    y: Animated,
+    w: Animated,
+    h: Animated,
+    /// False until the ring has been put somewhere on this screen: its first
+    /// place is taken at once, with nothing to glide from.
+    placed: bool,
+}
+
+impl Focus {
+    fn new() -> Self {
+        let spring = || Animated::new(0.0, role::hold()).with_rest(0.05);
+        Focus { x: spring(), y: spring(), w: spring(), h: spring(), placed: false }
+    }
 }
 
 impl Gfx {
@@ -125,6 +152,9 @@ impl Gfx {
             calm: false,
             pager: None,
             title_room: 96.0,
+            focus: Focus::new(),
+            focus_static: false,
+            motion_started: false,
         }
     }
 
@@ -185,11 +215,53 @@ impl Gfx {
         self.canvas.circle(cx + self.ox, cy, radius, color, 1.0);
     }
 
-    /// The focus ring: signal, just outside the focused surface. It lands at
-    /// once: Bezel does not animate changes that come from keys.
+    /// The focus ring: signal, just outside the focused surface. It glides
+    /// from the last thing focused to this one. (Bezel itself lands changes
+    /// made from keys at once; the calm version keeps to that.)
     pub fn focus_ring(&mut self, r: Rect, radius: f32) {
         let signal = self.tokens.signal;
-        self.canvas.stroke_rrect(r.inset(-2.5).offset(self.ox, 0.0), radius + 2.5, 1.5, signal, 1.0);
+        let at = if self.focus_static {
+            r
+        } else {
+            let f = &mut self.focus;
+            if !f.placed || self.calm {
+                f.x.jump(r.x);
+                f.y.jump(r.y);
+                f.w.jump(r.w);
+                f.h.jump(r.h);
+                f.placed = true;
+            } else if (f.x.target(), f.y.target(), f.w.target(), f.h.target()) != (r.x, r.y, r.w, r.h) {
+                f.x.set(r.x);
+                f.y.set(r.y);
+                f.w.set(r.w);
+                f.h.set(r.h);
+                self.motion_started = true;
+            }
+            Rect::new(f.x.value(), f.y.value(), f.w.value(), f.h.value())
+        };
+        self.canvas.stroke_rrect(at.inset(-2.5).offset(self.ox, 0.0), radius + 2.5, 1.5, signal, 1.0);
+    }
+
+    /// Forget where the ring was: the next screen's focus is placed at once.
+    pub fn focus_reset(&mut self) {
+        self.focus.placed = false;
+    }
+
+    /// Advance what moves on its own. True while something still is.
+    pub fn tick(&mut self, dt: f32) -> bool {
+        let f = &mut self.focus;
+        // Each spring must be advanced, so no short-circuit.
+        f.x.tick(dt) | f.y.tick(dt) | f.w.tick(dt) | f.h.tick(dt)
+    }
+
+    /// Whether drawing just gave something a new place to move to.
+    pub fn take_motion_started(&mut self) -> bool {
+        std::mem::take(&mut self.motion_started)
+    }
+
+    /// Left-aligned text centred on `cy`, at an opacity.
+    pub fn text_alpha(&mut self, x: f32, cy: f32, s: &str, style: TextStyle, color: Color, alpha: f32) {
+        self.text.draw(&mut self.canvas, x + self.ox, baseline_for(&style, cy), s, &style, color, alpha);
     }
 
     /// A meter: the fill takes the track's outer corners through a clip.

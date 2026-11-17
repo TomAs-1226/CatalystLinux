@@ -169,12 +169,15 @@ pub struct Logs {
     dir: Option<PathBuf>,
     shared: Arc<Shared>,
     demo: Vec<Row>,
+    /// The last listing and the generation it was read at: screens ask every
+    /// frame, the folder changes a few times an hour.
+    listed: Mutex<Option<(u64, Vec<Row>)>>,
 }
 
 impl Logs {
     /// No robot: nothing to show or pull.
     pub fn none() -> Self {
-        Logs { dir: None, shared: Arc::new(Shared::default()), demo: Vec::new() }
+        Logs { dir: None, shared: Arc::new(Shared::default()), demo: Vec::new(), listed: Mutex::new(None) }
     }
 
     /// Two scripted matches, for the demo robot.
@@ -193,7 +196,7 @@ impl Logs {
             Row { name: "FRC_20261116_093200_NYRO_Q9.wpilog".into(), bytes: 18_400_000, digest: Some(calm) },
             Row { name: "FRC_20261115_171800.wpilog".into(), bytes: 31_250_000, digest: None },
         ];
-        let logs = Logs { dir: None, shared: Arc::new(Shared::default()), demo };
+        let logs = Logs { dir: None, shared: Arc::new(Shared::default()), demo, listed: Mutex::new(None) };
         *logs.shared.status.lock().unwrap() = "demo logs".into();
         logs
     }
@@ -205,7 +208,7 @@ impl Logs {
         *shared.status.lock().unwrap() = "waiting for the robot".into();
         if fs::create_dir_all(&dir).is_err() {
             *shared.status.lock().unwrap() = "no place to keep logs".into();
-            return Logs { dir: None, shared, demo: Vec::new() };
+            return Logs { dir: None, shared, demo: Vec::new(), listed: Mutex::new(None) };
         }
         let (thread_shared, thread_dir, host) = (shared.clone(), dir.clone(), host.to_owned());
         thread::Builder::new()
@@ -213,7 +216,7 @@ impl Logs {
             .stack_size(512 * 1024)
             .spawn(move || pull_loop(&thread_shared, &thread_dir, &host))
             .expect("spawn logs thread");
-        Logs { dir: Some(dir), shared, demo: Vec::new() }
+        Logs { dir: Some(dir), shared, demo: Vec::new(), listed: Mutex::new(None) }
     }
 
     /// Pulling only happens while this is true: linked, and not enabled.
@@ -238,6 +241,12 @@ impl Logs {
     /// The logs kept here, newest first.
     pub fn list(&self) -> Vec<Row> {
         let Some(dir) = &self.dir else { return self.demo.clone() };
+        let generation = self.shared.generation.load(Ordering::Relaxed);
+        if let Some((at, rows)) = &*self.listed.lock().unwrap() {
+            if *at == generation {
+                return rows.clone();
+            }
+        }
         let mut rows: Vec<Row> = local_files(dir)
             .into_iter()
             .map(|(name, _, bytes)| {
@@ -250,6 +259,7 @@ impl Logs {
             .collect();
         // WPILib names sort by time.
         rows.sort_by(|a, b| b.name.cmp(&a.name));
+        *self.listed.lock().unwrap() = Some((generation, rows.clone()));
         rows
     }
 }

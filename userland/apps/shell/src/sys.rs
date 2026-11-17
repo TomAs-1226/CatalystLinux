@@ -110,3 +110,18 @@ pub fn set_brightness(percent: u32) -> bool {
     let value = (percent.clamp(5, 100) * max / 100).max(1);
     fs::write(dir.join("brightness"), value.to_string()).is_ok()
 }
+
+/// The time of day, as the status bar shows it.
+pub fn clock() -> String {
+    chrono::Local::now().format("%H:%M").to_string()
+}
+
+/// Battery charge alone, 0–100.
+pub fn battery_percent() -> Option<u32> {
+    fs::read_dir("/sys/class/power_supply").ok()?.flatten().find_map(|e| read(&e.path().join("capacity").to_string_lossy())?.parse().ok())
+}
+
+/// Whether a network interface has a link, without asking another program.
+pub fn link_up(interface: &str) -> bool {
+    read(&format!("/sys/class/net/{interface}/operstate")).is_some_and(|state| state == "up")
+}

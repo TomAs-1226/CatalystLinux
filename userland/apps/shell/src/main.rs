@@ -147,6 +147,7 @@ fn main() {
     let mut platform: Box<dyn Platform> = open_platform(flag("--sim"));
     let speed = Speed::named(value("--speed").as_deref());
     let mut meter = Meter::default();
+    let mut shown = 0u64;
     let perf = flag("--perf");
     let mut last = Instant::now();
     loop {
@@ -164,14 +165,19 @@ fn main() {
         if changed {
             shell.draw();
         }
-        let cost = speed.impose(work, changed);
-        if let Some(line) = meter.record(cost, changed) {
+        // A redraw that came out the same as what the panel shows is not sent again.
+        let fresh = changed && {
+            let hash = picture_hash(&shell.gfx.canvas.px);
+            std::mem::replace(&mut shown, hash) != hash
+        };
+        let cost = speed.impose(work, fresh);
+        if let Some(line) = meter.record(cost, fresh) {
             platform.set_status(&format!("Catalyst Linux · {} · {line}", speed.name));
             if perf {
                 eprintln!("{line}");
             }
         }
-        if changed || platform.present_always() {
+        if fresh || platform.present_always() {
             platform.present(&shell.gfx.canvas);
         }
     }
@@ -221,6 +227,14 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     };
     let started = Instant::now();
     let mut frames = 0u32;
+    // Home's tiles cascade in when it first appears: one shot of that, then let it finish.
+    for _ in 0..14 {
+        frame(&mut shell);
+    }
+    platform::sim::save_png(&shell.gfx.canvas, &dir.join("00-cascade.png"), 3);
+    for _ in 0..90 {
+        frame(&mut shell);
+    }
     for (name, keys) in tour {
         for key in keys.iter() {
             shell.key(*key);
@@ -235,12 +249,21 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
         shell.draw();
         platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}.png")), 3);
     }
-    // One frame caught mid page turn, to show the motion.
+    // An app caught opening out of its tile, then caught again on its way back.
     shell.key(Key::Enter);
-    for _ in 0..7 {
+    for _ in 0..8 {
         frame(&mut shell);
     }
-    platform::sim::save_png(&shell.gfx.canvas, &dir.join("11-page-turn.png"), 3);
+    platform::sim::save_png(&shell.gfx.canvas, &dir.join("11-app-opening.png"), 3);
+    for _ in 0..90 {
+        frame(&mut shell);
+    }
+    // And a page inside the app, caught sliding in.
+    shell.key(Key::Enter);
+    for _ in 0..9 {
+        frame(&mut shell);
+    }
+    platform::sim::save_png(&shell.gfx.canvas, &dir.join("12-page-sliding.png"), 3);
     println!("{} screens in {}, {frames} frames at {:.2} ms each", tour.len() + 1, dir.display(), started.elapsed().as_secs_f64() * 1e3 / frames as f64);
 }
 
@@ -346,4 +369,9 @@ impl Meter {
         *self = Meter::default();
         Some(line)
     }
+}
+
+/// A quick fingerprint of a frame (FNV-1a over its pixels).
+fn picture_hash(px: &[u32]) -> u64 {
+    px.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, p| (h ^ *p as u64).wrapping_mul(0x0000_0100_0000_01b3))
 }

@@ -65,11 +65,20 @@ pub struct Home {
     page: Animated,
     /// Columns in the grid: fewer, larger tiles at the large text size.
     columns: usize,
+    /// Where each tile was last drawn: an app opens out of its tile.
+    rects: Vec<Rect>,
+    /// Seconds since Home arrived, for the launcher cascade.
+    arrived: f32,
 }
+
+/// Bezel's launcher cascade: tiles spring into place one after another,
+/// spread over this long from the first to the last.
+const CASCADE_SPREAD: f32 = 0.28;
+const CASCADE_OVER: f32 = CASCADE_SPREAD + 0.9;
 
 impl Home {
     pub fn new() -> Self {
-        Home { focus: 0, page: Animated::new(0.0, role::page()).with_rest(0.002), columns: 3 }
+        Home { focus: 0, page: Animated::new(0.0, role::page()).with_rest(0.002), columns: 3, rects: Vec::new(), arrived: 0.0 }
     }
 
     fn per_page(&self) -> usize {
@@ -134,7 +143,13 @@ impl Screen for Home {
             Key::Up if row > 0 => self.focus -= columns,
             Key::Down if self.focus + columns < page_end => self.focus += columns,
             Key::Tab => self.focus = (self.focus + 1) % APPS.len(),
-            Key::Enter => return Nav::Push((APPS[self.focus].open)(cx.robot)),
+            Key::Enter => {
+                let screen = (APPS[self.focus].open)(cx.robot);
+                return match self.rects.get(self.focus) {
+                    Some(tile) => Nav::Open(screen, *tile),
+                    None => Nav::Push(screen),
+                };
+            }
             _ => {}
         }
         let target = (self.focus / per_page) as f32;
@@ -147,7 +162,12 @@ impl Screen for Home {
     }
 
     fn tick(&mut self, dt: f32) -> bool {
-        self.page.tick(dt)
+        let mut moving = self.page.tick(dt);
+        if self.arrived < CASCADE_OVER {
+            self.arrived += dt;
+            moving = true;
+        }
+        moving
     }
 
     fn draw(&mut self, g: &mut Gfx, robot: &Robot) {
@@ -175,6 +195,22 @@ impl Screen for Home {
                 continue;
             }
             let r = Rect::new(PAD + (local % columns) as f32 * (tw + GAP) + slide, top + (local / columns) as f32 * (th + GAP), tw, th);
+            if self.rects.len() != APPS.len() {
+                self.rects.resize(APPS.len(), Rect::default());
+            }
+            self.rects[i] = r;
+            // The cascade: each tile arrives a little after the one before it,
+            // nearest the top left first, and springs up into its place.
+            let r = if g.calm || self.arrived >= CASCADE_OVER {
+                r
+            } else {
+                let order = (local % columns) as f32 + (local / columns) as f32 * 1.5;
+                let since = self.arrived - CASCADE_SPREAD * order / (columns as f32 + 0.5);
+                if since < 0.0 {
+                    continue;
+                }
+                r.offset(0.0, 14.0 * role::release().solve(1.0, 0.0, since).0)
+            };
             let focused = i == self.focus;
             let (status, attention) = Self::status(i, robot);
             g.surface(r, TILE_RADIUS, t.surface1);
@@ -980,7 +1016,10 @@ pub struct SettingsApp {
     list: ListState,
     /// Read-only lines, re-read every couple of seconds while the page shows.
     info: Vec<(&'static str, String)>,
-    since_read: f32,
+    read_at: std::time::Instant,
+    /// What the section rows summarise, re-read with the rest.
+    network: String,
+    backlight: Option<u32>,
 }
 
 impl SettingsApp {
@@ -990,7 +1029,7 @@ impl SettingsApp {
     }
 
     fn page(title: &'static str, items: Vec<Item>) -> Self {
-        let mut page = SettingsApp { title, items, list: ListState::default(), info: Vec::new(), since_read: 0.0 };
+        let mut page = SettingsApp { title, items, list: ListState::default(), info: Vec::new(), read_at: std::time::Instant::now(), network: String::new(), backlight: None };
         page.read_info();
         page
     }
@@ -1009,6 +1048,9 @@ impl SettingsApp {
 
     fn read_info(&mut self) {
         use crate::sys;
+        self.read_at = std::time::Instant::now();
+        self.network = sys::address("eth0").filter(|a| a.contains('.')).or_else(|| sys::address("wlan0")).unwrap_or_else(|| "–".into());
+        self.backlight = sys::brightness();
         self.info = match self.title {
             "Network" => vec![
                 ("Name", dash(sys::hostname())),
@@ -1038,15 +1080,15 @@ impl SettingsApp {
         let section = |name: &str, summary: String| (name.to_owned(), format!("{summary} ›"), false);
         match item {
             Appearance => section("Appearance", format!("{} · {}", if g.tokens.tone == bezel::Tone::Light { "light" } else { "dark" }, g.accent.name())),
-            Display => section("Display", dash(crate::sys::brightness().map(|b| format!("{b}%")))),
-            Network => section("Network", crate::sys::address("eth0").or_else(|| crate::sys::address("wlan0")).unwrap_or_else(|| "–".into())),
+            Display => section("Display", dash(self.backlight.map(|b| format!("{b}%")))),
+            Network => section("Network", self.network.clone()),
             Access => section("Access", format!("ssh {}", onoff(crate::ssh_enabled()))),
             About => section("About", env!("CARGO_PKG_VERSION").to_owned()),
             Mode => ("Mode".into(), (if g.tokens.tone == bezel::Tone::Light { "light" } else { "dark" }).into(), true),
             AccentColor => ("Accent".into(), g.accent.name().into(), true),
             TextScale => ("Text size".into(), g.text_size.name().into(), true),
             Calm => ("Calm version".into(), onoff(g.calm), g.calm),
-            Brightness => ("Brightness".into(), dash(crate::sys::brightness().map(|b| format!("{b}%"))), true),
+            Brightness => ("Brightness".into(), dash(self.backlight.map(|b| format!("{b}%"))), true),
             Ssh => ("SSH access".into(), onoff(crate::ssh_enabled()), crate::ssh_enabled()),
             DemoRobot => ("Demo robot".into(), onoff(robot.is_demo()), robot.is_demo()),
             Info(i) => self.info.get(i).map(|(name, value)| ((*name).to_owned(), value.clone(), false)).unwrap_or_default(),
@@ -1068,6 +1110,7 @@ impl SettingsApp {
             Brightness => match crate::sys::brightness() {
                 Some(now) => {
                     crate::sys::set_brightness((now as i32 + step * 10).clamp(10, 100) as u32);
+                    self.backlight = crate::sys::brightness();
                 }
                 None => *cx.say = Some("the backlight is on the device".into()),
             },
@@ -1113,15 +1156,13 @@ impl Screen for SettingsApp {
         Nav::Stay
     }
 
-    fn tick(&mut self, dt: f32) -> bool {
-        self.since_read += dt;
-        if self.since_read < 2.0 || self.info.is_empty() {
+    fn tick(&mut self, _dt: f32) -> bool {
+        if self.read_at.elapsed().as_secs_f32() < 2.0 {
             return false;
         }
-        self.since_read = 0.0;
-        let before = self.info.clone();
+        let before = (self.info.clone(), self.network.clone(), self.backlight);
         self.read_info();
-        before != self.info
+        before != (self.info.clone(), self.network.clone(), self.backlight)
     }
 
     fn draw(&mut self, g: &mut Gfx, robot: &Robot) {
@@ -1152,7 +1193,7 @@ impl Screen for SettingsApp {
                     let value_w = g.measure("100%", g.ty.label) + 22.0;
                     g.row(r, &name, &value, t.ink, focused);
                     let name_w = g.measure(&name, g.ty.body) + 22.0;
-                    let level = crate::sys::brightness().unwrap_or(0) as f32 / 100.0;
+                    let level = self.backlight.unwrap_or(0) as f32 / 100.0;
                     g.meter(Rect::new(r.x + name_w, r.cy() - 3.0, r.w - name_w - value_w, 6.0), level, t.ice);
                 }
                 _ => g.row(r, &name, &value, if on { t.ink } else { t.dim }, focused),

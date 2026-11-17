@@ -43,7 +43,31 @@ panel, and the window title shows frames per second, the cost of a frame and
 how busy the handheld's processor would be. Those factors are estimates until
 a CardputerZero has been measured with `catalyst-shell --bench`. At them, an
 idle screen costs nothing, a screen showing live robot data keeps the
-processor about 6% busy, and a page turn runs at about 39 frames a second.
+processor about 6% busy (and is only sent to the panel when the picture
+actually changed), and transitions run at about 40 frames a second.
+
+## Motion
+
+Motion is Detent's, by Bezel's roles, and every piece of it is a spring that
+starts from what is on screen:
+
+- An app grows out of the tile it was opened from and shrinks back into it
+  (`release`). Press Esc while it opens and it turns round where it is,
+  keeping its speed; press Enter while it closes and the same window returns.
+- A page inside an app slides in from the right and back out (`page`), and
+  turns round the same way.
+- The focus ring glides to whatever is focused (`hold`). Bezel itself lands
+  changes made from keys at once; this bends that for the sake of flow, and
+  the calm version in Settings restores it.
+- Home's tiles cascade into place when it first appears (`release`, spread
+  over 0.28 s), and the island grows to carry a message, its words fading in
+  once it is past halfway.
+
+Springs are solved in closed form, so motion is the same at 20 frames a
+second as at 60, and nothing moves while the screen is idle. The tests in
+`shell.rs` hold all of this: turning round mid-flight without a jump,
+reopening from where a window is, frame-rate independence, and that an
+animation begun after an idle spell starts from its beginning.
 
 ## Build the SD card image
 
