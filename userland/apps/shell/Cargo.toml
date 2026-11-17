@@ -1,0 +1,21 @@
+[package]
+name = "catalyst-shell"
+description = "The Catalyst Linux shell: launcher, built-in Catalyst apps, and the hand-off to external apps."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bezel = { workspace = true }
+detent = { workspace = true }
+nt4 = { workspace = true }
+serde_json = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+# Desktop development only: a window to run the UI in, and PNG screenshots.
+# Neither is built into the device image.
+[target.'cfg(not(target_arch = "aarch64"))'.dependencies]
+minifb = { version = "0.29", default-features = false }
+png = "0.18"

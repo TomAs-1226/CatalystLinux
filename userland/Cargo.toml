@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = ["crates/detent", "crates/bezel", "crates/nt4", "apps/shell"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+detent = { path = "crates/detent" }
+bezel = { path = "crates/bezel" }
+nt4 = { path = "crates/nt4" }
+
+# The device build: small, fast, no unwinding tables.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Rendering in a debug build is too slow to judge motion by; optimise the
+# pixel code even while the rest stays debuggable.
+[profile.dev.package.bezel]
+opt-level = 3
+[profile.dev.package.detent]
+opt-level = 3
+[profile.dev.package."*"]
+opt-level = 2

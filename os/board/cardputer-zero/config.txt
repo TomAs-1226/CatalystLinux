@@ -1,0 +1,28 @@
+# Catalyst Linux on the M5Stack CardputerZero (Raspberry Pi CM0).
+
+start_file=start_cd.elf
+fixup_file=fixup_cd.dat
+kernel=Image
+arm_64bit=1
+
+# Nothing here uses the GPU: the panel is an SPI display drawn by the CPU.
+gpu_mem=16
+disable_splash=1
+disable_overscan=1
+boot_delay=0
+
+dtparam=i2c_arm=on
+dtparam=spi=on
+camera_auto_detect=0
+
+# Serial console on GPIO14/15 (the Grove port). This takes the PL011 from
+# Bluetooth, which nothing uses yet.
+enable_uart=1
+dtoverlay=disable-bt
+
+# USB device mode, for a link to the Systemcore or a PC over USB-C.
+dtoverlay=dwc2
+
+# The board: I/O expander, panel, backlight, keyboard, fuel gauge.
+dtoverlay=cardputerzero-v5-overlay
+dtoverlay=bq27220_v5

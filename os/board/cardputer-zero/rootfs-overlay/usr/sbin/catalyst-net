@@ -1,0 +1,55 @@
+#!/bin/sh
+# Wired Ethernet, brought up whenever a cable is in.
+#
+# DHCP first (a robot radio, a router). With no DHCP server, as on a cable
+# straight into the Systemcore, take a fixed address on the team's robot
+# network (10.TE.AM.77) so the robot at 10.TE.AM.2 is reachable.
+
+IF="${1:-eth0}"
+ROBOT_FILE=/data/catalyst/robot
+PIDFILE="/run/udhcpc.$IF.pid"
+
+# The address to fall back to, from the robot the user set: a team number or
+# a 10.TE.AM.x address. A hostname gives no subnet to guess, so nothing.
+robot_static() {
+	r=$(cat "$ROBOT_FILE" 2>/dev/null)
+	case "$r" in
+	'' | *[!0-9.]*) return ;;
+	10.*.*.*) echo "$r" | awk -F. '{ print "10." $2 "." $3 ".77" }' ;;
+	*.*) return ;;
+	*) [ "${#r}" -le 5 ] && echo "10.$((r / 100)).$((r % 100)).77" ;;
+	esac
+}
+
+# For testing the address rule on its own.
+if [ "${1:-}" = "--static-for" ]; then
+	ROBOT_FILE="$2"
+	robot_static
+	exit 0
+fi
+
+state=down
+while :; do
+	if [ -e "/sys/class/net/$IF" ]; then
+		ip link set "$IF" up 2>/dev/null
+		carrier=$(cat "/sys/class/net/$IF/carrier" 2>/dev/null || echo 0)
+	else
+		carrier=0
+	fi
+
+	if [ "$carrier" = 1 ] && [ "$state" = down ]; then
+		state=up
+		# Four quick tries, then keep asking in the background.
+		udhcpc -i "$IF" -b -t 4 -T 1 -p "$PIDFILE" >/dev/null 2>&1
+		if ! ip -4 addr show dev "$IF" | grep -q 'inet '; then
+			addr=$(robot_static)
+			[ -n "$addr" ] && ip addr replace "$addr/24" dev "$IF"
+		fi
+	elif [ "$carrier" != 1 ] && [ "$state" = up ]; then
+		state=down
+		[ -e "$PIDFILE" ] && kill "$(cat "$PIDFILE")" 2>/dev/null
+		rm -f "$PIDFILE"
+		ip addr flush dev "$IF" 2>/dev/null
+	fi
+	sleep 2
+done

@@ -1,0 +1,10 @@
+config BR2_PACKAGE_M5STACK_CARDPUTER_ZERO
+	bool "m5stack-cardputer-zero"
+	depends on BR2_LINUX_KERNEL
+	help
+	  Out-of-tree drivers and device tree overlays from M5Stack for
+	  the CardputerZero: the M5IOE1 I/O expander, the ST7789V3 panel
+	  (panel-mipi-dbi) and its PWM backlight, the TCA8418 keyboard,
+	  the BQ27220 fuel gauge and the power-fail handler.
+
+	  https://github.com/m5stack/m5stack-linux-dtoverlays

@@ -1,0 +1,13 @@
+#!/sbin/openrc-run
+# Wired Ethernet: DHCP, or a fixed address on the robot network without it.
+
+description="Catalyst Linux wired network"
+supervisor=supervise-daemon
+command=/usr/sbin/catalyst-net
+command_args="eth0"
+respawn_delay=2
+
+depend() {
+	need localmount
+	after sysv-rcs
+}

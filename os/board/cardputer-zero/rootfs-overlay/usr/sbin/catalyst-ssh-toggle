@@ -1,0 +1,20 @@
+#!/bin/sh
+# catalyst-ssh-toggle on|off|status
+case "$1" in
+on)
+	mkdir -p /data/catalyst /data/ssh
+	touch /data/catalyst/ssh-enabled
+	rc-service catalyst-ssh start
+	;;
+off)
+	rm -f /data/catalyst/ssh-enabled
+	rc-service catalyst-ssh stop
+	;;
+status)
+	[ -e /data/catalyst/ssh-enabled ] && echo on || echo off
+	;;
+*)
+	echo "usage: $0 on|off|status" >&2
+	exit 2
+	;;
+esac

@@ -1,0 +1,8 @@
+[package]
+name = "detent"
+description = "Detent's spring model: one damped oscillator, every vocabulary, solved in closed form."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

@@ -1,0 +1,58 @@
+# Catalyst Linux for the M5Stack CardputerZero (Raspberry Pi CM0, 64-bit).
+BR2_aarch64=y
+BR2_cortex_a53=y
+BR2_TOOLCHAIN_EXTERNAL=y
+BR2_TOOLCHAIN_EXTERNAL_BOOTLIN=y
+BR2_TOOLCHAIN_EXTERNAL_BOOTLIN_AARCH64_MUSL_STABLE=y
+BR2_TARGET_GENERIC_HOSTNAME="catalyst"
+BR2_TARGET_GENERIC_ISSUE="Catalyst Linux"
+BR2_INIT_OPENRC=y
+# mdev (part of BusyBox) loads drivers by modalias at boot and on hotplug:
+# the I2C and SPI controllers, USB Ethernet, anything plugged into the hub.
+BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV=y
+# The root filesystem stays read-only: the power switch cuts power at once.
+# BR2_TARGET_GENERIC_REMOUNT_ROOTFS_RW is not set
+BR2_TARGET_GENERIC_GETTY_PORT="ttyAMA0"
+BR2_TARGET_GENERIC_GETTY_BAUDRATE_115200=y
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_CATALYST_PATH)/board/cardputer-zero/rootfs-overlay"
+BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_CATALYST_PATH)/board/cardputer-zero/post-build.sh"
+BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_CATALYST_PATH)/board/cardputer-zero/post-image.sh"
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+# raspberrypi/linux rpi-6.18.y (6.18.62): the series M5Stack builds its drivers against.
+BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="$(call github,raspberrypi,linux,ea17ae02ca28483e508b05c7c44190c01a1ef8eb)/linux-ea17ae02ca28483e508b05c7c44190c01a1ef8eb.tar.gz"
+BR2_LINUX_KERNEL_DEFCONFIG="bcm2711"
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_CATALYST_PATH)/board/cardputer-zero/linux.fragment"
+BR2_LINUX_KERNEL_DTS_SUPPORT=y
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2710-rpi-cm0"
+BR2_LINUX_KERNEL_DTB_OVERLAY_SUPPORT=y
+BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
+# The kernel compresses its modules with xz; the module tools on the device
+# and the build machine's depmod both have to read them.
+BR2_PACKAGE_XZ=y
+BR2_PACKAGE_HOST_KMOD_XZ=y
+BR2_PACKAGE_RPI_FIRMWARE=y
+BR2_PACKAGE_RPI_FIRMWARE_BOOTCODE_BIN=y
+# Cut-down firmware: 16 MB for the GPU instead of 64 or more.
+BR2_PACKAGE_RPI_FIRMWARE_VARIANT_PI_CD=y
+BR2_PACKAGE_RPI_FIRMWARE_CONFIG_FILE="$(BR2_EXTERNAL_CATALYST_PATH)/board/cardputer-zero/config.txt"
+BR2_PACKAGE_RPI_FIRMWARE_CMDLINE_FILE="$(BR2_EXTERNAL_CATALYST_PATH)/board/cardputer-zero/cmdline.txt"
+BR2_PACKAGE_BRCMFMAC_SDIO_FIRMWARE_RPI=y
+BR2_PACKAGE_BRCMFMAC_SDIO_FIRMWARE_RPI_WIFI=y
+BR2_PACKAGE_WPA_SUPPLICANT=y
+BR2_PACKAGE_WPA_SUPPLICANT_NL80211=y
+BR2_PACKAGE_WPA_SUPPLICANT_CLI=y
+BR2_PACKAGE_WIRELESS_REGDB=y
+# In the image but not started: SSH is switched on from the System screen.
+BR2_PACKAGE_DROPBEAR=y
+# resize2fs, to grow /data over the whole card on first boot.
+BR2_PACKAGE_E2FSPROGS=y
+BR2_PACKAGE_E2FSPROGS_RESIZE2FS=y
+BR2_PACKAGE_M5STACK_CARDPUTER_ZERO=y
+BR2_TARGET_ROOTFS_EXT2=y
+BR2_TARGET_ROOTFS_EXT2_4=y
+BR2_TARGET_ROOTFS_EXT2_SIZE="96M"
+# BR2_TARGET_ROOTFS_TAR is not set
+BR2_PACKAGE_HOST_DOSFSTOOLS=y
+BR2_PACKAGE_HOST_GENIMAGE=y
+BR2_PACKAGE_HOST_MTOOLS=y

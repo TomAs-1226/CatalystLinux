@@ -1,0 +1,1 @@
+source "$BR2_EXTERNAL_CATALYST_PATH/package/m5stack-cardputer-zero/Config.in"
