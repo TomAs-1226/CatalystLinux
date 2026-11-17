@@ -19,6 +19,8 @@ pub enum Key {
     PageUp,
     PageDown,
     Char(char),
+    /// A letter with Ctrl held.
+    Ctrl(char),
 }
 
 pub trait Platform {
@@ -81,6 +83,7 @@ pub mod device {
         bytes_per_pixel: usize,
         inputs: Vec<File>,
         shift: bool,
+        ctrl: bool,
         /// The frame the panel is showing, to find what changed.
         shown: Vec<u32>,
         rows: Vec<u8>,
@@ -113,7 +116,7 @@ pub mod device {
                     }
                 }
             }
-            Ok(Device { fb, width, height, stride, bytes_per_pixel: bpp / 8, inputs, shift: false, shown: Vec::new(), rows: Vec::new() })
+            Ok(Device { fb, width, height, stride, bytes_per_pixel: bpp / 8, inputs, shift: false, ctrl: false, shown: Vec::new(), rows: Vec::new() })
         }
 
         fn translate(&mut self, code: u16, value: i32) -> Option<Key> {
@@ -125,6 +128,10 @@ pub mod device {
             ];
             if code == 42 || code == 54 {
                 self.shift = value != 0;
+                return None;
+            }
+            if code == 29 || code == 97 {
+                self.ctrl = value != 0;
                 return None;
             }
             if value == 0 {
@@ -145,7 +152,8 @@ pub mod device {
                 _ => {
                     let (base, plain, shifted) = ROWS.iter().find(|(base, row, _)| code >= *base && ((code - base) as usize) < row.len())?;
                     let row = if self.shift { shifted } else { plain };
-                    Key::Char(row.as_bytes()[(code - base) as usize] as char)
+                    let ch = row.as_bytes()[(code - base) as usize] as char;
+                    if self.ctrl && ch.is_ascii_alphabetic() { Key::Ctrl(ch.to_ascii_lowercase()) } else { Key::Char(ch) }
                 }
             })
         }
@@ -246,6 +254,7 @@ pub mod sim {
             // A window has to be looked after often, so never the whole wait.
             std::thread::sleep(timeout.min(Duration::from_millis(8)));
             let shift = self.window.is_key_down(K::LeftShift) || self.window.is_key_down(K::RightShift);
+            let ctrl = self.window.is_key_down(K::LeftCtrl) || self.window.is_key_down(K::RightCtrl);
             let keys = self
                 .window
                 .get_keys_pressed(KeyRepeat::Yes)
@@ -274,7 +283,11 @@ pub mod sim {
                             } else {
                                 return None;
                             };
-                            Key::Char(if shift { ch.to_ascii_uppercase() } else { ch })
+                            if ctrl && ch.is_ascii_alphabetic() {
+                                Key::Ctrl(ch)
+                            } else {
+                                Key::Char(if shift { ch.to_ascii_uppercase() } else { ch })
+                            }
                         }
                     })
                 })

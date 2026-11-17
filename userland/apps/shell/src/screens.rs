@@ -31,7 +31,7 @@ fn severity_color(g: &Gfx, severity: &str) -> Color {
 }
 
 /// Up, Down and the page keys over a list of `len` rows.
-fn list_key(list: &mut ListState, key: Key, len: usize) {
+pub fn list_key(list: &mut ListState, key: Key, len: usize) {
     match key {
         Key::Up => list.up(),
         Key::Down => list.down(len),
@@ -49,14 +49,16 @@ struct App {
     open: fn(&Robot) -> Box<dyn Screen>,
 }
 
-const APPS: [App; 8] = [
+const APPS: [App; 10] = [
     App { icon: "smart_toy", name: "Robot", open: |_| Box::new(RobotScreen::default()) },
     App { icon: "monitor_heart", name: "Health", open: |_| Box::new(Health::default()) },
     App { icon: "description", name: "Logs", open: |_| Box::new(LogsScreen::default()) },
     App { icon: "account_tree", name: "Tables", open: |_| Box::new(Tables::new()) },
     App { icon: "speed", name: "Loop", open: |_| Box::new(LoopTime) },
     App { icon: "precision_manufacturing", name: "Motors", open: |_| Box::new(Motors::default()) },
-    App { icon: "terminal", name: "Console", open: |robot| Box::new(Console::open(robot)) },
+    App { icon: "developer_board", name: "Console", open: |robot| Box::new(Console::open(robot)) },
+    App { icon: "terminal", name: "Terminal", open: |_| Box::new(crate::terminal::Terminal::new()) },
+    App { icon: "folder", name: "Files", open: |_| Box::new(crate::files::Files::new()) },
     App { icon: "settings", name: "Settings", open: |_| Box::new(SettingsApp::new()) },
 ];
 
@@ -108,6 +110,8 @@ impl Home {
                 _ => ("–".into(), None),
             },
             "Console" => ("robot log".into(), None),
+            "Terminal" => ("shell".into(), None),
+            "Files" => ("storage".into(), None),
             "Logs" => {
                 let rows = robot.logs.list();
                 let worst = rows.iter().filter_map(|r| r.digest.as_ref()).map(|d| d.headline().0).min();
@@ -143,6 +147,8 @@ impl Screen for Home {
             Key::Right if page_end < APPS.len() => self.focus = if page_end + row * columns < APPS.len() { page_end + row * columns } else { page_end },
             Key::Up if row > 0 => self.focus -= columns,
             Key::Down if self.focus + columns < page_end => self.focus += columns,
+            // A short last row: down from above its end lands on its last tile.
+            Key::Down if page * per_page + (row + 1) * columns < page_end => self.focus = page_end - 1,
             Key::Tab => self.focus = (self.focus + 1) % APPS.len(),
             Key::Enter => {
                 let screen = (APPS[self.focus].open)(cx.robot);

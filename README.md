@@ -12,7 +12,7 @@ Systemcore. Its GUI is Bezel and Detent, drawn natively on the CPU.
 | `userland/crates/detent` | Detent's spring model in Rust: every vocabulary, closed-form, interruptible. |
 | `userland/crates/bezel` | Bezel on the CPU: tonal surfaces, the two type voices, Material Symbols, and the full glass pass (refraction, frost, edge light, groups, shadow). |
 | `userland/crates/nt4` | A NetworkTables 4.1 client: one thread, read-only, reconnects on its own. |
-| `userland/apps/shell` | `catalyst-shell`: the launcher and the built-in apps (Robot, Health, Logs, Tables, Loop, Motors, Console, System). |
+| `userland/apps/shell` | `catalyst-shell`: the launcher and the built-in apps (Robot, Health, Logs, Tables, Loop, Motors, Console, Terminal, Files, Settings). |
 | `os/` | The Buildroot external tree: board config, kernel fragment, M5Stack driver package, OpenRC services, image layout. |
 | `scripts/` | Build-machine setup, shell cross-build, image build and checks, simulator. |
 | `work/FrcCatalyst` | A clone of FrcCatalyst carrying the Agent log routes, uncommitted (not part of this repo). |
@@ -102,6 +102,25 @@ bash scripts/inspect-image.sh        # boot files, drivers, services, sizes
 bash scripts/test-image-services.sh  # first-boot partition growth, the network address rule
 ```
 
+## Terminal, Files and the editor
+
+Terminal is a real shell (`/bin/sh` on a pseudo-terminal) on the handheld's
+own screen, 46 columns by 10 rows at the standard text size. The emulator
+behind it handles what shells, `vi` and the usual tools print: cursor
+movement, colours, scrolling regions, the alternate screen. The session
+outlives the screen, so going Home and back finds it as it was. Esc belongs
+to the programs in it; Ctrl-Q returns Home. Page Up and Page Down scroll back.
+
+Files browses the storage (starting in `/data`), makes a file with `n` and
+deletes one with `d` pressed twice. Enter opens a text file in the editor:
+arrows move, Ctrl-S saves (through a temporary file, so a power cut cannot
+leave half a file), Ctrl-Q closes, Ctrl-K removes a line.
+
+On a PC the terminal is a small stand-in shell, since there is no
+pseudo-terminal to use the same way. The real one is exercised by
+`scripts/test-arm.sh`, which runs the tests as the ARM build under emulation
+and talks to an actual shell through the emulator.
+
 ## Wi-Fi
 
 Settings › Network › Wi-Fi networks switches Wi-Fi on, lists what is in range,
@@ -141,8 +160,8 @@ external-app launcher.
 ## Roadmap
 
 Catalyst Linux is meant to be a pocket developer machine as well as a Catalyst
-tool. Chosen so far, not yet built: a terminal; files and an
-editor; scripting with a kit for writing Bezel apps; an SSH client and serial
+tool. Chosen so far, not yet built: scripting with a kit for writing Bezel
+apps; an SSH client and serial
 console; a network toolkit; USB gadget modes (serial, network and a drive of
 logs when plugged into a PC); a system monitor; standby and power saving;
 image updates with rollback; a status bar; an AprilTag reader on the built-in

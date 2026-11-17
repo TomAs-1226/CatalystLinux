@@ -53,6 +53,16 @@ pub trait Screen {
     fn tick(&mut self, _dt: f32) -> bool {
         false
     }
+    /// True for a screen that should be looked at every frame beat even
+    /// though nothing is moving, because something outside may change it at
+    /// any moment (a shell printing). It is only redrawn when `tick` says so.
+    fn busy(&self) -> bool {
+        false
+    }
+    /// A word for the island when the screen opens.
+    fn greeting(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 const MESSAGE_SECONDS: f32 = 2.4;
@@ -183,6 +193,12 @@ impl Shell {
             Nav::Open(screen, from) => self.open(screen, Path::Grow(from)),
             Nav::Pop => self.close(),
         }
+        self.apply_settings();
+    }
+
+    /// Bring the drawing in line with the settings: palette, calm, text size.
+    pub fn apply_settings(&mut self) {
+        self.dirty = true;
         self.gfx.accent = self.settings.accent;
         self.gfx.tokens = Tokens::of(self.settings.accent, if self.settings.light { Tone::Light } else { Tone::Dark });
         self.gfx.calm = self.settings.calm;
@@ -191,6 +207,9 @@ impl Shell {
 
     fn open(&mut self, screen: Box<dyn Screen>, path: Path) {
         self.gfx.focus_reset();
+        if let Some(words) = screen.greeting() {
+            self.say(words);
+        }
         // Asked back while it was leaving by the same path: it returns from
         // where it is, and the new copy is not needed.
         if let Some(t) = &mut self.transition {
@@ -278,8 +297,15 @@ impl Shell {
         draw
     }
 
-    pub fn animating(&self) -> bool {
+    /// Whether something on screen is in motion.
+    pub fn moving(&self) -> bool {
         self.moving
+    }
+
+    /// Whether to keep to the frame beat: something is moving, or the
+    /// screen in front wants looking at often.
+    pub fn animating(&self) -> bool {
+        self.moving || self.stack.last().is_some_and(|(s, _)| s.busy())
     }
 
     /// How far the transition in flight has come, if there is one.
@@ -571,7 +597,7 @@ mod tests {
     /// A shell on the demo robot, drawn once so Home knows where its tiles are.
     fn shell() -> Shell {
         let mut shell = Shell::new(Robot::demo());
-        shell.key(Key::Char('\0'));
+        shell.apply_settings();
         for _ in 0..120 {
             shell.tick(FRAME);
             shell.draw();

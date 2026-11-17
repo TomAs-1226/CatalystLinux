@@ -18,13 +18,17 @@
 //! ```
 
 mod agent;
+mod files;
 mod gfx;
 mod logs;
+mod pty;
 mod platform;
 mod robot;
 mod screens;
 mod shell;
 mod sys;
+mod term;
+mod terminal;
 mod wifi;
 mod wpilog;
 
@@ -123,7 +127,7 @@ fn main() {
     if let Some(accent) = value("--accent").and_then(|name| bezel::Accent::from_name(&name)) {
         shell.settings.accent = accent;
     }
-    shell.key(Key::Char('\0')); // apply the settings
+    shell.apply_settings();
 
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--shots") {
@@ -283,6 +287,13 @@ fn open_platform(sim: bool) -> Box<dyn Platform> {
 fn shots(mut shell: Shell, dir: &std::path::Path) {
     use Key::*;
     std::fs::create_dir_all(dir).expect("create the screenshot folder");
+    // A few files for the Files app to show.
+    let files = std::env::temp_dir().join("catalyst-tour-files");
+    std::fs::remove_dir_all(&files).ok();
+    std::fs::create_dir_all(files.join("logs")).ok();
+    std::fs::write(files.join("notes.txt"), "pit notes, nov 16\n\nelevator ran hot in q14 (80 c)\n  - check the follower's belt\n  - swap battery 3, it sagged to 6 v\ncan_s0 at 71%: move the intake off it\n").ok();
+    std::fs::write(files.join("check.sh"), "#!/bin/sh\nping -c 1 10.58.5.2\n").ok();
+    std::env::set_var("CATALYST_FILES", &files);
     let tour: &[(&str, &[Key])] = &[
         ("01-home", &[]),
         ("02-robot", &[Enter]),
@@ -293,8 +304,11 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
         ("05-tables-elevator", &[Down, Down, Enter]),
         ("06-loop", &[Back, Back, Right, Enter]),
         ("07-motors", &[Back, Right, Enter, Down]),
-        ("08-console", &[Back, Right, Enter]),
-        ("09-settings", &[Back, Right, Enter]),
+        ("08-console", &[Back, Right, Up, Enter]),
+        ("08b-terminal", &[Back, Right, Enter, Char('l'), Char('s'), Enter, Char('c'), Char('o'), Char('l'), Char('o'), Char('r'), Char('s'), Enter, Char('u'), Char('n'), Char('a'), Char('m'), Char('e'), Enter]),
+        ("08c-files", &[Ctrl('q'), Right, Enter]),
+        ("08d-editor", &[Down, Down, Enter, Down, Down, Right, Right, Right, Right]),
+        ("09-settings", &[Ctrl('q'), Back, Down, Enter]),
         ("09b-appearance", &[Enter]),
         ("09c-light-blue", &[Enter, Down, Enter]),
         ("09d-network", &[Back, Down, Down, Enter]),
@@ -327,7 +341,7 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
                 frames += 1;
             }
         }
-        shell.key(Key::Char('\0'));
+        shell.apply_settings();
         frame(&mut shell);
         shell.draw();
         platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}.png")), 3);
@@ -475,7 +489,7 @@ fn smooth(mut shell: Shell) {
         }
     };
     // Settings: an app with pages inside it.
-    for key in [Right, Right, Right, Right] {
+    for key in [Right, Right, Right, Down] {
         shell.key(key);
     }
     settle(&mut shell);
@@ -507,7 +521,7 @@ fn smooth(mut shell: Shell) {
                     if frames == 0 { firsts.push(interval) } else { rest.push(interval) }
                     frames += 1;
                     dt = interval;
-                    if !shell.animating() || frames > 400 {
+                    if !shell.moving() || frames > 400 {
                         break;
                     }
                 }
