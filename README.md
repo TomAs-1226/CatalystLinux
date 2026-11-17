@@ -64,7 +64,21 @@ starts from what is on screen:
   once it is past halfway.
 
 Springs are solved in closed form, so motion is the same at 20 frames a
-second as at 60, and nothing moves while the screen is idle. The tests in
+second as at 60, and nothing moves while the screen is idle.
+
+Even frames matter more than fast ones, so while anything moves, frames start
+on a steady beat: 25 ms (40 a second) if the handheld holds it, else 33, 50 or
+100 ms. One late frame is let go; a second soon after slows the beat, and it
+only quickens again between animations. `catalyst-shell --smooth` reports,
+for each kind of transition, the first, typical and worst gap between frames
+at the simulator's two speeds. At the estimated device speed apps open and
+close on an even 33 ms beat and pages turn on an even 25 ms one; at the
+worse-than-device speed everything holds an even 50 ms.
+
+On the device, frames are written to the framebuffer file a changed band of
+rows at a time, which the kernel sends to the panel at once. (Writing through
+a memory map would be gathered and sent on a timer about twenty times a
+second.) The tests in
 `shell.rs` hold all of this: turning round mid-flight without a jump,
 reopening from where a window is, frame-rate independence, and that an
 animation begun after an idle spell starts from its beginning.
@@ -88,6 +102,14 @@ bash scripts/inspect-image.sh        # boot files, drivers, services, sizes
 bash scripts/test-image-services.sh  # first-boot partition growth, the network address rule
 ```
 
+## Wi-Fi
+
+Settings › Network › Wi-Fi networks switches Wi-Fi on, lists what is in range,
+joins a network (the password is typed on the keyboard) and forgets one. It
+drives the system's `wpa_supplicant`; networks are kept in
+`/data/wifi/wpa_supplicant.conf`, and the radio stays off until it is switched
+on. On a PC a scripted set of networks stands in.
+
 ## Match logs
 
 The handheld pulls `.wpilog` files from the robot over the Ethernet cable,
@@ -109,8 +131,8 @@ and the log puller against the real agent script (with the new log routes),
 the log reader against a generated match, the ARM build of the shell under
 user-mode emulation, and the image's first-boot scripts under emulation.
 
-Not yet checked: anything on a real CardputerZero (boot, panel, keyboard,
-Ethernet, idle memory), the NT4 client against a real Systemcore, the log
+Not yet checked: anything on a real CardputerZero (boot, panel and how fast
+it takes frames, keyboard, Ethernet, Wi-Fi, idle memory), the NT4 client against a real Systemcore, the log
 reader against a log from a real robot, and the kernel fragment's effect on
 memory. Not yet built: the agent's machine pages (CPU, CAN buses, cameras),
 the AI log analysis, Wi-Fi setup in the UI, the camera, audio, and the
@@ -119,7 +141,7 @@ external-app launcher.
 ## Roadmap
 
 Catalyst Linux is meant to be a pocket developer machine as well as a Catalyst
-tool. Chosen so far, not yet built: Wi-Fi setup; a terminal; files and an
+tool. Chosen so far, not yet built: a terminal; files and an
 editor; scripting with a kit for writing Bezel apps; an SSH client and serial
 console; a network toolkit; USB gadget modes (serial, network and a drive of
 logs when plugged into a PC); a system monitor; standby and power saving;

@@ -13,6 +13,7 @@ use crate::logs::Digest;
 use crate::platform::Key;
 use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
+use crate::wifi::Wifi;
 use crate::wpilog::Level;
 
 fn dash(v: Option<String>) -> String {
@@ -1000,6 +1001,8 @@ enum Item {
     Calm,
     // Display.
     Brightness,
+    // Network.
+    WifiSetup,
     // Access.
     Ssh,
     DemoRobot,
@@ -1039,7 +1042,7 @@ impl SettingsApp {
         Some(match item {
             Appearance => Self::page("Appearance", vec![Mode, AccentColor, TextScale, Calm]),
             Display => Self::page("Display", vec![Brightness]),
-            Network => Self::page("Network", (0..4).map(Info).collect()),
+            Network => Self::page("Network", std::iter::once(WifiSetup).chain((0..4).map(Info)).collect()),
             Access => Self::page("Access", vec![Ssh, DemoRobot]),
             About => Self::page("About", (0..9).map(Info).collect()),
             _ => return None,
@@ -1089,6 +1092,7 @@ impl SettingsApp {
             TextScale => ("Text size".into(), g.text_size.name().into(), true),
             Calm => ("Calm version".into(), onoff(g.calm), g.calm),
             Brightness => ("Brightness".into(), dash(self.backlight.map(|b| format!("{b}%"))), true),
+            WifiSetup => section("Wi-Fi networks", "join".to_owned()),
             Ssh => ("SSH access".into(), onoff(crate::ssh_enabled()), crate::ssh_enabled()),
             DemoRobot => ("Demo robot".into(), onoff(robot.is_demo()), robot.is_demo()),
             Info(i) => self.info.get(i).map(|(name, value)| ((*name).to_owned(), value.clone(), false)).unwrap_or_default(),
@@ -1142,6 +1146,7 @@ impl Screen for SettingsApp {
         let Some(&item) = self.items.get(self.list.focus) else { return Nav::Pop };
         match key {
             Key::Back => return Nav::Pop,
+            Key::Enter | Key::Right if item == Item::WifiSetup => return Nav::Push(Box::new(WifiScreen::new())),
             Key::Enter | Key::Right | Key::Left => {
                 if let Some(page) = Self::section(item) {
                     if key != Key::Left {
@@ -1200,5 +1205,143 @@ impl Screen for SettingsApp {
             }
         }
         self.list.scrollbar(g, items.len(), top, H - PAD);
+    }
+}
+
+// ----------------------------------------------------------------- wi-fi ---
+
+/// Wi-Fi: switch it on, see what is in range, join a network, forget one.
+/// Passwords are typed on the keyboard and kept on the data partition by the
+/// system's Wi-Fi service.
+pub struct WifiScreen {
+    wifi: Wifi,
+    list: ListState,
+    seen: u64,
+    /// The network a password is being typed for, and what has been typed.
+    entering: Option<(String, String)>,
+}
+
+impl WifiScreen {
+    pub fn new() -> Self {
+        WifiScreen { wifi: Wifi::open(), list: ListState::default(), seen: u64::MAX, entering: None }
+    }
+}
+
+impl Screen for WifiScreen {
+    fn title(&self) -> &str {
+        "Wi-Fi"
+    }
+
+    fn wants_text(&self) -> bool {
+        self.entering.is_some()
+    }
+
+    fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
+        if let Some((ssid, password)) = &mut self.entering {
+            match key {
+                // WPA passwords are 8 to 63 printable characters.
+                Key::Char(c) if password.len() < 63 && (' '..='~').contains(&c) => password.push(c),
+                Key::Backspace => {
+                    password.pop();
+                }
+                Key::Back => self.entering = None,
+                Key::Enter if password.len() >= 8 => {
+                    self.wifi.join(ssid, Some(password.clone()));
+                    *cx.say = Some(format!("joining {ssid}"));
+                    self.entering = None;
+                }
+                Key::Enter => *cx.say = Some("at least 8 characters".into()),
+                _ => {}
+            }
+            return Nav::Stay;
+        }
+        let state = self.wifi.state();
+        match key {
+            Key::Back => return Nav::Pop,
+            Key::Enter if self.list.focus == 0 => self.wifi.enable(!state.enabled),
+            Key::Enter => match state.networks.get(self.list.focus - 1) {
+                Some(network) if network.current => *cx.say = Some("already connected".into()),
+                Some(network) if network.saved.is_some() || !network.secured => {
+                    self.wifi.join(&network.ssid, None);
+                    *cx.say = Some(format!("joining {}", network.ssid));
+                }
+                Some(network) => self.entering = Some((network.ssid.clone(), String::new())),
+                None => {}
+            },
+            Key::Tab => {
+                if let Some((network, id)) = state.networks.get(self.list.focus.wrapping_sub(1)).and_then(|n| Some((n, n.saved?))) {
+                    self.wifi.forget(id);
+                    *cx.say = Some(format!("forgot {}", network.ssid));
+                }
+            }
+            Key::Char('r') => self.wifi.scan(),
+            other => list_key(&mut self.list, other, state.networks.len() + 1),
+        }
+        Nav::Stay
+    }
+
+    fn tick(&mut self, _dt: f32) -> bool {
+        let generation = self.wifi.generation();
+        let changed = generation != self.seen;
+        self.seen = generation;
+        changed
+    }
+
+    fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
+        let t = g.tokens;
+        let ty = g.ty;
+        let (top, row_h) = (g.top(), g.row_h());
+        if let Some((ssid, password)) = &self.entering {
+            // One thing on the page: the password.
+            let label = g.text.fit(&format!("password for {ssid}"), &ty.caption, W - 2.0 * PAD - 18.0);
+            let field = Rect::new(PAD, top, W - 2.0 * PAD, ty.caption.size + ty.label.size + 20.0);
+            g.surface(field, TILE_RADIUS, t.surface2);
+            g.text_at(field.x + 10.0, field.y + 7.0 + ty.caption.size * 0.5, Align::Left, &label, ty.caption, t.dim);
+            let cy = field.bottom() - 8.0 - ty.label.size * 0.5;
+            // The end of a long password stays in view.
+            let room = field.w - 26.0;
+            let mut shown: &str = password;
+            while g.measure(shown, ty.label) > room && !shown.is_empty() {
+                shown = &shown[shown.char_indices().nth(1).map_or(shown.len(), |(i, _)| i)..];
+            }
+            let w = g.text_at(field.x + 10.0, cy, Align::Left, shown, ty.label, t.ink);
+            g.surface(Rect::new(field.x + 11.0 + w, cy - ty.label.size * 0.5, 1.5, ty.label.size), 0.5, t.signal);
+            g.focus_ring(field, TILE_RADIUS);
+            let count = if password.len() >= 8 { format!("{} characters", password.len()) } else { format!("{} characters · needs 8 or more", password.len()) };
+            g.text_at(PAD + 10.0, field.bottom() + 6.0 + ty.caption.size * 0.5, Align::Left, &count, ty.caption, if password.len() >= 8 { t.dim } else { t.faint });
+            g.hint("enter: join · esc: cancel");
+            return;
+        }
+        let state = self.wifi.state();
+        let bottom = H - PAD - g.hint_h();
+        let rows = state.networks.len() + 1;
+        for (i, y) in self.list.layout(rows, top, row_h, 3.0, bottom + 2.0) {
+            let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
+            let focused = i == self.list.focus;
+            if i == 0 {
+                g.row(r, "Wi-Fi", if state.enabled { "on" } else { "off" }, if state.enabled { t.ink } else { t.dim }, focused);
+                continue;
+            }
+            let network = &state.networks[i - 1];
+            const STRENGTH: [&str; 5] = ["out of range", "weak", "fair", "good", "strong"];
+            let value = if network.current {
+                "connected".to_owned()
+            } else {
+                let kind = if network.saved.is_some() { "saved · " } else if !network.secured { "open · " } else { "" };
+                format!("{kind}{}", STRENGTH[network.bars()])
+            };
+            g.row(r, &network.ssid, &value, if network.current { t.ink } else { t.dim }, focused);
+        }
+        self.list.scrollbar(g, rows, top, bottom);
+        // The hint says what Enter would do to the row in focus.
+        let hint = match self.list.focus.checked_sub(1).and_then(|i| state.networks.get(i)) {
+            _ if !state.enabled => "enter: switch wi-fi on".to_owned(),
+            Some(network) if network.saved.is_some() && !network.current => "enter: join · tab: forget".to_owned(),
+            Some(network) if network.current => format!("{} · tab: forget", state.status),
+            Some(_) => "enter: join".to_owned(),
+            None => state.status.clone(),
+        };
+        let fitted = g.text.fit(&hint, &ty.caption, W - 2.0 * PAD);
+        g.hint(&fitted);
     }
 }

@@ -6,6 +6,8 @@
 # network (10.TE.AM.77) so the robot at 10.TE.AM.2 is reachable.
 
 IF="${1:-eth0}"
+# "--dhcp-only": never fall back to a fixed address (Wi-Fi joins whatever network it is told to).
+DHCP_ONLY="${2:-}"
 ROBOT_FILE=/data/catalyst/robot
 PIDFILE="/run/udhcpc.$IF.pid"
 
@@ -41,7 +43,7 @@ while :; do
 		state=up
 		# Four quick tries, then keep asking in the background.
 		udhcpc -i "$IF" -b -t 4 -T 1 -p "$PIDFILE" >/dev/null 2>&1
-		if ! ip -4 addr show dev "$IF" | grep -q 'inet '; then
+		if [ -z "$DHCP_ONLY" ] && ! ip -4 addr show dev "$IF" | grep -q 'inet '; then
 			addr=$(robot_static)
 			[ -n "$addr" ] && ip addr replace "$addr/24" dev "$IF"
 		fi

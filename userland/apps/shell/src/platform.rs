@@ -24,7 +24,9 @@ pub enum Key {
 pub trait Platform {
     /// Wait up to `timeout` for keys. `None` means the user closed the shell.
     fn poll(&mut self, timeout: Duration) -> Option<Vec<Key>>;
-    fn present(&mut self, canvas: &Canvas);
+    /// Show a frame. Returns how much of the panel had to be sent: 0 when the
+    /// frame is what is already showing, 1 for the whole panel.
+    fn present(&mut self, canvas: &Canvas) -> f32;
     /// A desktop window must be fed every frame to stay responsive; the panel
     /// is only written when the picture changed.
     fn present_always(&self) -> bool {
@@ -32,6 +34,21 @@ pub trait Platform {
     }
     /// A line of status for whoever is developing; the device has nowhere to put one.
     fn set_status(&mut self, _text: &str) {}
+}
+
+/// The rows that differ from the frame last shown, as first..end, and note
+/// this frame as shown. Only those rows are sent to the panel.
+pub fn changed_rows(shown: &mut Vec<u32>, canvas: &Canvas) -> Option<(usize, usize)> {
+    let (w, h) = (canvas.w as usize, canvas.h as usize);
+    if shown.len() != canvas.px.len() {
+        *shown = canvas.px.clone();
+        return Some((0, h));
+    }
+    let differs = |y: usize| shown[y * w..(y + 1) * w] != canvas.px[y * w..(y + 1) * w];
+    let first = (0..h).find(|y| differs(*y))?;
+    let last = (first..h).rev().find(|y| differs(*y)).unwrap_or(first);
+    shown[first * w..(last + 1) * w].copy_from_slice(&canvas.px[first * w..(last + 1) * w]);
+    Some((first, last + 1))
 }
 
 // ---------------------------------------------------------------- device ---
@@ -49,16 +66,24 @@ pub mod device {
 
     /// The kernel framebuffer (`/dev/fb0`, the panel's DRM fbdev emulation)
     /// and every evdev keyboard.
+    ///
+    /// Frames are written to the framebuffer file, not through a memory map.
+    /// The panel hangs off SPI and the kernel sends it only what it is told
+    /// changed: a write is passed on at once, for exactly the rows written,
+    /// while changes made through a map are gathered and sent on a timer,
+    /// about twenty times a second, which would cap and unsettle every
+    /// animation.
     pub struct Device {
         fb: File,
-        map: *mut u8,
-        map_len: usize,
         width: usize,
         height: usize,
         stride: usize,
         bytes_per_pixel: usize,
         inputs: Vec<File>,
         shift: bool,
+        /// The frame the panel is showing, to find what changed.
+        shown: Vec<u32>,
+        rows: Vec<u8>,
     }
 
     impl Device {
@@ -78,13 +103,6 @@ pub mod device {
             let (width, height, bpp) = (var[0] as usize, var[1] as usize, var[6] as usize);
             // line_length sits after id[16], smem_start (8), smem_len, type, type_aux, visual, 3 × u16 + pad.
             let stride = u32::from_ne_bytes(fix[48..52].try_into().unwrap()) as usize;
-            let map_len = stride * height;
-            let map = unsafe {
-                libc::mmap(std::ptr::null_mut(), map_len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fb.as_raw_fd(), 0)
-            };
-            if map == libc::MAP_FAILED {
-                return Err(std::io::Error::last_os_error());
-            }
             let mut inputs = Vec::new();
             if let Ok(dir) = std::fs::read_dir("/dev/input") {
                 for entry in dir.flatten() {
@@ -95,11 +113,16 @@ pub mod device {
                     }
                 }
             }
-            Ok(Device { fb, map: map as *mut u8, map_len, width, height, stride, bytes_per_pixel: bpp / 8, inputs, shift: false })
+            Ok(Device { fb, width, height, stride, bytes_per_pixel: bpp / 8, inputs, shift: false, shown: Vec::new(), rows: Vec::new() })
         }
 
         fn translate(&mut self, code: u16, value: i32) -> Option<Key> {
-            const ROWS: [(u16, &str); 4] = [(2, "1234567890-="), (16, "qwertyuiop[]"), (30, "asdfghjkl;'`"), (44, "zxcvbnm,./")];
+            const ROWS: [(u16, &str, &str); 4] = [
+                (2, "1234567890-=", "!@#$%^&*()_+"),
+                (16, "qwertyuiop[]", "QWERTYUIOP{}"),
+                (30, "asdfghjkl;'`", "ASDFGHJKL:\"~"),
+                (44, "zxcvbnm,./", "ZXCVBNM<>?"),
+            ];
             if code == 42 || code == 54 {
                 self.shift = value != 0;
                 return None;
@@ -120,9 +143,9 @@ pub mod device {
                 104 => Key::PageUp,
                 109 => Key::PageDown,
                 _ => {
-                    let (base, row) = ROWS.iter().find(|(base, row)| code >= *base && ((code - base) as usize) < row.len())?;
-                    let ch = row.as_bytes()[(code - base) as usize] as char;
-                    Key::Char(if self.shift { ch.to_ascii_uppercase() } else { ch })
+                    let (base, plain, shifted) = ROWS.iter().find(|(base, row, _)| code >= *base && ((code - base) as usize) < row.len())?;
+                    let row = if self.shift { shifted } else { plain };
+                    Key::Char(row.as_bytes()[(code - base) as usize] as char)
                 }
             })
         }
@@ -159,12 +182,17 @@ pub mod device {
             Some(keys)
         }
 
-        fn present(&mut self, canvas: &Canvas) {
-            let (w, h) = (self.width.min(canvas.w as usize), self.height.min(canvas.h as usize));
-            let out = unsafe { std::slice::from_raw_parts_mut(self.map, self.map_len) };
-            for y in 0..h {
+        fn present(&mut self, canvas: &Canvas) -> f32 {
+            use std::os::unix::fs::FileExt;
+            let Some((first, end)) = changed_rows(&mut self.shown, canvas) else { return 0.0 };
+            let (w, end) = (self.width.min(canvas.w as usize), end.min(self.height));
+            if first >= end {
+                return 0.0;
+            }
+            self.rows.resize((end - first) * self.stride, 0);
+            for y in first..end {
                 let src = &canvas.px[y * canvas.w as usize..][..w];
-                let row = &mut out[y * self.stride..][..w * self.bytes_per_pixel];
+                let row = &mut self.rows[(y - first) * self.stride..][..w * self.bytes_per_pixel];
                 match self.bytes_per_pixel {
                     2 => {
                         for (o, p) in row.chunks_exact_mut(2).zip(src) {
@@ -180,13 +208,9 @@ pub mod device {
                     _ => {}
                 }
             }
-            let _ = &self.fb;
-        }
-    }
-
-    impl Drop for Device {
-        fn drop(&mut self) {
-            unsafe { libc::munmap(self.map as *mut _, self.map_len) };
+            // One write for the changed rows: the kernel sends those rows on.
+            self.fb.write_all_at(&self.rows, (first * self.stride) as u64).ok();
+            (end - first) as f32 / self.height.max(1) as f32
         }
     }
 }
@@ -201,22 +225,26 @@ pub mod sim {
     /// A desktop window showing the panel at 4×.
     pub struct Sim {
         window: Window,
+        shown: Vec<u32>,
     }
 
     impl Sim {
         pub fn open(w: usize, h: usize) -> Self {
             let mut window = Window::new("Catalyst Linux · 320×170 panel", w, h, WindowOptions { scale: Scale::X4, ..Default::default() })
                 .expect("open simulator window");
-            window.set_target_fps(60);
-            Sim { window }
+            // The shell starts frames on its own beat, as it does on the device.
+            window.set_target_fps(0);
+            Sim { window, shown: Vec::new() }
         }
     }
 
     impl Platform for Sim {
-        fn poll(&mut self, _timeout: Duration) -> Option<Vec<Key>> {
+        fn poll(&mut self, timeout: Duration) -> Option<Vec<Key>> {
             if !self.window.is_open() {
                 return None;
             }
+            // A window has to be looked after often, so never the whole wait.
+            std::thread::sleep(timeout.min(Duration::from_millis(8)));
             let shift = self.window.is_key_down(K::LeftShift) || self.window.is_key_down(K::RightShift);
             let keys = self
                 .window
@@ -262,8 +290,10 @@ pub mod sim {
             self.window.set_title(text);
         }
 
-        fn present(&mut self, canvas: &Canvas) {
+        fn present(&mut self, canvas: &Canvas) -> f32 {
+            let part = changed_rows(&mut self.shown, canvas).map_or(0.0, |(first, end)| (end - first) as f32 / canvas.h as f32);
             self.window.update_with_buffer(&canvas.px, canvas.w as usize, canvas.h as usize).ok();
+            part
         }
     }
 

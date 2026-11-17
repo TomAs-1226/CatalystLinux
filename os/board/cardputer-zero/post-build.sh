@@ -12,11 +12,12 @@ fi
 install -D -m 0755 "$SHELL_BIN" "$TARGET_DIR/usr/bin/catalyst-shell"
 
 for f in etc/init.d/catalyst-shell etc/init.d/catalyst-ssh etc/init.d/catalyst-net etc/init.d/catalyst-grow-data \
-	usr/sbin/catalyst-ssh-toggle usr/sbin/catalyst-net usr/sbin/catalyst-grow-data; do
+	etc/init.d/catalyst-wifi etc/init.d/catalyst-net-wifi \
+	usr/sbin/catalyst-ssh-toggle usr/sbin/catalyst-net usr/sbin/catalyst-grow-data usr/sbin/catalyst-wifi-toggle; do
 	chmod 0755 "$TARGET_DIR/$f"
 done
 mkdir -p "$TARGET_DIR/etc/runlevels/default" "$TARGET_DIR/etc/runlevels/boot" "$TARGET_DIR/data"
-for service in catalyst-shell catalyst-ssh catalyst-net; do
+for service in catalyst-shell catalyst-ssh catalyst-net catalyst-wifi catalyst-net-wifi; do
 	ln -sf "/etc/init.d/$service" "$TARGET_DIR/etc/runlevels/default/$service"
 done
 ln -sf /etc/init.d/catalyst-grow-data "$TARGET_DIR/etc/runlevels/boot/catalyst-grow-data"

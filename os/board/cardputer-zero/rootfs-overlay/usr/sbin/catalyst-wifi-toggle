@@ -1,0 +1,21 @@
+#!/bin/sh
+# catalyst-wifi-toggle on|off|status
+# The choice is kept on /data, so Wi-Fi comes back (or stays off) after a restart.
+case "$1" in
+on)
+	mkdir -p /data/catalyst
+	touch /data/catalyst/wifi-enabled
+	rc-service catalyst-wifi start
+	;;
+off)
+	rm -f /data/catalyst/wifi-enabled
+	rc-service catalyst-wifi stop
+	;;
+status)
+	[ -e /data/catalyst/wifi-enabled ] && echo on || echo off
+	;;
+*)
+	echo "usage: $0 on|off|status" >&2
+	exit 2
+	;;
+esac

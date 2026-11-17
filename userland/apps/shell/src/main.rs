@@ -5,6 +5,8 @@
 //! catalyst-shell --sim           a desktop window showing the 320 × 170 panel
 //! catalyst-shell --shots <dir>   render a scripted tour to PNG files
 //! catalyst-shell --bench         draw 600 frames off screen; print time and memory
+//! catalyst-shell --smooth        how even the frames of each transition are, at the
+//!                                handheld's estimated speed and at worse
 //!     --robot <team|ip|host>     robot to connect to (overrides the saved one)
 //!     --demo                     a scripted robot instead of a real one
 //!     --light, --calm            start in light mode / the calm version
@@ -23,6 +25,7 @@ mod robot;
 mod screens;
 mod shell;
 mod sys;
+mod wifi;
 mod wpilog;
 
 use std::time::{Duration, Instant};
@@ -130,6 +133,9 @@ fn main() {
     if flag("--bench") {
         return bench(shell);
     }
+    if flag("--smooth") {
+        return smooth(shell);
+    }
     if flag("--about") {
         // What Settings › About and Network would show, as text.
         let lines = [
@@ -146,39 +152,113 @@ fn main() {
 
     let mut platform: Box<dyn Platform> = open_platform(flag("--sim"));
     let speed = Speed::named(value("--speed").as_deref());
+    let mut beat = Beat::new();
     let mut meter = Meter::default();
-    let mut shown = 0u64;
     let perf = flag("--perf");
     let mut last = Instant::now();
+    // While anything moves, frames start on a steady beat, so motion is even
+    // rather than as fast as each frame happens to allow. Idle, nothing is
+    // drawn at all.
+    let mut next_frame = Instant::now();
     loop {
-        // Idle costs nothing: wake for keys, or four times a second for data.
-        let timeout = if shell.animating() { Duration::from_millis(4) } else { Duration::from_millis(250) };
+        let moving = shell.animating();
+        let timeout = if moving { next_frame.saturating_duration_since(Instant::now()) } else { Duration::from_millis(250) };
         let Some(keys) = platform.poll(timeout) else { break };
-        let work = Instant::now();
+        // Keys are taken in whenever they arrive; the frame waits for its beat.
         for key in keys {
             shell.key(key);
         }
-        let now = Instant::now();
-        let dt = (now - last).as_secs_f32().min(0.25);
-        last = now;
+        if moving && Instant::now() < next_frame {
+            continue;
+        }
+        let work = Instant::now();
+        let dt = (work - last).as_secs_f32().min(0.25);
+        last = work;
         let changed = shell.tick(dt);
         if changed {
             shell.draw();
         }
-        // A redraw that came out the same as what the panel shows is not sent again.
-        let fresh = changed && {
-            let hash = picture_hash(&shell.gfx.canvas.px);
-            std::mem::replace(&mut shown, hash) != hash
-        };
-        let cost = speed.impose(work, fresh);
-        if let Some(line) = meter.record(cost, fresh) {
+        let cost = speed.busy(work);
+        let part = if changed || platform.present_always() { platform.present(&shell.gfx.canvas) } else { 0.0 };
+        if let Some(line) = meter.record(cost, part > 0.0) {
             platform.set_status(&format!("Catalyst Linux · {} · {line}", speed.name));
             if perf {
                 eprintln!("{line}");
             }
         }
-        if fresh || platform.present_always() {
-            platform.present(&shell.gfx.canvas);
+        // What this frame needed: its own work, and the panel taking what
+        // was sent. The beat slows to one the handheld can hold, so frames
+        // stay evenly spaced rather than alternating fast and slow.
+        let beats = if part > 0.0 { beat.frame_took(cost + speed.panel.mul_f32(part)) } else { 1 };
+        next_frame += beat.interval() * beats;
+        if !shell.animating() {
+            beat.rest();
+            next_frame = Instant::now();
+        } else if next_frame < Instant::now() {
+            next_frame = Instant::now();
+        }
+    }
+}
+
+/// The time from one frame's start to the next while something is moving.
+///
+/// Frames evenly spaced look smooth; frames that alternate fast and slow do
+/// not, however good their average. So the beat is the fastest of a few
+/// steady rates that the handheld is actually holding: 40 frames a second
+/// (25 ms, or `CATALYST_FRAME_MS`), then 30, 20 and 10. One late frame is
+/// let go: it takes an extra beat and the rhythm carries on. A second soon
+/// after means the beat is too fast, and it steps down. It steps back up only
+/// after a long run of frames with room to spare, so it settles rather than
+/// hunts.
+struct Beat {
+    steps: [Duration; 4],
+    level: usize,
+    /// Frames in a row that would have fitted the next faster beat.
+    roomy: u32,
+    /// Frames since one ran late.
+    since_late: u32,
+}
+
+impl Beat {
+    fn new() -> Beat {
+        let ms = std::env::var("CATALYST_FRAME_MS").ok().and_then(|v| v.parse::<f32>().ok()).filter(|ms| (5.0..=100.0).contains(ms)).unwrap_or(25.0);
+        let base = Duration::from_secs_f32(ms / 1000.0);
+        Beat { steps: [base, base.mul_f32(4.0 / 3.0), base * 2, base * 4], level: 0, roomy: 0, since_late: u32::MAX }
+    }
+
+    fn interval(&self) -> Duration {
+        self.steps[self.level]
+    }
+
+    /// Note what a frame needed. Returns how many beats it takes up: one,
+    /// unless it ran late.
+    fn frame_took(&mut self, needed: Duration) -> u32 {
+        if needed > self.interval() {
+            self.roomy = 0;
+            if self.since_late < 8 && self.level + 1 < self.steps.len() {
+                // The second late frame in a short while: this beat is too fast.
+                self.level += 1;
+                self.since_late = u32::MAX;
+            } else {
+                self.since_late = 0;
+            }
+        } else {
+            self.since_late = self.since_late.saturating_add(1);
+            if self.level > 0 && needed.mul_f32(1.15) < self.steps[self.level - 1] {
+                self.roomy += 1;
+            } else {
+                self.roomy = 0;
+            }
+        }
+        (needed.as_secs_f32() / self.interval().as_secs_f32()).ceil().max(1.0) as u32
+    }
+
+    /// Motion has stopped. Only now may the beat quicken, so that it never
+    /// changes pace in the middle of an animation.
+    fn rest(&mut self) {
+        if self.roomy >= 40 && self.level > 0 {
+            self.level -= 1;
+            self.roomy = 0;
         }
     }
 }
@@ -217,7 +297,10 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
         ("09-settings", &[Back, Right, Enter]),
         ("09b-appearance", &[Enter]),
         ("09c-light-blue", &[Enter, Down, Enter]),
-        ("09d-about", &[Back, Down, Down, Down, Down, Enter]),
+        ("09d-network", &[Back, Down, Down, Enter]),
+        ("09e-wifi", &[Enter, Down, Down, Down]),
+        ("09f-wifi-password", &[Enter, Char('c'), Char('a'), Char('t'), Char('a'), Char('l'), Char('y'), Char('s'), Char('t'), Char('7')]),
+        ("09g-about", &[Back, Back, Back, Down, Down, Enter]),
         ("10-home-page-2-light", &[Back, Back]),
     ];
     let frame = |shell: &mut Shell| {
@@ -289,8 +372,11 @@ fn bench(mut shell: Shell) {
     if cfg!(not(target_arch = "aarch64")) {
         for name in ["device", "worse"] {
             let speed = Speed::named(Some(name));
-            let frame = ms as f32 * speed.cpu + speed.panel.as_secs_f32() * 1e3;
-            println!("  {}: {:.1} ms processor + {} ms panel = {:.0} fps while animating", speed.name, ms as f32 * speed.cpu, speed.panel.as_millis(), 1000.0 / frame);
+            let mut beat = Beat::new();
+            let needed = Duration::from_secs_f32(ms as f32 * speed.cpu / 1e3) + speed.panel;
+            beat.frame_took(needed);
+            let interval = beat.interval().as_secs_f32() * 1e3;
+            println!("  {}: {:.1} ms processor + {} ms panel holds a {interval:.0} ms beat = {:.0} fps for a full-screen redraw", speed.name, ms as f32 * speed.cpu, speed.panel.as_millis(), 1000.0 / interval);
         }
     }
     println!("{}", memory_line().unwrap_or_else(|| "no /proc here".into()));
@@ -308,7 +394,8 @@ struct Speed {
     name: &'static str,
     /// How many times longer the handheld takes over the same work.
     cpu: f32,
-    /// What pushing one frame to the panel adds.
+    /// How long the panel takes to accept a whole frame; part of a frame
+    /// takes that part of it.
     panel: Duration,
 }
 
@@ -323,15 +410,12 @@ impl Speed {
 
     /// Hold the loop until the handheld would have finished the work begun at
     /// `work`. Returns the time the handheld's processor was busy.
-    fn impose(&self, work: Instant, drew: bool) -> Duration {
+    fn busy(&self, work: Instant) -> Duration {
         let cost = work.elapsed().mul_f32(self.cpu);
         if self.cpu > 1.0 {
             // Busy, as the device would be: spin rather than sleep.
             while work.elapsed() < cost {
                 std::hint::spin_loop();
-            }
-            if drew {
-                std::thread::sleep(self.panel);
             }
         }
         cost
@@ -371,7 +455,142 @@ impl Meter {
     }
 }
 
-/// A quick fingerprint of a frame (FNV-1a over its pixels).
-fn picture_hash(px: &[u32]) -> u64 {
-    px.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, p| (h ^ *p as u64).wrapping_mul(0x0000_0100_0000_01b3))
+/// How even motion is, not how fast on average: for each kind of transition,
+/// the time between one frame and the next as the handheld would see it.
+/// A transition that averages 40 frames a second but stalls for one long
+/// frame looks worse than a steady 30, so this reports the first frame, the
+/// typical frame and the worst frame separately.
+///
+/// Time is simulated: each frame's measured cost is scaled to the handheld's
+/// speed, the panel's time is added, and the next frame is told that much
+/// time has passed, exactly as the device's own loop would.
+fn smooth(mut shell: Shell) {
+    use Key::*;
+    let steps: [(&str, Key); 5] = [("app opens", Enter), ("app closes", Back), ("app opens", Enter), ("page slides in", Enter), ("page slides out", Back)];
+    let settle = |shell: &mut Shell| {
+        for _ in 0..240 {
+            if shell.tick(1.0 / 60.0) {
+                shell.draw();
+            }
+        }
+    };
+    // Settings: an app with pages inside it.
+    for key in [Right, Right, Right, Right] {
+        shell.key(key);
+    }
+    settle(&mut shell);
+    for name in ["device", "worse"] {
+        let speed = Speed::named(Some(name));
+        let mut beat = Beat::new();
+        println!("{}: processor x{}, panel {} ms a full frame", speed.name, speed.cpu, speed.panel.as_millis());
+        println!("  {:<16} {:>6} {:>10} {:>10} {:>10} {:>9}", "", "frames", "first", "typical", "worst", "even");
+        for (label, key) in steps {
+            // Several runs, because a 0.5 ms frame on a PC is easily disturbed.
+            let (mut firsts, mut rest, mut counts) = (Vec::new(), Vec::new(), Vec::new());
+            for _ in 0..7 {
+                let mut shown = Vec::new();
+                platform::changed_rows(&mut shown, &shell.gfx.canvas);
+                shell.key(key);
+                let mut dt = 0.0f32;
+                let mut frames = 0usize;
+                loop {
+                    let started = Instant::now();
+                    let drew = shell.tick(dt);
+                    if drew {
+                        shell.draw();
+                    }
+                    let work = started.elapsed().as_secs_f32() * speed.cpu;
+                    let part = platform::changed_rows(&mut shown, &shell.gfx.canvas).map_or(0.0, |(first, end)| (end - first) as f32 / gfx::H);
+                    // The beat in force once this frame's needs are known.
+                    let beats = if part > 0.0 { beat.frame_took(Duration::from_secs_f32(work + speed.panel.as_secs_f32() * part)) } else { 1 };
+                    let interval = beat.interval().as_secs_f32() * beats as f32;
+                    if frames == 0 { firsts.push(interval) } else { rest.push(interval) }
+                    frames += 1;
+                    dt = interval;
+                    if !shell.animating() || frames > 400 {
+                        break;
+                    }
+                }
+                counts.push(frames);
+                beat.rest();
+                settle(&mut shell);
+                // Undo, so every run starts from the same place.
+                let undo = if matches!(key, Enter) { Back } else { Enter };
+                shell.key(undo);
+                settle(&mut shell);
+            }
+            // Leave the step done, for the next one.
+            shell.key(key);
+            settle(&mut shell);
+            let median = |v: &mut Vec<f32>| {
+                v.sort_by(|a, b| a.total_cmp(b));
+                v[v.len() / 2] * 1e3
+            };
+            let worst = rest.iter().cloned().fold(0.0f32, f32::max) * 1e3;
+            let typical = median(&mut rest);
+            // How many frames came exactly a typical frame after the one before.
+            let even = rest.iter().filter(|i| (**i * 1e3 - typical).abs() < 0.5).count() as f32 / rest.len().max(1) as f32;
+            counts.sort();
+            println!(
+                "  {label:<16} {:>6} {:>8.0}ms {:>8.0}ms {:>8.0}ms {:>8.0}%",
+                counts[counts.len() / 2],
+                median(&mut firsts),
+                typical,
+                worst,
+                even * 100.0
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ms(v: f32) -> Duration {
+        Duration::from_secs_f32(v / 1000.0)
+    }
+
+    #[test]
+    fn the_beat_slows_to_one_the_frames_hold_and_stays_there() {
+        let mut beat = Beat::new();
+        assert_eq!(beat.interval(), ms(25.0));
+        // Frames that fit keep the fastest beat.
+        for _ in 0..100 {
+            beat.frame_took(ms(21.0));
+        }
+        assert_eq!(beat.level, 0);
+        // One late frame is let go: it takes two beats, and the beat stays.
+        assert_eq!(beat.frame_took(ms(27.0)), 2);
+        assert_eq!(beat.level, 0);
+        for _ in 0..20 {
+            assert_eq!(beat.frame_took(ms(21.0)), 1);
+        }
+        // Two late frames close together: the beat is too fast, so down a step.
+        beat.frame_took(ms(27.0));
+        beat.frame_took(ms(21.0));
+        assert_eq!(beat.frame_took(ms(27.0)), 1, "which the slower beat holds");
+        assert_eq!(beat.level, 1);
+        // Frames hovering around the faster beat do not send it back and forth.
+        for i in 0..200 {
+            beat.frame_took(ms(if i % 3 == 0 { 26.0 } else { 24.0 }));
+        }
+        assert_eq!(beat.level, 1, "it settles rather than hunts");
+        // Frames that keep running late take it down further, a step at a time.
+        for _ in 0..4 {
+            beat.frame_took(ms(60.0));
+        }
+        assert_eq!(beat.level, 3);
+        // Only a long run with real room to spare brings it back up, a step at a time.
+        for _ in 0..39 {
+            beat.frame_took(ms(20.0));
+        }
+        beat.rest();
+        assert_eq!(beat.level, 3);
+        // And never mid-animation: only once motion has stopped.
+        beat.frame_took(ms(20.0));
+        assert_eq!(beat.level, 3);
+        beat.rest();
+        assert_eq!(beat.level, 2);
+    }
 }

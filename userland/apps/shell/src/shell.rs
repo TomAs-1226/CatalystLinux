@@ -112,6 +112,10 @@ pub struct Shell {
     background: Vec<u32>,
     background_for: Option<(u32, u32, u32)>,
     status: Status,
+    /// The top screen as it was last drawn, and how deep the stack was then:
+    /// a transition starts from this picture instead of drawing it again.
+    last_screen: Picture,
+    last_depth: usize,
 }
 
 /// The clock, battery and links at the top right, re-read now and then.
@@ -141,6 +145,8 @@ impl Shell {
             background: Vec::new(),
             background_for: None,
             status: Status { age: f32::MAX, ..Status::default() },
+            last_screen: (Vec::new(), None),
+            last_depth: usize::MAX,
         }
     }
 
@@ -314,14 +320,22 @@ impl Shell {
                     Self::draw_screen(g, screen, &self.robot, home);
                     (g.canvas.px.clone(), g.pager.take().map(|(pages, current, _)| (pages, current)))
                 };
+                // The screen that was showing was drawn last frame. Keeping that
+                // picture means a transition's first frame draws one screen,
+                // not two, so it starts without a stall.
+                let kept = |depth_then: usize| (self.last_depth == depth_then).then(|| self.last_screen.clone());
                 transition.pictures = Some(match &mut transition.leaving {
-                    Some(leaving) => [picture(g, self.stack[depth - 1].0.as_mut(), depth == 1), picture(g, leaving.as_mut(), false)],
+                    Some(leaving) => {
+                        let over = kept(depth + 1).unwrap_or_else(|| picture(g, leaving.as_mut(), false));
+                        [picture(g, self.stack[depth - 1].0.as_mut(), depth == 1), over]
+                    }
                     None => {
                         let (under, over) = self.stack.split_at_mut(depth - 1);
-                        let under = under.last_mut().map(|(s, _)| picture(g, s.as_mut(), depth == 2));
+                        let under = kept(depth - 1).or_else(|| under.last_mut().map(|(s, _)| picture(g, s.as_mut(), depth == 2)));
                         [under.unwrap_or_else(|| (self.background.clone(), None)), picture(g, over[0].0.as_mut(), false)]
                     }
                 });
+                self.last_depth = usize::MAX;
                 g.focus_static = false;
                 g.canvas.px.copy_from_slice(&self.background);
             }
@@ -349,6 +363,9 @@ impl Shell {
             }
         } else {
             Self::draw_screen(g, self.stack[depth - 1].0.as_mut(), &self.robot, depth == 1);
+            self.last_screen.0.clone_from(&g.canvas.px);
+            self.last_screen.1 = g.pager.map(|(pages, current, _)| (pages, current));
+            self.last_depth = depth;
         }
         g.ox = 0.0;
 

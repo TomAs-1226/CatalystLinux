@@ -1,0 +1,35 @@
+#!/sbin/openrc-run
+# Wi-Fi, when it has been switched on in Settings. The radio stays off
+# otherwise: it is the handheld's largest idle draw after the screen.
+# Networks and their passwords are kept in /data/wifi/wpa_supplicant.conf.
+
+description="Wi-Fi (wpa_supplicant), only when enabled"
+command=/usr/sbin/wpa_supplicant
+command_args="-i wlan0 -c /data/wifi/wpa_supplicant.conf"
+command_background=true
+pidfile=/run/wpa_supplicant.pid
+
+depend() {
+	need localmount
+	after sysv-rcs modules
+}
+
+start_pre() {
+	if [ ! -e /data/catalyst/wifi-enabled ]; then
+		einfo "Wi-Fi is switched off"
+		return 1
+	fi
+	mkdir -p /data/wifi
+	if [ ! -e /data/wifi/wpa_supplicant.conf ]; then
+		# update_config lets the shell save networks; the control socket is how it asks.
+		printf 'ctrl_interface=/run/wpa_supplicant\nupdate_config=1\n' > /data/wifi/wpa_supplicant.conf
+	fi
+	chmod 600 /data/wifi/wpa_supplicant.conf
+	ip link set wlan0 up 2>/dev/null
+	return 0
+}
+
+stop_post() {
+	ip link set wlan0 down 2>/dev/null
+	return 0
+}
