@@ -96,6 +96,8 @@ pub struct Gfx {
     pub icons: Icons,
     pub glass: Glass,
     pub tokens: Tokens,
+    /// The accent the palette was grown from.
+    pub accent: bezel::Accent,
     pub ty: Type,
     pub text_size: TextSize,
     /// Horizontal offset of what is being drawn: screens slide during a page turn.
@@ -104,6 +106,8 @@ pub struct Gfx {
     pub calm: bool,
     /// Page dots a screen wants on the glass pager: (pages, current, x offset).
     pub pager: Option<(usize, usize, f32)>,
+    /// The width a screen title may take before it meets the island.
+    pub title_room: f32,
 }
 
 impl Gfx {
@@ -114,11 +118,13 @@ impl Gfx {
             icons: Icons::new(),
             glass: Glass::new(),
             tokens,
+            accent: bezel::Accent::Orange,
             ty: Type::of(TextSize::Standard),
             text_size: TextSize::Standard,
             ox: 0.0,
             calm: false,
             pager: None,
+            title_room: 96.0,
         }
     }
 

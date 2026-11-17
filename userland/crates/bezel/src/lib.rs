@@ -16,7 +16,7 @@ pub mod icons;
 pub mod text;
 
 pub use canvas::{Canvas, Rect};
-pub use color::{Color, Tokens, Tone};
+pub use color::{Accent, Color, Tokens, Tone};
 pub use glass::{Glass, GlassShape, LIGHT_REST};
 pub use icons::Icons;
 pub use text::{Align, Face, Text, TextStyle};

@@ -28,12 +28,22 @@ until switched on in System.
 ## Try the UI on this PC
 
 ```powershell
-.\scripts\run-sim.ps1            # a window showing the panel at 4x, with a demo robot
+.\scripts\run-sim.ps1               # the panel at 4x, a demo robot, at the handheld's estimated speed
+.\scripts\run-sim.ps1 -Speed worse  # slower than the handheld, to see whether it still holds up
+.\scripts\run-sim.ps1 -Speed pc     # as fast as this PC goes
 .\scripts\run-sim.ps1 -Robot 5805   # a real robot: team number, IP or hostname
 ```
 
 Arrow keys or `F` `X` `Z` `C` (the keys that carry the arrows on the
 Cardputer) move, Enter opens, Esc goes back.
+
+The simulator holds itself to the handheld's speed: the processor work is
+stretched 20 times (40 at `worse`) and each frame waits 15 ms (25) for the
+panel, and the window title shows frames per second, the cost of a frame and
+how busy the handheld's processor would be. Those factors are estimates until
+a CardputerZero has been measured with `catalyst-shell --bench`. At them, an
+idle screen costs nothing, a screen showing live robot data keeps the
+processor about 6% busy, and a page turn runs at about 39 frames a second.
 
 ## Build the SD card image
 
@@ -81,6 +91,17 @@ reader against a log from a real robot, and the kernel fragment's effect on
 memory. Not yet built: the agent's machine pages (CPU, CAN buses, cameras),
 the AI log analysis, Wi-Fi setup in the UI, the camera, audio, and the
 external-app launcher.
+
+## Roadmap
+
+Catalyst Linux is meant to be a pocket developer machine as well as a Catalyst
+tool. Chosen so far, not yet built: Wi-Fi setup; a terminal; files and an
+editor; scripting with a kit for writing Bezel apps; an SSH client and serial
+console; a network toolkit; USB gadget modes (serial, network and a drive of
+logs when plugged into a PC); a system monitor; standby and power saving;
+image updates with rollback; a status bar; an AprilTag reader on the built-in
+camera, calibrated so it can measure for the robot; a pit checklist and match
+timer; a robot finder; the AI log analysis; memory and boot-time tuning.
 
 ## Third-party pieces
 

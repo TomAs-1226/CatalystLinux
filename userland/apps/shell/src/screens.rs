@@ -56,7 +56,7 @@ const APPS: [App; 8] = [
     App { icon: "speed", name: "Loop", open: |_| Box::new(LoopTime) },
     App { icon: "precision_manufacturing", name: "Motors", open: |_| Box::new(Motors::default()) },
     App { icon: "terminal", name: "Console", open: |robot| Box::new(Console::open(robot)) },
-    App { icon: "settings", name: "System", open: |_| Box::new(System::default()) },
+    App { icon: "settings", name: "Settings", open: |_| Box::new(SettingsApp::new()) },
 ];
 
 pub struct Home {
@@ -946,67 +946,218 @@ impl Screen for Console {
     }
 }
 
-// ---------------------------------------------------------------- system ---
+// -------------------------------------------------------------- settings ---
 
-/// This device: appearance, access, and what it is running.
-#[derive(Default)]
-pub struct System {
-    list: ListState,
+/// One thing on a settings page.
+#[derive(Clone, Copy, PartialEq)]
+enum Item {
+    // The sections.
+    Appearance,
+    Display,
+    Network,
+    Access,
+    About,
+    // Appearance.
+    Mode,
+    AccentColor,
+    TextScale,
+    Calm,
+    // Display.
+    Brightness,
+    // Access.
+    Ssh,
+    DemoRobot,
+    /// A read-only line of what the device reports.
+    Info(usize),
 }
 
-const SYSTEM_ROWS: usize = 6;
+/// Settings for the handheld itself: how it looks, its screen, its network,
+/// who can get in, and what it is. One page type serves the list of sections
+/// and each section.
+pub struct SettingsApp {
+    title: &'static str,
+    items: Vec<Item>,
+    list: ListState,
+    /// Read-only lines, re-read every couple of seconds while the page shows.
+    info: Vec<(&'static str, String)>,
+    since_read: f32,
+}
 
-impl Screen for System {
+impl SettingsApp {
+    pub fn new() -> Self {
+        use Item::*;
+        Self::page("Settings", vec![Appearance, Display, Network, Access, About])
+    }
+
+    fn page(title: &'static str, items: Vec<Item>) -> Self {
+        let mut page = SettingsApp { title, items, list: ListState::default(), info: Vec::new(), since_read: 0.0 };
+        page.read_info();
+        page
+    }
+
+    fn section(item: Item) -> Option<Self> {
+        use Item::*;
+        Some(match item {
+            Appearance => Self::page("Appearance", vec![Mode, AccentColor, TextScale, Calm]),
+            Display => Self::page("Display", vec![Brightness]),
+            Network => Self::page("Network", (0..4).map(Info).collect()),
+            Access => Self::page("Access", vec![Ssh, DemoRobot]),
+            About => Self::page("About", (0..9).map(Info).collect()),
+            _ => return None,
+        })
+    }
+
+    fn read_info(&mut self) {
+        use crate::sys;
+        self.info = match self.title {
+            "Network" => vec![
+                ("Name", dash(sys::hostname())),
+                ("Ethernet", dash(sys::address("eth0"))),
+                ("Wi-Fi", dash(sys::address("wlan0"))),
+                ("USB link", dash(sys::address("usb0"))),
+            ],
+            "About" => vec![
+                ("Catalyst Linux", env!("CARGO_PKG_VERSION").to_owned()),
+                ("Device", dash(sys::model())),
+                ("Kernel", dash(sys::kernel())),
+                ("Up for", dash(sys::uptime())),
+                ("Memory in use", dash(sys::memory())),
+                ("This shell", dash(sys::shell_memory())),
+                ("Storage", dash(sys::storage())),
+                ("Battery", dash(sys::battery())),
+                ("Processor", dash(sys::cpu_temperature())),
+            ],
+            _ => Vec::new(),
+        };
+    }
+
+    /// What a row shows: its name, its value, and whether the value is "on".
+    fn describe(&self, item: Item, g: &Gfx, robot: &Robot) -> (String, String, bool) {
+        use Item::*;
+        let onoff = |on: bool| (if on { "on" } else { "off" }).to_owned();
+        let section = |name: &str, summary: String| (name.to_owned(), format!("{summary} ›"), false);
+        match item {
+            Appearance => section("Appearance", format!("{} · {}", if g.tokens.tone == bezel::Tone::Light { "light" } else { "dark" }, g.accent.name())),
+            Display => section("Display", dash(crate::sys::brightness().map(|b| format!("{b}%")))),
+            Network => section("Network", crate::sys::address("eth0").or_else(|| crate::sys::address("wlan0")).unwrap_or_else(|| "–".into())),
+            Access => section("Access", format!("ssh {}", onoff(crate::ssh_enabled()))),
+            About => section("About", env!("CARGO_PKG_VERSION").to_owned()),
+            Mode => ("Mode".into(), (if g.tokens.tone == bezel::Tone::Light { "light" } else { "dark" }).into(), true),
+            AccentColor => ("Accent".into(), g.accent.name().into(), true),
+            TextScale => ("Text size".into(), g.text_size.name().into(), true),
+            Calm => ("Calm version".into(), onoff(g.calm), g.calm),
+            Brightness => ("Brightness".into(), dash(crate::sys::brightness().map(|b| format!("{b}%"))), true),
+            Ssh => ("SSH access".into(), onoff(crate::ssh_enabled()), crate::ssh_enabled()),
+            DemoRobot => ("Demo robot".into(), onoff(robot.is_demo()), robot.is_demo()),
+            Info(i) => self.info.get(i).map(|(name, value)| ((*name).to_owned(), value.clone(), false)).unwrap_or_default(),
+        }
+    }
+
+    /// Enter, Left or Right on a row. `step` is −1 or +1; Enter is +1.
+    fn change(&mut self, item: Item, step: i32, cx: &mut Cx) {
+        use Item::*;
+        match item {
+            Mode => cx.settings.light = !cx.settings.light,
+            AccentColor => {
+                let all = bezel::Accent::ALL;
+                let at = all.iter().position(|a| *a == cx.settings.accent).unwrap_or(0) as i32;
+                cx.settings.accent = all[(at + step).rem_euclid(all.len() as i32) as usize];
+            }
+            TextScale => cx.settings.text = if step > 0 { cx.settings.text.next() } else { cx.settings.text.next().next() },
+            Calm => cx.settings.calm = !cx.settings.calm,
+            Brightness => match crate::sys::brightness() {
+                Some(now) => {
+                    crate::sys::set_brightness((now as i32 + step * 10).clamp(10, 100) as u32);
+                }
+                None => *cx.say = Some("the backlight is on the device".into()),
+            },
+            Ssh => {
+                // Off unless switched on here; key-only logins.
+                let on = !crate::ssh_enabled();
+                *cx.say = Some(match crate::set_ssh(on) {
+                    Ok(()) if on => "ssh on · keys in /data/ssh".into(),
+                    Ok(()) => "ssh off".into(),
+                    Err(why) => why,
+                });
+            }
+            DemoRobot => {
+                *cx.robot = if cx.robot.is_demo() { Robot::none() } else { Robot::demo() };
+                *cx.say = Some(if cx.robot.is_demo() { "demo robot on".into() } else { "demo robot off".into() });
+            }
+            _ => {}
+        }
+        crate::save_settings(cx.settings);
+    }
+}
+
+impl Screen for SettingsApp {
     fn title(&self) -> &str {
-        "System"
+        self.title
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
+        let Some(&item) = self.items.get(self.list.focus) else { return Nav::Pop };
         match key {
-            Key::Enter => {
-                match self.list.focus {
-                    0 => cx.settings.light = !cx.settings.light,
-                    1 => cx.settings.text = cx.settings.text.next(),
-                    2 => cx.settings.calm = !cx.settings.calm,
-                    3 => {
-                        // Off unless switched on here; key-only logins.
-                        let on = !crate::ssh_enabled();
-                        *cx.say = Some(match crate::set_ssh(on) {
-                            Ok(()) if on => "ssh on · keys in /data/ssh".into(),
-                            Ok(()) => "ssh off".into(),
-                            Err(why) => why,
-                        });
-                    }
-                    4 => {
-                        *cx.robot = if cx.robot.is_demo() { Robot::none() } else { Robot::demo() };
-                        *cx.say = Some(if cx.robot.is_demo() { "demo robot on".into() } else { "demo robot off".into() });
-                    }
-                    _ => *cx.say = Some(crate::memory_line().unwrap_or_else(|| "memory shows on the device".into())),
-                }
-                crate::save_settings(cx.settings);
-            }
             Key::Back => return Nav::Pop,
-            other => list_key(&mut self.list, other, SYSTEM_ROWS),
+            Key::Enter | Key::Right | Key::Left => {
+                if let Some(page) = Self::section(item) {
+                    if key != Key::Left {
+                        return Nav::Push(Box::new(page));
+                    }
+                } else {
+                    self.change(item, if key == Key::Left { -1 } else { 1 }, cx);
+                }
+            }
+            other => list_key(&mut self.list, other, self.items.len()),
         }
         Nav::Stay
     }
 
+    fn tick(&mut self, dt: f32) -> bool {
+        self.since_read += dt;
+        if self.since_read < 2.0 || self.info.is_empty() {
+            return false;
+        }
+        self.since_read = 0.0;
+        let before = self.info.clone();
+        self.read_info();
+        before != self.info
+    }
+
     fn draw(&mut self, g: &mut Gfx, robot: &Robot) {
         let t = g.tokens;
-        let rows: [(&str, &str, bool); SYSTEM_ROWS] = [
-            ("Appearance", if t.tone == bezel::Tone::Light { "light" } else { "dark" }, true),
-            ("Text size", g.text_size.name(), true),
-            ("Calm version", if g.calm { "on" } else { "off" }, g.calm),
-            ("SSH access", if crate::ssh_enabled() { "on" } else { "off" }, crate::ssh_enabled()),
-            ("Demo robot", if robot.is_demo() { "on" } else { "off" }, robot.is_demo()),
-            ("About", concat!("catalyst linux ", env!("CARGO_PKG_VERSION")), false),
-        ];
         let (top, row_h) = (g.top(), g.row_h());
-        for (i, y) in self.list.layout(rows.len(), top, row_h, 3.0, H - PAD + 2.0) {
-            let (name, value, on) = rows[i];
+        let items = self.items.clone();
+        for (i, y) in self.list.layout(items.len(), top, row_h, 3.0, H - PAD + 2.0) {
+            let item = items[i];
+            let (name, value, on) = self.describe(item, g, robot);
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
-            g.row(r, name, value, if on { t.ink } else { t.dim }, i == self.list.focus);
+            let focused = i == self.list.focus;
+            match item {
+                // The accents themselves, the chosen one ringed.
+                Item::AccentColor => {
+                    g.row(r, &name, "", t.dim, focused);
+                    let all = bezel::Accent::ALL;
+                    for (n, accent) in all.iter().enumerate() {
+                        let cx = r.right() - 14.0 - (all.len() - 1 - n) as f32 * 17.0;
+                        let swatch = bezel::Tokens::of(*accent, t.tone).signal;
+                        if *accent == g.accent {
+                            g.dot(cx, r.cy(), 7.5, t.ink);
+                            g.dot(cx, r.cy(), 6.0, if focused { t.surface2 } else { t.surface1 });
+                        }
+                        g.dot(cx, r.cy(), 4.5, swatch);
+                    }
+                }
+                Item::Brightness => {
+                    let value_w = g.measure("100%", g.ty.label) + 22.0;
+                    g.row(r, &name, &value, t.ink, focused);
+                    let name_w = g.measure(&name, g.ty.body) + 22.0;
+                    let level = crate::sys::brightness().unwrap_or(0) as f32 / 100.0;
+                    g.meter(Rect::new(r.x + name_w, r.cy() - 3.0, r.w - name_w - value_w, 6.0), level, t.ice);
+                }
+                _ => g.row(r, &name, &value, if on { t.ink } else { t.dim }, focused),
+            }
         }
-        self.list.scrollbar(g, rows.len(), top, H - PAD);
+        self.list.scrollbar(g, items.len(), top, H - PAD);
     }
 }

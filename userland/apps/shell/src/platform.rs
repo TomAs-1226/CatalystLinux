@@ -30,6 +30,8 @@ pub trait Platform {
     fn present_always(&self) -> bool {
         false
     }
+    /// A line of status for whoever is developing; the device has nowhere to put one.
+    fn set_status(&mut self, _text: &str) {}
 }
 
 // ---------------------------------------------------------------- device ---
@@ -254,6 +256,10 @@ pub mod sim {
 
         fn present_always(&self) -> bool {
             true
+        }
+
+        fn set_status(&mut self, text: &str) {
+            self.window.set_title(text);
         }
 
         fn present(&mut self, canvas: &Canvas) {

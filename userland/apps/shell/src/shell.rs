@@ -1,7 +1,7 @@
 //! The shell: a stack of screens, the glass island that carries link status
 //! and messages, and the page turn between screens.
 
-use bezel::{Align, GlassShape, Rect, Tokens};
+use bezel::{Accent, Align, GlassShape, Rect, Tokens, Tone};
 use detent::{role, Animated};
 
 use crate::gfx::{Gfx, TextSize, H, PAD, W};
@@ -13,6 +13,7 @@ pub struct Settings {
     pub light: bool,
     pub calm: bool,
     pub text: TextSize,
+    pub accent: Accent,
 }
 
 /// What a screen can reach while handling a key.
@@ -60,6 +61,13 @@ pub struct Shell {
     message: Option<(String, f32)>,
     dirty: bool,
     screen_moving: bool,
+    /// The ground and its glows, drawn once per palette and copied each frame.
+    background: Vec<u32>,
+    background_for: Option<(u32, u32, u32)>,
+    /// A page turn slides two finished pictures instead of redrawing two
+    /// screens every frame: the one underneath and the one on top, each with
+    /// the page dots it asked for.
+    turn_pictures: Option<[(Vec<u32>, Option<(usize, usize)>); 2]>,
 }
 
 impl Shell {
@@ -67,7 +75,7 @@ impl Shell {
         Shell {
             gfx: Gfx::new(Tokens::dark()),
             robot,
-            settings: Settings { light: false, calm: false, text: TextSize::Standard },
+            settings: Settings { light: false, calm: false, text: TextSize::Standard, accent: Accent::Orange },
             stack: vec![Box::new(Home::new())],
             leaving: None,
             turn: Animated::new(0.0, role::page()).with_rest(0.002),
@@ -76,6 +84,9 @@ impl Shell {
             message: None,
             dirty: true,
             screen_moving: false,
+            background: Vec::new(),
+            background_for: None,
+            turn_pictures: None,
         }
     }
 
@@ -119,13 +130,15 @@ impl Shell {
             }
             Nav::Pop => {}
         }
-        self.gfx.tokens = if self.settings.light { Tokens::light() } else { Tokens::dark() };
+        self.gfx.accent = self.settings.accent;
+        self.gfx.tokens = Tokens::of(self.settings.accent, if self.settings.light { Tone::Light } else { Tone::Dark });
         self.gfx.calm = self.settings.calm;
         self.gfx.set_text_size(self.settings.text);
     }
 
     fn start_turn(&mut self, forward: bool) {
         self.forward = forward;
+        self.turn_pictures = None;
         if self.settings.calm {
             self.turn.jump(0.0);
             self.leaving = None;
@@ -164,34 +177,56 @@ impl Shell {
     pub fn draw(&mut self) {
         let g = &mut self.gfx;
         let t = g.tokens;
-        g.canvas.clear(t.ground);
-        // The ground's glows: signal from the light's side, ice opposite.
-        g.canvas.glow(40.0, 0.0, 150.0, t.signal, 0.07);
-        g.canvas.glow(300.0, 170.0, 130.0, t.ice, 0.05);
+        let palette = (t.ground.to_u32(), t.signal.to_u32(), t.ice.to_u32());
+        if self.background_for != Some(palette) {
+            g.canvas.clear(t.ground);
+            // The ground's glows: signal from the light's side, ice opposite.
+            g.canvas.glow(40.0, 0.0, 150.0, t.signal, 0.07);
+            g.canvas.glow(300.0, 170.0, 130.0, t.ice, 0.05);
+            self.background = g.canvas.px.clone();
+            self.background_for = Some(palette);
+            self.turn_pictures = None;
+        }
+        g.canvas.px.copy_from_slice(&self.background);
         g.pager = None;
+        // A title runs up to the island, however wide the island is just now.
+        g.title_room = (W - self.island_w.value().max(g.island_h())) * 0.5 - PAD - 8.0;
 
         // Screens: during a page turn the arriving and leaving ones slide together.
         let turn = self.turn.value();
         let depth = self.stack.len();
         if turn.abs() > 0.002 {
-            if self.forward {
-                if depth >= 2 {
-                    g.ox = -(1.0 - turn) * W * 0.3;
-                    Self::draw_screen(g, self.stack[depth - 2].as_mut(), &self.robot, depth == 2);
-                }
-                g.canvas.fill_rect(Rect::new(turn * W, 0.0, W, H), t.ground, 1.0);
-                g.ox = turn * W;
-                Self::draw_screen(g, self.stack[depth - 1].as_mut(), &self.robot, false);
-            } else {
-                g.ox = -turn * W * 0.3;
-                Self::draw_screen(g, self.stack[depth - 1].as_mut(), &self.robot, depth == 1);
-                if let Some(leaving) = &mut self.leaving {
-                    g.canvas.fill_rect(Rect::new((1.0 - turn) * W, 0.0, W, H), t.ground, 1.0);
-                    g.ox = (1.0 - turn) * W;
-                    Self::draw_screen(g, leaving.as_mut(), &self.robot, false);
+            // Take the two pictures on the first frame of the turn.
+            if self.turn_pictures.is_none() {
+                let picture = |g: &mut Gfx, screen: Option<&mut Box<dyn Screen>>, home: bool| {
+                    g.canvas.px.copy_from_slice(&self.background);
+                    g.pager = None;
+                    g.ox = 0.0;
+                    if let Some(screen) = screen {
+                        Self::draw_screen(g, screen.as_mut(), &self.robot, home);
+                    }
+                    (g.canvas.px.clone(), g.pager.take().map(|(pages, current, _)| (pages, current)))
+                };
+                self.turn_pictures = Some(if self.forward {
+                    let under = if depth >= 2 { picture(g, self.stack.get_mut(depth - 2), depth == 2) } else { picture(g, None, false) };
+                    [under, picture(g, self.stack.last_mut(), false)]
+                } else {
+                    [picture(g, self.stack.last_mut(), depth == 1), picture(g, self.leaving.as_mut(), false)]
+                });
+                g.canvas.px.copy_from_slice(&self.background);
+            }
+            // The one underneath drifts a third as far as the one on top travels.
+            let (under_x, over_x) = if self.forward { (-(1.0 - turn) * W * 0.3, turn * W) } else { (-turn * W * 0.3, (1.0 - turn) * W) };
+            if let Some([under, over]) = &self.turn_pictures {
+                for ((pixels, dots), x) in [(under, under_x), (over, over_x)] {
+                    blit_shifted(&mut g.canvas.px, pixels, W as usize, H as usize, x.round() as i32);
+                    if let Some((pages, current)) = dots {
+                        g.pager = Some((*pages, *current, x.round()));
+                    }
                 }
             }
         } else {
+            self.turn_pictures = None;
             g.ox = 0.0;
             Self::draw_screen(g, self.stack[depth - 1].as_mut(), &self.robot, depth == 1);
         }
@@ -250,11 +285,24 @@ impl Shell {
         let ty = g.ty;
         // The title shares the island's line; it gives way to a wide island.
         let bar_cy = 4.0 + g.island_h() * 0.5;
-        let room = if home { 112.0 } else { 96.0 };
+        let room = g.title_room;
         g.text_fit(PAD + 2.0, bar_cy, screen.title(), ty.title, t.ink, room);
         if !home {
             g.text_at(W - PAD - 2.0, bar_cy, Align::Right, "esc", ty.caption, t.dim);
         }
         screen.draw(g, robot);
+    }
+}
+
+/// Copy a full-screen picture into the frame, moved sideways by `dx` pixels.
+fn blit_shifted(dst: &mut [u32], src: &[u32], w: usize, h: usize, dx: i32) {
+    let shift = dx.unsigned_abs() as usize;
+    if shift >= w {
+        return;
+    }
+    let (to, from) = if dx >= 0 { (shift, 0) } else { (0, shift) };
+    let n = w - shift;
+    for y in 0..h {
+        dst[y * w + to..y * w + to + n].copy_from_slice(&src[y * w + from..y * w + from + n]);
     }
 }
