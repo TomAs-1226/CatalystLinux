@@ -54,10 +54,19 @@ OUT="$BUILD/releases/$CHANNEL/$VERSION"
 KEY="$BUILD/keys/update.key"
 PUB="$HERE/os/board/cardputer-zero/rootfs-overlay/etc/catalyst/update.pub"
 
+# The GitHub CLI: WSL's own, or else Windows' (this is WSL on a PC), which
+# is signed in on Windows and takes Windows paths.
+GH=gh
+host_path() { printf '%s\n' "$1"; }
+if ! command -v gh >/dev/null 2>&1 && command -v gh.exe >/dev/null 2>&1; then
+	GH=gh.exe
+	host_path() { wslpath -w "$1"; }
+fi
+
 if [ "$PUBLISH" = 1 ]; then
-	command -v gh >/dev/null || { echo "publishing needs the GitHub CLI (gh)" >&2; exit 1; }
-	gh auth status >/dev/null 2>&1 || { echo "sign the GitHub CLI in first: gh auth login" >&2; exit 1; }
-	if [ "$CHANNEL" = stable ] && gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+	command -v "$GH" >/dev/null || { echo "publishing needs the GitHub CLI (gh)" >&2; exit 1; }
+	"$GH" auth status >/dev/null 2>&1 || { echo "sign the GitHub CLI in first: gh auth login" >&2; exit 1; }
+	if [ "$CHANNEL" = stable ] && "$GH" release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
 		echo "$TAG is out already: raise os/VERSION first" >&2
 		exit 1
 	fi
@@ -119,9 +128,13 @@ if [ "$PUBLISH" = 1 ]; then
 	for extra in "$OUT"/system-from-*.cdelta "$OUT"/catalyst-flasher.exe; do
 		[ -e "$extra" ] && FILES+=("$extra")
 	done
+	ASSETS=()
+	for f in "${FILES[@]}"; do
+		ASSETS+=("$(host_path "$f")")
+	done
 	PRE=()
 	[ "$CHANNEL" = nightly ] && PRE=(--prerelease)
-	gh release create "$TAG" --repo "$REPO" --title "Catalyst Linux $VERSION" --notes "${NOTES:-Catalyst Linux $VERSION}" "${PRE[@]}" "${FILES[@]}"
+	"$GH" release create "$TAG" --repo "$REPO" --title "Catalyst Linux $VERSION" --notes "${NOTES:-Catalyst Linux $VERSION}" "${PRE[@]}" "${ASSETS[@]}"
 	echo "published: https://github.com/$REPO/releases/tag/$TAG"
 else
 	echo "made $OUT (add --publish to put it on GitHub)"
