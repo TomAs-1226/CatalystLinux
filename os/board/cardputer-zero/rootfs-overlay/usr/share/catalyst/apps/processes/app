@@ -1,0 +1,5 @@
+name = Processes
+icon = memory
+about = what is running
+run = top
+screen = terminal

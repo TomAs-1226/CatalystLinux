@@ -9,6 +9,10 @@
 //!                                handheld's estimated speed and at worse
 //!     --robot <team|ip|host>     robot to connect to (overrides the saved one)
 //!     --demo                     a scripted robot instead of a real one
+//!     --arrive <seconds>         the scripted robot, plugged in that long after start
+//!     --no-intro                 straight to Home, without the start animation
+//!     --setup                    first-boot setup again, as if never set up
+//! catalyst-shell --start-movie <file.png>   the start animation as an animated PNG
 //!     --light, --calm            start in light mode / the calm version
 //!     --text <size>              compact, standard or large
 //!     --accent <name>            orange, blue, green, violet or rose
@@ -18,15 +22,30 @@
 //! ```
 
 mod agent;
+mod apps;
+mod brand;
+mod catalogue;
+mod control;
 mod files;
 mod gfx;
+mod git;
+mod glance;
+mod gpu;
+mod intro;
+mod keys;
 mod logs;
+mod look;
 mod pty;
 mod platform;
+mod remote;
 mod robot;
+mod schedule;
 mod screens;
+mod search;
+mod setup;
 mod shell;
 mod sys;
+mod sysupdate;
 mod term;
 mod terminal;
 mod wifi;
@@ -42,13 +61,56 @@ fn config_path() -> std::path::PathBuf {
     std::env::var_os("CATALYST_CONF").map(Into::into).unwrap_or_else(|| "/etc/catalyst/robot".into())
 }
 
+/// The folder the handheld's own state is kept in, beside the robot address:
+/// `/data/catalyst` on the device.
+pub fn config_dir() -> std::path::PathBuf {
+    config_path().parent().map(std::path::Path::to_path_buf).unwrap_or_default()
+}
+
+/// Allow a public key to sign in over SSH: one line added to the keys
+/// Dropbear reads (`/data/ssh/authorized_keys`), unless it is there already.
+pub fn add_ssh_key(key: &str) -> std::io::Result<()> {
+    let key = key.trim();
+    if key.contains(['\n', '\r']) || !["ssh-ed25519 ", "ssh-rsa ", "ecdsa-sha2-"].iter().any(|p| key.starts_with(p)) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a public key"));
+    }
+    let dir = if cfg!(target_os = "linux") && std::path::Path::new("/data").is_dir() { std::path::PathBuf::from("/data/ssh") } else { config_dir().join("ssh") };
+    std::fs::create_dir_all(&dir)?;
+    let file = dir.join("authorized_keys");
+    let mut text = std::fs::read_to_string(&file).unwrap_or_default();
+    if text.lines().any(|l| l.trim() == key) {
+        return Ok(());
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(key);
+    text.push('\n');
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    sys::write_private(&file, text.as_bytes())
+}
+
+/// First-boot setup has been finished (or put off), so it is not shown again.
+pub fn setup_done() -> bool {
+    config_dir().join("setup-done").exists()
+}
+
+pub fn mark_setup_done() {
+    std::fs::create_dir_all(config_dir()).ok();
+    sys::write_atomic(&config_dir().join("setup-done"), b"").ok();
+}
+
 /// Remember the robot address across boots. False if it could not be written.
 pub fn save_robot_address(address: &str) -> bool {
     let path = config_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).ok();
     }
-    std::fs::write(path, address).is_ok()
+    sys::write_atomic(&path, address.as_bytes()).is_ok()
 }
 
 /// Appearance settings live beside the robot address, on the data partition.
@@ -57,18 +119,75 @@ fn settings_path() -> std::path::PathBuf {
 }
 
 pub fn save_settings(settings: &shell::Settings) {
-    let text = format!("light={}\ncalm={}\ntext={}\naccent={}\n", settings.light, settings.calm, settings.text.name(), settings.accent.name());
-    std::fs::write(settings_path(), text).ok();
+    sys::write_atomic(&settings_path(), settings_text(settings).as_bytes()).ok();
+}
+
+/// The settings as the file keeps them: one `name=value` a line.
+fn settings_text(s: &shell::Settings) -> String {
+    let lines = [
+        ("light", s.light.to_string()),
+        ("calm", s.calm.to_string()),
+        ("text", s.text.name().to_owned()),
+        ("accent", s.accent.key()),
+        ("theme", s.theme.name().to_owned()),
+        ("wallpaper", s.wallpaper.name().to_owned()),
+        ("corners", s.corners.name().to_owned()),
+        ("letters", s.letters.name().to_owned()),
+        ("width", s.width.name().to_owned()),
+        ("columns", s.columns.to_string()),
+        ("home", s.home.name().to_owned()),
+        ("open_robot", s.open_robot.to_string()),
+        ("match_report", s.match_report.to_string()),
+        ("glance", s.glance.iter().map(|w| w.name()).collect::<Vec<_>>().join(",")),
+        ("pinned", s.pinned.clone().unwrap_or_default()),
+        // App names cannot hold a line break, and commas are rare: a '|' between them.
+        ("order", s.order.join("|")),
+        ("hidden", s.hidden.join("|")),
+        ("favourites", s.favourites.join("|")),
+        ("clock24", s.clock24.to_string()),
+        ("seconds", s.seconds.to_string()),
+        ("island", s.island.name().to_owned()),
+        ("greeting", s.greeting.to_string()),
+        ("robot_name", s.robot_name.clone().unwrap_or_default()),
+        ("graphics", (if s.gpu { "auto" } else { "processor" }).to_owned()),
+    ];
+    lines.iter().map(|(k, v)| format!("{k}={v}\n")).collect()
 }
 
 fn load_settings(settings: &mut shell::Settings) {
-    let Ok(text) = std::fs::read_to_string(settings_path()) else { return };
+    if let Ok(text) = std::fs::read_to_string(settings_path()) {
+        parse_settings(&text, settings);
+    }
+}
+
+/// Read settings from their file's text; anything not understood is left as it was.
+fn parse_settings(text: &str, settings: &mut shell::Settings) {
     for line in text.lines() {
         match line.split_once('=') {
             Some(("light", v)) => settings.light = v == "true",
             Some(("calm", v)) => settings.calm = v == "true",
             Some(("text", v)) => settings.text = gfx::TextSize::from_name(v).unwrap_or(settings.text),
             Some(("accent", v)) => settings.accent = bezel::Accent::from_name(v).unwrap_or(settings.accent),
+            Some(("home", v)) => settings.home = shell::HomeStyle::from_name(v).unwrap_or(settings.home),
+            Some(("open_robot", v)) => settings.open_robot = v != "false",
+            Some(("match_report", v)) => settings.match_report = v != "false",
+            Some(("glance", v)) => settings.glance = shell::Widget::list_from(v),
+            Some(("pinned", v)) => settings.pinned = Some(v.trim().to_owned()).filter(|k| !k.is_empty()),
+            Some(("theme", v)) => settings.theme = look::Theme::from_name(v).unwrap_or(settings.theme),
+            Some(("wallpaper", v)) => settings.wallpaper = look::Wallpaper::from_name(v).unwrap_or(settings.wallpaper),
+            Some(("corners", v)) => settings.corners = look::Corners::from_name(v).unwrap_or(settings.corners),
+            Some(("letters", v)) => settings.letters = look::Letters::from_name(v).unwrap_or(settings.letters),
+            Some(("width", v)) => settings.width = look::Width::from_name(v).unwrap_or(settings.width),
+            Some(("columns", v)) => settings.columns = v.parse::<usize>().ok().filter(|c| (2..=3).contains(c)).unwrap_or(settings.columns),
+            Some(("order", v)) => settings.order = v.split('|').filter(|n| !n.is_empty()).map(str::to_owned).collect(),
+            Some(("hidden", v)) => settings.hidden = v.split('|').filter(|n| !n.is_empty()).map(str::to_owned).collect(),
+            Some(("favourites", v)) => settings.favourites = v.split('|').filter(|n| !n.is_empty()).map(str::to_owned).collect(),
+            Some(("clock24", v)) => settings.clock24 = v != "false",
+            Some(("seconds", v)) => settings.seconds = v == "true",
+            Some(("island", v)) => settings.island = shell::IslandRest::from_name(v).unwrap_or(settings.island),
+            Some(("greeting", v)) => settings.greeting = v != "false",
+            Some(("robot_name", v)) => settings.robot_name = Some(v.trim().to_owned()).filter(|n| !n.is_empty()),
+            Some(("graphics", v)) => settings.gpu = v != "processor",
             _ => {}
         }
     }
@@ -111,16 +230,26 @@ fn main() {
     let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
 
     let saved = std::fs::read_to_string(config_path()).ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
+    // The demo robot plugged in a while after start, to see what its arrival does.
+    let mut arrive = value("--arrive").and_then(|s| s.parse::<f32>().ok()).map(|s| Instant::now() + Duration::from_secs_f32(s.max(0.0)));
     let robot = match (flag("--demo"), value("--robot").or(saved)) {
+        _ if arrive.is_some() => Robot::none(),
         (true, _) => Robot::demo(),
         (_, Some(input)) if input == "demo" => Robot::demo(),
         (_, Some(input)) => Robot::connect(&screens::resolve_address(&input)),
         _ => Robot::none(),
     };
+    // The scripted tour brings its own files and apps to show.
+    #[cfg(not(target_arch = "aarch64"))]
+    if flag("--shots") {
+        tour_fixtures();
+    }
     let mut shell = Shell::new(robot);
     load_settings(&mut shell.settings);
     shell.settings.light |= flag("--light");
     shell.settings.calm |= flag("--calm");
+    // Everything on the processor, to compare against the GPU.
+    shell.settings.gpu &= !flag("--cpu");
     if let Some(size) = value("--text").and_then(|name| gfx::TextSize::from_name(&name)) {
         shell.settings.text = size;
     }
@@ -133,7 +262,23 @@ fn main() {
     if let Some(dir) = value("--shots") {
         return shots(shell, std::path::Path::new(&dir));
     }
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--looks") {
+        return looks(std::path::Path::new(&dir));
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--motion") {
+        return motion(std::path::Path::new(&dir));
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(path) = value("--start-movie") {
+        return start_movie(shell, std::path::Path::new(&path));
+    }
 
+    if flag("--bench") || flag("--about") {
+        // What draws is part of the answer: let the GPU finish opening.
+        shell.gfx.wait_gpu();
+    }
     if flag("--bench") {
         return bench(shell);
     }
@@ -147,6 +292,7 @@ fn main() {
             ("memory in use", sys::memory()), ("this shell", sys::shell_memory()), ("storage", sys::storage()),
             ("battery", sys::battery()), ("processor", sys::cpu_temperature()), ("ethernet", sys::address("eth0")),
             ("backlight", sys::brightness().map(|b| format!("{b}%"))),
+            ("graphics", Some(gpu::note())),
         ];
         for (name, value) in lines {
             println!("{name:>14}: {}", value.unwrap_or_else(|| "–".into()));
@@ -155,6 +301,13 @@ fn main() {
     }
 
     let mut platform: Box<dyn Platform> = open_platform(flag("--sim"));
+    // The first start sets the handheld up; `--setup` shows that again.
+    if flag("--setup") || !setup_done() {
+        shell.start_setup();
+    }
+    if !flag("--no-intro") {
+        shell.start_intro(if flag("--setup") || !setup_done() { "let's get you set up".to_owned() } else { start_caption(&shell) });
+    }
     let speed = Speed::named(value("--speed").as_deref());
     let mut beat = Beat::new();
     let mut meter = Meter::default();
@@ -178,12 +331,26 @@ fn main() {
         let work = Instant::now();
         let dt = (work - last).as_secs_f32().min(0.25);
         last = work;
+        if arrive.is_some_and(|at| work >= at) {
+            arrive = None;
+            shell.robot = Robot::demo_back_from_a_match();
+        }
         let changed = shell.tick(dt);
         if changed {
             shell.draw();
         }
         let cost = speed.busy(work);
         let part = if changed || platform.present_always() { platform.present(&shell.gfx.canvas) } else { 0.0 };
+        // An external app that draws for itself: once its page has arrived,
+        // the panel is its own until it ends or is left.
+        if let Some(app) = shell.take_launch() {
+            let result = apps::run(&app, &shell.settings, platform.as_mut(), &shell.gfx.canvas);
+            shell.launch_ended(result);
+            beat.rest();
+            last = Instant::now();
+            next_frame = last;
+            continue;
+        }
         if let Some(line) = meter.record(cost, part > 0.0) {
             platform.set_status(&format!("Catalyst Linux · {} · {line}", speed.name));
             if perf {
@@ -282,40 +449,291 @@ fn open_platform(sim: bool) -> Box<dyn Platform> {
     Box::new(platform::sim::Sim::open(gfx::W as usize, gfx::H as usize))
 }
 
-/// A scripted tour: press keys, let motion settle, save each screen.
+/// Files for the Files app and apps for Home to show in the tour.
 #[cfg(not(target_arch = "aarch64"))]
-fn shots(mut shell: Shell, dir: &std::path::Path) {
-    use Key::*;
-    std::fs::create_dir_all(dir).expect("create the screenshot folder");
-    // A few files for the Files app to show.
+fn tour_fixtures() {
     let files = std::env::temp_dir().join("catalyst-tour-files");
     std::fs::remove_dir_all(&files).ok();
     std::fs::create_dir_all(files.join("logs")).ok();
     std::fs::write(files.join("notes.txt"), "pit notes, nov 16\n\nelevator ran hot in q14 (80 c)\n  - check the follower's belt\n  - swap battery 3, it sagged to 6 v\ncan_s0 at 71%: move the intake off it\n").ok();
     std::fs::write(files.join("check.sh"), "#!/bin/sh\nping -c 1 10.58.5.2\n").ok();
     std::env::set_var("CATALYST_FILES", &files);
+    // Three external apps: a script, one that draws for itself, one in the terminal.
+    let apps = std::env::temp_dir().join("catalyst-tour-apps");
+    std::fs::remove_dir_all(&apps).ok();
+    std::fs::create_dir_all(apps.join("clock")).ok();
+    std::fs::create_dir_all(apps.join("processes")).ok();
+    std::fs::write(apps.join("check.sh"), "#!/bin/sh\nping -c 1 10.58.5.2\n").ok();
+    std::fs::write(apps.join("clock/app"), "name = Clock\nicon = schedule\nabout = big digits\nrun = ./clock\nscreen = own\n").ok();
+    std::fs::write(apps.join("processes/app"), "name = Processes\nicon = memory\nabout = what is running\nrun = top\n").ok();
+    std::env::set_var("CATALYST_APPS", &apps);
+    // Setup's page for a computer, at the address a handheld on team 5805's cable would have.
+    std::env::set_var("CATALYST_SETUP_ADDRESS", "10.58.5.77");
+}
+
+/// The line under the name as the handheld starts: whose it is when that is
+/// known (the team, and the robot it last linked to), otherwise what it is.
+fn start_caption(shell: &Shell) -> String {
+    let team = schedule::team_of(&shell.robot.address);
+    match (team, &shell.settings.robot_name) {
+        (Some(team), Some(name)) => format!("team {team} · {name}"),
+        (Some(team), None) => format!("team {team}"),
+        _ => format!("{} · cardputer zero", env!("CARGO_PKG_VERSION")),
+    }
+}
+
+/// The start animation as an animated PNG at the frame beat the handheld
+/// keeps (25 ms), from black through to Home's tiles arriving.
+#[cfg(not(target_arch = "aarch64"))]
+fn start_movie(mut shell: Shell, path: &std::path::Path) {
+    const BEAT: f32 = 0.025;
+    shell.start_intro(start_caption(&shell));
+    let mut frames = Vec::new();
+    for _ in 0..((intro::DONE + 1.3) / BEAT) as usize {
+        shell.tick(BEAT);
+        shell.draw();
+        frames.push(shell.gfx.canvas.px.clone());
+    }
+    platform::sim::save_apng(&frames, gfx::W as usize, gfx::H as usize, path, 2, 25);
+    // And stills: the strike, the ignition, the name arriving, the name set.
+    for (name, at) in [("1-strike", 0.44), ("2-ignite", 0.66), ("3-rising", 1.27), ("4-name", 2.2)] {
+        let i = ((at / BEAT) as usize).min(frames.len() - 1);
+        shell.gfx.canvas.px.copy_from_slice(&frames[i]);
+        platform::sim::save_png(&shell.gfx.canvas, &path.with_file_name(format!("start-{name}.png")), 3);
+    }
+    println!("{} frames written to {}", frames.len(), path.display());
+}
+
+/// The same screens in a range of looks: each theme, the wallpapers, your
+/// own colour, the letter styles, corners and tiles per row.
+#[cfg(not(target_arch = "aarch64"))]
+fn looks(dir: &std::path::Path) {
+    use look::{Corners, Letters, Theme, Wallpaper, Width};
+    use Key::*;
+    std::fs::create_dir_all(dir).expect("create the screenshot folder");
+    // (name, theme, wallpaper, accent, light, letters, width, corners, columns)
+    let looks: [(&str, Theme, Wallpaper, bezel::Accent, bool, Letters, Width, Corners, usize); 8] = [
+        ("1-catalyst", Theme::Catalyst, Wallpaper::Catalyst, bezel::Accent::Rose, false, Letters::Crisp, Width::Normal, Corners::Standard, 3),
+        ("2-catalyst-light", Theme::Catalyst, Wallpaper::Catalyst, bezel::Accent::Rose, true, Letters::Crisp, Width::Normal, Corners::Standard, 3),
+        ("3-bezel", Theme::Bezel, Wallpaper::Glow, bezel::Accent::Orange, false, Letters::Crisp, Width::Normal, Corners::Standard, 3),
+        ("4-aurora-violet", Theme::Catalyst, Wallpaper::Aurora, bezel::Accent::Violet, false, Letters::Soft, Width::Normal, Corners::Standard, 3),
+        ("5-own-teal-deep", Theme::Catalyst, Wallpaper::Deep, bezel::Accent::Hue(36), false, Letters::Crisp, Width::Normal, Corners::Standard, 3),
+        ("6-round-big-tiles", Theme::Catalyst, Wallpaper::Catalyst, bezel::Accent::Hue(6), false, Letters::Round, Width::Wide, Corners::Round, 2),
+        ("7-square-narrow", Theme::Bezel, Wallpaper::Plain, bezel::Accent::Blue, false, Letters::Crisp, Width::Narrow, Corners::Square, 3),
+        ("8-own-green-light", Theme::Bezel, Wallpaper::Aurora, bezel::Accent::Hue(24), true, Letters::Soft, Width::Normal, Corners::Round, 3),
+    ];
+    for (name, theme, wallpaper, accent, light, letters, width, corners, columns) in looks {
+        let mut shell = Shell::new(Robot::demo());
+        let s = &mut shell.settings;
+        (s.theme, s.wallpaper, s.accent, s.light, s.letters, s.width, s.corners, s.columns) = (theme, wallpaper, accent, light, letters, width, corners, columns);
+        shell.apply_settings();
+        let settle = |shell: &mut Shell, n: usize| {
+            for _ in 0..n {
+                if shell.tick(1.0 / 60.0) {
+                    shell.draw();
+                }
+            }
+        };
+        settle(&mut shell, 120);
+        shell.draw();
+        platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}-home.png")), 3);
+        // The Robot page, and Settings › Appearance.
+        shell.key(Enter);
+        settle(&mut shell, 120);
+        shell.draw();
+        platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}-robot.png")), 3);
+        shell.key(Back);
+        settle(&mut shell, 120);
+        for key in [Right, Right, Right, Right, Right, Right, Enter, Down, Enter, Down, Down, Down] {
+            shell.key(key);
+            settle(&mut shell, 60);
+        }
+        shell.draw();
+        platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}-appearance.png")), 3);
+    }
+    println!("{} looks in {}", looks.len(), dir.display());
+}
+
+/// The motion, to be looked at: each piece as a strip of frames 50 ms apart
+/// (and as an animated PNG at the handheld's 25 ms beat), and the Home
+/// settings as stills.
+#[cfg(not(target_arch = "aarch64"))]
+fn motion(dir: &std::path::Path) {
+    use Key::*;
+    const BEAT: f32 = 0.025;
+    const PW: usize = gfx::W as usize;
+    const PH: usize = gfx::H as usize;
+    std::fs::create_dir_all(dir).expect("create the screenshot folder");
+
+    // Frames from now on, one every beat, for `seconds`.
+    fn film(shell: &mut Shell, seconds: f32) -> Vec<Vec<u32>> {
+        (0..(seconds / BEAT).round() as usize)
+            .map(|_| {
+                shell.tick(BEAT);
+                shell.draw();
+                shell.gfx.canvas.px.clone()
+            })
+            .collect()
+    }
+    // Some of those frames side by side, three to a row, and the whole run animated.
+    fn strip(frames: &[Vec<u32>], at: &[usize], dir: &std::path::Path, name: &str) {
+        const GAP: usize = 4;
+        let cols = 3;
+        let rows = at.len().div_ceil(cols);
+        let (sw, sh) = (cols * PW + (cols - 1) * GAP, rows * PH + (rows - 1) * GAP);
+        let mut sheet = bezel::Canvas::new(sw as i32, sh as i32);
+        sheet.px.fill(0x0b0b0e);
+        for (n, &i) in at.iter().enumerate() {
+            let frame = &frames[i.min(frames.len() - 1)];
+            let (ox, oy) = ((n % cols) * (PW + GAP), (n / cols) * (PH + GAP));
+            for y in 0..PH {
+                sheet.px[(oy + y) * sw + ox..][..PW].copy_from_slice(&frame[y * PW..][..PW]);
+            }
+        }
+        platform::sim::save_png(&sheet, &dir.join(format!("{name}-strip.png")), 2);
+        platform::sim::save_apng(frames, PW, PH, &dir.join(format!("{name}.png")), 2, 25);
+    }
+    fn still(shell: &mut Shell, dir: &std::path::Path, name: &str) {
+        film(shell, 1.5);
+        platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}.png")), 3);
+    }
+    fn press(shell: &mut Shell, keys: &[Key]) {
+        for &key in keys {
+            shell.key(key);
+            film(shell, 0.6);
+        }
+    }
+    let fresh = |robot: Robot| {
+        let mut shell = Shell::new(robot);
+        shell.apply_settings();
+        film(&mut shell, 1.5);
+        shell
+    };
+    // 50 ms apart from the key, then where it comes to rest.
+    let beats = [0, 2, 4, 6, 9, 30];
+
+    // Settings growing out of its tile, its rows rising inside the window.
+    let mut shell = fresh(Robot::demo());
+    press(&mut shell, &[Right, Right, Right, Right, Right, Right]);
+    shell.key(Enter);
+    let frames = film(&mut shell, 1.0);
+    strip(&frames, &beats, dir, "1-open-settings");
+    // A page sliding in, its rows rising one after another.
+    press(&mut shell, &[Down, Down, Down]);
+    shell.key(Enter);
+    let frames = film(&mut shell, 1.0);
+    strip(&frames, &beats, dir, "2-page-rises");
+    // Enter on a switch: the row takes the press.
+    press(&mut shell, &[Down, Down, Down, Down, Down, Down, Down]);
+    shell.key(Enter);
+    let frames = film(&mut shell, 0.6);
+    strip(&frames, &[0, 1, 2, 4, 8, 20], dir, "3-press-row");
+    shell.key(Enter);
+    film(&mut shell, 0.6);
+
+    // The focus moving across Home: the tile it leaves settles, the next lifts.
+    let mut shell = fresh(Robot::demo());
+    shell.key(Right);
+    let frames = film(&mut shell, 0.8);
+    strip(&frames, &beats, dir, "4-focus-lift");
+    // Enter on a tile: it presses in as the app grows out of it.
+    shell.key(Enter);
+    let frames = film(&mut shell, 0.8);
+    strip(&frames, &beats, dir, "5-press-tile");
+
+    // A robot back from a match: the Logs tile pulses as the match's log
+    // arrives and its warning comes with it.
+    let mut shell = fresh(Robot::demo_back_from_a_match());
+    let frames = film(&mut shell, 6.0);
+    // A plain stretch of the Logs tile (the third across): when it changes, the pulse has begun.
+    let spot = |f: &Vec<u32>| f[34 * PW + 262];
+    let from = frames.windows(2).position(|w| spot(&w[0]) != spot(&w[1])).unwrap_or(0);
+    let pulse: Vec<Vec<u32>> = frames[from..].iter().take(48).cloned().collect();
+    strip(&pulse, &[0, 2, 4, 8, 14, 40], dir, "6-tile-reacts");
+
+    // Settings › Home, Arrange apps, and Home arranged.
+    let mut shell = fresh(Robot::demo());
+    press(&mut shell, &[Right, Right, Right, Right, Right, Right, Enter, Down, Down, Down, Enter]);
+    still(&mut shell, dir, "7-settings-home");
+    press(&mut shell, &[Down, Down, Down, Down, Down, Down, Down]);
+    still(&mut shell, dir, "8-settings-home-end");
+    press(&mut shell, &[Up, Up, Up, Up, Up, Enter]);
+    // Schedule moved to the front; Tables hidden; Logs a favourite, so first of all.
+    press(&mut shell, &[Down, Down, Down, Left, Left, Left, Down, Down, Down, Down, Enter, Up, Char(' ')]);
+    still(&mut shell, dir, "9-arrange-apps");
+    // Home, arranged so, from its first page of apps.
+    press(&mut shell, &[Back, Back, Back, Left, Left, Left, Left, Left]);
+    still(&mut shell, dir, "10-home-arranged");
+
+    // Settings › Display: brightness, and what draws (here, the processor).
+    let mut shell = fresh(Robot::demo());
+    press(&mut shell, &[Right, Right, Right, Right, Right, Right, Enter, Down, Down, Down, Down, Enter, Down]);
+    still(&mut shell, dir, "14-settings-display");
+
+    // Settings › System update, part-way through installing (a pretend status).
+    let update_dir = config_dir().join("update");
+    std::fs::create_dir_all(&update_dir).ok();
+    std::fs::write(update_dir.join("status.json"), r#"{"state":"installing","version":"0.3.0","progress":0.46,"detail":"","size":6800000,"checked":0,"notes":"faster glass, favourites"}"#).ok();
+    let mut shell = fresh(Robot::demo());
+    press(&mut shell, &[Right, Right, Right, Right, Right, Right, Enter, Down, Down, Down, Down, Down, Down, Down, Down, Enter]);
+    still(&mut shell, dir, "15-system-update");
+    std::fs::write(update_dir.join("status.json"), r#"{"state":"ready","version":"0.3.0","progress":1.0,"detail":"","size":6800000,"checked":0,"notes":"faster glass, favourites"}"#).ok();
+    // The page reads it again every two seconds, of real time.
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    film(&mut shell, 0.5);
+    still(&mut shell, dir, "16-system-update-ready");
+    std::fs::remove_dir_all(&update_dir).ok();
+
+    // The island at rest as a 12-hour clock with seconds.
+    let mut shell = fresh(Robot::demo());
+    (shell.settings.island, shell.settings.clock24, shell.settings.seconds) = (shell::IslandRest::Clock, false, true);
+    shell.apply_settings();
+    still(&mut shell, dir, "11-island-clock");
+
+    // A personal start: the team and its robot under the name, and Home's greeting.
+    let mut shell = Shell::new(Robot::demo());
+    shell.robot.address = "10.58.5.2".into();
+    shell.settings.robot_name = Some("atlas".into());
+    shell.apply_settings();
+    shell.start_intro(start_caption(&shell));
+    film(&mut shell, 2.4);
+    platform::sim::save_png(&shell.gfx.canvas, &dir.join("12-start-personal.png"), 3);
+    film(&mut shell, intro::DONE - 2.4 + 0.9);
+    platform::sim::save_png(&shell.gfx.canvas, &dir.join("13-greeting.png"), 3);
+    println!("motion in {}", dir.display());
+}
+
+/// A scripted tour: press keys, let motion settle, save each screen.
+#[cfg(not(target_arch = "aarch64"))]
+fn shots(mut shell: Shell, dir: &std::path::Path) {
+    use Key::*;
+    std::fs::create_dir_all(dir).expect("create the screenshot folder");
     let tour: &[(&str, &[Key])] = &[
         ("01-home", &[]),
         ("02-robot", &[Enter]),
         ("03-health", &[Back, Right, Enter]),
         ("04-logs", &[Back, Right, Enter]),
         ("04b-match", &[Enter]),
-        ("04c-tables", &[Back, Back, Down, Left, Left, Enter]),
+        // Home's tiles: Robot, Health, Logs / Schedule, Tables, Loop on the
+        // first page; Motors, Console, Terminal / Files, Git, Catalogue on the
+        // second; Settings, then the external apps, on the third.
+        ("04c-tables", &[Back, Back, Down, Left, Enter]),
         ("05-tables-elevator", &[Down, Down, Enter]),
         ("06-loop", &[Back, Back, Right, Enter]),
-        ("07-motors", &[Back, Right, Enter, Down]),
-        ("08-console", &[Back, Right, Up, Enter]),
+        ("06b-schedule", &[Back, Left, Left, Enter]),
+        ("07-motors", &[Back, Right, Right, Right, Up, Enter, Down]),
+        ("08-console", &[Back, Right, Enter]),
         ("08b-terminal", &[Back, Right, Enter, Char('l'), Char('s'), Enter, Char('c'), Char('o'), Char('l'), Char('o'), Char('r'), Char('s'), Enter, Char('u'), Char('n'), Char('a'), Char('m'), Char('e'), Enter]),
-        ("08c-files", &[Ctrl('q'), Right, Enter]),
+        ("08c-files", &[Ctrl('q'), Down, Left, Left, Enter]),
         ("08d-editor", &[Down, Down, Enter, Down, Down, Right, Right, Right, Right]),
-        ("09-settings", &[Ctrl('q'), Back, Down, Enter]),
-        ("09b-appearance", &[Enter]),
-        ("09c-light-blue", &[Enter, Down, Enter]),
-        ("09d-network", &[Back, Down, Down, Enter]),
+        ("09-settings", &[Ctrl('q'), Back, Up, Right, Right, Right, Enter]),
+        ("09b-appearance", &[Down, Enter]),
+        ("09c-light-blue", &[Down, Enter, Down, Enter, Enter]),
+        ("09d-network", &[Back, Down, Down, Down, Down, Enter]),
         ("09e-wifi", &[Enter, Down, Down, Down]),
         ("09f-wifi-password", &[Enter, Char('c'), Char('a'), Char('t'), Char('a'), Char('l'), Char('y'), Char('s'), Char('t'), Char('7')]),
-        ("09g-about", &[Back, Back, Back, Down, Down, Enter]),
-        ("10-home-page-2-light", &[Back, Back]),
+        ("09g-about", &[Back, Back, Back, Down, Down, Down, Enter]),
+        ("10-home-page-3-light", &[Back, Back]),
     ];
     let frame = |shell: &mut Shell| {
         if shell.tick(1.0 / 60.0) {
@@ -361,7 +779,115 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
         frame(&mut shell);
     }
     platform::sim::save_png(&shell.gfx.canvas, &dir.join("12-page-sliding.png"), 3);
-    println!("{} screens in {}, {frames} frames at {:.2} ms each", tour.len() + 1, dir.display(), started.elapsed().as_secs_f64() * 1e3 / frames as f64);
+    // External apps: their tiles on Home, one in the terminal, one that draws for itself.
+    let apps: &[(&str, &[Key])] = &[("13-home-apps", &[Back, Back, Right]), ("14-app-in-terminal", &[Enter]), ("15-app-own-screen", &[Ctrl('q'), Right, Enter])];
+    for (name, keys) in apps {
+        for key in keys.iter() {
+            shell.key(*key);
+            for _ in 0..90 {
+                frame(&mut shell);
+            }
+        }
+        shell.draw();
+        platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}.png")), 3);
+    }
+    // The control centre, caught coming down over Home and then at rest.
+    let settle = |shell: &mut Shell, frames: usize| {
+        for _ in 0..frames {
+            if shell.tick(1.0 / 60.0) {
+                shell.draw();
+            }
+        }
+    };
+    let save = |shell: &mut Shell, name: &str| {
+        shell.draw();
+        platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}.png")), 3);
+    };
+    shell.key(Back);
+    settle(&mut shell, 90);
+    shell.key(Ctrl(' '));
+    settle(&mut shell, 7);
+    save(&mut shell, "16-control-coming-down");
+    settle(&mut shell, 90);
+    shell.key(Down);
+    settle(&mut shell, 90);
+    save(&mut shell, "17-control-centre");
+    shell.key(Back);
+    settle(&mut shell, 90);
+    // The glance page: one step left of the first tile.
+    for _ in 0..20 {
+        if shell.top_title() == "Glance" {
+            break;
+        }
+        shell.key(Left);
+        settle(&mut shell, 90);
+    }
+    save(&mut shell, "18-glance");
+    // The other Home: the carousel, at rest and caught turning.
+    shell.key(Right);
+    shell.settings.home = shell::HomeStyle::Carousel;
+    shell.apply_settings();
+    settle(&mut shell, 90);
+    save(&mut shell, "19-carousel");
+    shell.key(Right);
+    settle(&mut shell, 6);
+    save(&mut shell, "20-carousel-turning");
+    // A robot back from a match plugged in while Home is showing: the Robot
+    // app, caught opening by itself; then, once the match's log is pulled,
+    // that match's summary. Then the switches for both, in Settings › Robot.
+    let mut shell = Shell::new(Robot::none());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    shell.robot = Robot::demo_back_from_a_match();
+    settle(&mut shell, 9);
+    save(&mut shell, "21-robot-arriving");
+    settle(&mut shell, 60 * 5);
+    save(&mut shell, "21b-match-report");
+    for key in [Back, Back, Right, Right, Right, Right, Right, Enter, Enter] {
+        shell.key(key);
+        settle(&mut shell, 90);
+    }
+    save(&mut shell, "22-robot-settings");
+    // First-start setup, page by page.
+    let mut shell = Shell::new(Robot::none());
+    shell.apply_settings();
+    shell.start_setup();
+    let pages: &[(&str, &[Key])] = &[
+        ("23-setup-welcome", &[]),
+        ("24-setup-computer", &[Down, Enter]),
+        ("25-setup-team", &[Back, Enter, Char('5'), Char('8'), Char('0'), Char('5')]),
+        ("26-setup-wifi", &[Enter]),
+        ("27-setup-keys", &[Down, Enter, Down]),
+        ("28-setup-choices", &[Tab, Down]),
+        ("29-setup-look", &[Tab, Right, Right]),
+        ("30-setup-working", &[Down, Down, Down, Down, Enter]),
+    ];
+    for (name, keys) in pages {
+        for key in keys.iter() {
+            shell.key(*key);
+            settle(&mut shell, 4);
+        }
+        settle(&mut shell, if *name == "30-setup-working" { 20 } else { 60 });
+        save(&mut shell, name);
+    }
+    settle(&mut shell, 70);
+    save(&mut shell, "31-setup-all-set");
+    // Search, from Home: Space, then a few letters.
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    for key in [Char(' '), Char('l'), Char('o')] {
+        shell.key(key);
+        settle(&mut shell, 40);
+    }
+    save(&mut shell, "32-search");
+    // Git, with no repositories yet: Terminal's tile, down, then left.
+    for key in [Back, Back, Right, Right, Right, Right, Right, Down, Left, Enter] {
+        shell.key(key);
+        settle(&mut shell, 60);
+    }
+    save(&mut shell, "33-git");
+    println!("{} screens in {}, {frames} frames at {:.2} ms each", tour.len() + apps.len() + 22, dir.display(), started.elapsed().as_secs_f64() * 1e3 / frames as f64);
 }
 
 /// Draw every screen repeatedly without a display, to time the renderer and
@@ -381,6 +907,8 @@ fn bench(mut shell: Shell) {
     }
     let ms = started.elapsed().as_secs_f64() * 1e3 / frames as f64;
     println!("{frames} frames, {ms:.2} ms each ({:.0} fps of headroom)", 1000.0 / ms);
+    let each = |d: Duration| d.as_secs_f64() * 1e3 / frames as f64;
+    println!("  of which the screens {:.2} ms, the glass over them {:.2} ms", each(shell.spent.0), each(shell.spent.1));
     // On a PC, what the simulator's two speeds make of that. Every frame here
     // is a full redraw with a page turn in flight: the worst case.
     if cfg!(not(target_arch = "aarch64")) {
@@ -480,80 +1008,116 @@ impl Meter {
 /// time has passed, exactly as the device's own loop would.
 fn smooth(mut shell: Shell) {
     use Key::*;
-    let steps: [(&str, Key); 5] = [("app opens", Enter), ("app closes", Back), ("app opens", Enter), ("page slides in", Enter), ("page slides out", Back)];
-    let settle = |shell: &mut Shell| {
+    fn settle(shell: &mut Shell) {
         for _ in 0..240 {
             if shell.tick(1.0 / 60.0) {
                 shell.draw();
             }
         }
-    };
-    // Settings: an app with pages inside it.
-    for key in [Right, Right, Right, Down] {
-        shell.key(key);
     }
-    settle(&mut shell);
+    /// Measure one kind of motion: press `key`, follow it frame by frame as
+    /// the handheld's loop would, then `undo` it; several times over. With
+    /// `leave`, the step is left done for the one after it.
+    fn measure(shell: &mut Shell, beat: &mut Beat, speed: &Speed, label: &str, key: Key, undo: Key, leave: bool) {
+        // Several runs, because a 0.5 ms frame on a PC is easily disturbed.
+        let (mut firsts, mut rest, mut counts) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..7 {
+            let mut shown = Vec::new();
+            platform::changed_rows(&mut shown, &shell.gfx.canvas);
+            shell.key(key);
+            let mut dt = 0.0f32;
+            let mut frames = 0usize;
+            loop {
+                let started = Instant::now();
+                let drew = shell.tick(dt);
+                if drew {
+                    shell.draw();
+                }
+                let work = started.elapsed().as_secs_f32() * speed.cpu;
+                let part = platform::changed_rows(&mut shown, &shell.gfx.canvas).map_or(0.0, |(first, end)| (end - first) as f32 / gfx::H);
+                // The beat in force once this frame's needs are known.
+                let beats = if part > 0.0 { beat.frame_took(Duration::from_secs_f32(work + speed.panel.as_secs_f32() * part)) } else { 1 };
+                let interval = beat.interval().as_secs_f32() * beats as f32;
+                if frames == 0 { firsts.push(interval) } else { rest.push(interval) }
+                frames += 1;
+                dt = interval;
+                if !shell.moving() || frames > 400 {
+                    break;
+                }
+            }
+            counts.push(frames);
+            beat.rest();
+            settle(shell);
+            // Undo, so every run starts from the same place.
+            shell.key(undo);
+            settle(shell);
+        }
+        if leave {
+            shell.key(key);
+            settle(shell);
+        }
+        if rest.is_empty() {
+            println!("  {label:<20} nothing moved");
+            return;
+        }
+        let median = |v: &mut Vec<f32>| {
+            v.sort_by(|a, b| a.total_cmp(b));
+            v[v.len() / 2] * 1e3
+        };
+        let worst = rest.iter().cloned().fold(0.0f32, f32::max) * 1e3;
+        let typical = median(&mut rest);
+        // How many frames came exactly a typical frame after the one before.
+        let even = rest.iter().filter(|i| (**i * 1e3 - typical).abs() < 0.5).count() as f32 / rest.len().max(1) as f32;
+        counts.sort();
+        println!("  {label:<20} {:>6} {:>8.0}ms {:>8.0}ms {:>8.0}ms {:>8.0}%", counts[counts.len() / 2], median(&mut firsts), typical, worst, even * 100.0);
+    }
+
+    // Each kind of motion: the keys that get to where it starts, its name,
+    // the key that sets it off, the key that undoes it, and whether to leave
+    // it done. They begin on Home with the Settings tile focused (Settings is
+    // an app with pages inside it) and run in order.
+    let steps: [(&[Key], &str, Key, Key, bool); 10] = [
+        (&[], "app opens", Enter, Back, true),
+        (&[], "app closes", Back, Enter, true),
+        (&[], "app opens", Enter, Back, true),
+        (&[], "page slides in", Enter, Back, true),
+        (&[], "page slides out", Back, Enter, true),
+        (&[], "control comes down", Ctrl(' '), Ctrl(' '), true),
+        (&[], "control goes away", Ctrl(' '), Ctrl(' '), true),
+        // About, ninth in Settings: a list longer than the page.
+        (&[Down, Down, Down, Down, Down, Down, Down, Down, Enter], "list scrolls", PageDown, PageUp, false),
+        // Home again, on the Settings tile: left is the page before.
+        (&[Back, Back], "home page turns", Left, Right, false),
+        // To the first tile of the first page: left again is the glance page.
+        (&[Left, Left, Left, Left, Left, Left], "glance slides in", Left, Right, false),
+    ];
     for name in ["device", "worse"] {
         let speed = Speed::named(Some(name));
         let mut beat = Beat::new();
+        // Home, the Settings tile focused: first on the third page.
+        for key in [Right, Right, Right, Right, Right, Right] {
+            shell.key(key);
+        }
+        settle(&mut shell);
         println!("{}: processor x{}, panel {} ms a full frame", speed.name, speed.cpu, speed.panel.as_millis());
-        println!("  {:<16} {:>6} {:>10} {:>10} {:>10} {:>9}", "", "frames", "first", "typical", "worst", "even");
-        for (label, key) in steps {
-            // Several runs, because a 0.5 ms frame on a PC is easily disturbed.
-            let (mut firsts, mut rest, mut counts) = (Vec::new(), Vec::new(), Vec::new());
-            for _ in 0..7 {
-                let mut shown = Vec::new();
-                platform::changed_rows(&mut shown, &shell.gfx.canvas);
-                shell.key(key);
-                let mut dt = 0.0f32;
-                let mut frames = 0usize;
-                loop {
-                    let started = Instant::now();
-                    let drew = shell.tick(dt);
-                    if drew {
-                        shell.draw();
-                    }
-                    let work = started.elapsed().as_secs_f32() * speed.cpu;
-                    let part = platform::changed_rows(&mut shown, &shell.gfx.canvas).map_or(0.0, |(first, end)| (end - first) as f32 / gfx::H);
-                    // The beat in force once this frame's needs are known.
-                    let beats = if part > 0.0 { beat.frame_took(Duration::from_secs_f32(work + speed.panel.as_secs_f32() * part)) } else { 1 };
-                    let interval = beat.interval().as_secs_f32() * beats as f32;
-                    if frames == 0 { firsts.push(interval) } else { rest.push(interval) }
-                    frames += 1;
-                    dt = interval;
-                    if !shell.moving() || frames > 400 {
-                        break;
-                    }
-                }
-                counts.push(frames);
-                beat.rest();
-                settle(&mut shell);
-                // Undo, so every run starts from the same place.
-                let undo = if matches!(key, Enter) { Back } else { Enter };
-                shell.key(undo);
+        println!("  {:<20} {:>6} {:>10} {:>10} {:>10} {:>9}", "", "frames", "first", "typical", "worst", "even");
+        for (setup, label, key, undo, leave) in steps {
+            for key in setup {
+                shell.key(*key);
                 settle(&mut shell);
             }
-            // Leave the step done, for the next one.
-            shell.key(key);
-            settle(&mut shell);
-            let median = |v: &mut Vec<f32>| {
-                v.sort_by(|a, b| a.total_cmp(b));
-                v[v.len() / 2] * 1e3
-            };
-            let worst = rest.iter().cloned().fold(0.0f32, f32::max) * 1e3;
-            let typical = median(&mut rest);
-            // How many frames came exactly a typical frame after the one before.
-            let even = rest.iter().filter(|i| (**i * 1e3 - typical).abs() < 0.5).count() as f32 / rest.len().max(1) as f32;
-            counts.sort();
-            println!(
-                "  {label:<16} {:>6} {:>8.0}ms {:>8.0}ms {:>8.0}ms {:>8.0}%",
-                counts[counts.len() / 2],
-                median(&mut firsts),
-                typical,
-                worst,
-                even * 100.0
-            );
+            measure(&mut shell, &mut beat, &speed, label, key, undo, leave);
         }
+        // The other Home.
+        shell.settings.home = shell::HomeStyle::Carousel;
+        shell.apply_settings();
+        settle(&mut shell);
+        measure(&mut shell, &mut beat, &speed, "carousel turns", Right, Left, false);
+        // Back to the grid, on the first tile, for the next speed.
+        shell.settings.home = shell::HomeStyle::Grid;
+        shell.apply_settings();
+        settle(&mut shell);
+        assert_eq!(shell.top_title(), "Catalyst", "each speed starts from Home");
     }
 }
 
@@ -563,6 +1127,30 @@ mod tests {
 
     fn ms(v: f32) -> Duration {
         Duration::from_secs_f32(v / 1000.0)
+    }
+
+    #[test]
+    fn every_setting_comes_back_as_it_was_saved() {
+        let mut s = shell::Settings::default();
+        (s.light, s.calm, s.accent, s.columns) = (true, true, bezel::Accent::Hue(43), 2);
+        (s.theme, s.wallpaper, s.corners) = (look::Theme::Bezel, look::Wallpaper::Aurora, look::Corners::Square);
+        (s.letters, s.width) = (look::Letters::Round, look::Width::Wide);
+        s.order = vec!["Schedule".into(), "Logs".into()];
+        s.hidden = vec!["Tables".into(), "Git".into()];
+        s.favourites = vec!["Logs".into()];
+        (s.clock24, s.seconds, s.island, s.greeting) = (false, true, shell::IslandRest::Battery, false);
+        (s.robot_name, s.gpu) = (Some("atlas".into()), false);
+        let saved = settings_text(&s);
+        assert!(saved != settings_text(&shell::Settings::default()), "every one of these differs from the default");
+        let mut back = shell::Settings::default();
+        parse_settings(&saved, &mut back);
+        assert_eq!(settings_text(&back), saved);
+        // A file from an older shell, or a line garbled: the rest still reads.
+        let mut partial = shell::Settings::default();
+        parse_settings("theme=bezel\nnonsense\ncolumns=9\naccent=hue-99\n", &mut partial);
+        assert_eq!(partial.theme, look::Theme::Bezel);
+        assert_eq!(partial.columns, 3, "out of range: kept as it was");
+        assert!(partial.gpu, "not in the file: the default (the gpu when it helps)");
     }
 
     #[test]

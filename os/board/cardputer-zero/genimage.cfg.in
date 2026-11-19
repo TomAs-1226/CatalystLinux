@@ -1,3 +1,12 @@
+# The card, laid out for A/B updates:
+#
+#   1  boot      FAT   the firmware, config.txt, and each system's kernel in
+#                      its own folder (slot-a/, slot-b/)
+#   2  system-a  ext4  one system (read-only when running)
+#   3  system-b  ext4  the other: an update is written here while A runs,
+#                      tried once, and kept only if it comes up
+#   4  data      ext4  everything that must survive: grows to fill the card
+
 image boot.vfat {
 	vfat {
 		files = {
@@ -5,7 +14,7 @@ image boot.vfat {
 		}
 	}
 
-	size = 64M
+	size = 128M
 }
 
 image data.ext4 {
@@ -29,9 +38,15 @@ image sdcard.img {
 		image = "boot.vfat"
 	}
 
-	partition rootfs {
+	partition system-a {
 		partition-type = 0x83
 		image = "rootfs.ext4"
+	}
+
+	# Empty until the first update is written into it.
+	partition system-b {
+		partition-type = 0x83
+		size = 160M
 	}
 
 	partition data {

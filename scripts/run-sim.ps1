@@ -4,6 +4,9 @@
 #   .\scripts\run-sim.ps1 -Speed worse       slower than the handheld: does it still hold up?
 #   .\scripts\run-sim.ps1 -Speed pc          as fast as this PC goes
 #   .\scripts\run-sim.ps1 -Robot 5805        a real robot (team number, IP or host)
+#   .\scripts\run-sim.ps1 -Arrive 5          no robot at first; the demo one, back from a match, after 5 s
+#   .\scripts\run-sim.ps1 -Setup             first-boot setup, as on a new handheld
+#   .\scripts\run-sim.ps1 -NoIntro           straight to Home, without the start animation
 #   .\scripts\run-sim.ps1 -Light -Accent blue -Text large
 #
 # The window title shows, once a second, the frames drawn, what a frame costs
@@ -16,7 +19,12 @@ param(
     [ValidateSet("compact", "standard", "large")][string]$Text,
     [switch]$Light,
     [switch]$Calm,
-    [switch]$Perf
+    [switch]$Perf,
+    # First-boot setup, as on a new handheld; or straight to Home, without the start animation.
+    [switch]$Setup,
+    [switch]$NoIntro,
+    # Start with no robot and plug the demo one in after this many seconds.
+    [double]$Arrive = -1
 )
 
 $env:PATH = "$HOME\.cargo\bin;$env:PATH"
@@ -32,10 +40,13 @@ if ($Text) { $shellArgs += @("--text", $Text) }
 if ($Light) { $shellArgs += "--light" }
 if ($Calm) { $shellArgs += "--calm" }
 if ($Perf) { $shellArgs += "--perf" }
+if ($Arrive -ge 0) { $shellArgs += @("--arrive", "$Arrive") }
+if ($Setup) { $shellArgs += "--setup" }
+if ($NoIntro) { $shellArgs += "--no-intro" }
 
 Push-Location (Join-Path $PSScriptRoot "..\userland")
 try {
-    cargo run --release -p catalyst-shell -- @shellArgs
+    cargo run --profile sim -p catalyst-shell -- @shellArgs
 } finally {
     Pop-Location
 }

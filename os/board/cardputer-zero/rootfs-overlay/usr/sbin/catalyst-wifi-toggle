@@ -5,7 +5,8 @@ case "$1" in
 on)
 	mkdir -p /data/catalyst
 	touch /data/catalyst/wifi-enabled
-	rc-service catalyst-wifi start
+	# restart, not start: the service counts as started even while Wi-Fi is off.
+	rc-service catalyst-wifi restart
 	;;
 off)
 	rm -f /data/catalyst/wifi-enabled

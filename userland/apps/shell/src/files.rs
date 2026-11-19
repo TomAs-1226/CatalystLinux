@@ -20,18 +20,22 @@ const EDITABLE: u64 = 512 * 1024;
 pub struct Entry {
     pub name: String,
     pub dir: bool,
+    /// An ordinary file, which the editor may open. Not a device, a pipe or
+    /// a socket: reading `/dev/zero` would never end.
+    pub file: bool,
     pub bytes: u64,
 }
 
-/// A folder's contents: folders first, then files, each by name.
+/// A folder's contents: folders first, then files, each by name. A link is
+/// shown as what it points at, so a linked folder can be entered.
 pub fn list(dir: &Path) -> Vec<Entry> {
     let mut entries: Vec<Entry> = fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
         .filter_map(|e| {
-            let meta = e.metadata().ok()?;
-            Some(Entry { name: e.file_name().to_string_lossy().into_owned(), dir: meta.is_dir(), bytes: meta.len() })
+            let meta = fs::metadata(e.path()).or_else(|_| e.metadata()).ok()?;
+            Some(Entry { name: e.file_name().to_string_lossy().into_owned(), dir: meta.is_dir(), file: meta.is_file(), bytes: meta.len() })
         })
         .collect();
     entries.sort_by(|a, b| b.dir.cmp(&a.dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
@@ -151,6 +155,7 @@ impl Screen for Files {
             }
             Key::Enter | Key::Right => match focused {
                 Some(entry) if entry.dir => self.enter(self.dir.join(&entry.name), None),
+                Some(entry) if !entry.file => *cx.say = Some("not a file the editor can open".into()),
                 Some(entry) if entry.bytes > EDITABLE => *cx.say = Some(format!("{} is too large to open", size(entry.bytes))),
                 Some(entry) => match Editor::open(&self.dir.join(&entry.name)) {
                     Ok(editor) => return Nav::Push(Box::new(editor)),
@@ -208,7 +213,7 @@ impl Screen for Files {
             g.empty("folder", "nothing in this folder");
         }
         let entries = self.entries.clone();
-        for (i, y) in self.list.layout(entries.len(), top, row_h, 3.0, bottom + 2.0) {
+        for (i, y) in self.list.layout(g, entries.len(), top, row_h, 3.0, bottom + 2.0) {
             let entry = &entries[i];
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let (name, value) = if entry.dir { (format!("{}/", entry.name), "›".to_owned()) } else { (entry.name.clone(), size(entry.bytes)) };
@@ -222,25 +227,39 @@ impl Screen for Files {
 // ---------------------------------------------------------------- editor ---
 
 /// A text file being edited: its lines, and where the cursor is in them.
+/// The file comes back out as it went in, apart from what was changed: its
+/// tabs stay tabs, its line endings stay what they were, and a file that did
+/// not end in a newline does not gain one.
 pub struct Buffer {
     pub lines: Vec<String>,
     /// Line, and column counted in characters.
     pub cursor: (usize, usize),
     pub modified: bool,
+    /// Windows line endings.
+    crlf: bool,
+    /// Whether the last line ends in a newline.
+    final_newline: bool,
+    /// Whether the file indents with tabs, so the Tab key types one.
+    pub tabs: bool,
 }
 
 impl Buffer {
     pub fn from_text(text: &str) -> Self {
-        let mut lines: Vec<String> = text.lines().map(|l| l.replace('\t', "    ")).collect();
+        // `lines` takes "\r\n" as one line end, as it should.
+        let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
         if lines.is_empty() {
             lines.push(String::new());
         }
-        Buffer { lines, cursor: (0, 0), modified: false }
+        let tabs = text.lines().any(|l| l.starts_with('\t'));
+        Buffer { lines, cursor: (0, 0), modified: false, crlf: text.contains("\r\n"), final_newline: text.is_empty() || text.ends_with('\n'), tabs }
     }
 
     pub fn text(&self) -> String {
-        let mut text = self.lines.join("\n");
-        text.push('\n');
+        let eol = if self.crlf { "\r\n" } else { "\n" };
+        let mut text = self.lines.join(eol);
+        if self.final_newline {
+            text.push_str(eol);
+        }
         text
     }
 
@@ -266,7 +285,7 @@ impl Buffer {
         let (line, col) = self.cursor;
         let at = self.byte_at(line, col);
         let rest = self.lines[line].split_off(at);
-        let indent: String = self.lines[line].chars().take_while(|c| *c == ' ').collect();
+        let indent: String = self.lines[line].chars().take_while(|c| *c == ' ' || *c == '\t').collect();
         let indent_len = indent.len().min(col);
         self.lines.insert(line + 1, format!("{}{rest}", &indent[..indent_len]));
         self.cursor = (line + 1, indent_len);
@@ -332,21 +351,33 @@ pub struct Editor {
 
 impl Editor {
     pub fn open(path: &Path) -> Result<Self, String> {
-        let bytes = fs::read(path).map_err(|_| "cannot read that file".to_string())?;
-        let text = String::from_utf8(bytes).map_err(|_| "not a text file".to_string())?;
+        use std::io::Read;
         let title = path.file_name().map_or_else(|| "file".to_owned(), |n| n.to_string_lossy().into_owned());
-        Ok(Editor { path: path.to_owned(), title, buffer: Buffer::from_text(&text), view: (0, 0), leaving: false, rows: 8 })
+        // Through a link to the file itself, so saving changes it and leaves the link.
+        let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+        match fs::metadata(&path) {
+            Ok(meta) if !meta.is_file() => return Err("not a file the editor can open".into()),
+            Ok(meta) if meta.len() > EDITABLE => return Err(format!("{} is too large to open", size(meta.len()))),
+            Ok(_) => {}
+            Err(_) => return Err("cannot read that file".into()),
+        }
+        // Read no more than the editor holds, whatever the file says its size is.
+        let mut bytes = Vec::new();
+        fs::File::open(&path).and_then(|f| f.take(EDITABLE + 1).read_to_end(&mut bytes)).map_err(|_| "cannot read that file".to_string())?;
+        if bytes.len() as u64 > EDITABLE {
+            return Err("too large to open".into());
+        }
+        let text = String::from_utf8(bytes).map_err(|_| "not a text file".to_string())?;
+        Ok(Editor { path, title, buffer: Buffer::from_text(&text), view: (0, 0), leaving: false, rows: 8 })
     }
 
     /// Write the file by way of a temporary one, so a power cut mid-save
-    /// leaves the old contents rather than half of the new.
+    /// leaves the old contents rather than half of the new. The file keeps
+    /// its permissions: a script stays runnable.
     fn save(&mut self) -> bool {
-        let temp = self.path.with_extension("catalyst-saving");
-        let ok = fs::write(&temp, self.buffer.text()).is_ok() && fs::rename(&temp, &self.path).is_ok();
+        let ok = crate::sys::write_atomic(&self.path, self.buffer.text().as_bytes()).is_ok();
         if ok {
             self.buffer.modified = false;
-        } else {
-            fs::remove_file(&temp).ok();
         }
         ok
     }
@@ -376,12 +407,14 @@ impl Screen for Editor {
                 self.leaving = true;
                 *cx.say = Some("unsaved · ctrl-q again discards".into());
             }
+            Key::Ctrl('s') if !b.modified => *cx.say = Some("no changes to save".into()),
             Key::Ctrl('s') => *cx.say = Some(if self.save() { "saved".into() } else { "could not save".into() }),
             Key::Ctrl('k') => b.delete_line(),
             Key::Ctrl('a') => b.cursor.1 = 0,
             Key::Ctrl('e') => b.cursor.1 = b.line_len(b.cursor.0),
             Key::Char(c) if !c.is_control() => b.insert(c),
             Key::Char(_) => {}
+            Key::Tab if b.tabs => b.insert('\t'),
             Key::Tab => (0..4).for_each(|_| b.insert(' ')),
             Key::Enter => b.new_line(),
             Key::Backspace => b.delete_back(),
@@ -392,7 +425,8 @@ impl Screen for Editor {
             Key::PageUp => b.step(-(self.rows as isize - 1), 0),
             Key::PageDown => b.step(self.rows as isize - 1, 0),
             // Esc does nothing here, so a slip does not close an unsaved file.
-            Key::Back | Key::Ctrl(_) => {}
+            // Neither does holding it: the way out is Ctrl-Q, which asks first.
+            Key::Back | Key::Leave | Key::Ctrl(_) => {}
         }
         Nav::Stay
     }
@@ -420,10 +454,12 @@ impl Screen for Editor {
                 // The cursor: a block in the signal colour, behind its character.
                 g.surface(Rect::new(x0 + (col - left) as f32 * cell_w, cy - cell_h * 0.5, cell_w + 0.5, cell_h), 2.0, t.signal);
             }
-            let shown: String = text.chars().skip(left).take(cols).collect();
+            // A tab takes one cell, shown as an arrow, so it can be seen and
+            // the cursor counts it as the one character it is.
+            let shown: String = text.chars().skip(left).take(cols).map(|c| if c == '\t' { '→' } else { c }).collect();
             g.text_at(x0, cy, Align::Left, &shown, style, t.ink);
             if first + row == line {
-                if let Some(under) = text.chars().nth(col) {
+                if let Some(under) = text.chars().nth(col).map(|c| if c == '\t' { '→' } else { c }) {
                     let mut utf8 = [0u8; 4];
                     g.text_at(x0 + (col - left) as f32 * cell_w, cy, Align::Left, under.encode_utf8(&mut utf8), style, t.on_signal);
                 }
@@ -482,6 +518,50 @@ mod tests {
         b.delete_back();
         b.delete_back();
         assert_eq!(b.lines[0], "50 C");
+    }
+
+    #[test]
+    fn a_file_comes_back_out_as_it_went_in() {
+        // Tabs, Windows line endings, no newline at the end: all kept.
+        for text in ["all:\n\tcc -o app app.c\n", "one\r\ntwo\r\n", "no newline at the end", "", "a\n\n"] {
+            let b = Buffer::from_text(text);
+            assert_eq!(b.text(), if text.is_empty() { "\n" } else { text }, "{text:?}");
+        }
+        // In a file indented with tabs, Tab types one; Enter keeps the tab indent.
+        let mut b = Buffer::from_text("all:\n\tcc\n");
+        assert!(b.tabs);
+        b.step(1, 0);
+        b.cursor.1 = 3;
+        b.new_line();
+        assert_eq!(b.lines[2], "\t");
+        // Windows endings stay Windows endings after an edit.
+        let mut b = Buffer::from_text("one\r\ntwo\r\n");
+        b.insert('!');
+        assert_eq!(b.text(), "!one\r\ntwo\r\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_keeps_a_script_runnable_and_a_link_a_link() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let dir = std::env::temp_dir().join(format!("catalyst-save-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("check.sh");
+        fs::write(&script, "#!/bin/sh\necho hi\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(&script, dir.join("link.sh")).unwrap();
+        let mut editor = Editor::open(&dir.join("link.sh")).unwrap();
+        editor.buffer.insert('#');
+        assert!(editor.save());
+        assert_eq!(fs::metadata(&script).unwrap().permissions().mode() & 0o777, 0o755);
+        assert!(fs::symlink_metadata(dir.join("link.sh")).unwrap().file_type().is_symlink());
+        assert!(fs::read_to_string(&script).unwrap().starts_with("##!/bin/sh"));
+        // A device is listed but not opened: reading it would never end.
+        let entries = list(Path::new("/dev"));
+        let zero = entries.iter().find(|e| e.name == "zero").expect("/dev/zero");
+        assert!(!zero.file && !zero.dir);
+        assert!(Editor::open(Path::new("/dev/zero")).is_err());
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

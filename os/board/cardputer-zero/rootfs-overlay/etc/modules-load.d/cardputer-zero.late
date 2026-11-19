@@ -1,0 +1,4 @@
+# Loaded by catalyst-late, once the shell is on screen.
+gpio-forwarder
+powerfail_suo
+bq27xxx_battery_i2c

@@ -2,6 +2,10 @@
 # Build the Catalyst Linux SD card image. Run inside WSL after wsl-setup.sh
 # and build-shell.sh. The first build takes around an hour; the image lands
 # in ~/catalyst-linux-build/output/images/sdcard.img.
+#
+# On a fresh build machine the shell links with Buildroot's own cross
+# compiler, so that comes first: `build-image.sh toolchain`, then
+# build-shell.sh, then this with no arguments.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"

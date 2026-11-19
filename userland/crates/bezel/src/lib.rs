@@ -12,7 +12,9 @@
 pub mod canvas;
 pub mod color;
 pub mod glass;
+pub mod hues;
 pub mod icons;
+pub mod simd;
 pub mod text;
 
 pub use canvas::{Canvas, Rect};

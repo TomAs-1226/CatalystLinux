@@ -67,6 +67,7 @@ pub fn blend(dst: u32, c: Color, a: f32) -> u32 {
     r << 16 | g << 8 | b
 }
 
+#[derive(Clone)]
 pub struct Canvas {
     pub w: i32,
     pub h: i32,
@@ -129,18 +130,56 @@ impl Canvas {
     }
 
     /// A Material surface: a filled rounded rectangle.
+    ///
+    /// Every screen is made of these, so the inside is not worked out a pixel
+    /// at a time: each row's solid run is filled in one go, and only the
+    /// pixels near an edge or in a corner go through the distance field.
     pub fn rrect(&mut self, r: Rect, radius: f32, color: Color, alpha: f32) {
+        if alpha <= 0.0 {
+            return;
+        }
         let rad = radius.min(r.w * 0.5).min(r.h * 0.5);
-        let (ix0, ix1) = (r.x + rad + 1.0, r.right() - rad - 1.0);
-        let (iy0, iy1) = (r.y + 1.0, r.bottom() - 1.0);
-        self.shade(r.inset(-1.0), color, alpha, |x, y| {
-            // The body between the corner columns needs no distance field.
-            if x > ix0 && x < ix1 && y > iy0 && y < iy1 {
-                1.0
+        let bbox = r.inset(-1.0);
+        let x0 = (bbox.x.floor() as i32).max(self.clip.0);
+        let y0 = (bbox.y.floor() as i32).max(self.clip.1);
+        let x1 = (bbox.right().ceil() as i32).min(self.clip.2);
+        let y1 = (bbox.bottom().ceil() as i32).min(self.clip.3);
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        // The pixels whose centres lie strictly between `lo` and `hi`.
+        let run = |lo: f32, hi: f32| (((lo - 0.5).floor() as i32 + 1).clamp(x0, x1), ((hi - 0.5).ceil() as i32).clamp(x0, x1));
+        // Between the corners a row is solid from edge to edge; through the
+        // corners, only between the corner columns; the edge rows, nowhere.
+        let wide = run(r.x + 1.0, r.right() - 1.0);
+        let narrow = run(r.x + rad + 1.0, r.right() - rad - 1.0);
+        let solid = (alpha * 256.0) as u32 >= 256;
+        let packed = color.to_u32();
+        for y in y0..y1 {
+            let row = (y * self.w) as usize;
+            let fy = y as f32 + 0.5;
+            let (from, to) = if fy > r.y + rad + 1.0 && fy < r.bottom() - rad - 1.0 {
+                wide
+            } else if fy > r.y + 1.0 && fy < r.bottom() - 1.0 {
+                narrow
             } else {
-                coverage(sd_rrect(x, y, &r, radius))
+                (x0, x0)
+            };
+            let to = to.max(from);
+            for x in (x0..from).chain(to..x1) {
+                let a = coverage(sd_rrect(x as f32 + 0.5, fy, &r, radius)) * alpha;
+                if a > 0.004 {
+                    let p = &mut self.px[row + x as usize];
+                    *p = blend(*p, color, a);
+                }
             }
-        });
+            let span = &mut self.px[row + from as usize..row + to as usize];
+            if solid {
+                span.fill(packed);
+            } else {
+                span.iter_mut().for_each(|p| *p = blend(*p, color, alpha));
+            }
+        }
     }
 
     /// A fill that takes its track's outer corners: `r` clipped to the
@@ -153,10 +192,37 @@ impl Canvas {
 
     /// A ring of `width` just inside the edge of a rounded rectangle.
     pub fn stroke_rrect(&mut self, r: Rect, radius: f32, width: f32, color: Color, alpha: f32) {
+        if alpha <= 0.0 {
+            return;
+        }
         let half = width * 0.5;
-        self.shade(r.inset(-1.0), color, alpha, |x, y| {
-            coverage((sd_rrect(x, y, &r, radius) + half).abs() - half)
-        });
+        let rad = radius.min(r.w * 0.5).min(r.h * 0.5);
+        let bbox = r.inset(-1.0);
+        let x0 = (bbox.x.floor() as i32).max(self.clip.0);
+        let y0 = (bbox.y.floor() as i32).max(self.clip.1);
+        let x1 = (bbox.right().ceil() as i32).min(self.clip.2);
+        let y1 = (bbox.bottom().ceil() as i32).min(self.clip.3);
+        // Wholly outside what may be drawn on: nothing to do.
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        // A ring is all edge: between the corners, only the few pixels at
+        // each side of a row can be on it, so the middle is not visited.
+        let reach = width + 2.0;
+        let (left_end, right_start) = (((r.x + reach).ceil() as i32).clamp(x0, x1), ((r.right() - reach).floor() as i32).clamp(x0, x1));
+        for y in y0..y1 {
+            let row = (y * self.w) as usize;
+            let fy = y as f32 + 0.5;
+            let sides_only = fy > r.y + rad + reach && fy < r.bottom() - rad - reach && right_start > left_end;
+            let (skip_from, skip_to) = if sides_only { (left_end, right_start) } else { (x1, x1) };
+            for x in (x0..skip_from).chain(skip_to..x1) {
+                let a = coverage((sd_rrect(x as f32 + 0.5, fy, &r, radius) + half).abs() - half) * alpha;
+                if a > 0.004 {
+                    let p = &mut self.px[row + x as usize];
+                    *p = blend(*p, color, a);
+                }
+            }
+        }
     }
 
     pub fn circle(&mut self, cx: f32, cy: f32, radius: f32, color: Color, alpha: f32) {
@@ -222,6 +288,41 @@ impl Canvas {
         });
     }
 
+    /// A filled polygon, anti-aliased: vector artwork such as a logo's mark.
+    /// Each pixel's coverage comes from its distance to the nearest edge,
+    /// signed by whether it is inside (even–odd), so the edge is smooth at
+    /// any size and any position, including between pixels.
+    pub fn polygon(&mut self, pts: &[(f32, f32)], color: Color, alpha: f32) {
+        if pts.len() < 3 {
+            return;
+        }
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for p in pts {
+            x0 = x0.min(p.0);
+            y0 = y0.min(p.1);
+            x1 = x1.max(p.0);
+            y1 = y1.max(p.1);
+        }
+        let bbox = Rect::new(x0 - 1.0, y0 - 1.0, x1 - x0 + 2.0, y1 - y0 + 2.0);
+        let n = pts.len();
+        self.shade(bbox, color, alpha, |x, y| {
+            let mut nearest = f32::MAX;
+            let mut inside = false;
+            for i in 0..n {
+                let (a, b) = (pts[i], pts[(i + 1) % n]);
+                if (a.1 > y) != (b.1 > y) && x < a.0 + (y - a.1) * (b.0 - a.0) / (b.1 - a.1) {
+                    inside = !inside;
+                }
+                let (bx, by) = (b.0 - a.0, b.1 - a.1);
+                let (px, py) = (x - a.0, y - a.1);
+                let t = ((px * bx + py * by) / (bx * bx + by * by).max(1e-6)).clamp(0.0, 1.0);
+                nearest = nearest.min((px - bx * t).powi(2) + (py - by * t).powi(2));
+            }
+            let d = nearest.sqrt();
+            coverage(if inside { -d } else { d })
+        });
+    }
+
     /// A soft radial glow, for the ground behind pages.
     pub fn glow(&mut self, cx: f32, cy: f32, radius: f32, color: Color, alpha: f32) {
         let inv = 1.0 / radius;
@@ -237,23 +338,107 @@ impl Canvas {
         let y0 = y.max(self.clip.1);
         let x1 = (x + w).min(self.clip.2);
         let y1 = (y + h).min(self.clip.3);
+        // Text and icons are most of what is drawn, so this stays in whole
+        // numbers: coverage 0..255 times alpha, as 256ths.
+        let scale = (alpha.clamp(0.0, 1.0) * (256.0 / 255.0) * 65536.0) as u32;
+        let (cr, cg, cb) = (color.0 as u32, color.1 as u32, color.2 as u32);
+        let packed = color.to_u32();
         for yy in y0..y1 {
             let src = ((yy - y) * w) as usize;
             let dst = (yy * self.w) as usize;
             for xx in x0..x1 {
                 let m = data[src + (xx - x) as usize];
-                if m != 0 {
-                    let p = &mut self.px[dst + xx as usize];
-                    *p = blend(*p, color, m as f32 * (alpha / 255.0));
+                if m == 0 {
+                    continue;
                 }
+                let a = (m as u32 * scale) >> 16;
+                let p = &mut self.px[dst + xx as usize];
+                if a >= 256 {
+                    *p = packed;
+                    continue;
+                }
+                let inv = 256 - a;
+                let d = *p;
+                *p = ((((d >> 16) & 0xff) * inv + cr * a) >> 8) << 16 | ((((d >> 8) & 0xff) * inv + cg * a) >> 8) << 8 | (((d & 0xff) * inv + cb * a) >> 8);
             }
         }
     }
 
-    /// Pack the frame as RGB565 for the panel.
+    /// Pack the frame as RGB565 for the panel, without dithering.
     pub fn to_rgb565(&self, out: &mut [u16]) {
         for (o, p) in out.iter_mut().zip(&self.px) {
             *o = (((p >> 19) & 0x1f) << 11 | ((p >> 10) & 0x3f) << 5 | ((p >> 3) & 0x1f)) as u16;
         }
+    }
+}
+
+/// A 4 × 4 ordered-dither matrix, 0 to 15.
+pub(crate) const BAYER: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+
+/// A pixel as RGB565 for a 16-bit panel, dithered by its place on the panel.
+///
+/// Truncating 8 bits to 5 turns a dark gradient (the ground, a glow, frosted
+/// glass) into a few visible steps. Adding a threshold that depends only on
+/// the pixel's position spreads each step into a fine, fixed pattern the eye
+/// averages back into the gradient, and a picture that does not change does
+/// not shimmer.
+#[inline]
+pub fn rgb565_dithered(p: u32, x: usize, y: usize) -> u16 {
+    let d = BAYER[y & 3][x & 3] as u32;
+    // Steps of 8 for red and blue, 4 for green: thresholds across each step.
+    let (d5, d6) = (d / 2, d / 4);
+    let r = (((p >> 16) & 0xff) + d5).min(255);
+    let g = (((p >> 8) & 0xff) + d6).min(255);
+    let b = ((p & 0xff) + d5).min(255);
+    ((r >> 3) << 11 | (g >> 2) << 5 | (b >> 3)) as u16
+}
+
+/// What the panel shows for an RGB565 value, back in 8 bits a channel.
+#[inline]
+pub fn rgb565_to_rgb(v: u16) -> u32 {
+    let (r, g, b) = ((v >> 11) as u32 & 0x1f, (v >> 5) as u32 & 0x3f, v as u32 & 0x1f);
+    (r << 3 | r >> 2) << 16 | (g << 2 | g >> 4) << 8 | (b << 3 | b >> 2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_dark_gradient_keeps_its_average_on_a_16_bit_panel() {
+        // A 4 × 4 patch of one dark grey between two of the panel's steps:
+        // truncated it falls to the step below; dithered, it averages back.
+        let grey = 0x13_13_13u32;
+        let mean = |dither: bool| {
+            let mut sum = 0u32;
+            for y in 0..4 {
+                for x in 0..4 {
+                    let v = if dither { rgb565_dithered(grey, x, y) } else { ((grey >> 19) << 11 | (grey >> 3 & 0x1f)) as u16 };
+                    sum += (rgb565_to_rgb(v) >> 16) & 0xff;
+                }
+            }
+            sum as f32 / 16.0
+        };
+        assert!((mean(true) - 19.0).abs() < 2.0, "dithered {}", mean(true));
+        assert!((mean(false) - 19.0).abs() > 2.0, "truncated {}", mean(false));
+        // White stays white, black stays black.
+        assert_eq!(rgb565_dithered(0xffffff, 3, 3), 0xffff);
+        assert_eq!(rgb565_dithered(0, 3, 3), 0);
+    }
+
+    #[test]
+    fn shapes_wholly_off_the_panel_draw_nothing() {
+        let mut canvas = Canvas::new(320, 170);
+        canvas.clear(Color::hex(0x101418));
+        let before = canvas.px.clone();
+        // Past each edge, as a tile is while its page slides away.
+        for r in [Rect::new(330.0, 40.0, 90.0, 60.0), Rect::new(-120.0, 40.0, 90.0, 60.0), Rect::new(40.0, 200.0, 90.0, 60.0), Rect::new(40.0, -90.0, 90.0, 60.0)] {
+            canvas.rrect(r, 12.0, Color::hex(0xff5a1f), 1.0);
+            canvas.stroke_rrect(r, 12.0, 2.0, Color::hex(0xff5a1f), 1.0);
+        }
+        assert!(canvas.px == before);
+        // Half on: the part on the panel is drawn.
+        canvas.stroke_rrect(Rect::new(290.0, 40.0, 90.0, 60.0), 12.0, 2.0, Color::hex(0xff5a1f), 1.0);
+        assert!(canvas.px != before);
     }
 }

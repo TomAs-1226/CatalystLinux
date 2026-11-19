@@ -111,7 +111,15 @@ pub struct Text {
     scale: ScaleContext,
     glyphs: HashMap<GlyphKey, Option<Glyph>>,
     runs: HashMap<u64, Rc<Run>>,
+    /// The letter style chosen for the sans: how round its corners are at
+    /// least (the ROND axis, 0 to 100), and how much wider or narrower than
+    /// each role's own width (the wdth axis). Applied wherever text is
+    /// measured or drawn, so what is measured is what is drawn.
+    letters: (f32, f32),
 }
+
+/// The width axis as far as the built-in subset of Google Sans Flex carries it.
+const WDTH: (f32, f32) = (85.0, 125.0);
 
 impl Default for Text {
     fn default() -> Self {
@@ -128,6 +136,21 @@ impl Text {
             scale: ScaleContext::new(),
             glyphs: HashMap::new(),
             runs: HashMap::new(),
+            letters: (0.0, 1.0),
+        }
+    }
+
+    /// Set the sans's letter style: `round` (0 crisp to 100 fully rounded)
+    /// and `width` (1 is each role's own; 0.9 narrower, 1.1 wider).
+    pub fn set_letters(&mut self, round: f32, width: f32) {
+        self.letters = (round.clamp(0.0, 100.0), width.clamp(0.8, 1.2));
+    }
+
+    /// A style as the letter style makes it.
+    fn adjusted(&self, style: &TextStyle) -> TextStyle {
+        match style.face {
+            Face::Sans => TextStyle { rond: style.rond.max(self.letters.0), wdth: (style.wdth * self.letters.1).clamp(WDTH.0, WDTH.1), ..*style },
+            Face::Code => *style,
         }
     }
 
@@ -186,7 +209,8 @@ impl Text {
     }
 
     pub fn measure(&mut self, text: &str, style: &TextStyle) -> f32 {
-        self.run(text, style).width
+        let style = self.adjusted(style);
+        self.run(text, &style).width
     }
 
     /// Height of capitals, for centring a line on something.
@@ -197,6 +221,7 @@ impl Text {
 
     /// Draw one line with its baseline at `baseline`. Returns its width.
     pub fn draw(&mut self, canvas: &mut Canvas, x: f32, baseline: f32, text: &str, style: &TextStyle, color: Color, alpha: f32) -> f32 {
+        let style = &self.adjusted(style);
         let run = self.run(text, style);
         if alpha <= 0.0 {
             return run.width;

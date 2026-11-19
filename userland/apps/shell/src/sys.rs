@@ -4,6 +4,53 @@
 
 use std::fs;
 
+/// Replace a file's contents so that a power cut at any moment leaves either
+/// the old contents or the new, never an empty or half-written file: write a
+/// temporary file beside it, put it on the card, then rename it over. A file
+/// that was there keeps its permissions.
+pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_replacing(path, bytes, false)
+}
+
+/// As `write_atomic`, for secrets (keys, passwords): readable by root alone
+/// from the moment the file exists, not made so afterwards.
+pub fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_replacing(path, bytes, true)
+}
+
+fn write_replacing(path: &std::path::Path, bytes: &[u8], private: bool) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut name = path.file_name().unwrap_or_default().to_owned();
+    name.push(".catalyst-saving");
+    let temp = path.with_file_name(name);
+    let result = (|| {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp)?;
+        file.write_all(bytes)?;
+        if let (false, Ok(meta)) = (private, fs::metadata(path)) {
+            file.set_permissions(meta.permissions())?;
+        }
+        file.sync_all()?;
+        fs::rename(&temp, path)?;
+        // The rename itself, on the card.
+        #[cfg(unix)]
+        if let Some(dir) = path.parent().and_then(|d| fs::File::open(if d.as_os_str().is_empty() { std::path::Path::new(".") } else { d }).ok()) {
+            dir.sync_all().ok();
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        fs::remove_file(&temp).ok();
+    }
+    result
+}
+
 fn read(path: &str) -> Option<String> {
     fs::read_to_string(path).ok().map(|s| s.trim_matches(|c: char| c.is_whitespace() || c == '\0').to_owned())
 }
@@ -82,13 +129,40 @@ pub fn storage() -> Option<String> {
 /// or nothing if the interface does not exist.
 pub fn address(interface: &str) -> Option<String> {
     let state = read(&format!("/sys/class/net/{interface}/operstate"))?;
-    let out = std::process::Command::new("ip").args(["-4", "-o", "addr", "show", "dev", interface]).output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    match text.split_whitespace().skip_while(|w| *w != "inet").nth(1) {
-        Some(cidr) => Some(cidr.split('/').next().unwrap_or(cidr).to_owned()),
+    match ipv4(interface) {
+        Some(address) => Some(address),
         None if state == "down" => Some("not connected".into()),
         None => Some("no address".into()),
     }
+}
+
+/// An interface's IPv4 address, asked of the kernel directly: this is read
+/// every few seconds while a page shows it, so no program is started for it.
+#[cfg(target_os = "linux")]
+fn ipv4(interface: &str) -> Option<String> {
+    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut list) } != 0 {
+        return None;
+    }
+    let mut found = None;
+    let mut at = list;
+    while !at.is_null() && found.is_none() {
+        // Safe: the list is the kernel's, valid until freed below.
+        let entry = unsafe { &*at };
+        let name = unsafe { std::ffi::CStr::from_ptr(entry.ifa_name) };
+        if !entry.ifa_addr.is_null() && name.to_bytes() == interface.as_bytes() && unsafe { (*entry.ifa_addr).sa_family } as i32 == libc::AF_INET {
+            let v4 = unsafe { &*(entry.ifa_addr as *const libc::sockaddr_in) };
+            found = Some(std::net::Ipv4Addr::from(u32::from_be(v4.sin_addr.s_addr)).to_string());
+        }
+        at = entry.ifa_next;
+    }
+    unsafe { libc::freeifaddrs(list) };
+    found
+}
+
+#[cfg(not(target_os = "linux"))]
+fn ipv4(_interface: &str) -> Option<String> {
+    None
 }
 
 fn backlight() -> Option<std::path::PathBuf> {
@@ -111,9 +185,9 @@ pub fn set_brightness(percent: u32) -> bool {
     fs::write(dir.join("brightness"), value.to_string()).is_ok()
 }
 
-/// The time of day, as the status bar shows it.
-pub fn clock() -> String {
-    chrono::Local::now().format("%H:%M").to_string()
+/// The time of day in hours and minutes, on the 24-hour clock or the 12-hour.
+pub fn clock(h24: bool) -> String {
+    chrono::Local::now().format(if h24 { "%H:%M" } else { "%-I:%M" }).to_string()
 }
 
 /// Battery charge alone, 0–100.

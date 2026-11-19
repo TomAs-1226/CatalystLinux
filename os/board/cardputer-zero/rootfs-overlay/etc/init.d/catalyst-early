@@ -1,0 +1,36 @@
+#!/sbin/openrc-run
+# The first thing after the kernel: just enough for the screen to come on.
+# Drivers for the panel, keys and clock, then storage. Everything else waits for
+# catalyst-late, which runs once the shell is already drawing.
+
+description="Screen, keys and storage"
+
+depend() {
+	need sysfs devfs
+}
+
+start() {
+	ebegin "Bringing up the screen, keys and storage"
+	# In the order listed: the I/O expander has to be there before the panel.
+	# shellcheck disable=SC2046
+	modprobe -a $(grep -v '^#' /etc/modules-load.d/cardputer-zero.conf) 2>/dev/null
+	# The time, from the clock chip, before anything shows or records it.
+	[ -e /dev/rtc0 ] && hwclock -s -u 2>/dev/null
+
+	mount /tmp
+	# /data is everything that must survive a restart. A power cut can leave
+	# it needing repair: mend it once and try again rather than run without.
+	if ! mount /data 2>/dev/null; then
+		ewarn "/data would not mount: checking it"
+		# The safe repairs first; if those are not enough, every repair
+		# e2fsck can make (what it cannot save goes to lost+found).
+		e2fsck -p /dev/mmcblk0p4 >/dev/null 2>&1
+		if ! mount /data 2>/dev/null; then
+			e2fsck -fy /dev/mmcblk0p4 >/dev/null 2>&1
+			mount /data || ewarn "running without /data: nothing will be kept"
+		fi
+	fi
+	# Once: grow /data over the whole card (restarts the machine the first time).
+	/usr/sbin/catalyst-grow-data
+	eend 0
+}

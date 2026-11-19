@@ -26,18 +26,27 @@ pub struct Robot {
     pub loop_history: VecDeque<f32>,
     /// Match logs pulled from this robot.
     pub logs: Logs,
+    /// The team's matches at its event.
+    pub schedule: crate::schedule::Schedule,
     last_generation: u64,
 }
 
 impl Robot {
     pub fn none() -> Self {
-        Robot { source: Source::None, address: String::new(), loop_history: VecDeque::new(), logs: Logs::none(), last_generation: u64::MAX }
+        Robot {
+            source: Source::None,
+            address: String::new(),
+            loop_history: VecDeque::new(),
+            logs: Logs::none(),
+            schedule: crate::schedule::Schedule::none(),
+            last_generation: u64::MAX,
+        }
     }
 
     pub fn connect(address: &str) -> Self {
         let client = Client::connect(address, "catalyst-linux", &[ROOT]);
         let host = address.split(':').next().unwrap_or_default();
-        Robot { source: Source::Live(client), address: address.to_owned(), logs: Logs::for_robot(host), ..Self::none() }
+        Robot { source: Source::Live(client), address: address.to_owned(), logs: Logs::for_robot(host), schedule: crate::schedule::Schedule::for_robot(host), ..Self::none() }
     }
 
     pub fn demo() -> Self {
@@ -45,9 +54,18 @@ impl Robot {
             source: Source::Demo { elapsed: 0.0, table: BTreeMap::new(), tick: 0 },
             address: "demo".into(),
             logs: Logs::demo(),
+            schedule: crate::schedule::Schedule::demo(),
             ..Self::none()
         };
         robot.refresh(0.0);
+        robot
+    }
+
+    /// The demo robot just back from a match: its newest log arrives a few
+    /// seconds after it links, as a real one's would once pulled.
+    pub fn demo_back_from_a_match() -> Self {
+        let mut robot = Robot::demo();
+        robot.logs = Logs::demo_arriving(4.0);
         robot
     }
 
@@ -87,6 +105,7 @@ impl Robot {
             Source::Live(c) => c.generation(),
             Source::Demo { elapsed, table, tick } => {
                 *elapsed += dt as f64;
+                self.logs.advance(dt);
                 let now = (*elapsed * 4.0) as u64; // 4 Hz
                 if now != *tick || table.is_empty() {
                     *tick = now;
@@ -99,7 +118,7 @@ impl Robot {
         // Logs are pulled only while the robot is reachable and not running an
         // opmode: a match is no time to be reading its disk.
         self.logs.set_allowed(self.linked() && self.bool("OpMode/Running") != Some(true));
-        let generation = generation.wrapping_add(self.logs.generation().wrapping_mul(0x9E37_79B9));
+        let generation = generation.wrapping_add(self.logs.generation().wrapping_mul(0x9E37_79B9)).wrapping_add(self.schedule.generation().wrapping_mul(0x85EB_CA6B));
         if generation == self.last_generation {
             return false;
         }
@@ -193,6 +212,7 @@ fn demo_table(t: f64) -> BTreeMap<String, Value> {
     let hot = 68.0 + 4.5 * wave(40.0, 0.0);
 
     put("Robot/Identity/Name", s("Atlas"));
+    put("Robot/Software/RobotCodeVersion", s("4f2c9e1a7b"));
     put("Robot/Identity/TeamNumber", Value::Int(5805));
     put("Robot/Software/CatalystVersion", s("2.0.0"));
     put("Robot/Software/WPILibVersion", s("2027.0.0-alpha-7"));

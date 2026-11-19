@@ -21,8 +21,17 @@ use crate::wpilog::{self, Level, Summary};
 pub const KEEP_DAYS: u64 = 30;
 /// Before this (2026-01-01) the clock has not been set, and ages mean nothing.
 const CLOCK_TRUSTED: u64 = 1_767_225_600;
-/// Space kept free on the data partition, whatever the age of the logs.
+/// Space kept free on the data partition, whatever the age of the logs: this
+/// much, or a quarter of the partition if that is less (a card whose data
+/// partition never grew is 64 MB, and 256 MB free would clear every log).
 const KEEP_FREE: u64 = 256 * 1024 * 1024;
+/// Logs cleared from this folder, one name a line: the robot still has them,
+/// and they are not pulled again.
+const CLEARED: &str = ".cleared";
+
+fn keep_free(partition: u64) -> u64 {
+    KEEP_FREE.min(partition / 4)
+}
 
 /// What the screens show for one log.
 #[derive(Clone, Debug, PartialEq)]
@@ -120,10 +129,10 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
-/// Which logs to clear: those past `KEEP_DAYS`, then the oldest until
-/// `KEEP_FREE` is free. `files` is (name, modified, bytes); `free` is the
-/// space left on the partition, when known.
-pub fn to_clear(files: &[(String, u64, u64)], now: u64, free: Option<u64>) -> Vec<String> {
+/// Which logs to clear: those past `KEEP_DAYS`, then the oldest until `keep`
+/// is free. `files` is (name, modified, bytes); `free` is the space left on
+/// the partition, when known.
+pub fn to_clear(files: &[(String, u64, u64)], now: u64, free: Option<u64>, keep: u64) -> Vec<String> {
     let mut oldest_first: Vec<&(String, u64, u64)> = files.iter().collect();
     oldest_first.sort_by_key(|f| f.1);
     let mut clear = Vec::new();
@@ -131,7 +140,7 @@ pub fn to_clear(files: &[(String, u64, u64)], now: u64, free: Option<u64>) -> Ve
     for (name, modified, bytes) in oldest_first {
         // Ages only mean something once the clock has been set.
         let expired = now >= CLOCK_TRUSTED && *modified >= CLOCK_TRUSTED && now.saturating_sub(*modified) > KEEP_DAYS * 86_400;
-        let cramped = free.is_some_and(|f| f < KEEP_FREE);
+        let cramped = free.is_some_and(|f| f < keep);
         if expired || cramped {
             clear.push(name.clone());
             free = free.map(|f| f + bytes);
@@ -140,17 +149,31 @@ pub fn to_clear(files: &[(String, u64, u64)], now: u64, free: Option<u64>) -> Ve
     clear
 }
 
+/// The space left on the partition holding `dir`, and its size.
 #[cfg(target_os = "linux")]
-fn free_space(dir: &Path) -> Option<u64> {
+fn space(dir: &Path) -> Option<(u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
     let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    (unsafe { libc::statvfs(path.as_ptr(), &mut stat) } == 0).then(|| stat.f_bavail as u64 * stat.f_frsize as u64)
+    (unsafe { libc::statvfs(path.as_ptr(), &mut stat) } == 0).then(|| (stat.f_bavail as u64 * stat.f_frsize as u64, stat.f_blocks as u64 * stat.f_frsize as u64))
 }
 
 #[cfg(not(target_os = "linux"))]
-fn free_space(_dir: &Path) -> Option<u64> {
+fn space(_dir: &Path) -> Option<(u64, u64)> {
     None
+}
+
+/// The logs cleared from `dir`, which are not to be pulled again.
+fn cleared(dir: &Path) -> Vec<String> {
+    fs::read_to_string(dir.join(CLEARED)).map(|t| t.lines().map(str::to_owned).collect()).unwrap_or_default()
+}
+
+fn remember_cleared(dir: &Path, names: &[String]) {
+    let mut all = cleared(dir);
+    all.extend(names.iter().cloned());
+    // The robot keeps a season's logs at most: the last thousand names are plenty.
+    let from = all.len().saturating_sub(1000);
+    crate::sys::write_atomic(&dir.join(CLEARED), (all[from..].join("\n") + "\n").as_bytes()).ok();
 }
 
 #[derive(Default)]
@@ -172,12 +195,16 @@ pub struct Logs {
     /// The last listing and the generation it was read at: screens ask every
     /// frame, the folder changes a few times an hour.
     listed: Mutex<Option<(u64, Vec<Row>)>>,
+    /// The demo's newest match, held back until this many seconds have
+    /// passed, as if it were being pulled: so a demo robot plugged in shows
+    /// what happens when a match's log arrives.
+    demo_held: Option<f32>,
 }
 
 impl Logs {
     /// No robot: nothing to show or pull.
     pub fn none() -> Self {
-        Logs { dir: None, shared: Arc::new(Shared::default()), demo: Vec::new(), listed: Mutex::new(None) }
+        Logs { dir: None, shared: Arc::new(Shared::default()), demo: Vec::new(), listed: Mutex::new(None), demo_held: None }
     }
 
     /// Two scripted matches, for the demo robot.
@@ -196,9 +223,28 @@ impl Logs {
             Row { name: "FRC_20261116_093200_NYRO_Q9.wpilog".into(), bytes: 18_400_000, digest: Some(calm) },
             Row { name: "FRC_20261115_171800.wpilog".into(), bytes: 31_250_000, digest: None },
         ];
-        let logs = Logs { dir: None, shared: Arc::new(Shared::default()), demo, listed: Mutex::new(None) };
+        let logs = Logs { dir: None, shared: Arc::new(Shared::default()), demo, listed: Mutex::new(None), demo_held: None };
         *logs.shared.status.lock().unwrap() = "demo logs".into();
         logs
+    }
+
+    /// The demo logs, with the newest match arriving `seconds` from now as
+    /// though it were being pulled from a robot just back from that match.
+    pub fn demo_arriving(seconds: f32) -> Self {
+        let mut logs = Self::demo();
+        logs.demo_held = Some(seconds);
+        logs
+    }
+
+    /// Time passes for the demo's held-back match.
+    pub fn advance(&mut self, dt: f32) {
+        if let Some(left) = &mut self.demo_held {
+            *left -= dt;
+            if *left <= 0.0 {
+                self.demo_held = None;
+                self.shared.generation.fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Keep the logs of the robot at `host`, pulling new ones in the background.
@@ -208,7 +254,7 @@ impl Logs {
         *shared.status.lock().unwrap() = "waiting for the robot".into();
         if fs::create_dir_all(&dir).is_err() {
             *shared.status.lock().unwrap() = "no place to keep logs".into();
-            return Logs { dir: None, shared, demo: Vec::new(), listed: Mutex::new(None) };
+            return Logs { dir: None, shared, demo: Vec::new(), listed: Mutex::new(None), demo_held: None };
         }
         let (thread_shared, thread_dir, host) = (shared.clone(), dir.clone(), host.to_owned());
         thread::Builder::new()
@@ -216,7 +262,7 @@ impl Logs {
             .stack_size(512 * 1024)
             .spawn(move || pull_loop(&thread_shared, &thread_dir, &host))
             .expect("spawn logs thread");
-        Logs { dir: Some(dir), shared, demo: Vec::new(), listed: Mutex::new(None) }
+        Logs { dir: Some(dir), shared, demo: Vec::new(), listed: Mutex::new(None), demo_held: None }
     }
 
     /// Pulling only happens while this is true: linked, and not enabled.
@@ -230,6 +276,9 @@ impl Logs {
 
     /// What the puller is doing, in a few words.
     pub fn status(&self) -> String {
+        if let (Some(left), Some(row)) = (self.demo_held, self.demo.first()) {
+            return format!("pulling {} · {}%", row.title(), ((1.0 - left / 4.0).clamp(0.0, 0.99) * 100.0) as u32);
+        }
         if let Some((name, total)) = self.shared.pulling.lock().unwrap().clone() {
             let done = self.shared.pulled_bytes.load(Ordering::Relaxed);
             let row = Row { name, bytes: 0, digest: None };
@@ -240,7 +289,10 @@ impl Logs {
 
     /// The logs kept here, newest first.
     pub fn list(&self) -> Vec<Row> {
-        let Some(dir) = &self.dir else { return self.demo.clone() };
+        let Some(dir) = &self.dir else {
+            let held = if self.demo_held.is_some() { 1 } else { 0 };
+            return self.demo[held.min(self.demo.len())..].to_vec();
+        };
         let generation = self.shared.generation.load(Ordering::Relaxed);
         if let Some((at, rows)) = &*self.listed.lock().unwrap() {
             if *at == generation {
@@ -284,9 +336,12 @@ fn local_files(dir: &Path) -> Vec<(String, u64, u64)> {
         .collect()
 }
 
-/// Clear what is due. Returns how many logs went.
-pub fn clean(dir: &Path) -> usize {
-    let files = local_files(dir);
+/// Clear what is due, and as many of the oldest as it takes for `room` more
+/// bytes to fit as well, never the log `making_room_for`. Returns how many
+/// logs went.
+pub fn clean(dir: &Path, room: u64, making_room_for: Option<&str>) -> usize {
+    let mut files = local_files(dir);
+    files.retain(|(name, ..)| Some(name.as_str()) != making_room_for);
     let time = now();
     // A log pulled before the clock was set gets its age from when the clock came good.
     if time >= CLOCK_TRUSTED {
@@ -298,10 +353,15 @@ pub fn clean(dir: &Path) -> usize {
             }
         }
     }
-    let clear = to_clear(&files, time, free_space(dir));
+    let space = space(dir);
+    let keep = space.map_or(KEEP_FREE, |(_, size)| keep_free(size));
+    let clear = to_clear(&files, time, space.map(|(free, _)| free), keep + room);
     for name in &clear {
         fs::remove_file(dir.join(name)).ok();
         fs::remove_file(dir.join(format!("{name}.json"))).ok();
+    }
+    if !clear.is_empty() {
+        remember_cleared(dir, &clear);
     }
     clear.len()
 }
@@ -313,7 +373,7 @@ fn digest_file(dir: &Path, name: &str) {
     let Ok(file) = File::open(&path) else { return };
     if let Ok(summary) = wpilog::summarize(std::io::BufReader::with_capacity(64 * 1024, file)) {
         let json = Digest::of(&summary).to_json(bytes).to_string();
-        fs::write(dir.join(format!("{name}.json")), json).ok();
+        crate::sys::write_atomic(&dir.join(format!("{name}.json")), json.as_bytes()).ok();
     }
 }
 
@@ -329,7 +389,7 @@ fn pull_loop(shared: &Shared, dir: &Path, host: &str) {
     loop {
         if now().saturating_sub(last_clean) >= 3600 || last_clean == 0 {
             last_clean = now().max(1);
-            if clean(dir) > 0 {
+            if clean(dir, 0, None) > 0 {
                 shared.generation.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -354,10 +414,15 @@ fn pull_loop(shared: &Shared, dir: &Path, host: &str) {
 fn pull_once(shared: &Shared, dir: &Path, host: &str) -> Result<usize, String> {
     let listing = agent::get(host, "/api/logs").map_err(|why| if why.contains("404") { "robot's agent is too old for logs".to_string() } else { why })?;
     let empty = Vec::new();
+    let gone = cleared(dir);
     for entry in listing["logs"].as_array().unwrap_or(&empty) {
         let (Some(name), Some(total)) = (entry["name"].as_str(), entry["bytes"].as_u64()) else { continue };
         // Names come from the robot: take only a plain file name.
         if !name.ends_with(".wpilog") || name.contains(['/', '\\']) || name.starts_with('.') {
+            continue;
+        }
+        // Cleared here for its age or for room: the robot still has it, but it stays gone.
+        if gone.iter().any(|g| g == name) {
             continue;
         }
         let path = dir.join(name);
@@ -372,6 +437,18 @@ fn pull_once(shared: &Shared, dir: &Path, host: &str) -> Result<usize, String> {
         if !shared.allowed.load(Ordering::Relaxed) || shared.stop.load(Ordering::Relaxed) {
             break;
         }
+        // Room for the rest of it first, oldest logs making way; a log the
+        // card could never hold is not started.
+        let need = total - have;
+        if let Some((_, size)) = space(dir) {
+            if need + keep_free(size) > size {
+                continue;
+            }
+            clean(dir, need, Some(name));
+            if space(dir).is_some_and(|(free, _)| free < need) {
+                return Err("card full: logs wait for room".into());
+            }
+        }
         shared.pulled_bytes.store(have, Ordering::Relaxed);
         *shared.pulling.lock().unwrap() = Some((name.to_owned(), total));
         let result = OpenOptions::new()
@@ -384,8 +461,6 @@ fn pull_once(shared: &Shared, dir: &Path, host: &str) -> Result<usize, String> {
         shared.generation.fetch_add(1, Ordering::Relaxed);
         result?;
         digest_file(dir, name);
-        // Make room as the card fills rather than once an hour.
-        clean(dir);
     }
     Ok(local_files(dir).len())
 }
@@ -404,24 +479,48 @@ mod tests {
     #[test]
     fn logs_go_after_thirty_days() {
         let files = [file("fresh", 2, 20), file("month", 29, 20), file("old", 31, 20), file("ancient", 90, 20)];
-        assert_eq!(to_clear(&files, TODAY, Some(10 * KEEP_FREE)), ["ancient", "old"]);
-        assert_eq!(to_clear(&files, TODAY, None), ["ancient", "old"]);
+        assert_eq!(to_clear(&files, TODAY, Some(10 * KEEP_FREE), KEEP_FREE), ["ancient", "old"]);
+        assert_eq!(to_clear(&files, TODAY, None, KEEP_FREE), ["ancient", "old"]);
     }
 
     #[test]
     fn the_oldest_go_first_when_the_card_fills() {
         let files = [file("a", 1, 100), file("b", 3, 100), file("c", 2, 100)];
         // 100 MB free: one 100 MB log must go, then 200 MB is still under the floor, so a second.
-        assert_eq!(to_clear(&files, TODAY, Some(100 * 1024 * 1024)), ["b", "c"]);
+        assert_eq!(to_clear(&files, TODAY, Some(100 * 1024 * 1024), KEEP_FREE), ["b", "c"]);
+    }
+
+    #[test]
+    fn a_small_data_partition_keeps_its_logs() {
+        // The 64 MB partition of a card that never grew, 30 MB free: a quarter
+        // of it is kept free, which 30 MB already is, so nothing goes.
+        const MB: u64 = 1024 * 1024;
+        let files = [file("a", 1, 10), file("b", 2, 10)];
+        assert_eq!(keep_free(64 * MB), 16 * MB);
+        assert!(to_clear(&files, TODAY, Some(30 * MB), keep_free(64 * MB)).is_empty());
+        // Room for a 20 MB log as well: the oldest makes way.
+        assert_eq!(to_clear(&files, TODAY, Some(30 * MB), keep_free(64 * MB) + 20 * MB), ["b"]);
+        // A big card keeps the full 256 MB.
+        assert_eq!(keep_free(29 * 1024 * MB), KEEP_FREE);
+    }
+
+    #[test]
+    fn a_cleared_log_is_remembered_and_not_pulled_again() {
+        let dir = std::env::temp_dir().join(format!("catalyst-cleared-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        remember_cleared(&dir, &["one.wpilog".into()]);
+        remember_cleared(&dir, &["two.wpilog".into()]);
+        assert_eq!(cleared(&dir), ["one.wpilog", "two.wpilog"]);
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn nothing_is_cleared_by_age_while_the_clock_is_unset() {
         // A handheld that booted with no clock reads 1970.
         let files = [("pulled-today".to_owned(), 5_000, 1024)];
-        assert!(to_clear(&files, 9_000_000, Some(10 * KEEP_FREE)).is_empty());
+        assert!(to_clear(&files, 9_000_000, Some(10 * KEEP_FREE), KEEP_FREE).is_empty());
         // And a log stamped 1970 is not thirty days old the moment the clock is set.
-        assert!(to_clear(&files, TODAY, Some(10 * KEEP_FREE)).is_empty());
+        assert!(to_clear(&files, TODAY, Some(10 * KEEP_FREE), KEEP_FREE).is_empty());
     }
 
     #[test]

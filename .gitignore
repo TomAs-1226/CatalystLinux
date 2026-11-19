@@ -2,3 +2,4 @@
 /shots/specimen*.png
 *.img
 /work/
+/scripts/__pycache__/

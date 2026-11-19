@@ -1,8 +1,9 @@
 #!/bin/sh
-# Grow the data partition to fill the SD card, once.
+# Grow the data partition (partition 4, after boot and systems A and B) to
+# fill the SD card, once.
 #
 # The image carries a small /data so it flashes quickly; logs want the whole
-# card. Growing takes two boots: the first rewrites partition 3 to run to the
+# card. Growing takes two boots: the first rewrites partition 4 to run to the
 # end of the card and restarts (the kernel cannot re-read the table of the
 # disk it is running from); the second enlarges the filesystem to match.
 #
@@ -10,44 +11,70 @@
 #   catalyst-grow-data --table-only <disk or image>  only rewrite the table
 
 DISK="${1:-/dev/mmcblk0}"
-PART="${2:-/dev/mmcblk0p3}"
-DONE=/data/.grown
-PENDING=/data/.grow-pending
+PART="${2:-/dev/mmcblk0p4}"
+# Other places for /sys and /data, for scripts/test-image-services.sh only.
+SYS="${CATALYST_SYS:-/sys}"
+DATA="${CATALYST_DATA:-/data}"
+DONE="$DATA/.grown"
+PENDING="$DATA/.grow-pending"
 
-# Recreate partition 3 from its present start to the end of the disk.
-# $1: disk, $2: first sector of partition 3
+# Recreate partition 4 from its present start to the end of the disk.
+# $1: disk, $2: first sector of partition 4
 rewrite_table() {
 	# -u: sectors. BusyBox fdisk otherwise works in cylinders and would move the start.
-	printf 'd\n3\nn\np\n3\n%s\n\nw\n' "$2" | fdisk -u "$1" >/dev/null 2>&1
+	# With 4 deleted it is the only free primary: fdisk picks it without asking.
+	printf 'd\n4\nn\np\n%s\n\nw\n' "$2" | fdisk -u "$1" >/dev/null 2>&1
 }
 
 if [ "$1" = "--table-only" ]; then
-	start=$(fdisk -l "$2" | awk '$1 ~ /3$/ { print $(NF-5) }' | tail -1)
+	start=$(fdisk -l "$2" | awk '$1 ~ /4$/ { print $(NF-5) }' | tail -1)
 	[ -n "$start" ] || exit 1
 	rewrite_table "$2" "$start"
 	exit 0
 fi
 
 [ -e "$DONE" ] && exit 0
-[ -w /data ] || exit 0
+[ -w "$DATA" ] || exit 0
 
 name=$(basename "$DISK")
 pname=$(basename "$PART")
-start=$(cat "/sys/block/$name/$pname/start" 2>/dev/null) || exit 0
-size=$(cat "/sys/block/$name/$pname/size")
-total=$(cat "/sys/block/$name/size")
+start=$(cat "$SYS/block/$name/$pname/start" 2>/dev/null) || exit 0
+size=$(cat "$SYS/block/$name/$pname/size")
+total=$(cat "$SYS/block/$name/size")
 
-# More than 8 MB of card past the partition, and not tried yet: rewrite, restart.
-if [ $((start + size + 16384)) -lt "$total" ] && [ ! -e "$PENDING" ]; then
-	touch "$PENDING"
+# How many times the table has been rewritten without the partition growing.
+tries=$(cat "$PENDING" 2>/dev/null)
+case "$tries" in '' | *[!0-9]*) tries=0 ;; esac
+
+# More than 8 MB of card past the partition: rewrite the table and restart.
+# A rewrite that did not take (a power cut, fdisk refusing) is tried again on
+# the next boot, three times in all; after that the partition keeps its size.
+if [ $((start + size + 16384)) -lt "$total" ]; then
+	if [ "$tries" -ge 3 ]; then
+		echo "catalyst-grow-data: the data partition would not grow; keeping it as it is" >&2
+		touch "$DONE"
+		exit 0
+	fi
+	echo $((tries + 1)) > "$PENDING"
 	sync
+	# fdisk reports failure even when the table is written: the kernel cannot
+	# re-read the table of a disk in use, which is why this restarts at all.
+	# So its answer means nothing here; the next boot sees whether it took.
 	rewrite_table "$DISK" "$start"
+	# Restart here and now, before anything else starts: the root is read-only
+	# and /data is put away first, so nothing is left half-written. BusyBox's
+	# own reboot, forced: the system's `reboot` would ask the service manager,
+	# which is in the middle of starting this.
+	umount "$DATA" 2>/dev/null
 	sync
-	reboot
+	busybox reboot -f
+	sleep 30
 	exit 0
 fi
 
-# Second boot (or nothing to gain): bring the filesystem up to the partition.
-resize2fs "$PART" >/dev/null 2>&1
-rm -f "$PENDING"
-touch "$DONE"
+# The partition is as large as it gets: bring the filesystem up to it. Done
+# only once that worked; otherwise it is tried again next boot (no restart).
+if resize2fs "$PART" >/dev/null 2>&1; then
+	rm -f "$PENDING"
+	touch "$DONE"
+fi

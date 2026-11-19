@@ -1,13 +1,15 @@
 #!/sbin/openrc-run
 # Wired Ethernet: DHCP, or a fixed address on the robot network without it.
+# ifplugd watches the cable and runs /usr/sbin/catalyst-net when it changes;
+# -M waits for the adapter to appear, since it is a USB device.
 
 description="Catalyst Linux wired network"
 supervisor=supervise-daemon
-command=/usr/sbin/catalyst-net
-command_args="eth0"
+command=/usr/sbin/ifplugd
+command_args="-n -i eth0 -M -I -u 0 -d 1 -t 2 -r /usr/sbin/catalyst-net"
 respawn_delay=2
 
 depend() {
-	need localmount
-	after sysv-rcs
+	need catalyst-early
+	after catalyst-late
 }

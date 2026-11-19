@@ -1,13 +1,16 @@
-//! The Terminal app: a shell on the handheld's own screen.
+//! The Terminal app: a shell on the handheld's own screen. The same screen
+//! runs an external app that asked for a terminal.
 //!
-//! The session outlives the screen: going Home and coming back finds the
-//! shell where it was left, with whatever it printed in the meantime.
+//! The login shell outlives the screen: going Home and coming back finds it
+//! where it was left, with whatever it printed in the meantime. An app's
+//! program ends when its screen is left.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 
 use bezel::{Align, Color, Rect, TextStyle, Tone};
 
-use crate::gfx::{Gfx, H, PAD, W};
+use crate::gfx::{Gfx, H, W};
 use crate::platform::Key;
 use crate::pty::Session;
 use crate::robot::Robot;
@@ -15,21 +18,36 @@ use crate::shell::{Cx, Nav, Screen};
 use crate::term::{Term, DEFAULT};
 
 thread_local! {
-    /// The one terminal session, kept while the app is closed.
-    static SESSION: RefCell<Option<(Session, Term)>> = const { RefCell::new(None) };
+    /// The login shell's session, kept while the Terminal app is closed.
+    static KEPT: RefCell<Option<(Session, Term)>> = const { RefCell::new(None) };
 }
 
 pub struct Terminal {
+    title: String,
+    /// The program to run instead of the login shell: a command line, and the
+    /// folder to run it from.
+    program: Option<(String, PathBuf)>,
+    /// What is running, and the screen it has drawn. The emulator stays after
+    /// the program ends, so its last words can still be read.
+    session: Option<Session>,
+    term: Option<Term>,
     /// Lines scrolled back into the history.
     back: usize,
-    /// The shell has exited; the next key leaves.
+    /// The program has exited; the next key leaves.
     ended: bool,
     greeted: bool,
 }
 
 impl Terminal {
+    /// The login shell, picked up where it was left.
     pub fn new() -> Self {
-        Terminal { back: 0, ended: false, greeted: false }
+        let (session, term) = KEPT.with_borrow_mut(Option::take).map_or((None, None), |(s, t)| (Some(s), Some(t)));
+        Terminal { title: "Terminal".into(), program: None, session, term, back: 0, ended: false, greeted: false }
+    }
+
+    /// One program in a terminal of its own: an external app.
+    pub fn running(title: &str, command: &str, dir: PathBuf) -> Self {
+        Terminal { title: title.to_owned(), program: Some((command.to_owned(), dir)), session: None, term: None, back: 0, ended: false, greeted: false }
     }
 
     /// The grid that fits the panel at the current text size: columns, rows,
@@ -45,6 +63,18 @@ impl Terminal {
     }
 }
 
+impl Drop for Terminal {
+    fn drop(&mut self) {
+        // The login shell waits for the next visit; an app's program goes
+        // with its screen (dropping the session hangs up on it).
+        if self.program.is_none() && !self.ended {
+            if let (Some(session), Some(term)) = (self.session.take(), self.term.take()) {
+                KEPT.with_borrow_mut(|kept| *kept = Some((session, term)));
+            }
+        }
+    }
+}
+
 /// The 16 terminal colours, in keeping with the palette in use.
 fn ansi(g: &Gfx, index: u8) -> Color {
     let t = &g.tokens;
@@ -52,7 +82,8 @@ fn ansi(g: &Gfx, index: u8) -> Color {
     let pick = |on_dark: u32, on_light: u32| Color::hex(if dark { on_dark } else { on_light });
     match index % 16 {
         0 => t.surface3,
-        1 | 9 => t.signal,
+        // Red is red, whatever the accent.
+        1 | 9 => g.fault(),
         2 | 10 => pick(0x7fd18b, 0x1f8a3d),
         3 | 11 => t.amber_ink,
         4 | 12 => pick(0x7aa7ff, 0x2b5fd9),
@@ -66,7 +97,7 @@ fn ansi(g: &Gfx, index: u8) -> Color {
 
 impl Screen for Terminal {
     fn title(&self) -> &str {
-        "Terminal"
+        &self.title
     }
 
     fn wants_text(&self) -> bool {
@@ -78,24 +109,22 @@ impl Screen for Terminal {
     }
 
     fn busy(&self) -> bool {
-        // The shell may print at any time; look often while the screen is open.
+        // The program may print at any time; look often while the screen is open.
         !self.ended
     }
 
-    fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
-        if self.ended {
+    fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
+        // Esc belongs to the programs in the terminal, so leaving is Ctrl-Q,
+        // or Esc held down.
+        if self.ended || key.leaves() {
             return Nav::Pop;
         }
         let bytes: Vec<u8> = match key {
-            // Esc belongs to the programs in the terminal, so leaving is Ctrl-Q.
-            Key::Ctrl('q') => return Nav::Pop,
             Key::PageUp | Key::PageDown => {
-                SESSION.with_borrow(|s| {
-                    if let Some((_, term)) = s {
-                        let page = term.rows.saturating_sub(1).max(1);
-                        self.back = if key == Key::PageUp { (self.back + page).min(term.history()) } else { self.back.saturating_sub(page) };
-                    }
-                });
+                if let Some(term) = &self.term {
+                    let page = term.rows.saturating_sub(1).max(1);
+                    self.back = if key == Key::PageUp { (self.back + page).min(term.history()) } else { self.back.saturating_sub(page) };
+                }
                 return Nav::Stay;
             }
             Key::Char(c) => c.to_string().into_bytes(),
@@ -108,38 +137,35 @@ impl Screen for Terminal {
             Key::Down => b"\x1b[B".to_vec(),
             Key::Right => b"\x1b[C".to_vec(),
             Key::Left => b"\x1b[D".to_vec(),
+            Key::Leave => return Nav::Pop,
         };
         // Typing returns to the live screen.
         self.back = 0;
-        SESSION.with_borrow_mut(|s| {
-            if let Some((session, _)) = s {
-                session.write(&bytes);
-            }
-        });
-        let _ = cx;
+        if let Some(session) = &mut self.session {
+            session.write(&bytes);
+        }
         Nav::Stay
     }
 
     fn tick(&mut self, _dt: f32) -> bool {
-        SESSION.with_borrow_mut(|slot| {
-            let Some((session, term)) = slot else { return !std::mem::replace(&mut self.greeted, true) };
-            let bytes = session.read();
-            let mut changed = !bytes.is_empty();
-            term.feed(&bytes);
-            let replies = term.take_replies();
-            if !replies.is_empty() {
-                session.write(&replies);
-            }
-            if !self.ended && !session.alive() {
-                self.ended = true;
-                changed = true;
-            }
-            if self.ended {
-                // The next time the app opens, a new shell starts.
-                *slot = None;
-            }
-            changed
-        })
+        let (Some(session), Some(term)) = (&mut self.session, &mut self.term) else {
+            // Not started yet (the first draw does that): ask for that draw once.
+            return !std::mem::replace(&mut self.greeted, true);
+        };
+        let bytes = session.read();
+        let mut changed = !bytes.is_empty();
+        term.feed(&bytes);
+        let replies = term.take_replies();
+        if !replies.is_empty() {
+            session.write(&replies);
+        }
+        if !session.alive() {
+            // Whatever it printed last stays on screen; the next key leaves.
+            self.ended = true;
+            self.session = None;
+            changed = true;
+        }
+        changed
     }
 
     fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
@@ -147,53 +173,59 @@ impl Screen for Terminal {
         let (cols, rows, cell_w, cell_h, panel) = Self::layout(g);
         g.surface(panel, 10.0, t.surface1);
         let style = g.ty.caption;
-        if self.ended {
-            g.text_at(panel.cx(), panel.cy(), Align::Center, "the shell has ended · any key returns", style, t.dim);
-            return;
+        if self.term.is_none() && !self.ended {
+            self.session = Some(match &self.program {
+                Some((command, dir)) => Session::run(cols, rows, command, dir),
+                None => Session::start(cols, rows),
+            });
+            self.term = Some(Term::new(cols, rows));
         }
-        SESSION.with_borrow_mut(|slot| {
-            let (session, term) = slot.get_or_insert_with(|| (Session::start(cols, rows), Term::new(cols, rows)));
-            if (term.cols, term.rows) != (cols, rows) {
-                term.resize(cols, rows);
+        let Some(term) = &mut self.term else { return };
+        if (term.cols, term.rows) != (cols, rows) {
+            term.resize(cols, rows);
+            if let Some(session) = &mut self.session {
                 session.resize(cols, rows);
             }
-            let back = self.back.min(term.history());
-            let (x0, y0) = (panel.x + 4.0, panel.y + 3.0);
-            let bold = TextStyle { wght: 700.0, ..style };
-            let mut utf8 = [0u8; 4];
-            for row in 0..rows {
-                let cy = y0 + (row as f32 + 0.5) * cell_h;
-                for (col, cell) in term.line(row, back).iter().enumerate().take(cols) {
-                    let x = x0 + col as f32 * cell_w;
-                    let is_cursor = back == 0 && term.cursor_visible && (col, row) == term.cursor;
-                    // Reverse video swaps ink and ground; the cursor is a block in the signal colour.
-                    let (mut ink, mut ground) = (
-                        if cell.fg == DEFAULT { t.ink } else { ansi(g, cell.fg) },
-                        if cell.bg == DEFAULT { None } else { Some(ansi(g, cell.bg)) },
-                    );
-                    if cell.reverse {
-                        (ink, ground) = (ground.unwrap_or(t.surface1), Some(ink));
-                    }
-                    if is_cursor {
-                        (ink, ground) = (t.on_signal, Some(t.signal));
-                    }
-                    if let Some(color) = ground {
-                        g.surface(Rect::new(x, cy - cell_h * 0.5, cell_w + 0.5, cell_h), if is_cursor { 2.0 } else { 0.0 }, color);
-                    }
-                    if cell.ch != ' ' {
-                        g.text_at(x, cy, Align::Left, cell.ch.encode_utf8(&mut utf8), if cell.bold { bold } else { style }, ink);
-                    }
+        }
+        let back = self.back.min(term.history());
+        let (x0, y0) = (panel.x + 4.0, panel.y + 3.0);
+        let bold = TextStyle { wght: 700.0, ..style };
+        let mut utf8 = [0u8; 4];
+        for row in 0..rows {
+            let cy = y0 + (row as f32 + 0.5) * cell_h;
+            for (col, cell) in term.line(row, back).iter().enumerate().take(cols) {
+                let x = x0 + col as f32 * cell_w;
+                let is_cursor = back == 0 && !self.ended && term.cursor_visible && (col, row) == term.cursor;
+                // Reverse video swaps ink and ground; the cursor is a block in the signal colour.
+                let (mut ink, mut ground) =
+                    (if cell.fg == DEFAULT { t.ink } else { ansi(g, cell.fg) }, if cell.bg == DEFAULT { None } else { Some(ansi(g, cell.bg)) });
+                if cell.reverse {
+                    (ink, ground) = (ground.unwrap_or(t.surface1), Some(ink));
+                }
+                if is_cursor {
+                    (ink, ground) = (t.on_signal, Some(t.signal));
+                }
+                if let Some(color) = ground {
+                    g.surface(Rect::new(x, cy - cell_h * 0.5, cell_w + 0.5, cell_h), if is_cursor { 2.0 } else { 0.0 }, color);
+                }
+                if cell.ch != ' ' {
+                    g.text_at(x, cy, Align::Left, cell.ch.encode_utf8(&mut utf8), if cell.bold { bold } else { style }, ink);
                 }
             }
-            // Scrolled back: say how far, where the newest line would be.
-            if back > 0 {
-                let note = format!("{back} lines back · page down");
-                let w = g.measure(&note, style) + 14.0;
-                let chip = Rect::new(panel.right() - w - 4.0, panel.bottom() - cell_h - 6.0, w, cell_h + 3.0);
-                g.surface(chip, chip.h * 0.5, t.surface3);
-                g.text_at(chip.cx(), chip.cy(), Align::Center, &note, style, t.ink);
-            }
-        });
-        let _ = PAD;
+        }
+        // A note in the corner: how far back the view is, or that the program is done.
+        let note = if self.ended {
+            Some("ended · any key returns".to_owned())
+        } else if back > 0 {
+            Some(format!("{back} lines back · page down"))
+        } else {
+            None
+        };
+        if let Some(note) = note {
+            let w = g.measure(&note, style) + 14.0;
+            let chip = Rect::new(panel.right() - w - 4.0, panel.bottom() - cell_h - 6.0, w, cell_h + 3.0);
+            g.surface(chip, chip.h * 0.5, t.surface3);
+            g.text_at(chip.cx(), chip.cy(), Align::Center, &note, style, t.ink);
+        }
     }
 }

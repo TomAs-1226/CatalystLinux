@@ -1,6 +1,6 @@
 # <file system>	<mount pt>	<type>	<options>	<dump>	<pass>
+# Mounted by catalyst-early (/run is OpenRC's own, mounted before anything runs).
 /dev/root	/		ext4	ro,noatime,noauto	0	0
-tmpfs		/tmp		tmpfs	mode=1777,size=24m	0	0
-tmpfs		/run		tmpfs	mode=0755,nosuid,nodev,size=4m	0	0
+tmpfs		/tmp		tmpfs	mode=1777,size=24m,noauto	0	0
 # Everything that must survive a reboot: settings, Wi-Fi networks, pulled logs.
-/dev/mmcblk0p3	/data		ext4	rw,noatime,commit=5,nofail	0	0
+/dev/mmcblk0p4	/data		ext4	rw,noatime,commit=5,noauto	0	0

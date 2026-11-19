@@ -112,7 +112,11 @@ impl Drop for Agent {
 /// and counting it in `progress`. Returns the bytes written; 0 when the robot
 /// has nothing past `offset`. Resuming is what makes a pulled plug harmless.
 pub fn download(host: &str, name: &str, offset: u64, out: &mut impl Write, progress: &AtomicU64) -> Result<u64, String> {
-    let addr = (host, PORT).to_socket_addrs().ok().and_then(|mut a| a.next()).ok_or("cannot resolve the robot")?;
+    download_from((host, PORT), host, name, offset, out, progress)
+}
+
+fn download_from(at: (&str, u16), host: &str, name: &str, offset: u64, out: &mut impl Write, progress: &AtomicU64) -> Result<u64, String> {
+    let addr = at.to_socket_addrs().ok().and_then(|mut a| a.next()).ok_or("cannot resolve the robot")?;
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(1500)).map_err(|_| "no answer from the robot".to_string())?;
     stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
@@ -126,7 +130,7 @@ pub fn download(host: &str, name: &str, offset: u64, out: &mut impl Write, progr
 
     let mut head = Vec::with_capacity(1024);
     let mut buf = [0u8; 16 * 1024];
-    let (body_start, want) = loop {
+    let (body_start, length, skip) = loop {
         let n = stream.read(&mut buf).map_err(|_| "agent timed out".to_string())?;
         if n == 0 {
             return Err("agent sent no reply".into());
@@ -134,38 +138,95 @@ pub fn download(host: &str, name: &str, offset: u64, out: &mut impl Write, progr
         head.extend_from_slice(&buf[..n]);
         if let Some(at) = head.windows(4).position(|w| w == b"\r\n\r\n") {
             let text = String::from_utf8_lossy(&head[..at]).to_ascii_lowercase();
+            let header = |name: &str| text.lines().find_map(|l| l.strip_prefix(name)).map(str::trim);
             let status = text.split_whitespace().nth(1).unwrap_or("");
-            match status {
-                "200" | "206" => {}
+            let length = header("content-length:").and_then(|v| v.parse::<u64>().ok()).ok_or("agent sent no length")?;
+            let skip = match status {
+                // The part asked for: it must start where this copy ends.
+                "206" => {
+                    let start = header("content-range:").and_then(|v| v.strip_prefix("bytes ")?.split('-').next()?.parse::<u64>().ok());
+                    if start != Some(offset) {
+                        return Err("agent sent the wrong part of the log".into());
+                    }
+                    0
+                }
+                // The whole file, the range ignored: pass over what is already here.
+                "200" => offset,
                 // Nothing past the offset: the file is already whole here.
                 "416" => return Ok(0),
                 "404" => return Err("agent has no log routes, or the log is gone".into()),
                 other => return Err(format!("agent said {other}")),
+            };
+            if skip > length {
+                return Err("the log on the robot is shorter than the copy here".into());
             }
-            let length = text.lines().find_map(|l| l.strip_prefix("content-length:")).and_then(|v| v.trim().parse::<u64>().ok());
-            break (at + 4, length.ok_or("agent sent no length")?);
+            break (at + 4, length, skip);
         }
         if head.len() > 64 * 1024 {
             return Err("agent reply was not http".into());
         }
     };
-    let mut written = 0u64;
-    let mut put = |chunk: &[u8], written: &mut u64| -> Result<(), String> {
-        let take = chunk.len().min((want - *written) as usize);
-        out.write_all(&chunk[..take]).map_err(|e| format!("cannot save the log: {e}"))?;
-        *written += take as u64;
-        progress.fetch_add(take as u64, Ordering::Relaxed);
+    // `seen` counts every byte of the body; only those past `skip` are kept.
+    let (mut seen, mut written) = (0u64, 0u64);
+    let mut put = |chunk: &[u8], seen: &mut u64, written: &mut u64| -> Result<(), String> {
+        let chunk = &chunk[..chunk.len().min((length - *seen) as usize)];
+        let drop = (skip.saturating_sub(*seen) as usize).min(chunk.len());
+        *seen += chunk.len() as u64;
+        let keep = &chunk[drop..];
+        out.write_all(keep).map_err(|e| format!("cannot save the log: {e}"))?;
+        *written += keep.len() as u64;
+        progress.fetch_add(keep.len() as u64, Ordering::Relaxed);
         Ok(())
     };
-    put(&head[body_start..], &mut written)?;
-    while written < want {
+    put(&head[body_start..], &mut seen, &mut written)?;
+    while seen < length {
         let n = stream.read(&mut buf).map_err(|_| "link dropped mid-log".to_string())?;
         if n == 0 {
             break; // short: the next pull resumes from here
         }
-        put(&buf[..n], &mut written)?;
+        put(&buf[..n], &mut seen, &mut written)?;
     }
     Ok(written)
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    /// Serve one canned reply on a local port, as an agent would.
+    fn serve(reply: Vec<u8>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 1024];
+                stream.read(&mut request).ok();
+                stream.write_all(&reply).ok();
+            }
+        });
+        format!("127.0.0.1:{port}")
+    }
+
+    fn fetch(reply: &[u8], offset: u64) -> Result<Vec<u8>, String> {
+        let host = serve(reply.to_vec());
+        let (host, port) = host.split_once(':').unwrap();
+        let mut out = Vec::new();
+        download_from((host, port.parse().unwrap()), host, "x.wpilog", offset, &mut out, &AtomicU64::new(0))?;
+        Ok(out)
+    }
+
+    #[test]
+    fn a_resumed_pull_keeps_only_what_is_missing() {
+        // An agent that honours the range: the rest of the file.
+        assert_eq!(fetch(b"HTTP/1.1 206 Partial\r\nContent-Length: 4\r\nContent-Range: bytes 6-9/10\r\n\r\nWXYZ", 6).unwrap(), b"WXYZ");
+        // One that ignores it and sends the whole file: the part already here is passed over.
+        assert_eq!(fetch(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabcdefWXYZ", 6).unwrap(), b"WXYZ");
+        // A part that starts somewhere else is refused rather than appended.
+        assert!(fetch(b"HTTP/1.1 206 Partial\r\nContent-Length: 4\r\nContent-Range: bytes 0-3/10\r\n\r\nabcd", 6).is_err());
+        // Nothing more: the copy here is whole.
+        assert_eq!(fetch(b"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\n\r\n", 10).unwrap(), b"");
+    }
 }
 
 /// One HTTP GET returning JSON. The agent always sends a Content-Length.

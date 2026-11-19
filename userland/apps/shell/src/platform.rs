@@ -21,6 +21,47 @@ pub enum Key {
     Char(char),
     /// A letter with Ctrl held.
     Ctrl(char),
+    /// Esc held for a second: leave whatever has the screen, even a program
+    /// that takes every other key for itself. (A short Esc is still `Back`.)
+    Leave,
+}
+
+impl Key {
+    /// The two ways out of anything that has the whole keyboard: Ctrl-Q, or
+    /// Esc held down.
+    pub fn leaves(self) -> bool {
+        matches!(self, Key::Ctrl('q') | Key::Leave)
+    }
+}
+
+/// How long Esc is held before it means [`Key::Leave`].
+const HOLD_TO_LEAVE: Duration = Duration::from_secs(1);
+
+/// Watches one key being held down.
+#[derive(Default)]
+pub struct Hold {
+    since: Option<std::time::Instant>,
+    fired: bool,
+}
+
+impl Hold {
+    /// Tell it whether the key is down now; true, once, when it has been
+    /// down long enough.
+    pub fn update(&mut self, down: bool) -> bool {
+        match (down, self.since) {
+            (false, _) => {
+                self.since = None;
+                self.fired = false;
+            }
+            (true, None) => self.since = Some(std::time::Instant::now()),
+            (true, Some(since)) if !self.fired && since.elapsed() >= HOLD_TO_LEAVE => {
+                self.fired = true;
+                return true;
+            }
+            _ => {}
+        }
+        false
+    }
 }
 
 pub trait Platform {
@@ -36,6 +77,13 @@ pub trait Platform {
     }
     /// A line of status for whoever is developing; the device has nowhere to put one.
     fn set_status(&mut self, _text: &str) {}
+    /// Something else drew on the panel (an external app): forget what was
+    /// last shown, so the next frame is sent whole.
+    fn invalidate(&mut self) {}
+    /// The panel's framebuffer device, for a program that is handed the screen.
+    fn framebuffer(&self) -> Option<String> {
+        None
+    }
 }
 
 /// The rows that differ from the frame last shown, as first..end, and note
@@ -77,22 +125,116 @@ pub mod device {
     /// animation.
     pub struct Device {
         fb: File,
+        fb_path: String,
+        /// Esc held down means leave; whether it is down, and for how long.
+        esc: Hold,
+        esc_down: bool,
         width: usize,
         height: usize,
         stride: usize,
         bytes_per_pixel: usize,
-        inputs: Vec<File>,
+        /// Every keyboard, by its name under `/dev/input`.
+        inputs: Vec<(String, File)>,
+        /// Tells when a keyboard is plugged in or pulled out.
+        watch: Option<File>,
         shift: bool,
         ctrl: bool,
         /// The frame the panel is showing, to find what changed.
         shown: Vec<u32>,
         rows: Vec<u8>,
+        /// The kernel's text console, held in graphics mode while the shell runs.
+        _console: Option<File>,
+    }
+
+    /// Tell the kernel's text console to stand aside. The boot line puts it
+    /// on the panel, and left in text mode it would print kernel messages
+    /// over the shell's picture (which is only sent again where it changes,
+    /// so they would stay). Its own keyboard handling is turned off too, so
+    /// keys meant for the shell cannot switch consoles or restart the
+    /// machine. Held for as long as the shell runs; restored when it stops.
+    fn quiet_console() -> Option<File> {
+        const KDSETMODE: libc::c_ulong = 0x4B3A;
+        const KD_GRAPHICS: libc::c_ulong = 0x01;
+        const KDSKBMODE: libc::c_ulong = 0x4B45;
+        const K_OFF: libc::c_ulong = 0x04;
+        let tty = OpenOptions::new().read(true).write(true).custom_flags(libc::O_NOCTTY).open("/dev/tty0").ok()?;
+        unsafe {
+            libc::ioctl(tty.as_raw_fd(), KDSETMODE as _, KD_GRAPHICS);
+            libc::ioctl(tty.as_raw_fd(), KDSKBMODE as _, K_OFF);
+        }
+        Some(tty)
+    }
+
+    impl Drop for Device {
+        fn drop(&mut self) {
+            const KDSETMODE: libc::c_ulong = 0x4B3A;
+            const KD_TEXT: libc::c_ulong = 0x00;
+            const KDSKBMODE: libc::c_ulong = 0x4B45;
+            const K_UNICODE: libc::c_ulong = 0x03;
+            if let Some(tty) = &self._console {
+                unsafe {
+                    libc::ioctl(tty.as_raw_fd(), KDSKBMODE as _, K_UNICODE);
+                    libc::ioctl(tty.as_raw_fd(), KDSETMODE as _, KD_TEXT);
+                }
+            }
+        }
+    }
+
+    /// The panel's framebuffer device. Usually `/dev/fb0`, but another
+    /// framebuffer (the Pi's HDMI one) can take that name first, so the one
+    /// with the panel's size is picked.
+    fn panel_framebuffer() -> String {
+        if let Ok(path) = std::env::var("CATALYST_FB") {
+            return path;
+        }
+        let mut found: Vec<String> = std::fs::read_dir("/sys/class/graphics")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| std::fs::read_to_string(e.path().join("virtual_size")).is_ok_and(|size| size.trim() == "320,170"))
+            .map(|e| format!("/dev/{}", e.file_name().to_string_lossy()))
+            .collect();
+        found.sort();
+        found.into_iter().next().unwrap_or_else(|| "/dev/fb0".into())
+    }
+
+    /// A watch on `/dev/input`, readable whenever a keyboard comes or goes.
+    fn watch_inputs() -> Option<File> {
+        use std::os::fd::FromRawFd;
+        unsafe {
+            let fd = libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC);
+            if fd < 0 {
+                return None;
+            }
+            let file = File::from_raw_fd(fd);
+            (libc::inotify_add_watch(fd, c"/dev/input".as_ptr(), libc::IN_CREATE | libc::IN_DELETE) >= 0).then_some(file)
+        }
     }
 
     impl Device {
+        /// Open every keyboard not already open, and let go of unplugged ones.
+        fn find_inputs(&mut self) {
+            let present: Vec<String> = std::fs::read_dir("/dev/input")
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.starts_with("event"))
+                .collect();
+            self.inputs.retain(|(name, _)| present.contains(name));
+            for name in present {
+                if self.inputs.iter().any(|(open, _)| *open == name) {
+                    continue;
+                }
+                if let Ok(f) = OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(format!("/dev/input/{name}")) {
+                    self.inputs.push((name, f));
+                }
+            }
+        }
+
         pub fn open() -> std::io::Result<Self> {
-            let path = std::env::var("CATALYST_FB").unwrap_or_else(|_| "/dev/fb0".into());
-            let fb = OpenOptions::new().read(true).write(true).open(path)?;
+            let fb_path = panel_framebuffer();
+            let fb = OpenOptions::new().read(true).write(true).open(&fb_path)?;
             // fb_var_screeninfo is 160 bytes, fb_fix_screeninfo 80 on arm64.
             let mut var = [0u32; 40];
             let mut fix = [0u8; 80];
@@ -106,17 +248,25 @@ pub mod device {
             let (width, height, bpp) = (var[0] as usize, var[1] as usize, var[6] as usize);
             // line_length sits after id[16], smem_start (8), smem_len, type, type_aux, visual, 3 × u16 + pad.
             let stride = u32::from_ne_bytes(fix[48..52].try_into().unwrap()) as usize;
-            let mut inputs = Vec::new();
-            if let Ok(dir) = std::fs::read_dir("/dev/input") {
-                for entry in dir.flatten() {
-                    if entry.file_name().to_string_lossy().starts_with("event") {
-                        if let Ok(f) = OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(entry.path()) {
-                            inputs.push(f);
-                        }
-                    }
-                }
-            }
-            Ok(Device { fb, width, height, stride, bytes_per_pixel: bpp / 8, inputs, shift: false, ctrl: false, shown: Vec::new(), rows: Vec::new() })
+            let mut device = Device {
+                fb,
+                fb_path,
+                esc: Hold::default(),
+                esc_down: false,
+                width,
+                height,
+                stride,
+                bytes_per_pixel: bpp / 8,
+                inputs: Vec::new(),
+                watch: watch_inputs(),
+                shift: false,
+                ctrl: false,
+                shown: Vec::new(),
+                rows: Vec::new(),
+                _console: quiet_console(),
+            };
+            device.find_inputs();
+            Ok(device)
         }
 
         fn translate(&mut self, code: u16, value: i32) -> Option<Key> {
@@ -134,8 +284,20 @@ pub mod device {
                 self.ctrl = value != 0;
                 return None;
             }
+            if code == 1 {
+                // Esc: once when pressed. Holding it does not repeat; held for
+                // a second it becomes Leave (see `poll`).
+                self.esc_down = value != 0;
+                return (value == 1).then_some(Key::Back);
+            }
             if value == 0 {
                 return None; // releases
+            }
+            // Ctrl-Space (or the Opt key, where the keyboard reports one)
+            // brings the control centre down: once per press, since a held
+            // key repeating would bring it down and put it away in turns.
+            if code == 125 || code == 126 || (code == 57 && self.ctrl) {
+                return (value == 1).then_some(Key::Ctrl(' '));
             }
             Some(match code {
                 1 => Key::Back,
@@ -162,17 +324,33 @@ pub mod device {
     impl Platform for Device {
         fn poll(&mut self, timeout: Duration) -> Option<Vec<Key>> {
             let mut fds: Vec<libc::pollfd> =
-                self.inputs.iter().map(|f| libc::pollfd { fd: f.as_raw_fd(), events: libc::POLLIN, revents: 0 }).collect();
+                self.inputs.iter().map(|(_, f)| libc::pollfd { fd: f.as_raw_fd(), events: libc::POLLIN, revents: 0 }).collect();
+            if let Some(watch) = &self.watch {
+                fds.push(libc::pollfd { fd: watch.as_raw_fd(), events: libc::POLLIN, revents: 0 });
+            }
             unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, timeout.as_millis() as i32) };
             let mut keys = Vec::new();
             let mut events = Vec::new();
+            let mut changed = false;
             for (i, fd) in fds.iter().enumerate() {
+                if i >= self.inputs.len() {
+                    // The watch: a keyboard came or went. Empty it and look again below.
+                    if fd.revents & libc::POLLIN != 0 {
+                        let mut note = [0u8; 1024];
+                        while self.watch.as_mut().is_some_and(|w| w.read(&mut note).is_ok_and(|n| n > 0)) {}
+                        changed = true;
+                    }
+                    continue;
+                }
+                if fd.revents & (libc::POLLERR | libc::POLLHUP) != 0 {
+                    changed = true;
+                }
                 if fd.revents & libc::POLLIN == 0 {
                     continue;
                 }
                 // struct input_event on 64-bit: 16 bytes of time, type, code, value.
                 let mut buf = [0u8; 24 * 16];
-                while let Ok(n) = self.inputs[i].read(&mut buf) {
+                while let Ok(n) = self.inputs[i].1.read(&mut buf) {
                     if n < 24 {
                         break;
                     }
@@ -186,6 +364,12 @@ pub mod device {
             }
             for (code, value) in events {
                 keys.extend(self.translate(code, value));
+            }
+            if changed {
+                self.find_inputs();
+            }
+            if self.esc.update(self.esc_down) {
+                keys.push(Key::Leave);
             }
             Some(keys)
         }
@@ -202,12 +386,8 @@ pub mod device {
                 let src = &canvas.px[y * canvas.w as usize..][..w];
                 let row = &mut self.rows[(y - first) * self.stride..][..w * self.bytes_per_pixel];
                 match self.bytes_per_pixel {
-                    2 => {
-                        for (o, p) in row.chunks_exact_mut(2).zip(src) {
-                            let v = (((p >> 19) & 0x1f) << 11 | ((p >> 10) & 0x3f) << 5 | ((p >> 3) & 0x1f)) as u16;
-                            o.copy_from_slice(&v.to_ne_bytes());
-                        }
-                    }
+                    // Eight pixels at a time with NEON.
+                    2 => bezel::simd::rgb565_row(src, y, row),
                     4 => {
                         for (o, p) in row.chunks_exact_mut(4).zip(src) {
                             o.copy_from_slice(&p.to_ne_bytes());
@@ -219,6 +399,14 @@ pub mod device {
             // One write for the changed rows: the kernel sends those rows on.
             self.fb.write_all_at(&self.rows, (first * self.stride) as u64).ok();
             (end - first) as f32 / self.height.max(1) as f32
+        }
+
+        fn invalidate(&mut self) {
+            self.shown.clear();
+        }
+
+        fn framebuffer(&self) -> Option<String> {
+            Some(self.fb_path.clone())
         }
     }
 }
@@ -234,6 +422,9 @@ pub mod sim {
     pub struct Sim {
         window: Window,
         shown: Vec<u32>,
+        esc: Hold,
+        /// The frame as the panel would show it.
+        panel: Vec<u32>,
     }
 
     impl Sim {
@@ -242,7 +433,7 @@ pub mod sim {
                 .expect("open simulator window");
             // The shell starts frames on its own beat, as it does on the device.
             window.set_target_fps(0);
-            Sim { window, shown: Vec::new() }
+            Sim { window, shown: Vec::new(), esc: Hold::default(), panel: Vec::new() }
         }
     }
 
@@ -255,10 +446,15 @@ pub mod sim {
             std::thread::sleep(timeout.min(Duration::from_millis(8)));
             let shift = self.window.is_key_down(K::LeftShift) || self.window.is_key_down(K::RightShift);
             let ctrl = self.window.is_key_down(K::LeftCtrl) || self.window.is_key_down(K::RightCtrl);
-            let keys = self
+            let leave = self.esc.update(self.window.is_key_down(K::Escape));
+            let mut keys: Vec<Key> = self
                 .window
                 .get_keys_pressed(KeyRepeat::Yes)
                 .into_iter()
+                // Esc counts once per press (held, it becomes Leave), and so
+                // does Ctrl-Space, which would otherwise open and shut the
+                // control centre in turns while held.
+                .filter(|k| !(*k == K::Escape || (*k == K::Space && ctrl)) || self.window.is_key_pressed(*k, KeyRepeat::No))
                 .filter_map(|k| {
                     Some(match k {
                         K::Up => Key::Up,
@@ -271,6 +467,7 @@ pub mod sim {
                         K::Tab => Key::Tab,
                         K::PageUp => Key::PageUp,
                         K::PageDown => Key::PageDown,
+                        K::Space if ctrl => Key::Ctrl(' '),
                         K::Space => Key::Char(' '),
                         K::Period => Key::Char('.'),
                         K::Minus => Key::Char('-'),
@@ -292,11 +489,18 @@ pub mod sim {
                     })
                 })
                 .collect();
+            if leave {
+                keys.push(Key::Leave);
+            }
             Some(keys)
         }
 
         fn present_always(&self) -> bool {
             true
+        }
+
+        fn invalidate(&mut self) {
+            self.shown.clear();
         }
 
         fn set_status(&mut self, text: &str) {
@@ -305,7 +509,11 @@ pub mod sim {
 
         fn present(&mut self, canvas: &Canvas) -> f32 {
             let part = changed_rows(&mut self.shown, canvas).map_or(0.0, |(first, end)| (end - first) as f32 / canvas.h as f32);
-            self.window.update_with_buffer(&canvas.px, canvas.w as usize, canvas.h as usize).ok();
+            // As the panel shows it: 16-bit colour, dithered as on the device.
+            let w = canvas.w as usize;
+            self.panel.clear();
+            self.panel.extend(canvas.px.iter().enumerate().map(|(i, &p)| bezel::canvas::rgb565_to_rgb(bezel::canvas::rgb565_dithered(p, i % w, i / w))));
+            self.window.update_with_buffer(&self.panel, w, canvas.h as usize).ok();
             part
         }
     }
@@ -325,5 +533,28 @@ pub mod sim {
         enc.set_color(png::ColorType::Rgb);
         enc.set_depth(png::BitDepth::Eight);
         enc.write_header().unwrap().write_image_data(&rgb).unwrap();
+    }
+
+    /// Frames as an animated PNG, `delay_ms` apart, each pixel `scale`
+    /// pixels square: motion that can be watched without a device.
+    pub fn save_apng(frames: &[Vec<u32>], w: usize, h: usize, path: &std::path::Path, scale: usize, delay_ms: u16) {
+        let file = std::io::BufWriter::new(std::fs::File::create(path).expect("create animation"));
+        let mut enc = png::Encoder::new(file, (w * scale) as u32, (h * scale) as u32);
+        enc.set_color(png::ColorType::Rgb);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.set_animated(frames.len() as u32, 0).unwrap();
+        enc.set_frame_delay(delay_ms, 1000).unwrap();
+        let mut writer = enc.write_header().unwrap();
+        let mut rgb = vec![0u8; w * scale * h * scale * 3];
+        for frame in frames {
+            for y in 0..h * scale {
+                for x in 0..w * scale {
+                    let p = frame[(y / scale) * w + x / scale];
+                    rgb[(y * w * scale + x) * 3..][..3].copy_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8]);
+                }
+            }
+            writer.write_image_data(&rgb).unwrap();
+        }
+        writer.finish().unwrap();
     }
 }

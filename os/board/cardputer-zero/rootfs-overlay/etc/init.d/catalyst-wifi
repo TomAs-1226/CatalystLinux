@@ -1,35 +1,58 @@
 #!/sbin/openrc-run
-# Wi-Fi, when it has been switched on in Settings. The radio stays off
-# otherwise: it is the handheld's largest idle draw after the screen.
-# Networks and their passwords are kept in /data/wifi/wpa_supplicant.conf.
+# Wi-Fi, when it has been switched on in Settings. Otherwise the radio's
+# driver is not even loaded: it is the handheld's largest idle draw after the
+# screen. Networks and their passwords are kept in
+# /data/wifi/wpa_supplicant.conf.
+#
+# Three pieces come and go together: the driver, wpa_supplicant (joins
+# networks), and an ifplugd that asks for an address once one is joined.
 
-description="Wi-Fi (wpa_supplicant), only when enabled"
-command=/usr/sbin/wpa_supplicant
-command_args="-i wlan0 -c /data/wifi/wpa_supplicant.conf"
-command_background=true
-pidfile=/run/wpa_supplicant.pid
+description="Wi-Fi, only when enabled"
 
 depend() {
-	need localmount
-	after sysv-rcs modules
+	need catalyst-early
+	after catalyst-late
 }
 
-start_pre() {
+start() {
 	if [ ! -e /data/catalyst/wifi-enabled ]; then
 		einfo "Wi-Fi is switched off"
+		return 0
+	fi
+	ebegin "Starting Wi-Fi"
+	modprobe brcmfmac
+	# The radio takes a moment to load its firmware and appear.
+	n=0
+	while [ ! -e /sys/class/net/wlan0 ] && [ $n -lt 50 ]; do
+		sleep 0.1
+		n=$((n + 1))
+	done
+	if [ ! -e /sys/class/net/wlan0 ]; then
+		eend 1 "the radio did not appear"
 		return 1
 	fi
 	mkdir -p /data/wifi
 	if [ ! -e /data/wifi/wpa_supplicant.conf ]; then
 		# update_config lets the shell save networks; the control socket is how it asks.
-		printf 'ctrl_interface=/run/wpa_supplicant\nupdate_config=1\n' > /data/wifi/wpa_supplicant.conf
+		printf 'ctrl_interface=/run/wpa_supplicant\nupdate_config=1\n' >/data/wifi/wpa_supplicant.conf
 	fi
 	chmod 600 /data/wifi/wpa_supplicant.conf
 	ip link set wlan0 up 2>/dev/null
-	return 0
+	wpa_supplicant -B -P /run/wpa_supplicant.pid -i wlan0 -c /data/wifi/wpa_supplicant.conf >/dev/null
+	start-stop-daemon -S -b -m -p /run/ifplugd.wlan0.pid -x /usr/sbin/ifplugd -- \
+		-n -i wlan0 -I -u 0 -d 2 -t 2 -r /usr/sbin/catalyst-net -x dhcp-only
+	eend 0
 }
 
-stop_post() {
+stop() {
+	ebegin "Stopping Wi-Fi"
+	start-stop-daemon -K -q -p /run/ifplugd.wlan0.pid 2>/dev/null
+	start-stop-daemon -K -q -p /run/wpa_supplicant.pid 2>/dev/null
+	/usr/sbin/catalyst-net wlan0 down
+	rm -f /run/ifplugd.wlan0.pid
 	ip link set wlan0 down 2>/dev/null
-	return 0
+	# Unload the driver, and what it alone was using: the radio goes quiet.
+	sleep 0.3
+	modprobe -r brcmfmac 2>/dev/null
+	eend 0
 }

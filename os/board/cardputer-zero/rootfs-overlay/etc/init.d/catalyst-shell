@@ -1,5 +1,7 @@
 #!/sbin/openrc-run
 # The Catalyst Linux GUI. Supervised: if it ever exits it comes straight back.
+# It starts as soon as the panel is up; the rest of the system (catalyst-late)
+# comes up behind it.
 
 description="Catalyst Linux shell"
 supervisor=supervise-daemon
@@ -11,17 +13,16 @@ output_log=/tmp/catalyst-shell.log
 error_log=/tmp/catalyst-shell.log
 
 depend() {
-	need localmount
-	after modules sysv-rcs
+	need catalyst-early
 }
 
 start_pre() {
-	mkdir -p /data/catalyst 2>/dev/null
+	mkdir -p /data/catalyst /data/apps 2>/dev/null
 	# Give the panel driver a moment to bind before the first frame.
 	local n=0
-	while [ ! -e /dev/fb0 ] && [ $n -lt 50 ]; do
+	while ! ls /dev/fb[0-9] >/dev/null 2>&1 && [ $n -lt 30 ]; do
 		sleep 0.1
 		n=$((n + 1))
 	done
-	[ -e /dev/fb0 ] || eerror "no framebuffer: is the panel driver loaded?"
+	ls /dev/fb[0-9] >/dev/null 2>&1 || eerror "no framebuffer: is the panel driver loaded?"
 }

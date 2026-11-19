@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/detent", "crates/bezel", "crates/nt4", "apps/shell"]
+members = ["crates/detent", "crates/bezel", "crates/nt4", "apps/shell", "apps/update", "apps/flasher"]
 
 [workspace.package]
 version = "0.1.0"
@@ -28,3 +28,13 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package."*"]
 opt-level = 2
+
+# The simulator on a development PC: as fast as the device build where it
+# counts, but compiled in pieces without whole-program optimisation. It
+# builds several times quicker, and an older compiler that fails on the one
+# large unit the device build makes (Rust 1.92 on Windows does) is not asked
+# to make it. Use: cargo run --profile sim -p catalyst-shell
+[profile.sim]
+inherits = "release"
+lto = false
+codegen-units = 16

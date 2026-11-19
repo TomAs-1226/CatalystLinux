@@ -1,0 +1,10 @@
+# On top of Buildroot's BusyBox configuration.
+# ifplugd: told by the kernel when a network cable goes in or out, instead of
+# a script asking every two seconds.
+CONFIG_IFPLUGD=y
+# The system log kept in a small ring in memory (read it with `logread`),
+# rather than a growing file.
+CONFIG_FEATURE_IPC_SYSLOG=y
+CONFIG_FEATURE_IPC_SYSLOG_BUFFER_SIZE=64
+CONFIG_LOGREAD=y
+CONFIG_FEATURE_LOGREAD_REDUCED_LOCKING=y

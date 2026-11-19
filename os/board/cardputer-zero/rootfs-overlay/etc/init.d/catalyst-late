@@ -1,0 +1,40 @@
+#!/sbin/openrc-run
+# Everything that can wait until the screen is on: the name, the rest of the
+# board's drivers, hotplug, and the system log.
+
+description="The rest of the system, behind the shell"
+
+depend() {
+	need catalyst-early
+	after catalyst-shell
+}
+
+start() {
+	ebegin "Bringing up the rest of the system"
+	hostname -F /etc/hostname
+	ip link set lo up
+
+	# The system log, kept as a 64 KB ring in memory: read it with `logread`.
+	# (The kernel's own log is `dmesg`.)
+	syslogd -C64
+
+	# Battery gauge and power-fail watcher.
+	# shellcheck disable=SC2046
+	modprobe -a $(grep -v '^#' /etc/modules-load.d/cardputer-zero.late) 2>/dev/null
+
+	# Hotplug: load a driver when its device appears (a USB adapter, a drive),
+	# and now for whatever is already there.
+	start-stop-daemon -S -b -x /sbin/mdev -- -df
+	find /sys/devices -name modalias -print0 2>/dev/null | xargs -0 sort -u | tr '\n' '\0' | xargs -0 modprobe -abq 2>/dev/null
+
+	# Looking through /sys above left the kernel remembering thousands of file
+	# names it will not need again; hand that memory back.
+	echo 2 >/proc/sys/vm/drop_caches
+	eend 0
+}
+
+stop() {
+	# Keep the clock chip in step with what the system learned (from the robot or the network).
+	[ -e /dev/rtc0 ] && hwclock -w -u 2>/dev/null
+	return 0
+}

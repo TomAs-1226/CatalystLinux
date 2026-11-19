@@ -14,4 +14,5 @@ echo
 echo "what fills the root filesystem:"
 du -sk target/lib/modules target/usr/bin target/usr/lib target/lib/firmware target/usr/sbin target/sbin target/bin target/lib 2>/dev/null |
 	sort -rn | awk '{ printf "  %6.1f MB  /%s\n", $1 / 1024, substr($2, 8) }'
-echo "  catalyst-shell alone: $(mb "$(stat -c %s target/usr/bin/catalyst-shell)") (about 4 MB of that is the two fonts)"
+echo "  catalyst-shell alone: $(mb "$(stat -c %s target/usr/bin/catalyst-shell)") (0.9 MB of that is the two fonts)"
+echo "  kernel in memory: $(size build/linux-custom/vmlinux | awk 'NR == 2 { printf "%.1f MB of code and data", ($1 + $2 + $3) / 1048576 }'); drivers on the card: $(find target/lib/modules -name '*.ko*' | wc -l) files"

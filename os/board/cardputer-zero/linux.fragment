@@ -1,5 +1,10 @@
-# On top of bcm2711_defconfig: drop what a handheld diagnostics tool never
-# uses and that costs memory just by being built in.
+# On top of bcm2711_defconfig (the Raspberry Pi kernel as shipped).
+#
+# The rule: cut what is built into the kernel and costs memory whether or not
+# it is used; keep every USB driver as a module on the card, so anything the
+# Pi kernel knows how to talk to over USB still works when plugged in.
+
+# --- already off since the first image ---
 # CONFIG_SWAP is not set
 # CONFIG_AUDIT is not set
 # CONFIG_FTRACE is not set
@@ -21,3 +26,122 @@ CONFIG_VFAT_FS=y
 CONFIG_DEVTMPFS=y
 CONFIG_DEVTMPFS_MOUNT=y
 CONFIG_DRM_FBDEV_EMULATION=y
+
+# --- processor features a Cortex-A53 does not have, and hosting other systems ---
+# CONFIG_VIRTUALIZATION is not set
+# CONFIG_NUMA is not set
+# CONFIG_EFI is not set
+# CONFIG_ARM64_SVE is not set
+# CONFIG_ARM64_SME is not set
+# CONFIG_ARM64_MTE is not set
+# CONFIG_ARM64_PTR_AUTH is not set
+# CONFIG_ARM64_AMU_EXTN is not set
+# 32-bit programs: the whole system is 64-bit.
+# CONFIG_COMPAT is not set
+
+# --- other Raspberry Pi models: the Pi 4's and Pi 5's own chips ---
+# CONFIG_ARCH_BRCMSTB is not set
+# CONFIG_MACB is not set
+# CONFIG_BCMASP is not set
+# CONFIG_MDIO_BCM_UNIMAC is not set
+# CONFIG_USB_DWC3 is not set
+# CONFIG_USB_BDC_UDC is not set
+# CONFIG_PHY_BRCM_USB is not set
+
+# --- buses and storage the CM0 has no way to carry ---
+# CONFIG_PCI is not set
+# CONFIG_BLK_DEV_NVME is not set
+# CONFIG_ATA is not set
+# CONFIG_BCMGENET is not set
+# CONFIG_IOMMU_SUPPORT is not set
+# CONFIG_MD is not set
+# CONFIG_ISCSI_TCP is not set
+# CONFIG_SCSI_ISCSI_ATTRS is not set
+# CONFIG_ISCSI_BOOT_SYSFS is not set
+# CONFIG_BLK_DEV_RAM is not set
+# CONFIG_BLK_DEV_INITRD is not set
+
+# --- USB drivers that were built in: now modules, loaded when the device appears ---
+CONFIG_SCSI=m
+CONFIG_BLK_DEV_SD=m
+CONFIG_USB_STORAGE=m
+CONFIG_USB_UAS=m
+CONFIG_USB_USBNET=m
+CONFIG_USB_LAN78XX=m
+CONFIG_USB_NET_SMSC95XX=m
+CONFIG_USB_XHCI_HCD=m
+CONFIG_PHYLIB=m
+CONFIG_MICROCHIP_PHY=m
+CONFIG_SMSC_PHY=m
+CONFIG_BROADCOM_PHY=m
+CONFIG_BCM7XXX_PHY=m
+CONFIG_MICREL_PHY=m
+CONFIG_BLK_DEV_LOOP=m
+CONFIG_RC_CORE=m
+
+# --- the Pi's video-processor services: nothing here uses them (the panel is
+# SPI, the camera goes through unicam). Modules, and kept from loading by
+# /etc/modprobe.d/catalyst.conf. ---
+CONFIG_BCM2835_VCHIQ=m
+CONFIG_FB_BCM2708=m
+
+# --- server networking ---
+# CONFIG_MPTCP is not set
+# CONFIG_NET_SCHED is not set
+# CONFIG_DCB is not set
+# CONFIG_LWTUNNEL is not set
+# CONFIG_MPLS is not set
+# CONFIG_IPV6_ILA is not set
+# CONFIG_IPV6_SEG6_LWTUNNEL is not set
+# CONFIG_IPV6_RPL_LWTUNNEL is not set
+# CONFIG_IPV6_IOAM6_LWTUNNEL is not set
+# CONFIG_IP_MROUTE is not set
+# CONFIG_IPV6_MROUTE is not set
+# CONFIG_IP_PNP is not set
+# CONFIG_BLK_DEV_RBD is not set
+# CONFIG_NET_SWITCHDEV is not set
+# CONFIG_NET_DSA is not set
+# CONFIG_XFRM_USER is not set
+# CONFIG_XFRM_INTERFACE is not set
+# CONFIG_NET_KEY is not set
+# CONFIG_INET_AH is not set
+# CONFIG_INET_ESP is not set
+# CONFIG_INET_IPCOMP is not set
+# CONFIG_INET6_AH is not set
+# CONFIG_INET6_ESP is not set
+# CONFIG_INET6_IPCOMP is not set
+# CONFIG_NET_IPVTI is not set
+# CONFIG_IPV6_VTI is not set
+# CONFIG_IP_SCTP is not set
+# CONFIG_BATMAN_ADV is not set
+# CONFIG_OPENVSWITCH is not set
+# CONFIG_L2TP is not set
+# CONFIG_ATM is not set
+# CONFIG_OCFS2_FS is not set
+# CONFIG_GFS2_FS is not set
+# CONFIG_DLM is not set
+# CONFIG_CEPH_FS is not set
+# CONFIG_CEPH_LIB is not set
+# CONFIG_BPF_JIT is not set
+
+# --- accounting, containers and debugging that run all the time ---
+# CONFIG_SCHED_AUTOGROUP is not set
+# CONFIG_CGROUPS is not set
+# CONFIG_PERF_EVENTS is not set
+# CONFIG_KALLSYMS_ALL is not set
+# CONFIG_DEBUG_FS is not set
+# CONFIG_LATENCYTOP is not set
+# CONFIG_DETECT_HUNG_TASK is not set
+# CONFIG_TASKSTATS is not set
+# CONFIG_PSI is not set
+# CONFIG_CHECKPOINT_RESTORE is not set
+# CONFIG_ANDROID_BINDER_IPC is not set
+# CONFIG_QUOTA is not set
+# CONFIG_AUTOFS_FS is not set
+# CONFIG_FS_ENCRYPTION is not set
+# CONFIG_PSTORE is not set
+# CONFIG_INPUT_MOUSEDEV is not set
+# Each processor keeping its own spare memory blocks is speed for servers.
+# CONFIG_SLUB_CPU_PARTIAL is not set
+# The kernel log: 64 KB of text instead of 128 (and its index shrinks with it).
+CONFIG_LOG_BUF_SHIFT=16

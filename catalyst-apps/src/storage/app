@@ -1,0 +1,6 @@
+name = Storage
+icon = folder
+about = what is using the card
+version = 1.0.0
+run = sh ./run.sh
+screen = terminal

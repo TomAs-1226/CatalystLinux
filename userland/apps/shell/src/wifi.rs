@@ -154,6 +154,63 @@ pub fn unescape(ssid: &str) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+/// Where wpa_supplicant keeps the networks it knows.
+const CONF: &str = "/data/wifi/wpa_supplicant.conf";
+
+/// Add networks to wpa_supplicant's file directly, for when the radio is
+/// not up yet to be asked (setup from a computer): each as a `network`
+/// block, the name in hex and the passphrase quoted, as `set_network` would
+/// write them. Switching Wi-Fi on afterwards reads them in.
+pub fn add_networks(file: &std::path::Path, networks: &[(String, Option<String>)]) -> std::io::Result<()> {
+    let mut text = std::fs::read_to_string(file).unwrap_or_else(|_| "ctrl_interface=/run/wpa_supplicant\nupdate_config=1\n".into());
+    for (ssid, password) in networks {
+        // What wpa_supplicant would refuse (and refusing one network, it
+        // reads none): a name over 32 bytes, a passphrase not 8 to 63
+        // characters, or one with a line break, which would end the block.
+        let bad_name = ssid.is_empty() || ssid.len() > 32;
+        let bad_password = password.as_deref().is_some_and(|p| !(8..=63).contains(&p.chars().count()) || p.contains(['\n', '\r']));
+        if bad_name || bad_password {
+            continue;
+        }
+        let secret = match password {
+            Some(p) => format!("\tpsk={}\n", psk_value(p)),
+            None => "\tkey_mgmt=NONE\n".to_owned(),
+        };
+        text.push_str(&format!("\nnetwork={{\n\tssid={}\n{secret}}}\n", ssid_value(ssid)));
+    }
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    crate::sys::write_private(file, text.as_bytes())
+}
+
+/// The networks a computer sent during setup, kept and the radio switched on.
+pub fn add_and_switch_on(networks: &[(String, Option<String>)]) {
+    if networks.is_empty() {
+        return;
+    }
+    let file = if std::path::Path::new(TOGGLE).exists() { std::path::PathBuf::from(CONF) } else { crate::config_dir().join("wpa_supplicant.conf") };
+    if add_networks(&file, networks).is_ok() {
+        switch(true);
+    }
+}
+
+/// A network name as `set_network … ssid` takes it: as hex, unquoted, which
+/// wpa_supplicant reads byte for byte. A quoted name would be taken from the
+/// first quote to the last with no escapes at all, so quotes, backslashes
+/// and letters beyond ASCII are safest this way.
+pub fn ssid_value(ssid: &str) -> String {
+    ssid.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A passphrase as `set_network … psk` takes it: between double quotes,
+/// exactly as typed. wpa_supplicant takes everything between the first quote
+/// and the last, so quotes and backslashes inside need no escaping (and
+/// escaping them would change the passphrase).
+pub fn psk_value(password: &str) -> String {
+    format!("\"{password}\"")
+}
+
 /// `scan_results`: bssid, frequency, signal, flags, ssid, tab-separated.
 /// Access points of one network are folded into its strongest.
 pub fn parse_scan(text: &str) -> Vec<Network> {
@@ -234,6 +291,28 @@ fn enabled() -> bool {
     std::path::Path::new(ENABLED_FLAG).exists()
 }
 
+/// Off the handheld there is no radio: this stands in for its switch.
+static DEMO_ON: AtomicBool = AtomicBool::new(false);
+
+/// Whether Wi-Fi is switched on: all a quick switch needs to know.
+pub fn switched_on() -> bool {
+    if std::path::Path::new(TOGGLE).exists() {
+        enabled()
+    } else {
+        DEMO_ON.load(Ordering::Relaxed)
+    }
+}
+
+/// Switch Wi-Fi on or off without waiting for it: bringing the radio up
+/// takes a few seconds.
+pub fn switch(on: bool) {
+    if std::path::Path::new(TOGGLE).exists() {
+        thread::spawn(move || Command::new(TOGGLE).arg(if on { "on" } else { "off" }).status().ok());
+    } else {
+        DEMO_ON.store(on, Ordering::Relaxed);
+    }
+}
+
 fn read_state() -> State {
     if !enabled() {
         return State { enabled: false, networks: Vec::new(), status: "off".into() };
@@ -255,11 +334,9 @@ fn join(ssid: &str, password: Option<&str>) {
                 cli(&["remove_network", &id.to_string()]);
             }
             let Some(id) = cli(&["add_network"]).map(|t| t.trim().to_owned()).filter(|t| t.parse::<u32>().is_ok()) else { return };
-            // wpa_cli wants strings in double quotes of their own.
-            let quoted = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
-            cli(&["set_network", &id, "ssid", &quoted(ssid)]);
+            cli(&["set_network", &id, "ssid", &ssid_value(ssid)]);
             match password {
-                Some(password) => cli(&["set_network", &id, "psk", &quoted(password)]),
+                Some(password) => cli(&["set_network", &id, "psk", &psk_value(password)]),
                 None => cli(&["set_network", &id, "key_mgmt", "NONE"]),
             };
             id
@@ -371,6 +448,34 @@ fn run_demo(shared: &Shared, rx: &Receiver<Cmd>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_and_passwords_reach_wpa_supplicant_unchanged() {
+        assert_eq!(ssid_value("Pit \"5805\""), "50697420223538303522");
+        assert_eq!(ssid_value("café"), "636166c3a9");
+        // A passphrase goes between quotes as it is: no escapes added.
+        assert_eq!(psk_value(r#"pa"ss\word"#), r#""pa"ss\word""#);
+    }
+
+    #[test]
+    fn networks_from_setup_are_written_as_wpa_supplicant_reads_them() {
+        let file = std::env::temp_dir().join(format!("catalyst-wpa-{}.conf", std::process::id()));
+        std::fs::remove_file(&file).ok();
+        let networks = [
+            ("Pit".into(), Some("hunter22".into())),
+            ("Open".into(), None),
+            ("Bad".into(), Some("hunter22\nx".into())),
+            ("Short".into(), Some("abc".into())),
+        ];
+        add_networks(&file, &networks).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.starts_with("ctrl_interface=/run/wpa_supplicant\nupdate_config=1\n"));
+        assert!(text.contains("network={\n\tssid=506974\n\tpsk=\"hunter22\"\n}"));
+        assert!(text.contains("network={\n\tssid=4f70656e\n\tkey_mgmt=NONE\n}"));
+        assert!(!text.contains("426164"), "a passphrase with a line break is not written");
+        assert!(!text.contains("53686f7274"), "nor one wpa_supplicant would refuse as too short");
+        std::fs::remove_file(&file).ok();
+    }
 
     const SCAN: &str = "bssid / frequency / signal level / flags / ssid\n\
 aa:bb:cc:00:00:01\t2437\t-52\t[WPA2-PSK-CCMP][ESS]\t5805_Robot\n\

@@ -14,6 +14,7 @@ BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_MDEV=y
 # BR2_TARGET_GENERIC_REMOUNT_ROOTFS_RW is not set
 BR2_TARGET_GENERIC_GETTY_PORT="ttyAMA0"
 BR2_TARGET_GENERIC_GETTY_BAUDRATE_115200=y
+BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_CATALYST_PATH)/board/cardputer-zero/busybox.fragment"
 BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_CATALYST_PATH)/board/cardputer-zero/rootfs-overlay"
 BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_CATALYST_PATH)/board/cardputer-zero/post-build.sh"
 BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_CATALYST_PATH)/board/cardputer-zero/post-image.sh"
@@ -48,10 +49,31 @@ BR2_PACKAGE_DROPBEAR=y
 # resize2fs, to grow /data over the whole card on first boot.
 BR2_PACKAGE_E2FSPROGS=y
 BR2_PACKAGE_E2FSPROGS_RESIZE2FS=y
+# HTTPS for the event schedule, the app catalogue and git: curl on mbedTLS,
+# one small TLS library shared by all three, with the certificates to check
+# the servers by. Nothing of it runs until something asks for a download.
+BR2_PACKAGE_LIBCURL=y
+BR2_PACKAGE_LIBCURL_CURL=y
+BR2_PACKAGE_LIBCURL_MBEDTLS=y
+BR2_PACKAGE_MBEDTLS=y
+BR2_PACKAGE_CA_CERTIFICATES=y
+# Git on the handheld: a repository's status, log and diffs, and pulling.
+BR2_PACKAGE_GIT=y
+# The GPU: Mesa's vc4 driver for the VideoCore IV (OpenGL ES 2.0 through
+# EGL), which the shell uses for glass, wallpapers and compositing when it
+# works, falling back to the processor when it does not. softpipe is Mesa's
+# software renderer: the same GL path on the processor, which is how the
+# GPU path is tested where there is no VideoCore (the emulator).
+BR2_PACKAGE_MESA3D=y
+BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_VC4=y
+BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_SOFTPIPE=y
+BR2_PACKAGE_MESA3D_OPENGL_EGL=y
+BR2_PACKAGE_MESA3D_OPENGL_ES=y
+BR2_PACKAGE_MESA3D_GBM=y
 BR2_PACKAGE_M5STACK_CARDPUTER_ZERO=y
 BR2_TARGET_ROOTFS_EXT2=y
 BR2_TARGET_ROOTFS_EXT2_4=y
-BR2_TARGET_ROOTFS_EXT2_SIZE="96M"
+BR2_TARGET_ROOTFS_EXT2_SIZE="160M"
 # BR2_TARGET_ROOTFS_TAR is not set
 BR2_PACKAGE_HOST_DOSFSTOOLS=y
 BR2_PACKAGE_HOST_GENIMAGE=y

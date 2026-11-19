@@ -8,11 +8,11 @@ use bezel::{Align, Color, Rect};
 use detent::{role, Animated};
 
 use crate::agent::Agent;
-use crate::gfx::{Gfx, ListState, TextSize, GAP, H, PAD, TILE_RADIUS, W};
+use crate::gfx::{Gfx, ListState, TextSize, GAP, H, PAD, W};
 use crate::logs::Digest;
 use crate::platform::Key;
 use crate::robot::Robot;
-use crate::shell::{Cx, Nav, Screen};
+use crate::shell::{Cx, HomeStyle, Nav, Screen, Widget};
 use crate::wifi::Wifi;
 use crate::wpilog::Level;
 
@@ -20,11 +20,11 @@ fn dash(v: Option<String>) -> String {
     v.unwrap_or_else(|| "–".into())
 }
 
-/// Colour has jobs. On this device: signal marks a fault, amber a warning,
-/// ice what is on or well.
-fn severity_color(g: &Gfx, severity: &str) -> Color {
+/// Colour has jobs. On this device: red marks a fault (the signal, when the
+/// accent is itself warm), amber a warning, ice what is on or well.
+pub fn severity_color(g: &Gfx, severity: &str) -> Color {
     match severity {
-        "ERROR" => g.tokens.signal,
+        "ERROR" => g.fault(),
         "WARN" => g.tokens.amber_ink,
         _ => g.tokens.dim,
     }
@@ -49,49 +49,314 @@ struct App {
     open: fn(&Robot) -> Box<dyn Screen>,
 }
 
-const APPS: [App; 10] = [
+const APPS: [App; 13] = [
     App { icon: "smart_toy", name: "Robot", open: |_| Box::new(RobotScreen::default()) },
     App { icon: "monitor_heart", name: "Health", open: |_| Box::new(Health::default()) },
     App { icon: "description", name: "Logs", open: |_| Box::new(LogsScreen::default()) },
+    App { icon: "event", name: "Schedule", open: |_| Box::new(crate::schedule::ScheduleScreen::default()) },
     App { icon: "account_tree", name: "Tables", open: |_| Box::new(Tables::new()) },
     App { icon: "speed", name: "Loop", open: |_| Box::new(LoopTime) },
     App { icon: "precision_manufacturing", name: "Motors", open: |_| Box::new(Motors::default()) },
     App { icon: "developer_board", name: "Console", open: |robot| Box::new(Console::open(robot)) },
     App { icon: "terminal", name: "Terminal", open: |_| Box::new(crate::terminal::Terminal::new()) },
     App { icon: "folder", name: "Files", open: |_| Box::new(crate::files::Files::new()) },
+    App { icon: "commit", name: "Git", open: |_| Box::new(crate::git::GitScreen::new()) },
+    App { icon: "storefront", name: "Catalogue", open: |_| Box::new(crate::catalogue::CatalogueScreen::new()) },
     App { icon: "settings", name: "Settings", open: |_| Box::new(SettingsApp::new()) },
 ];
 
+/// The built-in apps, for search: index, icon and name.
+pub fn builtin_apps() -> impl Iterator<Item = (usize, &'static str, &'static str)> {
+    APPS.iter().enumerate().map(|(i, app)| (i, app.icon, app.name))
+}
+
+/// Open a built-in app by its place in the list.
+pub fn open_builtin(index: usize, robot: &Robot) -> Box<dyn Screen> {
+    (APPS[index].open)(robot)
+}
+
+/// One of Home's tiles: a built-in app, or one found on the storage.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Tile {
+    Builtin(usize),
+    External(usize),
+}
+
 pub struct Home {
     focus: usize,
-    /// Which page is in view; turns on the page spring.
+    /// Which page of the grid is in view; turns on the page spring.
     page: Animated,
+    /// Where the carousel has turned to, in apps: it glides to the focused
+    /// one and lands like a dial on its detent.
+    turn: Animated,
+    /// 0 with the apps in view, 1 with the first glance page (one step to
+    /// their left), 2 with the next one left of that, and so on.
+    glance: Animated,
+    glance_page: usize,
+    /// The glance card in focus: its place in the glance list.
+    card: usize,
+    /// Each glance card where it was last drawn: Enter opens out of it.
+    cards: Vec<Rect>,
+    /// Which glance card is the robot's, as last drawn.
+    robot_card: Option<usize>,
+    /// Which Home this is drawn as, as last seen in the settings.
+    style: HomeStyle,
     /// Columns in the grid: fewer, larger tiles at the large text size.
     columns: usize,
     /// Where each tile was last drawn: an app opens out of its tile.
     rects: Vec<Rect>,
+    /// The carousel's middle card.
+    middle: Rect,
     /// Seconds since Home arrived, for the launcher cascade.
     arrived: f32,
+    /// External apps found on the storage.
+    external: Vec<crate::apps::App>,
+    /// Home's tiles in the order chosen in Settings › Home › Arrange apps,
+    /// those hidden there left out; and the arrangement they were laid out by.
+    tiles: Vec<Tile>,
+    arranged_by: crate::shell::Arrangement,
+    /// What the glance page says about this device, re-read now and then.
+    device: DeviceFacts,
+    device_age: f32,
+    /// The clock setting the facts were read with.
+    h24: bool,
+    /// Enter pressed on a tile: how long it has been pressed in. The app
+    /// grows out of it once it has been, `PRESS_IN` later.
+    opening: Option<f32>,
+    /// Each tile's lift (1 while it has the focus), its pulse when what it
+    /// reports changes for better or worse, and what it last reported.
+    lift: Vec<Animated>,
+    pulse: Vec<Animated>,
+    seen: Vec<Option<String>>,
 }
+
+/// The focused tile lifts on Bezel's detent spring: a touch larger and
+/// lighter, with the smallest settle.
+fn lift_spring() -> Animated {
+    Animated::new(0.0, role::detent()).with_rest(0.01)
+}
+
+/// A tile's pulse fades on the smooth spring.
+fn pulse_spring() -> Animated {
+    Animated::new(0.0, role::smooth()).with_rest(0.01)
+}
+
+/// A tile as Bezel's wall panels have one: the app's name small, lowercase
+/// and in the mono voice at the top, its icon at the top right (unless a
+/// dot or a star is there), and what it reports below, in the display voice
+/// and large when it is a reading.
+fn bezel_tile(g: &mut Gfx, r: Rect, icon: &str, name: &str, status: &str, focused: bool, corner_taken: bool) {
+    let (t, ty) = (g.tokens, g.ty);
+    let quiet = if focused { t.ink } else { t.dim };
+    let label_cy = r.y + 7.0 + ty.caption.size * 0.5;
+    g.text_fit(r.x + 9.0, label_cy, &name.to_lowercase(), ty.caption, quiet, r.w - 34.0);
+    if !corner_taken {
+        g.icon(icon, focused, r.right() - 13.0, label_cy, 14.0, quiet);
+    }
+    let baseline = r.bottom() - 8.0;
+    match split_reading(status) {
+        Some((value, unit)) => {
+            let size = (if r.w > 120.0 { 30.0 } else { 26.0f32 }).min(r.h - ty.caption.size - 20.0);
+            let big = ty.display(size);
+            let (value_w, unit_w) = (g.measure(value, big), g.measure(unit, ty.caption));
+            if value_w + 3.0 + unit_w <= r.w - 18.0 {
+                // The unit beside the number.
+                let w = g.text(r.x + 8.0, baseline, value, big, t.ink);
+                g.text(r.x + 11.0 + w, baseline, unit, ty.caption, t.dim);
+            } else {
+                // A long one ("in 8 min") on its own line under the name,
+                // and the number a size smaller to make room.
+                let unit = g.text.fit(unit, &ty.caption, r.w - 18.0);
+                g.text_at(r.x + 9.0, label_cy + ty.caption.size + 3.0, Align::Left, &unit, ty.caption, t.dim);
+                let big = ty.display(size.min(r.h - 2.0 * ty.caption.size - 22.0));
+                let value = g.text.fit(value, &big, r.w - 18.0);
+                g.text(r.x + 8.0, baseline, &value, big, t.ink);
+            }
+        }
+        None => {
+            g.text_fit(r.x + 9.0, baseline - ty.name.size * 0.36, status, ty.name, t.ink, r.w - 18.0);
+        }
+    }
+}
+
+/// A status as a reading: the number (or a match like "Q31", or "–") to
+/// show large, and what follows it. `None` when it is words.
+fn split_reading(status: &str) -> Option<(&str, &str)> {
+    let (first, rest) = status.split_once(' ').unwrap_or((status, ""));
+    let mut chars = first.chars();
+    let lead = chars.next()?;
+    let numeric = lead.is_ascii_digit() || first == "–";
+    let label = lead.is_ascii_uppercase() && first.len() <= 4 && first.len() > 1 && chars.all(|c| c.is_ascii_digit());
+    (numeric || label).then_some((first, rest))
+}
+
+/// How long a tile is pressed in before its app grows out of it: long enough
+/// to be seen, short enough not to be waited for. (My own tuning.)
+const PRESS_IN: f32 = 0.07;
 
 /// Bezel's launcher cascade: tiles spring into place one after another,
 /// spread over this long from the first to the last.
 const CASCADE_SPREAD: f32 = 0.28;
 const CASCADE_OVER: f32 = CASCADE_SPREAD + 0.9;
 
+/// The handheld's own vital signs, as the glance page shows them.
+#[derive(Clone, Default, PartialEq)]
+struct DeviceFacts {
+    clock: String,
+    date: String,
+    rows: Vec<(&'static str, String)>,
+}
+
+impl DeviceFacts {
+    fn read(h24: bool) -> Self {
+        use crate::sys;
+        let now = chrono::Local::now();
+        // Off the handheld there is nothing to read: show what it would look like.
+        let stand_in = |real: Option<String>, sample: &str| if cfg!(target_os = "linux") { dash(real) } else { sample.to_owned() };
+        let wired = sys::address("eth0").filter(|a| a.contains('.'));
+        let wireless = sys::address("wlan0").filter(|a| a.contains('.'));
+        DeviceFacts {
+            clock: sys::clock(h24),
+            date: now.format("%a %-d %b").to_string().to_lowercase(),
+            rows: vec![
+                ("battery", stand_in(sys::battery_percent().map(|p| format!("{p}%")), "82%")),
+                ("memory", stand_in(sys::memory(), "31 of 432 mb")),
+                ("disk", stand_in(sys::storage(), "1.2 of 29 gb")),
+                (if wired.is_none() && wireless.is_some() { "wi-fi" } else { "wired" }, stand_in(wired.or(wireless), "10.58.5.77")),
+            ],
+        }
+    }
+}
+
 impl Home {
     pub fn new() -> Self {
-        Home { focus: 0, page: Animated::new(0.0, role::page()).with_rest(0.002), columns: 3, rects: Vec::new(), arrived: 0.0 }
+        Home {
+            focus: 0,
+            page: Animated::new(0.0, role::page()).with_rest(0.002),
+            turn: Animated::new(0.0, role::detent()).with_rest(0.002),
+            glance: Animated::new(0.0, role::page()).with_rest(0.002),
+            glance_page: 0,
+            card: 0,
+            cards: Vec::new(),
+            robot_card: None,
+            style: HomeStyle::Grid,
+            columns: 3,
+            rects: Vec::new(),
+            middle: Rect::default(),
+            arrived: 0.0,
+            external: crate::apps::find(),
+            tiles: Vec::new(),
+            arranged_by: crate::shell::Arrangement::default(),
+            device: DeviceFacts::read(true),
+            device_age: 0.0,
+            h24: true,
+            opening: None,
+            lift: Vec::new(),
+            pulse: Vec::new(),
+            seen: Vec::new(),
+        }
+        .arranged(&crate::shell::Arrangement::default())
+    }
+
+    /// Lay the tiles out: the apps named in `order` first, in that order,
+    /// then the rest as they come (built-in, then external), leaving out
+    /// those in `hidden`. Settings is never hidden: it is the way back.
+    fn arranged(mut self, arrangement: &crate::shell::Arrangement) -> Self {
+        self.arrange(arrangement);
+        self
+    }
+
+    fn arrange(&mut self, arrangement: &crate::shell::Arrangement) {
+        let focused = self.tiles.get(self.focus).map(|t| self.tile_name(*t).to_owned());
+        self.arrange_around(arrangement, focused);
+    }
+
+    /// What a tile pulses for when it changes: for Health, Logs and Motors
+    /// what they say (a new warning, a log arriving, a motor dropping out);
+    /// for Robot whether one is linked; for every tile, its warning or fault
+    /// coming or going. Never a live reading (volts, loop time, a countdown),
+    /// which changes all the time.
+    fn news(&self, index: usize, status: &str, attention: Option<&'static str>, robot: &Robot) -> String {
+        let name = self.icon_and_name(index).1;
+        let said = match name.as_str() {
+            "Health" | "Logs" | "Motors" => status,
+            "Robot" if robot.linked() => "linked",
+            _ => "",
+        };
+        format!("{said}|{}", attention.unwrap_or(""))
+    }
+
+    /// Whether an app is one of the favourites.
+    fn favourite(&self, index: usize) -> bool {
+        self.tiles.get(index).is_some_and(|t| self.arranged_by.favourites.iter().any(|f| f == self.tile_name(*t)))
+    }
+
+    /// Arrange, keeping the focus on the app named `focused` wherever it now
+    /// is (or as near its old place as there is a tile).
+    fn arrange_around(&mut self, arrangement: &crate::shell::Arrangement, focused: Option<String>) {
+        let mut tiles: Vec<Tile> = (0..APPS.len()).map(Tile::Builtin).chain((0..self.external.len()).map(Tile::External)).collect();
+        let (order, hidden, favourites) = (&arrangement.order, &arrangement.hidden, &arrangement.favourites);
+        // Favourites first, then the rest; each in the order chosen.
+        let place = |t: &Tile| {
+            let name = self.tile_name(*t);
+            (!favourites.iter().any(|f| f == name), order.iter().position(|n| n == name).unwrap_or(usize::MAX))
+        };
+        tiles.sort_by_key(place);
+        tiles.retain(|t| self.tile_name(*t) == "Settings" || !hidden.iter().any(|n| n == self.tile_name(*t)));
+        self.tiles = tiles;
+        self.arranged_by = arrangement.clone();
+        self.lift.clear();
+        self.pulse.clear();
+        self.seen.clear();
+        let found = focused.and_then(|name| self.tiles.iter().position(|t| self.tile_name(*t) == name));
+        let at = found.unwrap_or(self.focus).min(self.tiles.len().saturating_sub(1));
+        if at != self.focus {
+            self.focus = at;
+            self.page.jump((at / self.per_page()) as f32);
+            self.turn.jump(at as f32);
+        }
+    }
+
+    /// Arrange again if the settings' arrangement is not the one in use.
+    fn follow_arrangement(&mut self, arrangement: &crate::shell::Arrangement) {
+        if self.arranged_by != *arrangement {
+            self.arrange(arrangement);
+        }
+    }
+
+    fn tile_name(&self, tile: Tile) -> &str {
+        match tile {
+            Tile::Builtin(i) => APPS[i].name,
+            // An app gone from the storage since: no name.
+            Tile::External(i) => self.external.get(i).map_or("", |app| app.name.as_str()),
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.tiles.len()
     }
 
     fn per_page(&self) -> usize {
         self.columns * 2
     }
 
+    fn icon_and_name(&self, index: usize) -> (String, String) {
+        match self.tiles.get(index) {
+            Some(Tile::Builtin(i)) => (APPS[*i].icon.to_owned(), APPS[*i].name.to_owned()),
+            Some(Tile::External(i)) => (self.external[*i].icon.clone(), self.external[*i].name.clone()),
+            None => (String::new(), String::new()),
+        }
+    }
+
     /// The one line under each app's name, and whether it needs attention.
-    fn status(index: usize, robot: &Robot) -> (String, Option<&'static str>) {
+    fn status(&self, index: usize, robot: &Robot) -> (String, Option<&'static str>) {
         let linked = robot.linked();
-        match APPS[index].name {
+        let app = match self.tiles.get(index) {
+            Some(Tile::Builtin(i)) => &APPS[*i],
+            Some(Tile::External(i)) => return (self.external[*i].about.clone(), None),
+            None => return (String::new(), None),
+        };
+        match app.name {
             "Robot" if linked => (dash(robot.f64("Systemcore/BatteryVolts").map(|v| format!("{v:.1} v"))), None),
             "Robot" => (robot.status(), None),
             "Health" => match (robot.i64("Health/ErrorCount"), robot.i64("Health/WarnCount")) {
@@ -109,9 +374,22 @@ impl Home {
                 (Some(c), Some(e)) => (format!("{c} of {e} up"), (c < e).then_some("ERROR")),
                 _ => ("–".into(), None),
             },
+            "Schedule" => match robot.schedule.view() {
+                Some(view) => match view.next(chrono::Utc::now().timestamp()) {
+                    Some(m) => {
+                        let now = chrono::Utc::now().timestamp();
+                        let when = m.queue_at.or(m.time).map(|t| crate::schedule::when(t, now)).unwrap_or_default();
+                        (format!("{} {when}", m.label).trim().to_owned(), (m.status.as_deref() == Some("Now queuing")).then_some("WARN"))
+                    }
+                    None => ("no match coming".into(), None),
+                },
+                None => ("–".into(), None),
+            },
             "Console" => ("robot log".into(), None),
             "Terminal" => ("shell".into(), None),
             "Files" => ("storage".into(), None),
+            "Git" => ("repositories".into(), None),
+            "Catalogue" => ("get apps".into(), None),
             "Logs" => {
                 let rows = robot.logs.list();
                 let worst = rows.iter().filter_map(|r| r.digest.as_ref()).map(|d| d.headline().0).min();
@@ -125,86 +403,157 @@ impl Home {
             _ => ("this device".into(), None),
         }
     }
-}
 
-impl Screen for Home {
-    fn title(&self) -> &str {
-        "Catalyst"
+    fn on_glance(&self) -> bool {
+        self.glance_page > 0
     }
 
-    fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
-        let (columns, per_page) = (self.columns, self.per_page());
-        let page = self.focus / per_page;
-        let local = self.focus % per_page;
-        let (col, row) = (local % columns, local / columns);
-        let page_end = ((page + 1) * per_page).min(APPS.len());
+    /// Bring the glance page in (its first page, its nearest card in focus),
+    /// or send it back out.
+    fn show_glance(&mut self, show: bool, calm: bool) {
+        if show {
+            self.card = 1;
+        }
+        self.glance_to(if show { 1 } else { 0 }, calm);
+    }
+
+    /// Turn to glance page `page` (0: the apps).
+    fn glance_to(&mut self, page: usize, calm: bool) {
+        self.glance_page = page;
+        if calm {
+            self.glance.jump(page as f32);
+        } else {
+            self.glance.set(page as f32);
+        }
+        if page > 0 {
+            self.device = DeviceFacts::read(self.h24);
+            self.device_age = 0.0;
+        }
+    }
+
+    /// Keys on the glance page. Its pages run leftward from Home, two cards
+    /// to a page: Left moves to the card on the left and on to the next page,
+    /// Right back toward Home.
+    fn glance_key(&mut self, key: Key, cx: &mut Cx) -> Nav {
+        let calm = cx.settings.calm;
+        let count = cx.settings.glance.len();
+        let pages = count.div_ceil(2).max(1);
+        self.card = self.card.min(count.saturating_sub(1));
+        let page = self.glance_page;
         match key {
-            Key::Left if col > 0 => self.focus -= 1,
-            // Past the edge of the grid is the next page.
-            Key::Left if page > 0 => self.focus = (page - 1) * per_page + row * columns + columns - 1,
-            Key::Right if col + 1 < columns && self.focus + 1 < page_end => self.focus += 1,
-            // The same row on the next page, or its first tile if that row is not there.
-            Key::Right if page_end < APPS.len() => self.focus = if page_end + row * columns < APPS.len() { page_end + row * columns } else { page_end },
-            Key::Up if row > 0 => self.focus -= columns,
-            Key::Down if self.focus + columns < page_end => self.focus += columns,
-            // A short last row: down from above its end lands on its last tile.
-            Key::Down if page * per_page + (row + 1) * columns < page_end => self.focus = page_end - 1,
-            Key::Tab => self.focus = (self.focus + 1) % APPS.len(),
+            Key::Back => self.show_glance(false, calm),
+            Key::Left if self.card % 2 == 1 => self.card -= 1,
+            Key::Left if page < pages => {
+                self.card = (2 * page + 1).min(count - 1);
+                self.glance_to(page + 1, calm);
+            }
+            // Nothing further left: the page gives a little and comes back.
+            Key::Left if !calm => self.glance.nudge(1.6),
+            Key::Right if self.card % 2 == 0 && self.card + 1 < count && self.card / 2 + 1 == page => self.card += 1,
+            Key::Right if page > 1 => {
+                self.card = 2 * (page - 2);
+                self.glance_to(page - 1, calm);
+            }
+            Key::Right => self.show_glance(false, calm),
             Key::Enter => {
-                let screen = (APPS[self.focus].open)(cx.robot);
-                return match self.rects.get(self.focus) {
-                    Some(tile) => Nav::Open(screen, *tile),
-                    None => Nav::Push(screen),
+                let Some(&widget) = cx.settings.glance.get(self.card) else { return Nav::Stay };
+                let from = self.cards.get(self.card).copied().filter(|r| r.w > 0.0);
+                return match (crate::glance::open(widget, cx), from) {
+                    (Some(screen), Some(from)) => Nav::Open(screen, from),
+                    (Some(screen), None) => Nav::Push(screen),
+                    (None, _) => Nav::Stay,
                 };
             }
             _ => {}
         }
-        let target = (self.focus / per_page) as f32;
-        if cx.settings.calm {
-            self.page.jump(target);
-        } else {
-            self.page.set(target);
-        }
         Nav::Stay
     }
 
-    fn tick(&mut self, dt: f32) -> bool {
-        let mut moving = self.page.tick(dt);
-        if self.arrived < CASCADE_OVER {
-            self.arrived += dt;
-            moving = true;
+    /// Open the focused app out of the tile (or card) it is drawn in.
+    fn open(&self, cx: &mut Cx) -> Nav {
+        let screen = match self.tiles.get(self.focus) {
+            Some(Tile::Builtin(i)) => (APPS[*i].open)(cx.robot),
+            Some(Tile::External(i)) => self.external[*i].open(),
+            None => return Nav::Stay,
+        };
+        let from = match self.style {
+            HomeStyle::Grid => self.rects.get(self.focus).copied(),
+            HomeStyle::Carousel => Some(self.middle),
+        };
+        match from {
+            Some(tile) if tile.w > 0.0 => Nav::Open(screen, tile),
+            _ => Nav::Push(screen),
         }
-        moving
     }
 
-    fn draw(&mut self, g: &mut Gfx, robot: &Robot) {
+    /// Keys on the grid of tiles. True if the key pushed against an edge.
+    fn grid_key(&mut self, key: Key, calm: bool) -> bool {
+        let (columns, per_page, count) = (self.columns, self.per_page(), self.count());
+        let page = self.focus / per_page;
+        let local = self.focus % per_page;
+        let (col, row) = (local % columns, local / columns);
+        let page_end = ((page + 1) * per_page).min(count);
+        match key {
+            Key::Left if col > 0 => self.focus -= 1,
+            // Past the edge of the grid is the next page; past the first page, the glance page.
+            Key::Left if page > 0 => self.focus = (page - 1) * per_page + row * columns + columns - 1,
+            Key::Left => self.show_glance(true, calm),
+            Key::Right if col + 1 < columns && self.focus + 1 < page_end => self.focus += 1,
+            // The same row on the next page, or its first tile if that row is not there.
+            Key::Right if page_end < count => self.focus = if page_end + row * columns < count { page_end + row * columns } else { page_end },
+            Key::Right => return true,
+            Key::Up if row > 0 => self.focus -= columns,
+            Key::Down if self.focus + columns < page_end => self.focus += columns,
+            // A short last row: down from above its end lands on its last tile.
+            Key::Down if page * per_page + (row + 1) * columns < page_end => self.focus = page_end - 1,
+            Key::Tab => self.focus = (self.focus + 1) % count,
+            _ => {}
+        }
+        false
+    }
+
+    /// Keys on the carousel. True if the key pushed against an edge.
+    fn carousel_key(&mut self, key: Key, calm: bool) -> bool {
+        let count = self.count();
+        match key {
+            Key::Left if self.focus > 0 => self.focus -= 1,
+            Key::Left => self.show_glance(true, calm),
+            Key::Right | Key::Tab if self.focus + 1 < count => self.focus += 1,
+            Key::Right => return true,
+            Key::Tab => self.focus = 0,
+            Key::PageDown => self.focus = (self.focus + 3).min(count - 1),
+            Key::PageUp => self.focus = self.focus.saturating_sub(3),
+            _ => {}
+        }
+        false
+    }
+
+    fn draw_grid(&mut self, g: &mut Gfx, robot: &Robot) {
         let t = g.tokens;
         let ty = g.ty;
-        let columns = if g.text_size == TextSize::Large { 2 } else { 3 };
-        if columns != self.columns {
-            self.columns = columns;
-            self.page.jump((self.focus / self.per_page()) as f32);
-        }
-        let per_page = self.per_page();
-        let pages = APPS.len().div_ceil(per_page);
-        // With more than one page, the grid ends above where the pager rests.
-        let bottom = if pages > 1 { H - 16.0 } else { H - PAD };
+        let (columns, per_page, count) = (self.columns, self.per_page(), self.count());
+        // The grid ends above where the pager rests.
+        let bottom = H - 16.0;
         let top = g.top();
         let tw = (W - 2.0 * PAD - GAP * (columns - 1) as f32) / columns as f32;
         let th = (bottom - top - GAP) / 2.0;
-        if pages > 1 {
-            g.pager = Some((pages, self.focus / per_page, g.ox));
+        if self.rects.len() != count {
+            self.rects.resize(count, Rect::default());
         }
-        for (i, app) in APPS.iter().enumerate() {
+        if self.lift.len() != count {
+            self.lift = (0..count).map(|_| lift_spring()).collect();
+            self.pulse = (0..count).map(|_| pulse_spring()).collect();
+            self.seen = vec![None; count];
+        }
+        let press = g.press();
+        for i in 0..count {
+            let (icon, name) = self.icon_and_name(i);
             let local = i % per_page;
             let slide = ((i / per_page) as f32 - self.page.value()) * W;
             if slide.abs() >= W {
                 continue;
             }
             let r = Rect::new(PAD + (local % columns) as f32 * (tw + GAP) + slide, top + (local / columns) as f32 * (th + GAP), tw, th);
-            if self.rects.len() != APPS.len() {
-                self.rects.resize(APPS.len(), Rect::default());
-            }
             self.rects[i] = r;
             // The cascade: each tile arrives a little after the one before it,
             // nearest the top left first, and springs up into its place.
@@ -219,20 +568,69 @@ impl Screen for Home {
                 r.offset(0.0, 14.0 * role::release().solve(1.0, 0.0, since).0)
             };
             let focused = i == self.focus;
-            let (status, attention) = Self::status(i, robot);
-            g.surface(r, TILE_RADIUS, t.surface1);
+            let (status, attention) = self.status(i, robot);
+            // The focused tile lifts: a touch larger and lighter. Calm, or
+            // drawn as a still picture, it is simply where it ends up.
+            let lifted = focused && !self.on_glance();
+            let want = if lifted { 1.0 } else { 0.0 };
+            if self.lift[i].target() != want {
+                if g.calm || g.focus_static {
+                    self.lift[i].jump(want);
+                } else {
+                    self.lift[i].set(want);
+                    g.started_moving();
+                }
+            }
+            // What it reports turned worse, or better: it pulses once in the
+            // colour of what it now says.
+            let news = self.news(i, &status, attention, robot);
+            if self.seen[i].as_ref().is_some_and(|before| *before != news) && !g.calm {
+                self.pulse[i].jump(1.0);
+                self.pulse[i].set(0.0);
+                g.started_moving();
+            }
+            self.seen[i] = Some(news);
+            let (lift, pulse) = (self.lift[i].value(), self.pulse[i].value().clamp(0.0, 1.0));
+            let pressed = if lifted { press } else { 0.0 };
+            // The ring goes straight to where the lifted tile rests.
+            let ring = r.inset(-1.5).offset(0.0, -1.0);
+            let r = r.inset(-1.5 * lift + 2.0 * pressed).offset(0.0, -lift);
+            let radius = (g.tile_radius() + 1.5 * lift - 2.0 * pressed).max(0.0);
+            let tint = attention.map_or(t.ice, |severity| severity_color(g, severity));
+            let fill = t.surface1.mix(t.surface2, lift * 0.7).mix(tint, 0.3 * pulse).mix(t.ink, 0.12 * pressed);
+            // A lifted tile casts a soft shadow.
+            g.shadow(r, radius, lift);
+            g.surface(r, radius, fill);
+            // Bezel's wall-panel tiles: the name small, lowercase and mono at
+            // the top, what the app reports large below it.
+            if g.theme == crate::look::Theme::Bezel {
+                let corner_taken = attention.is_some() || self.favourite(i);
+                bezel_tile(g, r, &icon, &name, &status, focused, corner_taken);
+                if let Some(severity) = attention {
+                    let c = severity_color(g, severity);
+                    g.dot(r.right() - 12.0, r.y + 12.0, 3.5 + 1.5 * pulse, c);
+                }
+                if self.favourite(i) {
+                    let x = r.right() - if attention.is_some() { 25.0 } else { 12.0 };
+                    g.icon("star", true, x, r.y + 12.0, 11.0, t.dim);
+                }
+                if lifted {
+                    g.focus_ring(ring, g.tile_radius() + 1.5);
+                }
+                continue;
+            }
             // A selected item's icon fills in.
             let icon_color = if focused { t.ink } else { t.dim };
             let (text_x, name_cy, status_cy, text_w);
             if tw > 120.0 {
                 // A wide tile: the icon beside two lines.
-                g.icon(app.icon, focused, r.x + 23.0, r.cy(), 24.0, icon_color);
+                g.icon(&icon, focused, r.x + 23.0, r.cy(), 24.0, icon_color);
                 text_x = r.x + 44.0;
                 text_w = r.w - 52.0;
                 name_cy = r.cy() - ty.caption.size * 0.5 - 1.0;
                 status_cy = r.cy() + ty.name.size * 0.5 + 1.0;
             } else {
-                g.icon(app.icon, focused, r.x + 18.0, r.y + 15.0, 18.0, icon_color);
+                g.icon(&icon, focused, r.x + 18.0, r.y + 15.0, 18.0, icon_color);
                 text_x = r.x + 10.0;
                 text_w = r.w - 16.0;
                 status_cy = r.bottom() - 6.0 - ty.caption.size * 0.5;
@@ -240,14 +638,379 @@ impl Screen for Home {
             }
             if let Some(severity) = attention {
                 let c = severity_color(g, severity);
-                g.dot(r.right() - 12.0, r.y + 12.0, 3.5, c);
+                g.dot(r.right() - 12.0, r.y + 12.0, 3.5 + 1.5 * pulse, c);
             }
-            g.text_fit(text_x, name_cy, app.name, ty.name, t.ink, text_w);
+            if self.favourite(i) {
+                let x = r.right() - if attention.is_some() { 25.0 } else { 12.0 };
+                g.icon("star", true, x, r.y + 12.0, 11.0, t.dim);
+            }
+            g.text_fit(text_x, name_cy, &name, ty.name, t.ink, text_w);
             g.text_fit(text_x, status_cy, &status, ty.caption, t.dim, text_w);
-            if focused {
-                g.focus_ring(r, TILE_RADIUS);
+            if lifted {
+                g.focus_ring(ring, g.tile_radius() + 1.5);
             }
         }
+    }
+
+    /// One app at a time: a large card in the middle, its neighbours peeking
+    /// in at either side, smaller and without their words.
+    fn draw_carousel(&mut self, g: &mut Gfx, robot: &Robot) {
+        let t = g.tokens;
+        let ty = g.ty;
+        let (top, bottom) = (g.top(), H - 16.0);
+        let cy = (top + bottom) * 0.5;
+        let (cw, ch) = (150.0, bottom - top - 6.0);
+        // A neighbour's near edge sits just clear of the middle card.
+        const SMALL: f32 = 0.8;
+        let spacing = cw * 0.5 + cw * SMALL * 0.5 + 6.0;
+        self.middle = Rect::new((W - cw) * 0.5, cy - ch * 0.5, cw, ch);
+        let turn = self.turn.value();
+        // Farthest first, so the card nearest the middle is on top.
+        let mut order: Vec<usize> = (0..self.count()).filter(|i| (*i as f32 - turn).abs() < 2.2).collect();
+        order.sort_by(|a, b| (*b as f32 - turn).abs().total_cmp(&(*a as f32 - turn).abs()));
+        for i in order {
+            let away = i as f32 - turn;
+            // 1 in the middle, 0 a whole step away.
+            let near = 1.0 - away.abs().min(1.0);
+            let scale = SMALL + (1.0 - SMALL) * near;
+            let (w, h) = (cw * scale, ch * scale);
+            let r = Rect::new(W * 0.5 + away * spacing - w * 0.5, cy - h * 0.5, w, h);
+            g.surface(r, g.tile_radius() * scale + 2.0 * near, if near > 0.5 { t.surface2 } else { t.surface1 });
+            let (icon, name) = self.icon_and_name(i);
+            let (status, attention) = self.status(i, robot);
+            // The icon rises as its card comes to the middle, and the words come
+            // in with it. It keeps one size: an icon is drawn from its outline
+            // once per size, and a size that changed every frame would be
+            // drawn afresh every frame.
+            let icon_cy = (r.cy() - 16.0 * near).round();
+            g.icon_alpha(&icon, near > 0.5, r.cx().round(), icon_cy, 30.0, if near > 0.5 { t.ink } else { t.dim }, 0.55 + 0.45 * near);
+            if near > 0.02 {
+                let name = g.text.fit(&name, &ty.title, cw - 18.0);
+                let status = g.text.fit(&status, &ty.caption, cw - 18.0);
+                let (name_w, status_w) = (g.measure(&name, ty.title), g.measure(&status, ty.caption));
+                let name_cy = r.cy() + 14.0;
+                g.text_alpha(r.cx() - name_w * 0.5, name_cy, &name, ty.title, t.ink, near);
+                g.text_alpha(r.cx() - status_w * 0.5, name_cy + ty.title.size * 0.5 + ty.caption.size * 0.5 + 4.0, &status, ty.caption, t.dim, near);
+            }
+            if let Some(severity) = attention {
+                let c = severity_color(g, severity);
+                g.dot(r.right() - 12.0 * scale, r.y + 12.0 * scale, 3.5, c);
+            }
+        }
+        // The ring marks the middle: cards turn through it.
+        if !self.on_glance() {
+            g.focus_ring(self.middle, g.tile_radius() + 2.0);
+        }
+    }
+
+    /// The status line of a built-in app, by name.
+    fn status_of(&self, name: &str, robot: &Robot) -> (String, Option<&'static str>) {
+        match self.tiles.iter().position(|t| matches!(t, Tile::Builtin(i) if APPS[*i].name == name)) {
+            Some(at) => self.status(at, robot),
+            None => ("–".into(), None),
+        }
+    }
+
+    /// One glance page: two cards side by side, from the cards chosen in
+    /// Settings, to be read without opening anything.
+    fn draw_glance(&mut self, g: &mut Gfx, robot: &Robot, page: usize) {
+        let widgets = g.glance.clone();
+        self.cards.resize(widgets.len(), Rect::default());
+        self.robot_card = widgets.iter().position(|w| *w == Widget::Robot);
+        let (top, bottom) = (g.top(), H - 16.0);
+        let w = (W - 2.0 * PAD - GAP) * 0.5;
+        if widgets.is_empty() {
+            g.empty("insights", "choose cards in Settings › Home");
+            return;
+        }
+        for slot in 0..2 {
+            let i = 2 * (page - 1) + slot;
+            let Some(&widget) = widgets.get(i) else { break };
+            let r = Rect::new(PAD + slot as f32 * (w + GAP), top, w, bottom - top);
+            self.cards[i] = r.offset(g.ox, 0.0);
+            let card = match widget {
+                Widget::Device => crate::glance::Card {
+                    big: self.device.clock.clone(),
+                    unit: None,
+                    under: self.device.date.clone(),
+                    dot: None,
+                    rows: self.device.rows.iter().map(|(n, v)| ((*n).to_owned(), v.clone(), None)).collect(),
+                    warn: false,
+                },
+                Widget::Robot => {
+                    let linked = robot.linked();
+                    let volts = robot.f64("Systemcore/BatteryVolts").filter(|_| linked);
+                    let last_match = robot.logs.list().first().and_then(|row| row.digest.as_ref().map(|d| d.headline()));
+                    crate::glance::Card {
+                        big: volts.map_or("–".into(), |v| format!("{v:.1}")),
+                        unit: volts.map(|_| "v"),
+                        under: if linked { robot.string("Robot/Identity/Name").unwrap_or_else(|| "robot".into()).to_lowercase() } else { robot.status() },
+                        dot: Some(if linked { g.tokens.ice } else { g.tokens.faint }),
+                        rows: vec![
+                            ("health".into(), self.status_of("Health", robot).0, self.status_of("Health", robot).1),
+                            ("loop".into(), self.status_of("Loop", robot).0, self.status_of("Loop", robot).1),
+                            ("motors".into(), self.status_of("Motors", robot).0, self.status_of("Motors", robot).1),
+                            (
+                                "match".into(),
+                                last_match.as_ref().map_or_else(|| "–".into(), |(_, text)| text.clone()),
+                                last_match.as_ref().and_then(|(level, _)| match level {
+                                    Level::Fault => Some("ERROR"),
+                                    Level::Warn => Some("WARN"),
+                                    Level::Fine => None,
+                                }),
+                            ),
+                        ],
+                        warn: volts.is_some_and(|v| v < 11.0),
+                    }
+                }
+                other => crate::glance::card(other, robot, g.pinned.as_deref()),
+            };
+            crate::glance::draw(g, r, &card, self.on_glance() && self.card == i);
+        }
+    }
+}
+
+impl Screen for Home {
+    fn title(&self) -> &str {
+        if self.on_glance() {
+            "Glance"
+        } else {
+            "Catalyst"
+        }
+    }
+
+    fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
+        let calm = cx.settings.calm;
+        self.follow_arrangement(&cx.settings.arrangement());
+        // The style in the settings, which a draw may not have caught up with yet.
+        let style = cx.settings.home;
+        // Up from the top of Home pulls the control centre down.
+        let at_top = self.on_glance() || style == HomeStyle::Carousel || (self.focus % self.per_page()) < self.columns;
+        if key == Key::Up && at_top {
+            return Nav::Control;
+        }
+        // Space or / searches everything; the bare letters stay arrows here.
+        if key == Key::Char(' ') || key == Key::Char('/') {
+            return Nav::Push(Box::new(crate::search::Search::new(None)));
+        }
+        if self.on_glance() {
+            return self.glance_key(key, cx);
+        }
+        // Any key but Enter changes its mind about a tile still pressed in.
+        if key != Key::Enter {
+            self.opening = None;
+        }
+        if key == Key::Enter {
+            // Pressed in for an instant, then the app grows out of the tile.
+            // (At once in the calm version, and while a window is still on
+            // its way back into its tile: that brings the same one back.)
+            if calm || !cx.at_rest {
+                return self.open(cx);
+            }
+            self.opening.get_or_insert(0.0);
+            return Nav::Stay;
+        }
+        let pushed = match style {
+            HomeStyle::Grid => self.grid_key(key, calm),
+            HomeStyle::Carousel => self.carousel_key(key, calm),
+        };
+        let (page, turn) = ((self.focus / self.per_page()) as f32, self.focus as f32);
+        if calm {
+            self.page.jump(page);
+            self.turn.jump(turn);
+        } else {
+            self.page.set(page);
+            self.turn.set(turn);
+            // Past the last app: a push against the end, which gives and returns.
+            if pushed {
+                self.page.nudge(1.6);
+                self.turn.nudge(7.0);
+            }
+        }
+        Nav::Stay
+    }
+
+    fn appear(&mut self) {
+        // The launcher cascade, now that Home can be seen.
+        self.arrived = 0.0;
+    }
+
+    fn parallax(&self) -> Option<f32> {
+        // Home is one strip: the glance pages on the left, then the grid's
+        // pages (or the carousel's cards). Where it is turned to, 0 to 1.
+        let glance_pages = self.cards.len().div_ceil(2).max(1) as f32;
+        let (at, stops) = match self.style {
+            HomeStyle::Grid => (self.page.value(), self.count().div_ceil(self.per_page()) as f32),
+            HomeStyle::Carousel => (self.turn.value(), self.count() as f32),
+        };
+        let place = at - self.glance.value() + glance_pages;
+        Some((place / (glance_pages + stops - 1.0).max(1.0)).clamp(0.0, 1.0))
+    }
+
+    fn robot_linked(&mut self, calm: bool) -> Nav {
+        let robot = || Box::new(RobotScreen::default());
+        // On the glance page: out of the robot's card if it is on this page.
+        if self.on_glance() {
+            let shown = |i: usize| i / 2 + 1 == self.glance_page;
+            let card = self.robot_card.filter(|i| shown(*i)).and_then(|i| self.cards.get(i)).copied().filter(|r| r.w > 0.0);
+            return match card {
+                Some(from) => Nav::Open(robot(), from),
+                None => Nav::Push(robot()),
+            };
+        }
+        let Some(at) = self.tiles.iter().position(|t| matches!(t, Tile::Builtin(i) if APPS[*i].name == "Robot")) else {
+            return Nav::Push(robot());
+        };
+        if self.focus != at {
+            // Turn to Robot's tile first, so the app comes out of it and
+            // goes back into it.
+            self.focus = at;
+            let (page, turn) = ((at / self.per_page()) as f32, at as f32);
+            if calm {
+                self.page.jump(page);
+                self.turn.jump(turn);
+            } else {
+                self.page.set(page);
+                self.turn.set(turn);
+            }
+            return Nav::Stay;
+        }
+        if !(self.page.is_settled() && self.turn.is_settled() && self.glance.is_settled()) {
+            return Nav::Stay;
+        }
+        let from = match self.style {
+            HomeStyle::Grid => self.rects.get(at).copied().unwrap_or_default(),
+            HomeStyle::Carousel => self.middle,
+        };
+        // Not drawn there yet: ask again after the next frame.
+        let on_screen = from.w > 0.0 && from.x >= 0.0 && from.right() <= W;
+        if on_screen {
+            Nav::Open(robot(), from)
+        } else {
+            Nav::Stay
+        }
+    }
+
+    fn resume(&mut self) {
+        // Back on Home: an app may have been added or removed meanwhile.
+        let focused = self.tiles.get(self.focus).map(|t| self.tile_name(*t).to_owned());
+        self.external = crate::apps::find();
+        let arrangement = self.arranged_by.clone();
+        self.arrange_around(&arrangement, focused);
+        let focus = self.focus.min(self.count().saturating_sub(1));
+        if focus != self.focus {
+            // The focused app went: its page or card may be gone with it.
+            self.focus = focus;
+            self.page.jump((focus / self.per_page()) as f32);
+            self.turn.jump(focus as f32);
+        }
+    }
+
+    fn update(&mut self, cx: &mut Cx) -> Nav {
+        match self.opening {
+            Some(pressed) if pressed >= PRESS_IN => {
+                self.opening = None;
+                self.open(cx)
+            }
+            _ => Nav::Stay,
+        }
+    }
+
+    fn tick(&mut self, dt: f32) -> bool {
+        // Each spring must be advanced, so no short-circuit.
+        let mut moving = self.page.tick(dt) | self.turn.tick(dt) | self.glance.tick(dt);
+        if let Some(pressed) = &mut self.opening {
+            *pressed += dt.max(0.001);
+            moving = true;
+        }
+        for spring in self.lift.iter_mut().chain(self.pulse.iter_mut()) {
+            moving |= spring.tick(dt);
+        }
+        if self.arrived < CASCADE_OVER {
+            self.arrived += dt;
+            moving = true;
+        }
+        // While the glance page shows, its facts are re-read every few seconds.
+        if self.on_glance() {
+            self.device_age += dt.max(0.01);
+            if self.device_age > 4.0 {
+                self.device_age = 0.0;
+                let facts = DeviceFacts::read(self.h24);
+                if facts != self.device {
+                    self.device = facts;
+                    moving = true;
+                }
+            }
+        }
+        moving
+    }
+
+    fn draw(&mut self, g: &mut Gfx, robot: &Robot) {
+        let arrangement = g.arrangement.clone();
+        self.follow_arrangement(&arrangement);
+        if g.clock.0 != self.h24 {
+            self.h24 = g.clock.0;
+            self.device = DeviceFacts::read(self.h24);
+        }
+        // Two larger tiles across when chosen, and always at the large text size.
+        let columns = if g.text_size == TextSize::Large { 2 } else { g.columns.clamp(2, 3) };
+        if columns != self.columns || g.home != self.style {
+            // A different Home: everything is where the focus is, at once.
+            let first = self.arrived == 0.0;
+            self.columns = columns;
+            self.style = g.home;
+            self.page.jump((self.focus / self.per_page()) as f32);
+            self.turn.jump(self.focus as f32);
+            if self.style == HomeStyle::Carousel {
+                // No cascade here. Arriving, the carousel turns into place instead.
+                self.arrived = CASCADE_OVER;
+                if first && !g.calm && !g.focus_static {
+                    self.turn.jump(self.focus as f32 + 0.9);
+                    self.turn.set(self.focus as f32);
+                    g.started_moving();
+                }
+            }
+        }
+        // The pager counts the glance pages first (the farthest leftmost),
+        // then the grid's pages or the carousel's apps.
+        // Cards taken away in Settings meanwhile: never left on a page, or a
+        // card, that is no longer there.
+        let glance_pages = g.glance.len().div_ceil(2).max(1);
+        if self.glance_page > glance_pages {
+            self.glance_page = glance_pages;
+            self.glance.jump(glance_pages as f32);
+        }
+        self.card = self.card.min(g.glance.len().saturating_sub(1));
+        let stops = match self.style {
+            HomeStyle::Grid => self.count().div_ceil(self.per_page()),
+            HomeStyle::Carousel => self.count(),
+        };
+        let at = match self.style {
+            HomeStyle::Grid => self.focus / self.per_page(),
+            HomeStyle::Carousel => self.focus,
+        };
+        if stops + glance_pages < 24 {
+            let current = if self.on_glance() { glance_pages - self.glance_page } else { glance_pages + at };
+            g.pager = Some((stops + glance_pages, current, g.ox));
+        }
+        // The apps and the glance pages are one strip: the glance pages to the left.
+        let base = g.ox;
+        let shift = self.glance.value() * W;
+        if shift < W - 0.5 {
+            g.ox = base + shift;
+            match self.style {
+                HomeStyle::Grid => self.draw_grid(g, robot),
+                HomeStyle::Carousel => self.draw_carousel(g, robot),
+            }
+        }
+        for page in 1..=glance_pages {
+            let ox = shift - page as f32 * W;
+            if ox.abs() < W - 0.5 {
+                g.ox = base + ox;
+                self.draw_glance(g, robot, page);
+            }
+        }
+        g.ox = base;
     }
 }
 
@@ -320,16 +1083,18 @@ impl Screen for RobotScreen {
         let battery = Rect::new(PAD, top, left_w, field.y - GAP - top);
         g.stat(battery, "battery", robot.f64("Systemcore/BatteryVolts").map(|v| format!("{v:.1}")), "v", (battery.h - ty.caption.size - 14.0).min(36.0));
         if robot.bool("Systemcore/BrownedOut") == Some(true) {
-            g.text_at(battery.right() - 9.0, battery.y + 5.0 + ty.caption.size * 0.5, Align::Right, "brownout", ty.caption, t.signal);
+            // On its tile, rising in with it.
+            let fault = g.fault();
+            g.text_at(battery.right() - 9.0, battery.y + 5.0 + ty.caption.size * 0.5, Align::Right, "brownout", ty.caption, fault);
         }
-        g.surface(field, TILE_RADIUS, if self.editing.is_some() { t.surface2 } else { t.surface1 });
+        g.surface(field, g.tile_radius(), if self.editing.is_some() { t.surface2 } else { t.surface1 });
         g.text_at(field.x + 9.0, field.y + 5.0 + ty.caption.size * 0.5, Align::Left, "address", ty.caption, t.dim);
         let value_cy = field.bottom() - 5.0 - ty.label.size * 0.5;
         match &self.editing {
             Some(text) => {
                 let w = g.text_at(field.x + 9.0, value_cy, Align::Left, text, ty.label, t.ink);
                 g.surface(Rect::new(field.x + 10.0 + w, value_cy - ty.label.size * 0.5, 1.5, ty.label.size), 0.5, t.signal);
-                g.focus_ring(field, TILE_RADIUS);
+                g.focus_ring(field, g.tile_radius());
             }
             None => {
                 let shown = if robot.address.is_empty() { "not set".to_owned() } else { robot.address.clone() };
@@ -344,7 +1109,9 @@ impl Screen for RobotScreen {
         let temp = robot.f64("Systemcore/TempCelsius");
         let rows: [(&str, String, Option<f32>); 5] = [
             ("link", if robot.linked() { dash(robot.rtt_ms().map(|ms| format!("{ms:.1} ms"))) } else { robot.status() }, None),
-            ("team", dash(robot.i64("Robot/Identity/TeamNumber").map(|n| n.to_string())), None),
+            // The code on the robot: its commit, and against the repository
+            // marked as the robot's code, how far behind it is.
+            ("code", dash(robot.string("Robot/Software/RobotCodeVersion").map(|v| crate::git::robot_code_line(&v).unwrap_or_else(|| v.chars().take(9).collect()))), None),
             ("cpu", dash(cpu.map(|v| format!("{v:.0}%"))), cpu.map(|v| v as f32 / 100.0)),
             ("temp", dash(temp.map(|v| format!("{v:.0} °c"))), temp.map(|v| v as f32 / 90.0)),
             ("can", dash(can.map(|v| format!("{:.0}%", v * 100.0))), can.map(|v| v as f32)),
@@ -402,7 +1169,7 @@ impl Screen for Health {
 
         // One line of counts: errors, warnings, and whether preflight passed.
         let preflight = match (robot.string("Preflight/Summary"), robot.bool("Preflight/Ready")) {
-            (Some(s), Some(false)) => (s, t.signal),
+            (Some(s), Some(false)) => (s, g.fault()),
             (Some(s), _) => (s, t.ink),
             (None, _) => ("not run".to_owned(), t.faint),
         };
@@ -412,7 +1179,7 @@ impl Screen for Health {
             None => ("–".to_owned(), t.faint),
         };
         let chips = [
-            ("err", count(robot.i64("Health/ErrorCount"), t.signal)),
+            ("err", count(robot.i64("Health/ErrorCount"), g.fault())),
             ("warn", count(robot.i64("Health/WarnCount"), t.amber_ink)),
             ("pre", preflight),
         ];
@@ -440,7 +1207,7 @@ impl Screen for Health {
         let len = firing.len() + history.len();
         let list_bottom = H - PAD - g.hint_h();
         let mut detail = String::new();
-        for (i, y) in self.list.layout(len, list_top, row_h, 3.0, list_bottom + 2.0) {
+        for (i, y) in self.list.layout(g, len, list_top, row_h, 3.0, list_bottom + 2.0) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let focused = i == self.list.focus;
             if let Some((severity, subsystem, id, why)) = firing.get(i) {
@@ -478,7 +1245,7 @@ fn megabytes(bytes: u64) -> String {
 
 fn level_color(g: &Gfx, level: Level) -> Color {
     match level {
-        Level::Fault => g.tokens.signal,
+        Level::Fault => g.fault(),
         Level::Warn => g.tokens.amber_ink,
         Level::Fine => g.tokens.dim,
     }
@@ -503,8 +1270,8 @@ impl Screen for LogsScreen {
             Key::Back => return Nav::Pop,
             Key::Enter => {
                 if let Some(row) = rows.get(self.list.focus) {
-                    match &row.digest {
-                        Some(digest) => return Nav::Push(Box::new(LogDetail { title: row.title(), digest: digest.clone(), list: ListState::default() })),
+                    match LogDetail::of(row) {
+                        Some(detail) => return Nav::Push(Box::new(detail)),
                         None => *cx.say = Some("not read yet".into()),
                     }
                 }
@@ -527,7 +1294,7 @@ impl Screen for LogsScreen {
         let top = g.top();
         let bottom = H - PAD - g.hint_h();
         let row_h = ty.body.size + ty.caption.size + 12.0;
-        for (i, y) in self.list.layout(rows.len(), top, row_h, 4.0, bottom + 2.0) {
+        for (i, y) in self.list.layout(g, rows.len(), top, row_h, 4.0, bottom + 2.0) {
             let row = &rows[i];
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let focused = i == self.list.focus;
@@ -568,6 +1335,13 @@ pub struct LogDetail {
     list: ListState,
 }
 
+impl LogDetail {
+    /// A log's summary, once it has been read.
+    pub fn of(row: &crate::logs::Row) -> Option<Self> {
+        Some(LogDetail { title: row.title(), digest: row.digest.clone()?, list: ListState::default() })
+    }
+}
+
 impl Screen for LogDetail {
     fn title(&self) -> &str {
         "Match"
@@ -603,7 +1377,7 @@ impl Screen for LogDetail {
         let list_top = top + chip_h + GAP;
         let bottom = H - PAD - g.hint_h();
         let row_h = g.row_h();
-        for (i, y) in self.list.layout(d.highlights.len(), list_top, row_h, 3.0, bottom + 2.0) {
+        for (i, y) in self.list.layout(g, d.highlights.len(), list_top, row_h, 3.0, bottom + 2.0) {
             let (level, text) = &d.highlights[i];
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let color = level_color(g, *level);
@@ -659,6 +1433,18 @@ impl Tables {
         self.list = ListState::default();
         self.list.focus = focus;
     }
+
+    /// Tables opened at a key (`Loop/Robot/LastMs`): in its table, focused
+    /// on it. Back climbs the tables above it.
+    pub fn at(key: &str, robot: &Robot) -> Self {
+        let mut tables = Tables::new();
+        let (path, name) = key.rsplit_once('/').map_or((String::new(), key), |(p, n)| (format!("{p}/"), n));
+        tables.enter(path, 0);
+        tables.trail = vec![0; tables.path.matches('/').count()];
+        let at = tables.nodes(robot).iter().position(|n| matches!(n, Node::Value(v, _) if v == name)).unwrap_or(0);
+        tables.list.focus = at;
+        tables
+    }
 }
 
 impl Screen for Tables {
@@ -673,6 +1459,19 @@ impl Screen for Tables {
                 if let Some(Node::Table(name, _)) = nodes.get(self.list.focus) {
                     self.trail.push(self.list.focus);
                     self.enter(format!("{}{name}/", self.path), 0);
+                }
+            }
+            // p pins a value to the glance page (again unpins it).
+            Key::Char('p') => {
+                if let Some(Node::Value(name, _)) = nodes.get(self.list.focus) {
+                    let key = format!("{}{name}", self.path);
+                    let unpin = cx.settings.pinned.as_deref() == Some(key.as_str());
+                    cx.settings.pinned = (!unpin).then_some(key);
+                    if !unpin && !cx.settings.glance.contains(&Widget::Pinned) {
+                        cx.settings.glance.push(Widget::Pinned);
+                    }
+                    crate::save_settings(cx.settings);
+                    *cx.say = Some(if unpin { "unpinned".into() } else { format!("{name} pinned to the glance page") });
                 }
             }
             Key::Back | Key::Left => {
@@ -700,7 +1499,7 @@ impl Screen for Tables {
             return;
         }
         let (top, row_h) = (g.top(), g.row_h());
-        for (i, y) in self.list.layout(nodes.len(), top, row_h, 3.0, H - PAD + 2.0) {
+        for (i, y) in self.list.layout(g, nodes.len(), top, row_h, 3.0, H - PAD + 2.0) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             match &nodes[i] {
                 Node::Table(name, count) => g.row(r, &format!("{name}/"), &format!("{count} ›"), t.dim, i == self.list.focus),
@@ -742,7 +1541,7 @@ impl Screen for LoopTime {
             g.stat(r, label, robot.f64(key).map(|v| format!("{v:.1}")), "ms", 22.0);
         }
         let plot = Rect::new(PAD, top + tile_h + GAP, W - 2.0 * PAD, H - PAD - top - tile_h - GAP);
-        g.surface(plot, TILE_RADIUS, t.surface1);
+        g.surface(plot, g.tile_radius(), t.surface1);
         if robot.loop_history.len() < 2 {
             let line = match (robot.linked(), robot.f64("Loop/Robot/LastMs")) {
                 (false, _) => "no robot",
@@ -803,7 +1602,7 @@ impl Screen for Motors {
         }
         let top = g.top();
         let row_h = ty.name.size + ty.caption.size + 12.0;
-        for (i, y) in self.list.layout(rows.len(), top, row_h, 4.0, H - PAD + 2.0) {
+        for (i, y) in self.list.layout(g, rows.len(), top, row_h, 4.0, H - PAD + 2.0) {
             // serial|model|kind|bus|id|name|firmware|poweredSeconds|runningSeconds|…|peakStatorAmps|peakTempC|…
             let f: Vec<&str> = rows[i].split('|').collect();
             let field = |n: usize| f.get(n).copied().unwrap_or("");
@@ -956,7 +1755,7 @@ impl Screen for Console {
 
         // The log: newest at the bottom, the message without its journal prefix.
         let panel = Rect::new(PAD, top + chip_h + GAP, W - 2.0 * PAD, H - PAD - top - chip_h - GAP);
-        g.surface(panel, TILE_RADIUS, t.surface1);
+        g.surface(panel, g.tile_radius(), t.surface1);
         let empty = Vec::new();
         let lines = program["log"].as_array().unwrap_or(&empty);
         let line_h = ty.caption.size + 3.0;
@@ -968,7 +1767,7 @@ impl Screen for Console {
             let line = line.as_str().unwrap_or_default();
             let message = line.split_once("]: ").map_or(line, |(_, m)| m);
             let ink = if message.contains("ERROR") || message.contains("FAIL") || message.contains("Exception") {
-                t.signal
+                g.fault()
             } else if message.to_ascii_lowercase().contains("warn") {
                 t.amber_ink
             } else {
@@ -995,23 +1794,67 @@ impl Screen for Console {
 #[derive(Clone, Copy, PartialEq)]
 enum Item {
     // The sections.
+    RobotSection,
     Appearance,
+    TextSection,
+    HomeSection,
     Display,
     Network,
+    KeysSection,
     Access,
+    /// Settings › System update: where it stands, the next step, the choices.
+    UpdateSection,
+    UpdateState,
+    UpdateAction,
+    UpdateNote,
+    UpdateChannel,
+    UpdateAuto,
+    UpdateOvernight,
     About,
+    /// Setup's page offered to a computer, outside first start.
+    FromComputer,
     // Appearance.
+    ThemeChoice,
     Mode,
     AccentColor,
+    /// Your own colour: a hue around the wheel.
+    OwnColour,
+    WallpaperChoice,
+    CornersChoice,
+    // Text.
+    LettersChoice,
+    WidthChoice,
+    // Home.
+    HomeScreen,
+    Columns,
+    /// Arrange apps: Home's tiles in order, any of them hidden.
+    ArrangeApps,
+    /// An app on that page, by its place in `SettingsApp::apps`.
+    AppTile(usize),
+    ClockFormat,
+    Seconds,
+    IslandChoice,
+    Greeting,
+    GlancePage,
+    /// A glance card, by its place in `Widget::ALL`.
+    GlanceCard(usize),
     TextScale,
     Calm,
     // Display.
     Brightness,
+    /// Graphics: the GPU when there is one, or the processor alone.
+    Graphics,
     // Network.
     WifiSetup,
     // Access.
     Ssh,
+    // Keys.
+    KeyFor(usize),
+    KeysFromFile,
+    // Robot.
     DemoRobot,
+    OpenRobot,
+    MatchReport,
     /// A read-only line of what the device reports.
     Info(usize),
 }
@@ -1029,16 +1872,149 @@ pub struct SettingsApp {
     /// What the section rows summarise, re-read with the rest.
     network: String,
     backlight: Option<u32>,
+    /// Where a system update stands, re-read with the rest.
+    update: crate::sysupdate::Status,
+    /// Keys for online services, and one being typed: which, and what so far.
+    keys: crate::keys::Keys,
+    typing: Option<(usize, String)>,
+    /// On Arrange apps: every app Home can show, built-in then external.
+    apps: Vec<String>,
+}
+
+/// Every app Home can show, by name: the built-in ones, then those found on
+/// the storage.
+fn app_names() -> Vec<String> {
+    APPS.iter().map(|a| a.name.to_owned()).chain(crate::apps::find().into_iter().map(|a| a.name)).collect()
+}
+
+/// Arrange apps' rows as Home has them: the favourites first, then the rest,
+/// each in the order chosen, anything not yet placed after them as it comes.
+fn arrange_items(apps: &[String], arrangement: &crate::shell::Arrangement) -> Vec<Item> {
+    let mut at: Vec<usize> = (0..apps.len()).collect();
+    at.sort_by_key(|i| {
+        let name = &apps[*i];
+        (!arrangement.favourites.contains(name), arrangement.order.iter().position(|n| n == name).unwrap_or(usize::MAX))
+    });
+    at.into_iter().map(Item::AppTile).collect()
+}
+
+/// The hue of "your own colour" nearest a named accent's own, to start from.
+fn nearest_hue(accent: bezel::Accent) -> u8 {
+    let c = accent.seed();
+    let (r, g, b) = (c.0 as f32 / 255.0, c.1 as f32 / 255.0, c.2 as f32 / 255.0);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let hue = if max == min {
+        0.0
+    } else if max == r {
+        60.0 * (((g - b) / (max - min)).rem_euclid(6.0))
+    } else if max == g {
+        60.0 * ((b - r) / (max - min) + 2.0)
+    } else {
+        60.0 * ((r - g) / (max - min) + 4.0)
+    };
+    ((hue / bezel::hues::STEP as f32).round() as u32 % bezel::Accent::HUES as u32) as u8
+}
+
+/// The glance page's settings rows: the cards in use in their order, then
+/// the rest.
+fn glance_items(order: &[Widget]) -> Vec<Item> {
+    let place = |w: &Widget| Widget::ALL.iter().position(|a| a == w).unwrap_or(0);
+    order.iter().map(|w| Item::GlanceCard(place(w))).chain(Widget::ALL.iter().filter(|w| !order.contains(w)).map(|w| Item::GlanceCard(place(w)))).collect()
+}
+
+/// Where everything in Settings is, for search: what it is called, the
+/// section it is in, and its place there (none: the section itself).
+const SETTING_PLACES: [(&str, Item, Option<usize>); 42] = [
+    ("Robot settings", Item::RobotSection, None),
+    ("Open Robot on link", Item::RobotSection, Some(0)),
+    ("Match report after a match", Item::RobotSection, Some(1)),
+    ("Demo robot", Item::RobotSection, Some(2)),
+    ("Appearance", Item::Appearance, None),
+    ("Theme", Item::Appearance, Some(0)),
+    ("Light or dark mode", Item::Appearance, Some(1)),
+    ("Accent colour", Item::Appearance, Some(2)),
+    ("Your own colour", Item::Appearance, Some(3)),
+    ("Wallpaper", Item::Appearance, Some(4)),
+    ("Corners", Item::Appearance, Some(5)),
+    ("Calm version", Item::Appearance, Some(6)),
+    ("Text", Item::TextSection, None),
+    ("Text size", Item::TextSection, Some(0)),
+    ("Letter style", Item::TextSection, Some(1)),
+    ("Letter width", Item::TextSection, Some(2)),
+    ("Home", Item::HomeSection, None),
+    ("Home screen style", Item::HomeSection, Some(0)),
+    ("Tiles per row", Item::HomeSection, Some(1)),
+    ("Arrange apps", Item::ArrangeApps, None),
+    ("Glance page cards", Item::GlancePage, None),
+    ("Clock format", Item::HomeSection, Some(4)),
+    ("Clock seconds", Item::HomeSection, Some(5)),
+    ("Island at rest", Item::HomeSection, Some(6)),
+    ("Greeting", Item::HomeSection, Some(7)),
+    ("Display", Item::Display, None),
+    ("Brightness", Item::Display, Some(0)),
+    ("Graphics and the GPU", Item::Display, Some(1)),
+    ("Network", Item::Network, None),
+    ("Wi-Fi networks", Item::Network, Some(0)),
+    ("Keys for online services", Item::KeysSection, None),
+    ("The Blue Alliance key", Item::KeysSection, Some(0)),
+    ("FRC Nexus key", Item::KeysSection, Some(1)),
+    ("AI analysis key", Item::KeysSection, Some(2)),
+    ("Read keys from a file", Item::KeysSection, Some(3)),
+    ("SSH access", Item::Access, Some(0)),
+    ("System update", Item::UpdateSection, None),
+    ("Check for updates", Item::UpdateSection, Some(1)),
+    ("Update channel", Item::UpdateSection, Some(3)),
+    ("About this handheld", Item::About, None),
+    ("Version", Item::About, Some(0)),
+    ("Set up from a computer", Item::FromComputer, None),
+];
+
+/// The names search finds Settings by.
+pub fn setting_names() -> impl Iterator<Item = (usize, &'static str)> {
+    SETTING_PLACES.iter().enumerate().map(|(i, place)| (i, place.0))
+}
+
+/// Settings opened at one of `SETTING_PLACES`.
+pub fn open_setting(index: usize) -> Box<dyn Screen> {
+    let (_, section, place) = SETTING_PLACES[index];
+    match SettingsApp::section(section) {
+        Some(mut page) => {
+            page.list.focus = place.unwrap_or(0);
+            Box::new(page)
+        }
+        None => Box::new(crate::setup::Setup::from_computer()),
+    }
+}
+
+/// The file Settings reads keys from: put there over SSH or from a USB drive.
+fn keys_file() -> std::path::PathBuf {
+    if cfg!(target_os = "linux") && std::path::Path::new("/data").is_dir() {
+        "/data/keys.txt".into()
+    } else {
+        crate::config_dir().join("keys.txt")
+    }
 }
 
 impl SettingsApp {
     pub fn new() -> Self {
         use Item::*;
-        Self::page("Settings", vec![Appearance, Display, Network, Access, About])
+        Self::page("Settings", vec![RobotSection, Appearance, TextSection, HomeSection, Display, Network, KeysSection, Access, UpdateSection, About, FromComputer])
     }
 
     fn page(title: &'static str, items: Vec<Item>) -> Self {
-        let mut page = SettingsApp { title, items, list: ListState::default(), info: Vec::new(), read_at: std::time::Instant::now(), network: String::new(), backlight: None };
+        let mut page = SettingsApp {
+            title,
+            items,
+            list: ListState::default(),
+            info: Vec::new(),
+            read_at: std::time::Instant::now(),
+            network: String::new(),
+            backlight: None,
+            update: crate::sysupdate::Status::default(),
+            keys: crate::keys::Keys::load(),
+            typing: None,
+            apps: Vec::new(),
+        };
         page.read_info();
         page
     }
@@ -1046,11 +2022,23 @@ impl SettingsApp {
     fn section(item: Item) -> Option<Self> {
         use Item::*;
         Some(match item {
-            Appearance => Self::page("Appearance", vec![Mode, AccentColor, TextScale, Calm]),
-            Display => Self::page("Display", vec![Brightness]),
+            RobotSection => Self::page("Robot", vec![OpenRobot, MatchReport, DemoRobot]),
+            Appearance => Self::page("Appearance", vec![ThemeChoice, Mode, AccentColor, OwnColour, WallpaperChoice, CornersChoice, Calm]),
+            TextSection => Self::page("Text", vec![TextScale, LettersChoice, WidthChoice]),
+            HomeSection => Self::page("Home", vec![HomeScreen, Columns, ArrangeApps, GlancePage, ClockFormat, Seconds, IslandChoice, Greeting]),
+            ArrangeApps => {
+                let apps = app_names();
+                let mut page = Self::page("Arrange apps", arrange_items(&apps, &crate::shell::Arrangement::default()));
+                page.apps = apps;
+                page
+            }
+            GlancePage => Self::page("Glance page", glance_items(&crate::shell::Settings::default().glance)),
+            Display => Self::page("Display", vec![Brightness, Graphics]),
             Network => Self::page("Network", std::iter::once(WifiSetup).chain((0..4).map(Info)).collect()),
-            Access => Self::page("Access", vec![Ssh, DemoRobot]),
-            About => Self::page("About", (0..9).map(Info).collect()),
+            KeysSection => Self::page("Keys", (0..crate::keys::SERVICES.len()).map(KeyFor).chain(std::iter::once(KeysFromFile)).collect()),
+            Access => Self::page("Access", vec![Ssh]),
+            UpdateSection => Self::page("Updates", vec![UpdateState, UpdateAction, UpdateNote, UpdateChannel, UpdateAuto, UpdateOvernight]),
+            About => Self::page("About", (0..10).map(Info).collect()),
             _ => return None,
         })
     }
@@ -1060,6 +2048,7 @@ impl SettingsApp {
         self.read_at = std::time::Instant::now();
         self.network = sys::address("eth0").filter(|a| a.contains('.')).or_else(|| sys::address("wlan0")).unwrap_or_else(|| "–".into());
         self.backlight = sys::brightness();
+        self.update = crate::sysupdate::read();
         self.info = match self.title {
             "Network" => vec![
                 ("Name", dash(sys::hostname())),
@@ -1077,6 +2066,7 @@ impl SettingsApp {
                 ("Storage", dash(sys::storage())),
                 ("Battery", dash(sys::battery())),
                 ("Processor", dash(sys::cpu_temperature())),
+                ("Graphics", crate::gpu::note()),
             ],
             _ => Vec::new(),
         };
@@ -1088,19 +2078,126 @@ impl SettingsApp {
         let onoff = |on: bool| (if on { "on" } else { "off" }).to_owned();
         let section = |name: &str, summary: String| (name.to_owned(), format!("{summary} ›"), false);
         match item {
-            Appearance => section("Appearance", format!("{} · {}", if g.tokens.tone == bezel::Tone::Light { "light" } else { "dark" }, g.accent.name())),
+            RobotSection => section("Robot", if robot.is_demo() { "demo".to_owned() } else { dash(Some(robot.address.clone()).filter(|a| !a.is_empty())) }),
+            Appearance => section("Appearance", format!("{} · {}", g.theme.name(), if g.tokens.tone == bezel::Tone::Light { "light" } else { "dark" })),
             Display => section("Display", dash(self.backlight.map(|b| format!("{b}%")))),
             Network => section("Network", self.network.clone()),
             Access => section("Access", format!("ssh {}", onoff(crate::ssh_enabled()))),
+            UpdateSection => section("System update", crate::sysupdate::summary(&self.update)),
+            UpdateState => ("Status".into(), crate::sysupdate::summary(&self.update), self.update.state != "failed"),
+            UpdateAction => {
+                let name = match self.update.state.as_str() {
+                    "available" => "Download and install",
+                    "ready" => "Restart to update",
+                    "checking" | "downloading" | "installing" | "trying" => "Working on it",
+                    _ => "Check now",
+                };
+                (name.into(), "›".into(), true)
+            }
+            UpdateNote => {
+                let u = &self.update;
+                match (u.detail.is_empty(), u.notes.is_empty()) {
+                    (false, _) => ("Note".into(), u.detail.clone(), false),
+                    (true, false) => ("What's new".into(), u.notes.clone(), true),
+                    (true, true) => ("This system".into(), crate::sysupdate::version(), true),
+                }
+            }
+            UpdateChannel => ("Channel".into(), crate::sysupdate::pref("channel", "stable"), true),
+            UpdateAuto => {
+                let on = crate::sysupdate::pref("auto", "on") == "on";
+                ("Download automatically".into(), onoff(on), on)
+            }
+            UpdateOvernight => {
+                let on = crate::sysupdate::pref("overnight", "off") == "on";
+                ("Restart overnight".into(), onoff(on), on)
+            }
+            KeysSection => {
+                let set = crate::keys::SERVICES.iter().filter(|(name, _)| self.keys.get(name).is_some()).count();
+                section("Keys", format!("{set} of {} set", crate::keys::SERVICES.len()))
+            }
+            FromComputer => section("Set up from a computer", String::new()),
+            KeyFor(i) => {
+                let (name, label) = crate::keys::SERVICES[i];
+                let value = match &self.typing {
+                    Some((row, text)) if *row == i => format!("{}▏", text.chars().rev().take(16).collect::<Vec<_>>().into_iter().rev().collect::<String>()),
+                    _ => self.keys.shown(name),
+                };
+                (label.to_owned(), value, self.keys.get(name).is_some())
+            }
+            KeysFromFile => ("Read from a file".into(), keys_file().display().to_string(), false),
             About => section("About", env!("CARGO_PKG_VERSION").to_owned()),
             Mode => ("Mode".into(), (if g.tokens.tone == bezel::Tone::Light { "light" } else { "dark" }).into(), true),
             AccentColor => ("Accent".into(), g.accent.name().into(), true),
+            HomeScreen => ("Home screen".into(), g.home.name().into(), true),
+            Columns => ("Tiles per row".into(), g.columns.to_string(), true),
+            ThemeChoice => ("Theme".into(), g.theme.name().into(), true),
+            OwnColour => (
+                "Your own colour".into(),
+                match g.accent {
+                    bezel::Accent::Hue(_) => format!("{}°", g.accent.degrees().unwrap_or(0)),
+                    _ => "off".into(),
+                },
+                matches!(g.accent, bezel::Accent::Hue(_)),
+            ),
+            WallpaperChoice => ("Wallpaper".into(), g.look.wallpaper.name().into(), true),
+            CornersChoice => ("Corners".into(), g.look.corners.name().into(), true),
+            LettersChoice => ("Letters".into(), g.look.letters.name().into(), true),
+            WidthChoice => ("Letter width".into(), g.look.width.name().into(), true),
+            TextSection => section("Text", format!("{} · {}", g.text_size.name(), g.look.letters.name())),
+            HomeSection => section("Home", format!("{} · {} across", g.home.name(), g.columns)),
+            GlancePage => section("Glance page", format!("{} cards", g.glance.len())),
+            ArrangeApps => section(
+                "Arrange apps",
+                match g.arrangement.hidden.len() {
+                    0 => "all shown".to_owned(),
+                    n => format!("{n} hidden"),
+                },
+            ),
+            AppTile(i) => {
+                let name = self.apps.get(i).cloned().unwrap_or_default();
+                let hidden = |n: &str| n != "Settings" && g.arrangement.hidden.iter().any(|h| h == n);
+                if hidden(&name) {
+                    (name, "hidden".into(), false)
+                } else {
+                    // Its place among those shown.
+                    let place = self
+                        .items
+                        .iter()
+                        .take_while(|it| **it != item)
+                        .filter(|it| matches!(it, AppTile(j) if !hidden(self.apps.get(*j).map_or("", String::as_str))))
+                        .count();
+                    (name, format!("on · {}", place + 1), true)
+                }
+            }
+            ClockFormat => ("Clock".into(), (if g.clock.0 { "24-hour" } else { "12-hour" }).into(), true),
+            Seconds => ("Seconds on the clock".into(), onoff(g.clock.1), g.clock.1),
+            IslandChoice => ("Island at rest".into(), g.island.name().into(), true),
+            Greeting => ("Greeting".into(), onoff(g.greeting), g.greeting),
+            GlanceCard(i) => {
+                let widget = Widget::ALL[i];
+                match g.glance.iter().position(|w| *w == widget) {
+                    Some(at) => (widget.label().into(), format!("on · {}", at + 1), true),
+                    None => (widget.label().into(), "off".into(), false),
+                }
+            }
             TextScale => ("Text size".into(), g.text_size.name().into(), true),
             Calm => ("Calm version".into(), onoff(g.calm), g.calm),
             Brightness => ("Brightness".into(), dash(self.backlight.map(|b| format!("{b}%"))), true),
+            Graphics => (
+                "Graphics".into(),
+                match (g.gpu_wanted(), &g.gpu) {
+                    (true, Some(gpu)) if gpu.renderer().contains("VC4") => "videocore gpu".into(),
+                    (true, Some(_)) => "gpu".into(),
+                    (true, None) => "auto · processor".into(),
+                    (false, _) => "processor".into(),
+                },
+                g.gpu.is_some(),
+            ),
             WifiSetup => section("Wi-Fi networks", "join".to_owned()),
             Ssh => ("SSH access".into(), onoff(crate::ssh_enabled()), crate::ssh_enabled()),
             DemoRobot => ("Demo robot".into(), onoff(robot.is_demo()), robot.is_demo()),
+            OpenRobot => ("Open Robot on link".into(), onoff(g.open_robot), g.open_robot),
+            MatchReport => ("Match report after a match".into(), onoff(g.match_report), g.match_report),
             Info(i) => self.info.get(i).map(|(name, value)| ((*name).to_owned(), value.clone(), false)).unwrap_or_default(),
         }
     }
@@ -1115,8 +2212,32 @@ impl SettingsApp {
                 let at = all.iter().position(|a| *a == cx.settings.accent).unwrap_or(0) as i32;
                 cx.settings.accent = all[(at + step).rem_euclid(all.len() as i32) as usize];
             }
+            HomeScreen => cx.settings.home = cx.settings.home.next(),
+            Columns => cx.settings.columns = if cx.settings.columns == 3 { 2 } else { 3 },
+            ClockFormat => cx.settings.clock24 = !cx.settings.clock24,
+            Seconds => cx.settings.seconds = !cx.settings.seconds,
+            IslandChoice => cx.settings.island = cx.settings.island.step(step),
+            Greeting => cx.settings.greeting = !cx.settings.greeting,
+            ThemeChoice => {
+                // A theme brings its own wallpaper and accent.
+                cx.settings.theme = cx.settings.theme.step(step);
+                (cx.settings.wallpaper, cx.settings.accent) = cx.settings.theme.defaults();
+            }
+            OwnColour => {
+                let hues = bezel::Accent::HUES as i32;
+                cx.settings.accent = match cx.settings.accent {
+                    bezel::Accent::Hue(i) => bezel::Accent::Hue((i as i32 + step).rem_euclid(hues) as u8),
+                    // Starting from your own colour: the hue nearest the accent in use.
+                    _ => bezel::Accent::Hue(nearest_hue(cx.settings.accent)),
+                };
+            }
+            WallpaperChoice => cx.settings.wallpaper = cx.settings.wallpaper.step(step),
+            CornersChoice => cx.settings.corners = cx.settings.corners.step(step),
+            LettersChoice => cx.settings.letters = cx.settings.letters.step(step),
+            WidthChoice => cx.settings.width = cx.settings.width.step(step),
             TextScale => cx.settings.text = if step > 0 { cx.settings.text.next() } else { cx.settings.text.next().next() },
             Calm => cx.settings.calm = !cx.settings.calm,
+            Graphics => cx.settings.gpu = !cx.settings.gpu,
             Brightness => match crate::sys::brightness() {
                 Some(now) => {
                     crate::sys::set_brightness((now as i32 + step * 10).clamp(10, 100) as u32);
@@ -1124,6 +2245,25 @@ impl SettingsApp {
                 }
                 None => *cx.say = Some("the backlight is on the device".into()),
             },
+            UpdateAction => {
+                use crate::sysupdate::run;
+                let u = &self.update;
+                let started = match u.state.as_str() {
+                    "available" => run("install").map(|()| format!("downloading {}", u.version)),
+                    "ready" => run("apply").map(|()| format!("restarting into {}", u.version)),
+                    "checking" | "downloading" | "installing" | "trying" => Ok("already working on it".into()),
+                    _ => run("check").map(|()| "checking for updates".into()),
+                };
+                *cx.say = Some(started.unwrap_or_else(|why| why));
+            }
+            UpdateChannel => {
+                let next = if crate::sysupdate::pref("channel", "stable") == "stable" { "nightly" } else { "stable" };
+                crate::sysupdate::set_pref("channel", next);
+                // What is newest depends on the channel: look again.
+                crate::sysupdate::run("check").ok();
+            }
+            UpdateAuto => crate::sysupdate::set_pref("auto", if crate::sysupdate::pref("auto", "on") == "on" { "off" } else { "on" }),
+            UpdateOvernight => crate::sysupdate::set_pref("overnight", if crate::sysupdate::pref("overnight", "off") == "on" { "off" } else { "on" }),
             Ssh => {
                 // Off unless switched on here; key-only logins.
                 let on = !crate::ssh_enabled();
@@ -1137,6 +2277,23 @@ impl SettingsApp {
                 *cx.robot = if cx.robot.is_demo() { Robot::none() } else { Robot::demo() };
                 *cx.say = Some(if cx.robot.is_demo() { "demo robot on".into() } else { "demo robot off".into() });
             }
+            KeyFor(i) => self.typing = Some((i, String::new())),
+            KeysFromFile => {
+                let file = keys_file();
+                *cx.say = Some(match crate::keys::Keys::read(&file) {
+                    Some(found) => {
+                        let count = crate::keys::SERVICES.iter().filter(|(name, _)| found.get(name).is_some()).count();
+                        self.keys.merge(&found);
+                        match self.keys.save() {
+                            Ok(()) => format!("{count} key{} read", if count == 1 { "" } else { "s" }),
+                            Err(_) => "could not keep the keys".into(),
+                        }
+                    }
+                    None => format!("no {} yet", file.display()),
+                });
+            }
+            OpenRobot => cx.settings.open_robot = !cx.settings.open_robot,
+            MatchReport => cx.settings.match_report = !cx.settings.match_report,
             _ => {}
         }
         crate::save_settings(cx.settings);
@@ -1148,11 +2305,103 @@ impl Screen for SettingsApp {
         self.title
     }
 
+    fn wants_text(&self) -> bool {
+        self.typing.is_some()
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
+        // A key being typed: Enter keeps it, Esc leaves it as it was.
+        if let Some((service, text)) = &mut self.typing {
+            match key {
+                Key::Char(c) if !c.is_control() && text.len() < 200 => text.push(c),
+                Key::Backspace => {
+                    text.pop();
+                }
+                Key::Enter => {
+                    let (name, value) = (crate::keys::SERVICES[*service].0, text.clone());
+                    self.keys.set(name, &value);
+                    self.typing = None;
+                    *cx.say = Some(if self.keys.save().is_ok() { "key kept".into() } else { "could not keep the key".into() });
+                }
+                Key::Back => self.typing = None,
+                _ => {}
+            }
+            return Nav::Stay;
+        }
         let Some(&item) = self.items.get(self.list.focus) else { return Nav::Pop };
+        // A glance card: Enter switches it on or off; Left and Right move it
+        // earlier or later among those in use. The focus stays on it.
+        if let Item::GlanceCard(i) = item {
+            let widget = Widget::ALL[i];
+            let order = &mut cx.settings.glance;
+            let at = order.iter().position(|w| *w == widget);
+            match (key, at) {
+                (Key::Back, _) => return Nav::Pop,
+                (Key::Enter, Some(at)) => {
+                    order.remove(at);
+                }
+                (Key::Enter, None) => order.push(widget),
+                (Key::Left, Some(at)) if at > 0 => order.swap(at, at - 1),
+                (Key::Right, Some(at)) if at + 1 < order.len() => order.swap(at, at + 1),
+                (other, _) => {
+                    list_key(&mut self.list, other, self.items.len());
+                    return Nav::Stay;
+                }
+            }
+            self.items = glance_items(&cx.settings.glance);
+            self.list.focus = self.items.iter().position(|it| *it == Item::GlanceCard(i)).unwrap_or(0);
+            crate::save_settings(cx.settings);
+            return Nav::Stay;
+        }
+        // An app on Arrange apps: Enter shows or hides it; Space makes it a
+        // favourite or not; Left and Right move it earlier or later among the
+        // favourites or among the rest. The focus stays on it.
+        if let Item::AppTile(i) = item {
+            let name = self.apps[i].clone();
+            let mut order: Vec<String> = self.items.iter().filter_map(|it| if let Item::AppTile(j) = it { self.apps.get(*j).cloned() } else { None }).collect();
+            let at = order.iter().position(|n| *n == name).unwrap_or(0);
+            let favourite = |n: &String| cx.settings.favourites.contains(n);
+            let same_side = |a: usize, b: usize| order.get(b).is_some_and(|n| favourite(n) == favourite(&order[a]));
+            let (earlier, later) = (at > 0 && same_side(at, at - 1), same_side(at, at + 1));
+            match key {
+                Key::Char(' ') => match cx.settings.favourites.iter().position(|f| *f == name) {
+                    Some(f) => {
+                        cx.settings.favourites.remove(f);
+                        *cx.say = Some(format!("{} is not a favourite", name.to_lowercase()));
+                    }
+                    None => {
+                        cx.settings.favourites.push(name.clone());
+                        *cx.say = Some(format!("{} pinned first", name.to_lowercase()));
+                    }
+                },
+                Key::Back => return Nav::Pop,
+                Key::Enter if name == "Settings" => {
+                    *cx.say = Some("settings stays on home".into());
+                    return Nav::Stay;
+                }
+                Key::Enter => match cx.settings.hidden.iter().position(|h| *h == name) {
+                    Some(h) => {
+                        cx.settings.hidden.remove(h);
+                    }
+                    None => cx.settings.hidden.push(name.clone()),
+                },
+                Key::Left if earlier => order.swap(at, at - 1),
+                Key::Right if later => order.swap(at, at + 1),
+                other => {
+                    list_key(&mut self.list, other, self.items.len());
+                    return Nav::Stay;
+                }
+            }
+            cx.settings.order = order;
+            self.items = arrange_items(&self.apps, &cx.settings.arrangement());
+            self.list.focus = self.items.iter().position(|it| *it == Item::AppTile(i)).unwrap_or(0);
+            crate::save_settings(cx.settings);
+            return Nav::Stay;
+        }
         match key {
             Key::Back => return Nav::Pop,
             Key::Enter | Key::Right if item == Item::WifiSetup => return Nav::Push(Box::new(WifiScreen::new())),
+            Key::Enter | Key::Right if item == Item::FromComputer => return Nav::Push(Box::new(crate::setup::Setup::from_computer())),
             Key::Enter | Key::Right | Key::Left => {
                 if let Some(page) = Self::section(item) {
                     if key != Key::Left {
@@ -1179,13 +2428,41 @@ impl Screen for SettingsApp {
     fn draw(&mut self, g: &mut Gfx, robot: &Robot) {
         let t = g.tokens;
         let (top, row_h) = (g.top(), g.row_h());
+        // The glance page's cards are listed in the order they are in use.
+        if self.title == "Glance page" {
+            let order = glance_items(&g.glance);
+            if order != self.items {
+                let focused = self.items.get(self.list.focus).copied();
+                self.items = order;
+                self.list.focus = focused.and_then(|f| self.items.iter().position(|it| *it == f)).unwrap_or(0);
+            }
+        }
+        let arranging = self.title == "Arrange apps";
+        if arranging {
+            let order = arrange_items(&self.apps, &g.arrangement);
+            if order != self.items {
+                let focused = self.items.get(self.list.focus).copied();
+                self.items = order;
+                self.list.focus = focused.and_then(|f| self.items.iter().position(|it| *it == f)).unwrap_or(0);
+            }
+        }
         let items = self.items.clone();
-        for (i, y) in self.list.layout(items.len(), top, row_h, 3.0, H - PAD + 2.0) {
+        // Arrange apps says what its keys do along the bottom.
+        let bottom = if arranging { H - g.hint_h() - 3.0 } else { H - PAD + 2.0 };
+        for (i, y) in self.list.layout(g, items.len(), top, row_h, 3.0, bottom) {
             let item = items[i];
             let (name, value, on) = self.describe(item, g, robot);
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let focused = i == self.list.focus;
             match item {
+                // A favourite's star, just before its place.
+                Item::AppTile(j) => {
+                    g.row(r, &name, &value, if on { t.ink } else { t.dim }, focused);
+                    if self.apps.get(j).is_some_and(|n| g.arrangement.favourites.contains(n)) {
+                        let value_w = g.measure(&value, g.ty.label);
+                        g.icon("star", true, r.right() - 10.0 - value_w - 10.0, r.cy(), 12.0, t.ink);
+                    }
+                }
                 // The accents themselves, the chosen one ringed.
                 Item::AccentColor => {
                     g.row(r, &name, "", t.dim, focused);
@@ -1200,6 +2477,33 @@ impl Screen for SettingsApp {
                         g.dot(cx, r.cy(), 4.5, swatch);
                     }
                 }
+                // The wheel laid flat: a strip running through every hue in
+                // its own signal colour, the chosen one marked, its angle
+                // beside it.
+                Item::OwnColour => {
+                    g.row(r, &name, &value, if on { t.ink } else { t.dim }, focused);
+                    let hues = bezel::Accent::HUES as usize;
+                    let value_w = if value.is_empty() { 0.0 } else { g.measure(&value, g.ty.label) + 8.0 };
+                    let strip = Rect::new(r.right() - 10.0 - value_w - 96.0, r.cy() - 3.0, 96.0, 6.0);
+                    let track = strip.offset(g.ox, 0.0);
+                    for k in 0..strip.w as usize {
+                        let hue = bezel::Accent::Hue((k * hues / strip.w as usize) as u8);
+                        let column = Rect::new(track.x + k as f32, track.y, 1.0, track.h);
+                        g.canvas.rrect_clipped(column, 0.0, track, track.h * 0.5, bezel::Tokens::of(hue, t.tone).signal, 1.0);
+                    }
+                    if let bezel::Accent::Hue(i) = g.accent {
+                        let x = strip.x + (i as f32 + 0.5) * strip.w / hues as f32;
+                        g.dot(x, r.cy(), 6.0, t.ink);
+                        g.dot(x, r.cy(), 4.5, t.signal);
+                    }
+                }
+                // While it downloads or installs, how far it has come.
+                Item::UpdateState if matches!(self.update.state.as_str(), "downloading" | "installing") => {
+                    let value_w = g.measure(&value, g.ty.label) + 22.0;
+                    g.row(r, &name, &value, t.ink, focused);
+                    let name_w = g.measure(&name, g.ty.body) + 22.0;
+                    g.meter(Rect::new(r.x + name_w, r.cy() - 3.0, (r.w - name_w - value_w).max(10.0), 6.0), self.update.progress, t.ice);
+                }
                 Item::Brightness => {
                     let value_w = g.measure("100%", g.ty.label) + 22.0;
                     g.row(r, &name, &value, t.ink, focused);
@@ -1210,7 +2514,10 @@ impl Screen for SettingsApp {
                 _ => g.row(r, &name, &value, if on { t.ink } else { t.dim }, focused),
             }
         }
-        self.list.scrollbar(g, items.len(), top, H - PAD);
+        self.list.scrollbar(g, items.len(), top, bottom - 2.0);
+        if arranging {
+            g.hint("enter: hide · space: favourite · ←→: move");
+        }
     }
 }
 
@@ -1301,7 +2608,7 @@ impl Screen for WifiScreen {
             // One thing on the page: the password.
             let label = g.text.fit(&format!("password for {ssid}"), &ty.caption, W - 2.0 * PAD - 18.0);
             let field = Rect::new(PAD, top, W - 2.0 * PAD, ty.caption.size + ty.label.size + 20.0);
-            g.surface(field, TILE_RADIUS, t.surface2);
+            g.surface(field, g.tile_radius(), t.surface2);
             g.text_at(field.x + 10.0, field.y + 7.0 + ty.caption.size * 0.5, Align::Left, &label, ty.caption, t.dim);
             let cy = field.bottom() - 8.0 - ty.label.size * 0.5;
             // The end of a long password stays in view.
@@ -1312,7 +2619,7 @@ impl Screen for WifiScreen {
             }
             let w = g.text_at(field.x + 10.0, cy, Align::Left, shown, ty.label, t.ink);
             g.surface(Rect::new(field.x + 11.0 + w, cy - ty.label.size * 0.5, 1.5, ty.label.size), 0.5, t.signal);
-            g.focus_ring(field, TILE_RADIUS);
+            g.focus_ring(field, g.tile_radius());
             let count = if password.len() >= 8 { format!("{} characters", password.len()) } else { format!("{} characters · needs 8 or more", password.len()) };
             g.text_at(PAD + 10.0, field.bottom() + 6.0 + ty.caption.size * 0.5, Align::Left, &count, ty.caption, if password.len() >= 8 { t.dim } else { t.faint });
             g.hint("enter: join · esc: cancel");
@@ -1321,7 +2628,7 @@ impl Screen for WifiScreen {
         let state = self.wifi.state();
         let bottom = H - PAD - g.hint_h();
         let rows = state.networks.len() + 1;
-        for (i, y) in self.list.layout(rows, top, row_h, 3.0, bottom + 2.0) {
+        for (i, y) in self.list.layout(g, rows, top, row_h, 3.0, bottom + 2.0) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let focused = i == self.list.focus;
             if i == 0 {
@@ -1349,5 +2656,53 @@ impl Screen for WifiScreen {
         };
         let fitted = g.text.fit(&hint, &ty.caption, W - 2.0 * PAD);
         g.hint(&fitted);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(home: &Home) -> Vec<String> {
+        (0..home.count()).map(|i| home.icon_and_name(i).1).collect()
+    }
+
+    #[test]
+    fn home_follows_its_arrangement_and_the_focus_stays_on_its_app() {
+        let mut home = Home::new();
+        let all = names(&home);
+        assert_eq!(all[0], "Robot", "as they come: the built-in apps first");
+        home.focus = all.iter().position(|n| n == "Logs").unwrap();
+        let arrangement = |order: &[&str], hidden: &[&str], favourites: &[&str]| crate::shell::Arrangement {
+            order: order.iter().map(|s| s.to_string()).collect(),
+            hidden: hidden.iter().map(|s| s.to_string()).collect(),
+            favourites: favourites.iter().map(|s| s.to_string()).collect(),
+        };
+        home.arrange(&arrangement(&["Schedule", "Logs"], &["Tables", "Settings"], &[]));
+        let arranged = names(&home);
+        assert_eq!(arranged[..2], ["Schedule", "Logs"]);
+        assert!(!arranged.iter().any(|n| n == "Tables"), "hidden");
+        assert!(arranged.iter().any(|n| n == "Settings"), "Settings is never hidden: it is the way back");
+        assert_eq!(arranged.len(), all.len() - 1);
+        assert_eq!(arranged[home.focus], "Logs", "the focus stays on the same app");
+        // Its own app hidden: the focus stays where it was, on whatever is there now.
+        home.arrange(&arrangement(&[], &["Logs"], &[]));
+        assert!(home.focus < home.count());
+        // Favourites go first, in the order chosen, and wear a star.
+        home.arrange(&arrangement(&["Schedule", "Git", "Robot"], &[], &["Git", "Health"]));
+        let pinned = names(&home);
+        assert_eq!(pinned[..3], ["Git", "Health", "Schedule"]);
+        assert!(home.favourite(0) && home.favourite(1) && !home.favourite(2));
+        // Back as it came.
+        home.arrange(&arrangement(&[], &[], &[]));
+        assert_eq!(names(&home), all);
+    }
+
+    #[test]
+    fn arrange_apps_lists_them_in_the_order_chosen_then_the_rest() {
+        let apps: Vec<String> = ["A", "B", "C", "D"].map(String::from).to_vec();
+        let arrangement = crate::shell::Arrangement { order: vec!["C".into(), "A".into(), "gone".into()], hidden: vec![], favourites: vec!["D".into()] };
+        let items = arrange_items(&apps, &arrangement);
+        assert!(items == vec![Item::AppTile(3), Item::AppTile(2), Item::AppTile(0), Item::AppTile(1)]);
     }
 }

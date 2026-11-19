@@ -1,0 +1,23 @@
+#!/sbin/openrc-run
+# System updates, at every start. After an update the firmware starts the new
+# system once (a "try"): the check waits for the shell to show it is up, then
+# makes the new system the one that starts. If it never comes up, the handheld
+# is restarted into the system that worked, and that one says the update did
+# not take. On an ordinary start it only notes how the last try went.
+#
+# The check runs on in the background (it may wait minutes for the shell);
+# started through a subshell, it belongs to no one and leaves no zombie.
+
+description="Keep a newly updated system once it has come up"
+
+depend() {
+	# After the shell, not needing it: if a tried system's shell will not
+	# start, this must still run, so the handheld goes back to the old one.
+	after catalyst-shell
+}
+
+start() {
+	ebegin "Checking how the last update went"
+	( /usr/bin/catalyst-update verify >/dev/null 2>&1 & )
+	eend 0
+}

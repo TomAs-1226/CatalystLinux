@@ -4,7 +4,8 @@ case "$1" in
 on)
 	mkdir -p /data/catalyst /data/ssh
 	touch /data/catalyst/ssh-enabled
-	rc-service catalyst-ssh start
+	# restart, not start: the service counts as started even while SSH is off.
+	rc-service catalyst-ssh restart
 	;;
 off)
 	rm -f /data/catalyst/ssh-enabled

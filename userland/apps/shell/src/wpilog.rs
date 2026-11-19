@@ -126,6 +126,10 @@ fn want(name: &str, kind: &str) -> Option<Want> {
     }
 }
 
+/// The largest record read into memory. Every record the summary wants (a
+/// start record with its name and metadata, a number, a flag) is far smaller.
+const MAX_RECORD: u64 = 64 * 1024;
+
 fn read_uint(r: &mut impl Read, width: usize) -> io::Result<u64> {
     let mut buf = [0u8; 8];
     r.read_exact(&mut buf[..width])?;
@@ -171,11 +175,18 @@ pub fn summarize(mut r: impl Read) -> io::Result<Summary> {
             break;
         };
         // Control records and wanted entries are read; everything else is skipped unread.
+        // So is anything larger than a record worth reading can be: a size
+        // that large is a damaged file, and reading it whole would take
+        // more memory than the handheld has.
         let wanted = if entry == 0 { None } else { wants.get(&entry) };
-        if entry != 0 && wanted.is_none() {
+        if (entry != 0 && wanted.is_none()) || size > MAX_RECORD {
             if io::copy(&mut r.by_ref().take(size), &mut io::sink())? < size {
                 s.truncated = true;
                 break;
+            }
+            if size > MAX_RECORD {
+                s.records += 1;
+                continue;
             }
         } else {
             payload.resize(size as usize, 0);
@@ -365,6 +376,21 @@ mod tests {
         let s = summarize(&bytes[..bytes.len() / 2 + 3]).unwrap();
         assert!(s.truncated);
         assert!(s.seconds > 60.0 && s.seconds < 90.0, "{}", s.seconds);
+    }
+
+    #[test]
+    fn a_damaged_record_claiming_gigabytes_is_not_read_into_memory() {
+        // A good start, then a control record whose size says 4 GB, then the rest of the match.
+        let good = sample();
+        let mut bytes = good[..12].to_vec();
+        bytes.push(0b0011_1111); // 4-byte id, 4-byte size, 4-byte time
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&good[12..]);
+        // It comes back cut short where the damage is, rather than taking the shell down.
+        let s = summarize(&bytes[..]).unwrap();
+        assert!(s.truncated);
     }
 
     #[test]

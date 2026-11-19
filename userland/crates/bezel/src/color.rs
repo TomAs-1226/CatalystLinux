@@ -120,10 +120,16 @@ pub enum Accent {
     Green,
     Violet,
     Rose,
+    /// Your own colour: one of 72 hues round the wheel, every 5°, each
+    /// grown into a palette by the same generator.
+    Hue(u8),
 }
 
 impl Accent {
+    /// The named accents, offered as swatches.
     pub const ALL: [Accent; 5] = [Accent::Orange, Accent::Blue, Accent::Green, Accent::Violet, Accent::Rose];
+    /// How many hues "your own colour" offers.
+    pub const HUES: u8 = crate::hues::HUES.len() as u8;
 
     pub fn name(self) -> &'static str {
         match self {
@@ -132,11 +138,45 @@ impl Accent {
             Accent::Green => "green",
             Accent::Violet => "violet",
             Accent::Rose => "rose",
+            Accent::Hue(_) => "own",
+        }
+    }
+
+    /// The name a settings file keeps: your own colour by its angle on the
+    /// wheel, "hue-215".
+    pub fn key(self) -> String {
+        match self {
+            Accent::Hue(i) => format!("hue-{}", self.degrees().unwrap_or(i as u32)),
+            named => named.name().to_owned(),
+        }
+    }
+
+    /// Your own colour's angle on the wheel.
+    pub fn degrees(self) -> Option<u32> {
+        match self {
+            Accent::Hue(i) => Some(i as u32 * crate::hues::STEP),
+            _ => None,
         }
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
+        if let Some(degrees) = name.strip_prefix("hue-").and_then(|n| n.parse::<u32>().ok()) {
+            let i = degrees / crate::hues::STEP;
+            return (degrees % crate::hues::STEP == 0 && i < Self::HUES as u32).then_some(Accent::Hue(i as u8));
+        }
         Self::ALL.into_iter().find(|a| a.name() == name)
+    }
+
+    /// The colour the palette was grown from, for a swatch.
+    pub fn seed(self) -> Color {
+        match self {
+            Accent::Orange => Color::hex(0xff5b1f),
+            Accent::Blue => Color::hex(0x3d7bff),
+            Accent::Green => Color::hex(0x2fb36a),
+            Accent::Violet => Color::hex(0x7a5cff),
+            Accent::Rose => Color::hex(0xe94560),
+            Accent::Hue(i) => Color::hex(crate::hues::HUES[i as usize % crate::hues::HUES.len()].0),
+        }
     }
 
     pub fn next(self) -> Self {
@@ -189,6 +229,13 @@ impl Tokens {
             // Monet from #e94560, FrcCatalyst's own red
             (Accent::Rose, Dark) => palette(Dark, [0x140c0d, 0x22191a, 0x291f20, 0x362c2c, 0x291f20, 0x2d2324, 0xfceaea, 0xbba6a7, 0x705f60, 0xff5d74, 0x271113, 0xcbe3d1, 0x032a18, 0xffbf63, 0x341f00, 0x48300a, 0xffbf63]),
             (Accent::Rose, Light) => palette(Light, [0xf6e4e4, 0xfffbff, 0xffeded, 0xf0dede, 0xfffbff, 0xf3e1e1, 0x22191a, 0x6b5a5b, 0xbba6a7, 0xee4964, 0xffffff, 0xcbe3d1, 0x032a18, 0xffcf8b, 0x332000, 0xffddb1, 0x916100]),
+            (Accent::Hue(i), tone) => {
+                let (_, dark, light) = crate::hues::HUES[i as usize % crate::hues::HUES.len()];
+                match tone {
+                    Dark => palette(Dark, dark),
+                    Light => palette(Light, light),
+                }
+            }
         }
     }
 }

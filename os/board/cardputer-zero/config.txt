@@ -5,11 +5,18 @@ fixup_file=fixup_cd.dat
 kernel=Image
 arm_64bit=1
 
-# Nothing here uses the GPU: the panel is an SPI display drawn by the CPU.
+# The firmware keeps 16 MB for itself. The GPU's 3D core is driven by Linux
+# (the vc4 driver) from its own contiguous memory pool, 32 MB, which the rest
+# of the system borrows while the GPU does not need it. No HDMI: the panel is
+# an SPI display; the GPU draws into memory and the frame goes out over SPI.
 gpu_mem=16
+dtoverlay=vc4-kms-v3d,nohdmi,noaudio,cma-size=33554432
 disable_splash=1
 disable_overscan=1
 boot_delay=0
+# The watchdog: a system that hangs while it starts is restarted, which
+# after an update tried once means back to the one that worked.
+dtparam=watchdog=on
 
 dtparam=i2c_arm=on
 dtparam=spi=on

@@ -11,7 +11,13 @@ pub struct Session {
 impl Session {
     /// Start a shell in a terminal of this size.
     pub fn start(cols: usize, rows: usize) -> Session {
-        Session { inner: imp::Inner::start(cols, rows) }
+        Session { inner: imp::Inner::start(cols, rows, None) }
+    }
+
+    /// Run one program (a shell command line) in a terminal of this size,
+    /// from the folder it lives in. The session ends when the program does.
+    pub fn run(cols: usize, rows: usize, command: &str, dir: &std::path::Path) -> Session {
+        Session { inner: imp::Inner::start(cols, rows, Some((command, dir))) }
     }
 
     /// Whatever the shell has printed since the last read; never waits.
@@ -49,14 +55,18 @@ mod imp {
     }
 
     impl Inner {
-        pub fn start(cols: usize, rows: usize) -> Inner {
+        pub fn start(cols: usize, rows: usize, program: Option<(&str, &std::path::Path)>) -> Inner {
             // Everything the child needs is made before the fork: between
             // fork and exec only async-signal-safe calls are allowed.
             let shell = CString::new("/bin/sh").unwrap();
-            // A leading dash makes it a login shell, which reads /etc/profile.
-            let argv = [CString::new("-sh").unwrap()];
             let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-            let start_in = if std::path::Path::new("/data").is_dir() { "/data".to_owned() } else { home.clone() };
+            let (argv, start_in) = match program {
+                // One program: the shell runs its command line and ends with it.
+                Some((command, dir)) => (vec!["sh".to_owned(), "-c".to_owned(), command.to_owned()], dir.to_string_lossy().into_owned()),
+                // A leading dash makes it a login shell, which reads /etc/profile.
+                None => (vec!["-sh".to_owned()], if std::path::Path::new("/data").is_dir() { "/data".to_owned() } else { home.clone() }),
+            };
+            let argv: Vec<CString> = argv.into_iter().filter_map(|a| CString::new(a).ok()).collect();
             let env: Vec<CString> = [
                 "TERM=xterm".to_owned(),
                 format!("HOME={home}"),
@@ -67,7 +77,7 @@ mod imp {
             .into_iter()
             .map(|s| CString::new(s).unwrap())
             .collect();
-            let start_in = CString::new(start_in).unwrap();
+            let start_in = CString::new(start_in).unwrap_or_else(|_| CString::new("/").unwrap());
             let argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|s| s.as_ptr()).chain(std::iter::once(std::ptr::null())).collect();
             let env_ptrs: Vec<*const libc::c_char> = env.iter().map(|s| s.as_ptr()).chain(std::iter::once(std::ptr::null())).collect();
             let window = size(cols, rows);
@@ -85,6 +95,10 @@ mod imp {
                 unsafe {
                     let flags = libc::fcntl(master, libc::F_GETFL);
                     libc::fcntl(master, libc::F_SETFL, flags | libc::O_NONBLOCK);
+                    // Not handed down to whatever the shell starts later (the
+                    // Wi-Fi or SSH service, an app): a daemon holding it open
+                    // would keep this terminal from ever hanging up.
+                    libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC);
                 }
             }
             Inner { master, child, exited: child <= 0 }
@@ -136,14 +150,36 @@ mod imp {
     impl Drop for Inner {
         fn drop(&mut self) {
             unsafe {
-                if !self.exited && self.child > 0 {
-                    libc::kill(self.child, libc::SIGHUP);
-                    libc::waitpid(self.child, std::ptr::null_mut(), libc::WNOHANG);
-                }
                 if self.master >= 0 {
                     libc::close(self.master);
                 }
+                if !self.exited && self.child > 0 {
+                    libc::kill(self.child, libc::SIGHUP);
+                    // A program takes a moment to go, and must be waited for
+                    // once it has, or it stays behind as a zombie for as long
+                    // as the shell runs. One that ignores the hang-up is made
+                    // to go. Off the drawing thread, which must not wait.
+                    let child = self.child;
+                    std::thread::Builder::new()
+                        .stack_size(64 * 1024)
+                        .spawn(move || reap(child))
+                        .ok();
+                }
             }
+        }
+    }
+
+    /// Wait for `child` to end, giving it two seconds before making it.
+    fn reap(child: libc::pid_t) {
+        for _ in 0..40 {
+            if unsafe { libc::waitpid(child, std::ptr::null_mut(), libc::WNOHANG) } != 0 {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        unsafe {
+            libc::kill(child, libc::SIGKILL);
+            libc::waitpid(child, std::ptr::null_mut(), 0);
         }
     }
 }
@@ -160,9 +196,14 @@ mod imp {
     const PROMPT: &str = "\x1b[1;34m/data\x1b[0m $ ";
 
     impl Inner {
-        pub fn start(_cols: usize, _rows: usize) -> Inner {
+        pub fn start(_cols: usize, _rows: usize, program: Option<(&str, &std::path::Path)>) -> Inner {
             let mut out = Vec::new();
-            out.extend_from_slice(b"\x1b[2mstand-in shell: the handheld runs a real /bin/sh here\x1b[0m\r\n");
+            match program {
+                Some((command, _)) => {
+                    out.extend_from_slice(format!("\x1b[2mstand-in shell: the handheld would run\r\n  {command}\r\nhere (exit finishes it)\x1b[0m\r\n").as_bytes())
+                }
+                None => out.extend_from_slice(b"\x1b[2mstand-in shell: the handheld runs a real /bin/sh here\x1b[0m\r\n"),
+            }
             out.extend_from_slice(PROMPT.as_bytes());
             Inner { out, line: String::new(), open: true }
         }
@@ -250,7 +291,7 @@ mod tests {
     fn a_real_shell_answers_through_the_emulator() {
         let mut session = Session::start(40, 10);
         let mut term = Term::new(40, 10);
-        let mut pump = |session: &mut Session, term: &mut Term, until: &dyn Fn(&Term) -> bool| {
+        let pump = |session: &mut Session, term: &mut Term, until: &dyn Fn(&Term) -> bool| {
             let start = Instant::now();
             while start.elapsed() < Duration::from_secs(10) {
                 let bytes = session.read();

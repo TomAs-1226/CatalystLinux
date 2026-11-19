@@ -1,22 +1,31 @@
 #!/sbin/openrc-run
-# SSH is off unless it was switched on from the System screen, which runs
+# SSH is off unless it was switched on in Settings, which runs
 # "catalyst-ssh-toggle on". The choice and the host key live on /data.
 # Logins are key-only (-s): public keys go in /data/ssh/authorized_keys.
 
 description="Dropbear SSH, only when enabled"
-command=/usr/sbin/dropbear
-command_args="-R -r /data/ssh/host_ed25519 -s"
-pidfile=/run/dropbear.pid
 
 depend() {
-	need localmount
+	need catalyst-early
+	after catalyst-late
 }
 
-start_pre() {
+start() {
 	if [ ! -e /data/catalyst/ssh-enabled ]; then
 		einfo "SSH is switched off"
-		return 1
+		return 0
 	fi
+	ebegin "Starting SSH"
 	mkdir -p /data/ssh
-	[ -e /data/ssh/host_ed25519 ] || dropbearkey -t ed25519 -f /data/ssh/host_ed25519 >/dev/null
+	[ -e /data/ssh/host_ed25519 ] || dropbearkey -t ed25519 -f /data/ssh/host_ed25519 >/dev/null 2>&1
+	/usr/sbin/dropbear -R -r /data/ssh/host_ed25519 -s -P /run/dropbear.pid
+	eend $?
+}
+
+stop() {
+	[ -e /run/dropbear.pid ] || return 0
+	ebegin "Stopping SSH"
+	start-stop-daemon -K -q -p /run/dropbear.pid
+	rm -f /run/dropbear.pid
+	eend 0
 }

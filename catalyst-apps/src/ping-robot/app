@@ -1,0 +1,6 @@
+name = Ping the robot
+icon = link
+about = is it there, and how fast
+version = 1.0.0
+run = sh ./run.sh
+screen = terminal
