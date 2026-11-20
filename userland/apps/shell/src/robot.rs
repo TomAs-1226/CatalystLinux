@@ -28,6 +28,8 @@ pub struct Robot {
     pub logs: Logs,
     /// The team's matches at its event.
     pub schedule: crate::schedule::Schedule,
+    /// The values on the live graph, sampled whichever screen is showing.
+    pub graphs: crate::graphs::Recorder,
     last_generation: u64,
 }
 
@@ -39,6 +41,7 @@ impl Robot {
             loop_history: VecDeque::new(),
             logs: Logs::none(),
             schedule: crate::schedule::Schedule::none(),
+            graphs: crate::graphs::Recorder::default(),
             last_generation: u64::MAX,
         }
     }
@@ -115,6 +118,11 @@ impl Robot {
             }
             Source::None => 0,
         };
+        // The graphed values, sampled on their own clock whether or not
+        // anything changed (a steady value is a flat line moving on).
+        let mut graphs = std::mem::take(&mut self.graphs);
+        graphs.sample(dt, self);
+        self.graphs = graphs;
         // Logs are pulled only while the robot is reachable and not running an
         // opmode: a match is no time to be reading its disk.
         self.logs.set_allowed(self.linked() && self.bool("OpMode/Running") != Some(true));

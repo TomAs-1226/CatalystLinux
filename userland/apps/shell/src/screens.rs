@@ -49,7 +49,7 @@ struct App {
     open: fn(&Robot) -> Box<dyn Screen>,
 }
 
-const APPS: [App; 18] = [
+const APPS: [App; 20] = [
     App { icon: "smart_toy", name: "Robot", open: |_| Box::new(RobotScreen::default()) },
     App { icon: "monitor_heart", name: "Health", open: |_| Box::new(Health::default()) },
     App { icon: "description", name: "Logs", open: |_| Box::new(LogsScreen::default()) },
@@ -67,6 +67,8 @@ const APPS: [App; 18] = [
     App { icon: "settings_ethernet", name: "Connect", open: |_| Box::new(crate::connect::Connect::new()) },
     App { icon: "play_circle", name: "Actions", open: |_| Box::new(crate::commands::Commands::new()) },
     App { icon: "qr_code_scanner", name: "AprilTag", open: |_| Box::new(crate::apriltags::Reader::new()) },
+    App { icon: "insights", name: "Graphs", open: |_| Box::new(crate::graphs::Graphs::new()) },
+    App { icon: "checklist", name: "Pit", open: |_| Box::new(crate::pit::Pit::default()) },
     App { icon: "settings", name: "Settings", open: |_| Box::new(SettingsApp::new()) },
 ];
 
@@ -390,6 +392,11 @@ impl Home {
                 },
                 None => ("–".into(), None),
             },
+            "Graphs" => match robot.graphs.keys().len() {
+                0 => ("none yet".into(), None),
+                n => (format!("{n} live"), None),
+            },
+            "Pit" => crate::pit::tile(robot),
             "Console" => ("robot log".into(), None),
             "Terminal" => ("shell".into(), None),
             "Files" => ("storage".into(), None),
@@ -1269,11 +1276,24 @@ fn level_color(g: &Gfx, level: Level) -> Color {
 }
 
 /// The match logs pulled from the robot, newest first. Each row carries the
-/// worst thing its match had; Enter opens the whole summary.
+/// worst thing its match had; Enter opens the whole summary. Once two
+/// matches have been read, a row above them opens their trends, saying what
+/// is getting worse; the focus starts on the newest match, under it.
 #[derive(Default)]
 pub struct LogsScreen {
     list: ListState,
     seen: u64,
+    placed: bool,
+}
+
+impl LogsScreen {
+    /// The focus starts on the newest match, below the trends row if there is one.
+    fn place(&mut self, trends: bool) {
+        if !self.placed {
+            self.list.focus = trends as usize;
+            self.placed = true;
+        }
+    }
 }
 
 impl Screen for LogsScreen {
@@ -1283,17 +1303,21 @@ impl Screen for LogsScreen {
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let rows = cx.robot.logs.list();
+        let trends = crate::trends::available(&rows);
+        self.place(trends);
+        let first = trends as usize;
         match key {
             Key::Back => return Nav::Pop,
+            Key::Enter if trends && self.list.focus == 0 => return Nav::Push(Box::new(crate::trends::Trends::new())),
             Key::Enter => {
-                if let Some(row) = rows.get(self.list.focus) {
+                if let Some(row) = self.list.focus.checked_sub(first).and_then(|i| rows.get(i)) {
                     match LogDetail::of(row) {
                         Some(detail) => return Nav::Push(Box::new(detail)),
                         None => *cx.say = Some("not read yet".into()),
                     }
                 }
             }
-            other => list_key(&mut self.list, other, rows.len()),
+            other => list_key(&mut self.list, other, rows.len() + first),
         }
         Nav::Stay
     }
@@ -1308,15 +1332,32 @@ impl Screen for LogsScreen {
             g.empty("description", if status.is_empty() { "no robot set" } else { &status });
             return;
         }
+        let trends = crate::trends::available(&rows);
+        self.place(trends);
+        let first = trends as usize;
         let top = g.top();
         let bottom = H - PAD - g.hint_h();
         let row_h = ty.body.size + ty.caption.size + 12.0;
-        for (i, y) in self.list.layout(g, rows.len(), top, row_h, 4.0, bottom + 2.0) {
-            let row = &rows[i];
+        for (i, y) in self.list.layout(g, rows.len() + first, top, row_h, 4.0, bottom + 2.0) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let focused = i == self.list.focus;
             g.surface(r, 12.0, if focused { t.surface2 } else { t.surface1 });
             let (line1, line2) = (r.y + 5.0 + ty.body.size * 0.5, r.bottom() - 5.0 - ty.caption.size * 0.5);
+            if trends && i == 0 {
+                // Trends: how many matches, and what is getting worse.
+                let read = rows.iter().filter(|r| r.digest.is_some()).count();
+                let count_w = g.text_at(r.right() - 10.0, line1, Align::Right, &format!("{read} matches ›"), ty.label, t.dim);
+                g.icon("trending_up", focused, r.x + 16.0, line1, 14.0, t.ink);
+                g.text_fit(r.x + 28.0, line1, "Trends", ty.body, t.ink, r.w - 48.0 - count_w);
+                let (worse, line) = crate::trends::headline(&rows);
+                g.dot(r.x + 13.0, line2, 2.5, if worse { t.amber_ink } else { t.ice });
+                g.text_fit(r.x + 21.0, line2, &line, ty.caption, t.dim, r.w - 31.0);
+                if focused {
+                    g.focus_ring(r, 12.0);
+                }
+                continue;
+            }
+            let row = &rows[i - first];
             let size_w = g.text_at(r.right() - 10.0, line1, Align::Right, &megabytes(row.bytes), ty.label, t.dim);
             g.text_fit(r.x + 10.0, line1, &row.title(), ty.body, t.ink, r.w - 30.0 - size_w);
             match &row.digest {
@@ -1334,7 +1375,7 @@ impl Screen for LogsScreen {
                 g.focus_ring(r, 12.0);
             }
         }
-        self.list.scrollbar(g, rows.len(), top, bottom);
+        self.list.scrollbar(g, rows.len() + first, top, bottom);
         let fitted = g.text.fit(&status, &ty.caption, W - 2.0 * PAD);
         g.hint(&fitted);
     }
@@ -1472,12 +1513,27 @@ impl Screen for Tables {
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let nodes = self.nodes(cx.robot);
         match key {
-            Key::Enter | Key::Right => {
-                if let Some(Node::Table(name, _)) = nodes.get(self.list.focus) {
+            Key::Enter | Key::Right => match nodes.get(self.list.focus) {
+                Some(Node::Table(name, _)) => {
                     self.trail.push(self.list.focus);
                     self.enter(format!("{}{name}/", self.path), 0);
                 }
-            }
+                // Enter on a value puts it on the live graph, or takes it off.
+                Some(Node::Value(name, _)) if key == Key::Enter => {
+                    // Short words: a long message squeezes the table's name.
+                    use crate::graphs::Toggled;
+                    let key = format!("{}{name}", self.path);
+                    let numeric = cx.robot.get(&key).and_then(|v| crate::graphs::number(&v)).is_some();
+                    *cx.say = Some(match cx.robot.graphs.toggle(&key, numeric) {
+                        Toggled::Added => "graphed".into(),
+                        Toggled::Removed => "off the graph".into(),
+                        Toggled::Full => "graphs full".into(),
+                        Toggled::NotANumber => "not a number".into(),
+                    });
+                }
+                _ => {}
+            },
+            Key::Char('g') => return Nav::Push(Box::new(crate::graphs::Graphs::new())),
             // p pins a value to the glance page (again unpins it).
             Key::Char('p') => {
                 if let Some(Node::Value(name, _)) = nodes.get(self.list.focus) {
@@ -1516,18 +1572,28 @@ impl Screen for Tables {
             return;
         }
         let (top, row_h) = (g.top(), g.row_h());
-        for (i, y) in self.list.layout(g, nodes.len(), top, row_h, 3.0, H - PAD + 2.0) {
+        let bottom = H - PAD - g.hint_h();
+        let graphed = robot.graphs.keys().to_vec();
+        for (i, y) in self.list.layout(g, nodes.len(), top, row_h, 3.0, bottom + 2.0) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             match &nodes[i] {
                 Node::Table(name, count) => g.row(r, &format!("{name}/"), &format!("{count} ›"), t.dim, i == self.list.focus),
                 Node::Value(name, value) => {
                     // The value gets up to half the row; the name takes the rest.
                     let shown = g.text.fit(value, &ty.label, r.w * 0.5);
-                    g.row(r, name, &shown, t.ink, i == self.list.focus)
+                    g.row(r, name, &shown, t.ink, i == self.list.focus);
+                    // On the graph: its line's colour, just before the value.
+                    let key = format!("{}{name}", self.path);
+                    if let Some(at) = graphed.iter().position(|k| *k == key) {
+                        let value_w = g.measure(&shown, if g.theme == crate::look::Theme::Bezel { ty.body } else { ty.label });
+                        g.dot(r.right() - 10.0 - value_w - 8.0, r.cy(), 3.0, crate::graphs::colour(&t, at));
+                    }
                 }
             }
         }
-        self.list.scrollbar(g, nodes.len(), top, H - PAD);
+        self.list.scrollbar(g, nodes.len(), top, bottom);
+        let on_value = matches!(nodes.get(self.list.focus), Some(Node::Value(..)));
+        g.hint(if on_value { "enter: graph · g: graphs · p: pin" } else { "g: graphs" });
     }
 }
 

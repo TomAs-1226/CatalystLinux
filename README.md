@@ -15,7 +15,7 @@ windows that grow out of tiles whenever it is there.
 | `userland/crates/bezel` | Bezel on the CPU: tonal surfaces, the two type voices, Material Symbols, and the full glass pass (refraction, frost, edge light, groups, shadow). |
 | `userland/crates/nt4` | A NetworkTables 4.1 client: one thread, read-only, reconnects on its own. |
 | `userland/crates/apriltag` | AprilTag detection: AprilRobotics' C library (3.4.5, BSD 2-Clause, vendored with the 36h11 family FRC uses) behind a small flat shim, with each tag's pose. |
-| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, AprilTag, Settings) and the launcher for external ones. |
+| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, AprilTag, Graphs, Pit, Settings) and the launcher for external ones. |
 | `userland/apps/update` | `catalyst-update`: system updates on the handheld (A/B, tried once, rolled back if it does not come up), and the release tool that makes and signs them. |
 | `userland/apps/flasher` | Catalyst Flasher: the newest release onto an SD card in one go. |
 | `userland/assets/app-icon` | Catalyst's icon (the FrcCatalyst bolt) at each size Windows uses, built into the simulator; `assets/` holds it for Raspberry Pi Imager's listing. |
@@ -594,7 +594,9 @@ uncommitted in `work/FrcCatalyst` (`agent/`), and a robot needs that agent
 for logs to appear. Pulling happens in the background while the robot is
 linked and not running an opmode, resumes where it stopped, and each log is
 summarised once (brownouts, battery low point, health checks fired, loop
-overruns, hottest mechanisms). Logs are cleared after 30 days, oldest first
+overruns, hottest mechanisms, the busiest CAN bus). A summary an older shell
+wrote is made again the next time its log is looked at, so trends have
+everything. Logs are cleared after 30 days, oldest first
 if the card fills; `/data` grows to fill the SD card on first boot. Space is
 made for a log before it is pulled, and one the card could never hold is not
 started; the space kept free is 256 MB, or a quarter of the partition if
@@ -602,6 +604,62 @@ that is less. A cleared log is remembered (`/data/logs/.cleared`) and not
 pulled again. A damaged log is summarised up to the damage, never read whole
 into memory, and a resumed pull keeps only the missing part even from a
 server that ignores the request to resume.
+
+## Match trends
+
+Once two matches have been read, the top of Logs is a Trends row saying what
+is getting worse ("battery sagging lower · 4 more", or "nothing getting
+worse"); the focus still starts on the newest match below it. Trends shows,
+match by match across the last sixteen read, the battery's low point,
+brownouts, loop overruns, the hottest motor and the busiest CAN bus, as bars
+with the newest match at the right. A measure that is worse in the newest
+match than in the five before it (the battery more than 0.4 v lower or under
+9 v, a brownout, three more overruns, a motor 6 °c hotter or at 80, CAN 8%
+busier or at 90%) is marked, its bar and value in amber with ▲ or ▼. Left and
+Right go back through the matches (the match chosen is named at the bottom),
+Enter opens it. The demo robot's logs are a day and a half of qualifying in
+which the robot slowly gets worse until its newest match browns out.
+
+## Live graphs
+
+In Tables, Enter on a value graphs it (Enter again takes it off; a flag
+graphs as 1 and 0), up to four at once; `g` opens Graphs, which is also on
+Home. Each value has a lane: its name and reading on the left (the unit read
+from the key's name, so `BatteryVolts` is "battery" at "12.4 v"), and its
+last minute on its own scale on the right, since graphed values are rarely
+in the same units. The fewer graphed, the taller the lanes. Up and Down
+choose one, whose range over the minute is at the bottom; Space pauses; `d`
+takes one off; Enter opens it in Tables. The robot's recorder samples the
+graphed values ten times a second whatever is on screen, so a graph opened
+late already has its minute; which values are graphed is remembered. A
+graphed value wears its line's colour in Tables. The colours are the signal,
+ice (deeper in light mode), amber and ink, each at least 3:1 against the
+plot in both tones for every accent.
+
+## The pit: checklist and match timer
+
+The Pit app opens on two cards, the checklist and the match timer.
+
+- **Checklist.** What a team checks before queueing (battery charged and
+  strapped in, bumpers, radio, code, mechanisms zeroed, bolts and chains,
+  breaker and CAN, driver station, spares), the team's own to change: Enter
+  ticks an item, `n` adds one, `d` twice deletes one, `r` clears every tick
+  for the next match. Where the robot can vouch for an item, the row says
+  what it reads (the battery's volts, whether the radio links, the deployed
+  code's version, the busiest CAN bus), amber when it looks wrong. Kept in
+  `pit-checklist` beside the settings.
+- **Match timer.** A match counted as the field counts it, from the 2026
+  game manual (REBUILT): AUTO's 20 seconds, then TELEOP's 2:20 as a 10 s
+  transition shift, four 25 s alliance shifts and END GAME's last 30
+  seconds. The clock large, the phase under it, what comes next and when,
+  and the match as a bar of its phases. Enter starts and pauses, Left and
+  Right go to the phase before or after, `r` resets; the island says each new
+  phase. It keeps running whatever is on screen, and Home's Pit tile shows it
+  ("1:45 shift 2", in amber during END GAME). While the robot is linked and
+  publishes its own match clock (`/Catalyst/Match/TimeLeft`, which FrcCatalyst
+  2.0 fills from the FMS), that is shown instead, its period told from what
+  it counted before (the clock alone cannot tell AUTO's 0:15 from END
+  GAME's).
 
 ## Event schedule
 
@@ -907,15 +965,13 @@ analysis, the camera, audio.
 ## Roadmap
 
 Chosen so far, not yet built: scripting with a kit for writing Bezel apps (so
-an external app can draw like a built-in one); a pit checklist and match
-timer; the AI log analysis.
+an external app can draw like a built-in one); the AI log analysis.
 
 Added since, also not yet built:
 
-- For the robot: live graphs of any number in Tables; alerts (rules that
-  watch the robot and flag it on the island with a tone); match trends across
-  pulled logs. The link stays read-only: a tuner that writes to the robot was
-  offered and not chosen.
+- For the robot: alerts (rules that watch the robot and flag it on the
+  island with a tone). The link stays read-only: a tuner that writes to the
+  robot was offered and not chosen.
 - For the pit: QR codes for a match summary or an address.
 - For development: an HTTP tester; a hex viewer and programmer's calculator;
   a serial plotter.
@@ -929,8 +985,8 @@ themes and looks, Home's arrangement, clock, island and greeting, the
 personal start, the new motion, and the GPU; then the recent apps (an app
 switcher), screenshots, standby and power saving, the system monitor, the
 network toolkit with the robot finder, the SSH client and serial console,
-saved commands, the AprilTag reader, USB to a computer, and the command-line
-tools.
+saved commands, the AprilTag reader, USB to a computer, the command-line
+tools, live graphs, the pit checklist and match timer, and match trends.
 
 ## Third-party pieces
 
