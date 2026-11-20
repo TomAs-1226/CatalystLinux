@@ -1862,6 +1862,10 @@ enum Item {
     Brightness,
     /// Graphics: the GPU when there is one, or the processor alone.
     Graphics,
+    /// Standby: how long with no key before the screen goes off, and how
+    /// the processor chooses its speed.
+    ScreenOff,
+    Processor,
     // Network.
     WifiSetup,
     // Access.
@@ -1942,7 +1946,7 @@ fn glance_items(order: &[Widget]) -> Vec<Item> {
 
 /// Where everything in Settings is, for search: what it is called, the
 /// section it is in, and its place there (none: the section itself).
-const SETTING_PLACES: [(&str, Item, Option<usize>); 45] = [
+const SETTING_PLACES: [(&str, Item, Option<usize>); 47] = [
     ("Robot settings", Item::RobotSection, None),
     ("Open Robot on link", Item::RobotSection, Some(0)),
     ("Match report after a match", Item::RobotSection, Some(1)),
@@ -1971,6 +1975,8 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 45] = [
     ("Display", Item::Display, None),
     ("Brightness", Item::Display, Some(0)),
     ("Graphics and the GPU", Item::Display, Some(1)),
+    ("Screen off after", Item::Display, Some(2)),
+    ("Power saving", Item::Display, Some(3)),
     ("Network", Item::Network, None),
     ("Wi-Fi networks", Item::Network, Some(0)),
     ("Keys for online services", Item::KeysSection, None),
@@ -2059,7 +2065,7 @@ impl SettingsApp {
                 page
             }
             GlancePage => Self::page("Glance page", glance_items(&crate::shell::Settings::default().glance)),
-            Display => Self::page("Display", vec![Brightness, Graphics]),
+            Display => Self::page("Display", vec![Brightness, Graphics, ScreenOff, Processor]),
             Network => Self::page("Network", std::iter::once(WifiSetup).chain((0..4).map(Info)).collect()),
             KeysSection => Self::page("Keys", (0..crate::keys::SERVICES.len()).map(KeyFor).chain(std::iter::once(KeysFromFile)).collect()),
             Access => Self::page("Access", vec![Ssh]),
@@ -2219,6 +2225,8 @@ impl SettingsApp {
                 },
                 g.gpu.is_some(),
             ),
+            ScreenOff => ("Screen off after".into(), crate::standby::screen_off_name(g.screen_off), g.screen_off != 0),
+            Processor => ("Processor".into(), g.power.name().into(), true),
             WifiSetup => section("Wi-Fi networks", "join".to_owned()),
             Ssh => ("SSH access".into(), onoff(crate::ssh_enabled()), crate::ssh_enabled()),
             DemoRobot => ("Demo robot".into(), onoff(robot.is_demo()), robot.is_demo()),
@@ -2264,6 +2272,18 @@ impl SettingsApp {
             TextScale => cx.settings.text = if step > 0 { cx.settings.text.next() } else { cx.settings.text.next().next() },
             Calm => cx.settings.calm = !cx.settings.calm,
             Graphics => cx.settings.gpu = !cx.settings.gpu,
+            ScreenOff => {
+                let all = crate::standby::SCREEN_OFF_CHOICES;
+                let at = all.iter().position(|s| *s == cx.settings.screen_off).unwrap_or(1) as i32;
+                cx.settings.screen_off = all[(at + step).rem_euclid(all.len() as i32) as usize];
+            }
+            Processor => {
+                cx.settings.power = cx.settings.power.step(step);
+                // The kernel's governors are on the handheld; a computer has none to set.
+                if crate::sys::governors().is_empty() {
+                    *cx.say = Some("the processor is set on the handheld".into());
+                }
+            }
             Brightness => match crate::sys::brightness() {
                 Some(now) => {
                     crate::sys::set_brightness((now as i32 + step * 10).clamp(10, 100) as u32);

@@ -359,6 +359,8 @@ pub mod device {
             Some(match code {
                 1 => Key::Back,
                 14 => Key::Backspace,
+                // Ctrl-Tab: the recent apps (no program in a terminal can be sent it).
+                15 if self.ctrl => Key::Ctrl('\t'),
                 15 => Key::Tab,
                 28 | 96 => Key::Enter,
                 57 => Key::Char(' '),
@@ -597,6 +599,7 @@ pub mod sim {
                 K::Enter | K::NumPadEnter => Key::Enter,
                 K::Escape => Key::Back,
                 K::Backspace => Key::Backspace,
+                K::Tab if ctrl => Key::Ctrl('\t'),
                 K::Tab => Key::Tab,
                 K::PageUp => Key::PageUp,
                 K::PageDown => Key::PageDown,

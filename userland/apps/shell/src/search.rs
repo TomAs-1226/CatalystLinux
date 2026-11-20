@@ -131,6 +131,11 @@ impl Screen for Search {
         true
     }
 
+    /// A passing screen: what it opened is kept among the recent apps, not it.
+    fn keep_in_recents(&self) -> bool {
+        false
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let changed = match key {
             Key::Back if self.query.is_empty() => return Nav::Pop,

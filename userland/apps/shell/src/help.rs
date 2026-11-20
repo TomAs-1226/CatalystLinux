@@ -39,13 +39,14 @@ struct Step {
     words: &'static str,
 }
 
-const STEPS: [Step; 8] = [
+const STEPS: [Step; 9] = [
     Step { spot: Spot::Nothing, title: "A quick tour", words: "Half a minute on the keys. Enter goes on, Esc skips the tour." },
     Step { spot: Spot::Tile, title: "Your apps", words: "The arrows go through them in order, and Enter opens the one in the ring." },
     Step { spot: Spot::Nothing, title: "Going back", words: "Esc goes back a step. Held for a second, it leaves any app, even the terminal; so does Ctrl Q." },
     Step { spot: Spot::Island, title: "The island", words: "News arrives here: a robot linking, an update, a fault. It grows to say it, then settles." },
     Step { spot: Spot::Pager, title: "Pages", words: "Home turns its pages as you go. Left of the first app is the glance page: the robot and this handheld at a glance." },
     Step { spot: Spot::Nothing, title: "Control centre", words: "Ctrl Space brings it down over any screen: Wi-Fi, light mode, brightness. Up from Home's top row works too." },
+    Step { spot: Spot::Nothing, title: "Recent apps", words: "Ctrl Tab shows the apps you used last. Enter takes you back to one, just as you left it." },
     Step { spot: Spot::Nothing, title: "Search", words: "Space on Home searches the apps and settings. Just start typing." },
     Step { spot: Spot::Nothing, title: "Forgot a key?", words: "Hold ? for five seconds on any screen for the list of shortcuts. Settings › Help has this tour again." },
 ];
@@ -311,7 +312,15 @@ const SHORTCUTS: &[Line] = &[
     Line::Keys("Back", "esc"),
     Line::Keys("Leave any app", "esc held · ctrl q"),
     Line::Keys("Control centre", "ctrl space"),
+    Line::Keys("Recent apps", "ctrl tab"),
     Line::Keys("This list, after 5 s", "? held"),
+    Line::Head("control centre"),
+    Line::Keys("Recent apps", "r"),
+    Line::Keys("Screenshot", "s"),
+    Line::Head("recent apps"),
+    Line::Keys("The next one", "← → · tab"),
+    Line::Keys("Back to it", "enter"),
+    Line::Keys("Let it go", "↑ · bksp"),
     Line::Head("home"),
     Line::Keys("Next or last app", "← →"),
     Line::Keys("Up and down a page", "↑ ↓"),
@@ -371,6 +380,10 @@ impl Shortcuts {
 impl Screen for Shortcuts {
     fn title(&self) -> &str {
         "Shortcuts"
+    }
+
+    fn keep_in_recents(&self) -> bool {
+        false
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {

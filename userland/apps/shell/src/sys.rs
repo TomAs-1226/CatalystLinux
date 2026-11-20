@@ -97,12 +97,16 @@ pub fn cpu_temperature() -> Option<String> {
     Some(format!("{:.0} °c", milli / 1000.0))
 }
 
-/// Battery charge and whether it is charging, from the fuel gauge.
+/// Battery charge and whether it is charging, from the fuel gauge; on
+/// battery, how long it has left when the gauge can say.
 pub fn battery() -> Option<String> {
     for entry in fs::read_dir("/sys/class/power_supply").ok()?.flatten() {
         let dir = entry.path();
         let Some(percent) = read(&dir.join("capacity").to_string_lossy()) else { continue };
         let status = read(&dir.join("status").to_string_lossy()).unwrap_or_default().to_lowercase();
+        if let Some(left) = battery_minutes_left() {
+            return Some(format!("{percent}% · {} left", minutes_text(left)));
+        }
         return Some(if status.is_empty() || status == "unknown" { format!("{percent}%") } else { format!("{percent}% · {status}") });
     }
     None
@@ -183,6 +187,68 @@ pub fn set_brightness(percent: u32) -> bool {
     let Some(max) = read(&dir.join("max_brightness").to_string_lossy()).and_then(|m| m.parse::<u32>().ok()) else { return false };
     let value = (percent.clamp(5, 100) * max / 100).max(1);
     fs::write(dir.join("brightness"), value.to_string()).is_ok()
+}
+
+/// The backlight switched on or off (`bl_power`), its brightness kept for
+/// when it comes back: standby's "off". False if there is none to switch.
+pub fn backlight_power(on: bool) -> bool {
+    let Some(dir) = backlight() else { return false };
+    // 0 is on; 4 is FB_BLANK_POWERDOWN.
+    fs::write(dir.join("bl_power"), if on { "0" } else { "4" }).is_ok()
+}
+
+/// The ways the kernel offers of choosing the processor's speed.
+pub fn governors() -> Vec<String> {
+    read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors").map(|s| s.split_whitespace().map(str::to_owned).collect()).unwrap_or_default()
+}
+
+/// Set every processor's governor to the first of `wanted` the kernel has.
+/// False if it has none of them, or there is no cpufreq (a computer).
+pub fn set_governor(wanted: &[&str]) -> bool {
+    let have = governors();
+    let Some(pick) = wanted.iter().find(|w| have.iter().any(|h| h == *w)) else { return false };
+    let mut set = false;
+    for policy in fs::read_dir("/sys/devices/system/cpu/cpufreq").into_iter().flatten().flatten() {
+        let file = policy.path().join("scaling_governor");
+        if file.exists() {
+            set |= fs::write(file, pick).is_ok();
+        }
+    }
+    set || fs::write("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", pick).is_ok()
+}
+
+/// Minutes of battery left, while it runs on battery: the fuel gauge's own
+/// reckoning, or its charge (or energy) over the current (or power) drawn.
+/// Nothing while charging, or if the gauge does not say.
+pub fn battery_minutes_left() -> Option<u64> {
+    for entry in fs::read_dir("/sys/class/power_supply").ok()?.flatten() {
+        let dir = entry.path();
+        let value = |name: &str| read(&dir.join(name).to_string_lossy()).and_then(|v| v.parse::<f64>().ok()).map(f64::abs);
+        if value("capacity").is_none() {
+            continue;
+        }
+        let status = read(&dir.join("status").to_string_lossy()).unwrap_or_default().to_lowercase();
+        if status != "discharging" {
+            return None;
+        }
+        let hours = value("time_to_empty_now")
+            .or_else(|| value("time_to_empty_avg"))
+            .map(|seconds| seconds / 3600.0)
+            .or_else(|| Some(value("energy_now")? / value("power_now").filter(|p| *p > 0.0)?))
+            .or_else(|| Some(value("charge_now")? / value("current_now").filter(|c| *c > 0.0)?))?;
+        let minutes = (hours * 60.0).round();
+        return (1.0..=7.0 * 24.0 * 60.0).contains(&minutes).then_some(minutes as u64);
+    }
+    None
+}
+
+/// Minutes as a short time: "3 h 10 m", "45 m".
+pub fn minutes_text(minutes: u64) -> String {
+    if minutes >= 60 {
+        format!("{} h {} m", minutes / 60, minutes % 60)
+    } else {
+        format!("{minutes} m")
+    }
 }
 
 /// The time of day in hours and minutes, on the 24-hour clock or the 12-hour.

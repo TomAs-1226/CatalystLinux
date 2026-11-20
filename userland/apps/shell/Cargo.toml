@@ -21,12 +21,13 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 vte = "0.15"
 # QR codes for the setup page's address (Project Nayuki's encoder; no dependencies).
 qrcodegen = "1.8"
+# Screenshots, on the handheld as on a computer (and the galleries' pictures).
+png = "0.18"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
-# Desktop development only: a window to run the UI in, and PNG screenshots.
-# Neither is built into the device image.
+# Desktop development only: a window to run the UI in. Not built into the
+# device image.
 [target.'cfg(not(target_arch = "aarch64"))'.dependencies]
 minifb = { version = "0.29", default-features = false }
-png = "0.18"
