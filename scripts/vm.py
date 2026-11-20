@@ -286,10 +286,55 @@ def main():
         if opts.tour:
             os.makedirs(opts.tour, exist_ok=True)
             failed = tour(vm, opts.tour)
+            failed += tools(vm)
             failed += updates(vm)
     finally:
         vm.stop()
     sys.exit(1 if failed else 0)
+
+
+# Home's built-in apps, and Terminal's place among them (screens.rs, APPS).
+BUILT_IN = 20
+TERMINAL = 8
+
+
+def tools(vm):
+    """What this image adds for a developer and for the AprilTag reader and
+    USB: each there and answering. Returns how many checks failed."""
+    failed = 0
+
+    def check(what, ok, detail=""):
+        nonlocal failed
+        print(f"   {'ok   ' if ok else 'FAIL '} {what}{': ' + str(detail) if detail else ''}")
+        failed += 0 if ok else 1
+
+    print("== the image's tools")
+    out = vm.run("python3 -c 'import sys, json, curses; print(sys.version.split()[0])'", 60)
+    check("Python 3 runs, with its json and curses", out[:1] == "3", out)
+    for command, want in [
+        ("vim --version | head -n1", "VIM"),
+        ("nano --version | head -n1", "nano"),
+        ("htop --version", "htop"),
+        ("tmux -V", "tmux"),
+        ("rsync --version | head -n1", "rsync"),
+        ("jq --version", "jq"),
+        ("strace -V | head -n1", "strace"),
+        ("i2cdetect -V 2>&1", "i2cdetect"),
+        ("picocom --help 2>&1 | head -n1", "picocom"),
+        ("dbclient -h 2>&1 | head -n2", "Dropbear"),
+        ("dropbearkey -h 2>&1 | head -n2", "dropbearkey"),
+    ]:
+        out = vm.run(command, 60)
+        check(f"{command.split()[0]} is there", want.lower() in out.lower(), out.splitlines()[0] if out else "")
+    out = vm.run("catalyst-camera; echo exit $?", 60)
+    check("the camera program runs and says there is no camera", "exit 1" in out and "camera" in out, " | ".join(out.splitlines()[-2:]))
+    out = vm.run("rc-status default | grep catalyst-usb | tr -s ' '")
+    check("the USB service starts (charging only by default)", "started" in out, out)
+    out = vm.run("catalyst-usb status")
+    check("catalyst-usb says how it stands", out.startswith("off"), out)
+    out = vm.run("busybox udhcpd 2>&1 | head -n1")
+    check("BusyBox has its DHCP server for USB networking", "udhcpd" in out.lower(), out)
+    return failed
 
 
 def tour(vm, folder):
@@ -342,12 +387,16 @@ def tour(vm, folder):
     done = until("[ -e /data/catalyst/setup-done ] && echo done", lambda out: out == "done", 90)
     check("setup can be put off, and that is remembered", done == "done", done)
     time.sleep(10)
+    # The tour of the keys follows setup; Esc skips it.
+    shot("1-tour")
+    vm.key("esc")
+    time.sleep(8)
     check("Home draws", shot("1-home") > 50)
 
-    # Tiles: thirteen built in, Settings last, opening the third page; then
-    # the image's Processes (13) and the user's own by name: hello (14), and
-    # Paint (15) on the row below.
-    for key in ["right"] * 7:
+    # Left and Right go through the apps in order: twenty built in, Settings
+    # last; then the image's Processes (20) and the user's own by name: hello
+    # (21) and Paint (22).
+    for key in ["right"] * BUILT_IN:
         vm.key(key)
     time.sleep(6)
     shot("2-home-apps")
@@ -367,7 +416,7 @@ def tour(vm, folder):
     vm.key("ret")
     time.sleep(10)
 
-    vm.key("down")
+    vm.key("right")
     vm.key("ret")
     check("an app with its own screen is started", until(running("sleep 600"), lambda out: out != "") != "")
     saw = vm.run("cat /tmp/paint-saw")
@@ -387,9 +436,9 @@ def tour(vm, folder):
     vm.key("esc")
     time.sleep(10)
 
-    # The built-in terminal has a real shell behind it: from Paint's tile, up
-    # is Settings, and left of that the second page's Terminal.
-    for key in ["up", "left", "ret"]:
+    # The built-in terminal has a real shell behind it: from Paint's tile,
+    # Left back through the apps to Terminal's.
+    for key in ["left"] * (BUILT_IN + 2 - TERMINAL) + ["ret"]:
         vm.key(key)
     time.sleep(14)
     for key in ["e", "c", "h", "o", "spc", "o", "k", "spc", "shift-dot", "slash", "t", "m", "p", "slash", "t", "y", "p", "e", "d", "ret"]:
