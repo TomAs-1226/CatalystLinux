@@ -200,7 +200,7 @@ class Machine:
         self.monitor(f"screendump {ppm}")
         time.sleep(0.5)
         ppm_to_png(ppm, path)
-        pixels = open(ppm, "rb").read().split(maxsplit=4)[4]
+        _, _, pixels = read_ppm(open(ppm, "rb").read())
         return len({pixels[i:i + 3] for i in range(0, len(pixels), 3)})
 
     def stop(self):
@@ -211,13 +211,29 @@ class Machine:
             self.qemu.kill()
 
 
+def read_ppm(data):
+    """A binary PPM's width, height and pixels. Its header is four fields
+    (P6, width, height, the largest value), then exactly one byte of white
+    space; the pixels after it may begin with bytes that look like white space
+    (a dark picture), which a plain split would eat."""
+    fields, i = [], 0
+    while len(fields) < 4:
+        while data[i:i + 1].isspace():
+            i += 1
+        j = i
+        while j < len(data) and not data[j:j + 1].isspace():
+            j += 1
+        fields.append(data[i:j])
+        i = j
+    w, h = int(fields[1]), int(fields[2])
+    return w, h, data[i + 1:i + 1 + w * h * 3]
+
+
 def ppm_to_png(ppm, png, scale=3):
     """Write a binary PPM as a PNG, enlarged, with nothing but the standard library."""
     import struct
     import zlib
-    data = open(ppm, "rb").read()
-    parts = data.split(maxsplit=4)
-    w, h, pixels = int(parts[1]), int(parts[2]), parts[4]
+    w, h, pixels = read_ppm(open(ppm, "rb").read())
     rows = []
     for y in range(h):
         row = pixels[y * w * 3:(y + 1) * w * 3]
@@ -309,8 +325,8 @@ def tools(vm):
         failed += 0 if ok else 1
 
     print("== the image's tools")
-    out = vm.run("python3 -c 'import sys, json, curses; print(sys.version.split()[0])'", 60)
-    check("Python 3 runs, with its json and curses", out[:1] == "3", out)
+    out = vm.run("python3 -c 'import sys, json, curses, ssl, sqlite3, zlib, readline, xml.parsers.expat, lzma, bz2; print(sys.version.split()[0])'", 60)
+    check("Python 3 runs, with its common modules (ssl, sqlite3, curses, zlib...)", out[:1] == "3", out.splitlines()[-1] if out else "")
     for command, want in [
         ("vim --version | head -n1", "VIM"),
         ("nano --version | head -n1", "nano"),
@@ -332,8 +348,8 @@ def tools(vm):
     check("the USB service starts (charging only by default)", "started" in out, out)
     out = vm.run("catalyst-usb status")
     check("catalyst-usb says how it stands", out.startswith("off"), out)
-    out = vm.run("busybox udhcpd 2>&1 | head -n1")
-    check("BusyBox has its DHCP server for USB networking", "udhcpd" in out.lower(), out)
+    out = vm.run("busybox --list | grep -x udhcpd")
+    check("BusyBox has its DHCP server for USB networking", out.strip() == "udhcpd", out)
     return failed
 
 

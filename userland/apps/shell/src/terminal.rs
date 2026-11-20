@@ -158,6 +158,14 @@ impl Screen for Terminal {
         !self.ended
     }
 
+    /// Only the login shell is kept among recent apps (its session was always
+    /// kept). A program started in a terminal of its own (an app, an SSH
+    /// session, a saved command, a serial line) ends when it is left, as an
+    /// app that draws for itself does: nothing goes on running unseen.
+    fn keep_in_recents(&self) -> bool {
+        self.program.is_none() && self.serial.is_none()
+    }
+
     fn keeps_awake(&self) -> bool {
         // An app's program, while it runs; the login shell, while what runs in
         // it is printing (a build, a log being followed), not at a quiet prompt.
@@ -294,5 +302,19 @@ impl Screen for Terminal {
             g.surface(chip, chip.h * 0.5, t.surface3);
             g.text_at(chip.cx(), chip.cy(), Align::Center, &note, style, t.ink);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_login_shell_is_kept_among_recent_apps() {
+        // A program in a terminal of its own ends when it is left.
+        assert!(!Terminal::running("Top", "top", std::env::temp_dir()).keep_in_recents());
+        assert!(!Terminal::serial("Serial", "/dev/null", 115200).keep_in_recents());
+        // The login shell goes on, as its session always has.
+        assert!(Terminal::new().keep_in_recents());
     }
 }
