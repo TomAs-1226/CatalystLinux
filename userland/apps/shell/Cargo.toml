@@ -16,6 +16,7 @@ packed = []
 bezel = { workspace = true }
 detent = { workspace = true }
 nt4 = { workspace = true }
+apriltag = { workspace = true }
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 vte = "0.15"

@@ -1,0 +1,176 @@
+#!/bin/sh
+# catalyst-usb off|serial|network|drive   choose, and apply now
+# catalyst-usb apply|down|status          the saved choice: apply it, take it down, say it
+#
+# What the handheld is to a computer its USB-C port is plugged into:
+#   off      nothing (it only charges)
+#   serial   a serial port with a login on it (/dev/ttyGS0 here)
+#   network  a network adapter: the handheld at 192.168.7.1, the computer
+#            given 192.168.7.2 (no route or DNS, so its own internet stays)
+#   drive    a read-only drive holding the match logs as they were when
+#            the drive was made (choose drive again to bring it up to date)
+# Made with the kernel's USB gadget framework (configfs) on the dwc2
+# controller. The choice is kept in /data/catalyst/usb-mode and applied at
+# every start by the catalyst-usb service. `status` prints the mode and
+# whether a computer has the handheld ("connected") or not.
+set -u
+
+G=/sys/kernel/config/usb_gadget/catalyst
+MODE_FILE=/data/catalyst/usb-mode
+DRIVE=/data/catalyst/usb-drive.img
+LOGS=/data/logs
+ADDR=192.168.7.1
+RUN=/run/catalyst-usb
+
+udc() { ls /sys/class/udc 2>/dev/null | head -n 1; }
+
+saved() {
+	m=$(cat "$MODE_FILE" 2>/dev/null)
+	case "$m" in serial | network | drive) echo "$m" ;; *) echo off ;; esac
+}
+
+down() {
+	# The login on the serial port, and its respawning loop.
+	if [ -e "$RUN.getty" ]; then
+		kill "$(cat "$RUN.getty")" 2>/dev/null
+		rm -f "$RUN.getty"
+	fi
+	fuser -k /dev/ttyGS0 >/dev/null 2>&1
+	if [ -e "$RUN.dhcp" ]; then
+		kill "$(cat "$RUN.dhcp")" 2>/dev/null
+		rm -f "$RUN.dhcp"
+	fi
+	ip link set usb0 down 2>/dev/null
+	[ -d "$G" ] || return 0
+	echo "" > "$G/UDC" 2>/dev/null
+	for link in "$G"/configs/c.1/*; do
+		[ -L "$link" ] && rm -f "$link"
+	done
+	rmdir "$G/configs/c.1/strings/0x409" "$G/configs/c.1" 2>/dev/null
+	for f in "$G"/functions/*; do
+		[ -d "$f" ] && rmdir "$f" 2>/dev/null
+	done
+	rmdir "$G/strings/0x409" "$G" 2>/dev/null
+	return 0
+}
+
+# A gadget with one function, $1, in a configuration called $2.
+make_gadget() {
+	modprobe libcomposite 2>/dev/null
+	mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config || return 1
+	[ -n "$(udc)" ] || { echo "no USB device controller" >&2; return 1; }
+	mkdir -p "$G/strings/0x409" "$G/configs/c.1/strings/0x409" || return 1
+	echo 0x1d6b > "$G/idVendor"  # the Linux Foundation
+	echo 0x0104 > "$G/idProduct" # its multifunction composite gadget
+	echo 0x0100 > "$G/bcdDevice"
+	echo 0x0200 > "$G/bcdUSB"
+	serial=$(sed -n 's/^Serial[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo)
+	echo "${serial:-catalyst}" > "$G/strings/0x409/serialnumber"
+	echo "Catalyst Linux" > "$G/strings/0x409/manufacturer"
+	echo "CardputerZero" > "$G/strings/0x409/product"
+	echo "$2" > "$G/configs/c.1/strings/0x409/configuration"
+	echo 250 > "$G/configs/c.1/MaxPower"
+	mkdir -p "$G/functions/$1" || return 1
+}
+
+bind() {
+	ln -s "$G/functions/$1" "$G/configs/c.1/" && udc > "$G/UDC"
+}
+
+serial() {
+	make_gadget acm.usb0 "Serial console" && bind acm.usb0 || return 1
+	# A login on the port, again after each logout.
+	(
+		trap 'exit 0' TERM
+		while :; do
+			getty -L 115200 ttyGS0 vt100
+			sleep 1
+		done
+	) </dev/null >/dev/null 2>&1 &
+	echo $! > "$RUN.getty"
+}
+
+network() {
+	make_gadget ncm.usb0 "Network" || return 1
+	# The same addresses every time, so the computer keeps its settings for it.
+	serial=$(sed -n 's/^Serial[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo | tail -c 7)
+	serial=${serial:-000001}
+	pair=$(echo "$serial" | sed 's/\(..\)\(..\)\(..\)/\1:\2:\3/')
+	echo "02:ca:7a:$pair" > "$G/functions/ncm.usb0/dev_addr"
+	echo "06:ca:7a:$pair" > "$G/functions/ncm.usb0/host_addr"
+	bind ncm.usb0 || return 1
+	i=0
+	while [ ! -e /sys/class/net/usb0 ] && [ $i -lt 5 ]; do
+		sleep 1
+		i=$((i + 1))
+	done
+	ip addr flush dev usb0 2>/dev/null
+	ip addr add "$ADDR/24" dev usb0 && ip link set usb0 up || return 1
+	cat > "$RUN.udhcpd.conf" <<CONF
+interface usb0
+start 192.168.7.2
+end 192.168.7.2
+max_leases 1
+option subnet 255.255.255.0
+lease_file $RUN.leases
+pidfile $RUN.dhcp
+CONF
+	touch "$RUN.leases"
+	udhcpd "$RUN.udhcpd.conf"
+}
+
+drive() {
+	# The logs as a FAT image: their size and room to spare, from 16 MB to 512 MB.
+	used=$(du -sm "$LOGS" 2>/dev/null | cut -f1)
+	size=$((${used:-0} + 8))
+	[ "$size" -lt 16 ] && size=16
+	[ "$size" -gt 512 ] && size=512
+	rm -f "$DRIVE"
+	dd if=/dev/zero of="$DRIVE" bs=1M count=0 seek="$size" 2>/dev/null || return 1
+	mkdosfs -n LOGS "$DRIVE" >/dev/null || return 1
+	modprobe loop 2>/dev/null
+	mnt=$RUN.mnt
+	mkdir -p "$mnt"
+	mount -o loop "$DRIVE" "$mnt" || return 1
+	[ -d "$LOGS" ] && cp -r "$LOGS"/. "$mnt"/ 2>/dev/null
+	cat > "$mnt/README.txt" <<TXT
+Match logs from a Catalyst Linux handheld, as they were when this drive was
+made. To bring it up to date, choose "drive of logs" in Settings > USB again.
+TXT
+	umount "$mnt"
+	rmdir "$mnt"
+	make_gadget mass_storage.usb0 "Logs" || return 1
+	echo 1 > "$G/functions/mass_storage.usb0/lun.0/ro"
+	echo 1 > "$G/functions/mass_storage.usb0/lun.0/removable"
+	echo "$DRIVE" > "$G/functions/mass_storage.usb0/lun.0/file"
+	bind mass_storage.usb0
+}
+
+apply() {
+	down
+	case "$(saved)" in
+	serial) serial ;;
+	network) network ;;
+	drive) drive ;;
+	*) return 0 ;;
+	esac
+}
+
+case "${1:-}" in
+off | serial | network | drive)
+	mkdir -p /data/catalyst
+	echo "$1" > "$MODE_FILE"
+	apply || { down; exit 1; }
+	;;
+apply) apply ;;
+down) down ;;
+status)
+	state=$(cat /sys/class/udc/*/state 2>/dev/null | head -n 1)
+	case "$state" in configured) link=connected ;; *) link="not connected" ;; esac
+	echo "$(saved) $link"
+	;;
+*)
+	echo "usage: $0 off|serial|network|drive|apply|down|status" >&2
+	exit 2
+	;;
+esac

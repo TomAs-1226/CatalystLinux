@@ -33,6 +33,7 @@
 mod about;
 mod agent;
 mod apps;
+mod apriltags;
 mod brand;
 mod catalogue;
 mod control;
@@ -57,6 +58,7 @@ mod setup;
 mod shell;
 mod sys;
 mod sysupdate;
+mod usb;
 mod term;
 mod terminal;
 mod wifi;
@@ -1044,6 +1046,19 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     save(&mut shell, "41-shortcuts");
     press(&mut shell, &[Down; 9], 20);
     save(&mut shell, "41b-shortcuts-home");
+
+    // The AprilTag reader, on the simulated camera (which runs in real time,
+    // so the shot waits for its pictures).
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    press(&mut shell, &vec![Right; steps_to("AprilTag")], 20);
+    press(&mut shell, &[Enter], 60);
+    for name in ["80-apriltag", "80b-apriltag-later"] {
+        std::thread::sleep(std::time::Duration::from_millis(1600));
+        settle(&mut shell, 4);
+        save(&mut shell, name);
+    }
 
     // The tour, as it follows first-boot setup: its first steps.
     let mut shell = Shell::new(Robot::demo());

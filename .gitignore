@@ -3,3 +3,4 @@
 *.img
 /work/
 /scripts/__pycache__/
+/.claude/worktrees/

@@ -1,15 +1,16 @@
 # Catalyst Linux on the M5Stack CardputerZero (Raspberry Pi CM0).
 
-start_file=start_cd.elf
-fixup_file=fixup_cd.dat
 kernel=Image
 arm_64bit=1
 
-# The firmware keeps 16 MB for itself. The GPU's 3D core is driven by Linux
-# (the vc4 driver) from its own contiguous memory pool, 32 MB, which the rest
-# of the system borrows while the GPU does not need it. No HDMI: the panel is
-# an SPI display; the GPU draws into memory and the frame goes out over SPI.
-gpu_mem=16
+# The firmware keeps 64 MB for itself, as M5Stack ships it: the camera's
+# image processing runs in the firmware and needs it (with 16 MB and the
+# cut-down firmware the camera does not appear). The GPU's 3D core is driven
+# by Linux (the vc4 driver) from its own contiguous memory pool, 32 MB, which
+# the rest of the system borrows while the GPU and camera do not need it. No
+# HDMI: the panel is an SPI display; the GPU draws into memory and the frame
+# goes out over SPI.
+gpu_mem=64
 dtoverlay=vc4-kms-v3d,nohdmi,noaudio,cma-size=33554432
 disable_splash=1
 disable_overscan=1
@@ -20,7 +21,9 @@ dtparam=watchdog=on
 
 dtparam=i2c_arm=on
 dtparam=spi=on
+# The camera: the IMX219, named rather than detected, as M5Stack sets it.
 camera_auto_detect=0
+dtoverlay=imx219
 
 # Serial console on GPIO14/15 (the Grove port). This takes the PL011 from
 # Bluetooth, which nothing uses yet.

@@ -8,3 +8,6 @@ CONFIG_FEATURE_IPC_SYSLOG=y
 CONFIG_FEATURE_IPC_SYSLOG_BUFFER_SIZE=64
 CONFIG_LOGREAD=y
 CONFIG_FEATURE_LOGREAD_REDUCED_LOCKING=y
+# udhcpd: hands the computer its address when the handheld is a USB network
+# adapter to it (Settings > USB > network).
+CONFIG_UDHCPD=y

@@ -1,1 +1,2 @@
 source "$BR2_EXTERNAL_CATALYST_PATH/package/m5stack-cardputer-zero/Config.in"
+source "$BR2_EXTERNAL_CATALYST_PATH/package/catalyst-camera/Config.in"

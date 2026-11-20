@@ -49,7 +49,7 @@ struct App {
     open: fn(&Robot) -> Box<dyn Screen>,
 }
 
-const APPS: [App; 13] = [
+const APPS: [App; 14] = [
     App { icon: "smart_toy", name: "Robot", open: |_| Box::new(RobotScreen::default()) },
     App { icon: "monitor_heart", name: "Health", open: |_| Box::new(Health::default()) },
     App { icon: "description", name: "Logs", open: |_| Box::new(LogsScreen::default()) },
@@ -62,6 +62,7 @@ const APPS: [App; 13] = [
     App { icon: "folder", name: "Files", open: |_| Box::new(crate::files::Files::new()) },
     App { icon: "commit", name: "Git", open: |_| Box::new(crate::git::GitScreen::new()) },
     App { icon: "storefront", name: "Catalogue", open: |_| Box::new(crate::catalogue::CatalogueScreen::new()) },
+    App { icon: "qr_code_scanner", name: "AprilTag", open: |_| Box::new(crate::apriltags::Reader::new()) },
     App { icon: "settings", name: "Settings", open: |_| Box::new(SettingsApp::new()) },
 ];
 
@@ -1864,6 +1865,10 @@ enum Item {
     Graphics,
     // Network.
     WifiSetup,
+    /// Settings › USB: what the handheld is to a computer, and whether one has it.
+    UsbSection,
+    UsbMode,
+    UsbLink,
     // Access.
     Ssh,
     // Keys.
@@ -1942,7 +1947,7 @@ fn glance_items(order: &[Widget]) -> Vec<Item> {
 
 /// Where everything in Settings is, for search: what it is called, the
 /// section it is in, and its place there (none: the section itself).
-const SETTING_PLACES: [(&str, Item, Option<usize>); 45] = [
+const SETTING_PLACES: [(&str, Item, Option<usize>); 46] = [
     ("Robot settings", Item::RobotSection, None),
     ("Open Robot on link", Item::RobotSection, Some(0)),
     ("Match report after a match", Item::RobotSection, Some(1)),
@@ -1984,6 +1989,7 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 45] = [
     ("Update channel", Item::UpdateSection, Some(3)),
     ("About this handheld", Item::About, None),
     ("Version", Item::About, Some(0)),
+    ("USB", Item::UsbSection, None),
     ("Help", Item::Help, None),
     ("Take the tour", Item::Help, Some(0)),
     ("Keyboard shortcuts", Item::Help, Some(1)),
@@ -2024,7 +2030,7 @@ fn keys_file() -> std::path::PathBuf {
 impl SettingsApp {
     pub fn new() -> Self {
         use Item::*;
-        Self::page("Settings", vec![RobotSection, Appearance, TextSection, HomeSection, Display, Network, KeysSection, Access, UpdateSection, Help, About, FromComputer])
+        Self::page("Settings", vec![RobotSection, Appearance, TextSection, HomeSection, Display, Network, UsbSection, KeysSection, Access, UpdateSection, Help, About, FromComputer])
     }
 
     fn page(title: &'static str, items: Vec<Item>) -> Self {
@@ -2065,6 +2071,7 @@ impl SettingsApp {
             Access => Self::page("Access", vec![Ssh]),
             UpdateSection => Self::page("Updates", vec![UpdateState, UpdateAction, UpdateNote, UpdateChannel, UpdateAuto, UpdateOvernight]),
             Help => Self::page("Help", vec![TakeTour, KeyboardShortcuts]),
+            UsbSection => Self::page("USB", vec![UsbMode, UsbLink]),
             DeveloperSection => Self::page("Developer", vec![DevMode, MotionScale, ShowKeys]),
             _ => return None,
         })
@@ -2142,6 +2149,16 @@ impl SettingsApp {
             KeysFromFile => ("Read from a file".into(), keys_file().display().to_string(), false),
             About => section("About", crate::sysupdate::version()),
             Help => section("Help", "tour · keys".to_owned()),
+            UsbSection => section("USB", crate::usb::MODES[crate::usb::mode()].1.to_owned()),
+            UsbMode => {
+                let at = crate::usb::mode();
+                ("Plugged into a computer".into(), crate::usb::MODES[at].1.into(), at != 0)
+            }
+            UsbLink => match crate::usb::connected() {
+                Some(true) => ("Computer".into(), "connected".into(), true),
+                Some(false) => ("Computer".into(), "not connected".into(), false),
+                None => ("Computer".into(), "on the handheld".into(), false),
+            },
             TakeTour => ("Take the tour".into(), "›".into(), true),
             KeyboardShortcuts => ("Keyboard shortcuts".into(), "›".into(), true),
             DeveloperSection => section("Developer options", "on".to_owned()),
@@ -2326,6 +2343,14 @@ impl SettingsApp {
                 cx.settings.motion_scale = all[(at + step).clamp(0, all.len() as i32 - 1) as usize];
             }
             ShowKeys => cx.settings.show_keys = !cx.settings.show_keys,
+            UsbMode => {
+                let n = crate::usb::MODES.len() as i32;
+                let next = (crate::usb::mode() as i32 + step).rem_euclid(n) as usize;
+                *cx.say = Some(match crate::usb::set(next) {
+                    Ok(()) => format!("usb: {}", crate::usb::MODES[next].1),
+                    Err(why) => why,
+                });
+            }
             _ => {}
         }
         crate::save_settings(cx.settings);
@@ -2571,6 +2596,9 @@ impl Screen for SettingsApp {
         self.list.scrollbar(g, items.len(), top, bottom - 2.0);
         if arranging {
             g.hint("enter: hide · space: favourite · ←→: move");
+        }
+        if self.title == "USB" {
+            g.hint(crate::usb::MODES[crate::usb::mode()].2);
         }
     }
 }

@@ -1,0 +1,9 @@
+config BR2_PACKAGE_CATALYST_CAMERA
+	bool "catalyst-camera"
+	depends on BR2_PACKAGE_LIBCAMERA
+	depends on BR2_INSTALL_LIBSTDCPP
+	help
+	  The camera's picture, greyscale, on standard output, for the
+	  shell's AprilTag reader: a small libcamera program in place of
+	  rpicam-apps (which needs newer kernel headers than this
+	  toolchain has, and Boost).

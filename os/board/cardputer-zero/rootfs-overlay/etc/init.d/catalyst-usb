@@ -1,0 +1,30 @@
+#!/sbin/openrc-run
+# What the handheld is over USB to a computer, as chosen in Settings › USB
+# (catalyst-usb): nothing, a serial console, a network adapter, or a drive of
+# the match logs. Nothing is set up while it is "off", the default.
+
+description="USB to a computer, as chosen in Settings"
+
+depend() {
+	need catalyst-early
+	after catalyst-late
+}
+
+start() {
+	mode=$(cat /data/catalyst/usb-mode 2>/dev/null)
+	case "$mode" in
+	serial | network | drive) ;;
+	*)
+		einfo "USB: charging only"
+		return 0
+		;;
+	esac
+	ebegin "USB: $mode"
+	/usr/sbin/catalyst-usb apply >/dev/null 2>&1
+	eend $?
+}
+
+stop() {
+	/usr/sbin/catalyst-usb down >/dev/null 2>&1
+	return 0
+}

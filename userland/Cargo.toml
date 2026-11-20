@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/detent", "crates/bezel", "crates/nt4", "apps/shell", "apps/update", "apps/flasher"]
+members = ["crates/detent", "crates/bezel", "crates/nt4", "crates/apriltag", "apps/shell", "apps/update", "apps/flasher"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ license = "MIT"
 detent = { path = "crates/detent" }
 bezel = { path = "crates/bezel" }
 nt4 = { path = "crates/nt4" }
+apriltag = { path = "crates/apriltag" }
 
 # The device build: small, fast, no unwinding tables.
 [profile.release]

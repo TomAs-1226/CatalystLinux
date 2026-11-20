@@ -16,9 +16,13 @@ export CARGO_TARGET_DIR="${CATALYST_ARM_TARGET:-$BUILD/target}"
 # Linked as build-shell.sh links it, and run against the image's own root:
 # its C library, its loader, its Mesa.
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$BUILD/output/host/bin/aarch64-linux-gcc"
+# C code built into the shell (the AprilTag detector) goes through the same compiler.
+export CC_aarch64_unknown_linux_musl="$BUILD/output/host/bin/aarch64-linux-gcc"
+export AR_aarch64_unknown_linux_musl="$BUILD/output/host/bin/aarch64-linux-ar"
+export CFLAGS_aarch64_unknown_linux_musl="-mcpu=cortex-a53"
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-cpu=cortex-a53 -C target-feature=-crt-static"
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUNNER="$HERE/scripts/arm-run.sh"
 
 cd "$HERE/userland"
 # The shell, and the renderer (whose NEON paths only an ARM build has).
-cargo test --target aarch64-unknown-linux-musl -p catalyst-shell -p bezel -p catalyst-update "$@"
+cargo test --target aarch64-unknown-linux-musl -p catalyst-shell -p bezel -p catalyst-update -p apriltag "$@"

@@ -14,6 +14,7 @@ windows that grow out of tiles whenever it is there.
 | `userland/crates/detent` | Detent's spring model in Rust: every vocabulary, closed-form, interruptible. |
 | `userland/crates/bezel` | Bezel on the CPU: tonal surfaces, the two type voices, Material Symbols, and the full glass pass (refraction, frost, edge light, groups, shadow). |
 | `userland/crates/nt4` | A NetworkTables 4.1 client: one thread, read-only, reconnects on its own. |
+| `userland/crates/apriltag` | AprilTag detection: AprilRobotics' C library (3.4.5, BSD 2-Clause, vendored with the 36h11 family FRC uses) behind a small flat shim, with each tag's pose. |
 | `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, the built-in apps (Robot, Health, Logs, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Settings) and the launcher for external ones. |
 | `userland/apps/update` | `catalyst-update`: system updates on the handheld (A/B, tried once, rolled back if it does not come up), and the release tool that makes and signs them. |
 | `userland/apps/flasher` | Catalyst Flasher: the newest release onto an SD card in one go. |
@@ -574,8 +575,11 @@ processor family and 512 MB; `scripts/vm.py`), before and after the trim:
 
 Counted the strictest way (what the kernel keeps for itself plus everything
 in use), an idle system is 47 MB, down from 64. On the handheld the boot
-firmware takes another 16 MB for the video processor, which no setting
-returns. The emulator has no panel, keyboard matrix, fuel gauge or radio, so
+firmware takes another 64 MB for the video processor, which no setting
+returns: the camera's image processing runs in the full firmware and needs it
+(with the cut-down firmware and 16 MB, which earlier images used, the camera
+does not appear). What the system uses is unchanged; there is 48 MB less to
+use, about 400 MB still free. The emulator has no panel, keyboard matrix, fuel gauge or radio, so
 the board's own drivers are loaded but idle in these figures, and emulator
 seconds are not handheld seconds (about six of the 24 are spent waiting for a
 panel that is not there): the table compares one build with another.
@@ -624,6 +628,60 @@ What changed:
   (`scripts/subset-fonts.sh`; the full files are in
   `userland/assets/fonts/full`): 4.0 MB became 0.9 MB. Libraries no program
   loads are left out of the image.
+
+## The AprilTag reader
+
+The camera's picture (the IMX219, through libcamera) with every 36h11 tag in
+it outlined and numbered, and beside it each tag, nearest first: how far away
+it is, how far to the left or right, and how far it is turned (its yaw).
+Space holds the picture. It checks what the robot's vision should be seeing.
+
+- The picture is 640 × 480 at 15 frames a second from the sensor's full-view
+  binned mode, so the lens is known: nominally 530 pixels of focal length,
+  or a calibration in `apriltag/lens.json` beside the settings
+  (`{"fx": …, "fy": …, "cx": …, "cy": …}`, as PhotonVision's calibration gives
+  them). Tags are taken to be FRC's, 6.5 inches across their black square.
+- `catalyst-camera` (`os/package/catalyst-camera`), a small libcamera program
+  of the image's own, streams the brightness of each frame to the reader,
+  only while it is open; rpicam-apps needs kernel headers newer than this
+  toolchain's, and Boost. The detector is AprilRobotics' (as PhotonVision
+  uses), on two of the four cores, looking at the picture halved.
+- In the simulator a simulated camera shows tags 7 and 13 in a grey room,
+  tag 7 drifting and turning, drawn as the nominal lens would see them and
+  read by the same detector; its distance and turn come back within a few
+  centimetres and degrees of where it was drawn (tested).
+
+Not yet checked on a CardputerZero: the camera's connection and power (the
+image names it `dtoverlay=imx219`, as M5Stack's own image does), the frame
+rate the CM0 reaches, and the lens figures.
+
+## USB to a computer
+
+Settings › USB chooses what the handheld is to a computer its USB-C port is
+plugged into, kept across restarts (`catalyst-usb`, the kernel's USB gadget
+framework on the dwc2 controller):
+
+- **Charging only**, the default.
+- **Serial console**: a serial port with a login on it (`/dev/ttyGS0` on the
+  handheld; `screen`, PuTTY or `picocom` on the computer). The login is root's,
+  which has no password, as on the Grove port's serial console.
+- **Network**: a network adapter (CDC NCM, which Windows 10 and 11, macOS and
+  Linux all drive themselves). The handheld is 192.168.7.1 and gives the
+  computer 192.168.7.2, with no route or DNS, so the computer's own internet
+  stays as it was; SSH and the setup page are reachable there.
+- **Drive of logs**: a read-only drive holding the match logs as they were
+  when it was made; choosing it again brings it up to date.
+
+The page says whether a computer has it. Not yet checked on a CardputerZero:
+whether its USB-C port takes the device role when plugged into a computer.
+
+## Command-line tools
+
+From the Terminal (and over SSH): Python 3, vim (with its syntax files) and
+nano, htop, tmux, rsync, jq, strace, i2c-tools, picocom for serial ports, and
+Dropbear's SSH client (`dbclient`, with `dropbearkey`), beside BusyBox's own
+small tools and git. Nothing of them runs until called; together they take
+about 40 MB of the 160 MB system partition.
 
 ## Updates, over the air
 
@@ -756,11 +814,8 @@ analysis, the camera, audio.
 
 Chosen so far, not yet built: scripting with a kit for writing Bezel apps (so
 an external app can draw like a built-in one); an SSH client and serial
-console; a network toolkit; USB gadget modes (serial, network and a drive of
-logs when plugged into a PC); a system monitor; standby and power saving;
-image updates with rollback; an AprilTag reader on the built-in camera,
-calibrated so it can measure for the robot; a pit checklist and match timer;
-a robot finder; the AI log analysis.
+console; a network toolkit; a system monitor; standby and power saving; a
+pit checklist and match timer; a robot finder; the AI log analysis.
 
 Added since, also not yet built:
 

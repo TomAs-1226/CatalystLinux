@@ -22,6 +22,10 @@ if [ ! -x "$CC" ]; then
     exit 1
 fi
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$CC"
+# C code built into the shell (the AprilTag detector) goes through the same compiler.
+export CC_aarch64_unknown_linux_musl="$CC"
+export AR_aarch64_unknown_linux_musl="${CC%gcc}ar"
+export CFLAGS_aarch64_unknown_linux_musl="-mcpu=cortex-a53"
 # The CM0's Cortex-A53, and the C library shared rather than built in.
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-cpu=cortex-a53 -C target-feature=-crt-static"
 

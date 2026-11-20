@@ -1,0 +1,10 @@
+[package]
+name = "apriltag"
+description = "AprilTag detection (AprilRobotics' C library, 36h11) for the AprilTag reader."
+version.workspace = true
+edition.workspace = true
+license = "BSD-2-Clause"
+build = "build.rs"
+
+[build-dependencies]
+cc = "1"
