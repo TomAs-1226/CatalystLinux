@@ -10,7 +10,9 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="${CATALYST_BUILD:-$HOME/catalyst-linux-build}"
 export PATH="$HOME/.cargo/bin:$PATH"
-export CARGO_TARGET_DIR="$BUILD/target"
+# Its own target folder when asked (CATALYST_ARM_TARGET), so builds from
+# several checkouts at once do not wait on one another's lock.
+export CARGO_TARGET_DIR="${CATALYST_ARM_TARGET:-$BUILD/target}"
 # Linked as build-shell.sh links it, and run against the image's own root:
 # its C library, its loader, its Mesa.
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$BUILD/output/host/bin/aarch64-linux-gcc"
