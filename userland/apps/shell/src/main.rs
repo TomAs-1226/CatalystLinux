@@ -20,6 +20,14 @@
 //!                                or slower; the window title shows the cost
 //!     --perf                     also print that cost once a second
 //! ```
+//!
+//! Built with the `packed` feature (each release's `catalyst-sim.exe`), it is
+//! the simulator for a computer with nothing installed: started with nothing,
+//! it opens the window at the handheld's speed with the demo robot.
+
+// The packed simulator is a windowed program on Windows: double-clicked, no
+// console comes up beside it.
+#![cfg_attr(all(windows, feature = "packed"), windows_subsystem = "windows")]
 
 mod agent;
 mod apps;
@@ -224,10 +232,60 @@ pub fn memory_line() -> Option<String> {
     Some(format!("shell {:.1} mb · system {:.0} of {:.0} mb used", rss as f64 / 1024.0, (total - available) as f64 / 1024.0, total as f64 / 1024.0))
 }
 
+/// Where the simulator keeps what it saves on a computer: the user's own
+/// folder for programs' data, never the computer's `/etc` or `/data`.
+fn user_state_dir() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let home = || std::env::var_os("HOME").map(PathBuf::from);
+    if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("CatalystLinux"))
+    } else if cfg!(target_os = "macos") {
+        home().map(|h| h.join("Library/Application Support/CatalystLinux"))
+    } else {
+        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).or_else(|| home().map(|h| h.join(".local/share"))).map(|d| d.join("catalyst-linux"))
+    }
+}
+
+/// Run from a terminal, the packed simulator prints there (`--about`, `--bench`).
+#[cfg(all(windows, feature = "packed"))]
+fn attach_console() {
+    extern "system" {
+        fn AttachConsole(process: u32) -> i32;
+    }
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    // SAFETY: a plain Win32 call; failing (double-clicked, no console) is fine.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(all(windows, feature = "packed"))]
+    attach_console();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // The packed simulator is always the simulator, at the handheld's
+    // estimated speed unless told another: double-clicked, or started from a
+    // terminal with options of its own (`--no-intro`, `--light`).
+    if cfg!(feature = "packed") {
+        if !args.iter().any(|a| a == "--sim") {
+            args.push("--sim".into());
+        }
+        if !args.iter().any(|a| a == "--speed") {
+            args.extend(["--speed".into(), "device".into()]);
+        }
+    }
     let flag = |name: &str| args.iter().any(|a| a == name);
     let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+
+    // The simulator on a computer saves in the user's folder unless told otherwise.
+    if flag("--sim") && std::env::var_os("CATALYST_CONF").is_none() {
+        if let Some(dir) = user_state_dir() {
+            std::env::set_var("CATALYST_CONF", dir.join("robot"));
+            if std::env::var_os("CATALYST_LOGS").is_none() {
+                std::env::set_var("CATALYST_LOGS", dir.join("logs"));
+            }
+        }
+    }
 
     let saved = std::fs::read_to_string(config_path()).ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
     // The demo robot plugged in a while after start, to see what its arrival does.
@@ -237,6 +295,8 @@ fn main() {
         (true, _) => Robot::demo(),
         (_, Some(input)) if input == "demo" => Robot::demo(),
         (_, Some(input)) => Robot::connect(&screens::resolve_address(&input)),
+        // The packed simulator has a robot to show until it is given a real one.
+        _ if cfg!(feature = "packed") => Robot::demo(),
         _ => Robot::none(),
     };
     // The scripted tour brings its own files and apps to show.

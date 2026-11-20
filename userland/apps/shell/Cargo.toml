@@ -4,6 +4,13 @@ description = "The Catalyst Linux shell: launcher, built-in Catalyst apps, and t
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+build = "build.rs"
+
+[features]
+# The simulator packed for a computer with nothing installed (each release's
+# catalyst-sim.exe): started with nothing, it opens the window with the demo
+# robot; on Windows it is a windowed program, with no console of its own.
+packed = []
 
 [dependencies]
 bezel = { workspace = true }

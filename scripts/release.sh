@@ -107,13 +107,23 @@ rm -rf "$OUT"
 	--build "$BUILD_TIME" --key "$KEY" --repo "$REPO" --tag "$TAG" --notes "$NOTES" "${PREV_ARGS[@]}"
 ls -l "$OUT"
 
-# The flasher for Windows, built by Windows' own Rust (this is WSL on a PC):
-# a release carries it, so a new card is one download and one click.
+# The flasher and the simulator for Windows, built by Windows' own Rust (this
+# is WSL on a PC): a release carries them, so a new card is one download and
+# one click, and so is trying Catalyst Linux on a PC. Both carry their own C
+# runtime (userland/.cargo/config.toml): nothing else to install.
 if command -v cmd.exe >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1; then
-	echo "== the flasher for Windows"
 	WIN_USERLAND="$(wslpath -w "$HERE/userland")"
+	echo "== the flasher for Windows"
 	if (cd /mnt/c && cmd.exe /c "cd /d $WIN_USERLAND && %USERPROFILE%\\.cargo\\bin\\cargo.exe build --profile sim -p catalyst-flasher") >/dev/null 2>&1; then
 		cp "$HERE/userland/target/sim/catalyst-flasher.exe" "$OUT/"
+	else
+		echo "   (Windows' Rust could not build it: the release goes without it)"
+	fi
+	# Packed: double-clicked, it opens the simulator with the demo robot. Built
+	# apart from the everyday simulator, which stays a console program.
+	echo "== the simulator for Windows"
+	if (cd /mnt/c && cmd.exe /c "cd /d $WIN_USERLAND && %USERPROFILE%\\.cargo\\bin\\cargo.exe build --profile sim -p catalyst-shell --features packed --target-dir target\\packed") >/dev/null 2>&1; then
+		cp "$HERE/userland/target/packed/sim/catalyst-shell.exe" "$OUT/catalyst-sim.exe"
 	else
 		echo "   (Windows' Rust could not build it: the release goes without it)"
 	fi
@@ -125,7 +135,7 @@ ls -1dt "$BUILD/releases/$CHANNEL"/*/ | tail -n +4 | xargs -r rm -rf
 if [ "$PUBLISH" = 1 ]; then
 	echo "== publishing $TAG to $REPO"
 	FILES=("$OUT"/manifest.json "$OUT"/manifest.sig "$OUT"/system.img.gz "$OUT"/boot.pack "$OUT"/catalyst-linux-*.img.gz "$OUT"/os_list_catalyst.json)
-	for extra in "$OUT"/system-from-*.cdelta "$OUT"/catalyst-flasher.exe; do
+	for extra in "$OUT"/system-from-*.cdelta "$OUT"/catalyst-flasher.exe "$OUT"/catalyst-sim.exe; do
 		[ -e "$extra" ] && FILES+=("$extra")
 	done
 	ASSETS=()

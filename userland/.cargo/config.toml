@@ -1,0 +1,4 @@
+# Windows programs carry their own C runtime, so the simulator and the
+# flasher run on a PC with nothing installed (no Visual C++ Redistributable).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -17,6 +17,7 @@ windows that grow out of tiles whenever it is there.
 | `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, the built-in apps (Robot, Health, Logs, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Settings) and the launcher for external ones. |
 | `userland/apps/update` | `catalyst-update`: system updates on the handheld (A/B, tried once, rolled back if it does not come up), and the release tool that makes and signs them. |
 | `userland/apps/flasher` | Catalyst Flasher: the newest release onto an SD card in one go. |
+| `userland/assets/app-icon` | Catalyst's icon (the FrcCatalyst bolt) at each size Windows uses, built into the simulator; `assets/` holds it for Raspberry Pi Imager's listing. |
 | `os/` | The Buildroot external tree: board config, kernel and BusyBox fragments, M5Stack driver package, OpenRC services, image layout. |
 | `scripts/` | Build-machine setup, shell cross-build, kernel and image builds, image checks, the emulator harness, the simulator, the catalogue packer. |
 | `catalyst-apps/` | The app catalogue, meant to become its own repository (`TomAs-1226/catalyst-apps`): three example apps, their packed archives and the index. |
@@ -42,6 +43,18 @@ driver kept as a loadable file · Latin-only fonts · HTTPS through curl on
 mbedTLS, shared by git, the schedule and the catalogue · keys for online
 services set in first-boot setup (from the handheld or a computer), in
 Settings, or read from a file.
+
+## Try it on any Windows PC
+
+Download **[catalyst-sim.exe](https://github.com/TomAs-1226/CatalystLinux/releases/latest/download/catalyst-sim.exe)**
+from the newest release and double-click it. The simulator opens with a demo
+robot, at the handheld's estimated speed, starting with first-boot setup as a
+new handheld does. It is one file with nothing to install: its fonts, icons
+and C runtime are inside it. What it saves (settings, the robot's address,
+keys) goes in `%LOCALAPPDATA%\CatalystLinux`. It is not signed, so Windows
+may stop it the first time: *More info*, then *Run anyway*. From a terminal it
+takes the shell's own options: `--no-intro`, `--setup`, `--light`,
+`--speed pc`, `--robot 5805`, `--arrive 5`.
 
 ## Try the UI on this PC
 
@@ -607,8 +620,8 @@ systems on the card:
 Releases are made on this PC by `scripts/release.sh` (stable, tagged
 `v<os/VERSION>`; or nightly, a pre-release) and published to the GitHub
 repository's releases with `--publish`: the system and its patches, the
-signed manifest, the card image, its Raspberry Pi Imager listing, and the
-Windows flasher. The signing key is made on the first run and kept in
+signed manifest, the card image, its Raspberry Pi Imager listing, the
+Windows flasher and the packed simulator. The signing key is made on the first run and kept in
 `~/catalyst-linux-build/keys` (back it up: handhelds only take updates signed
 with it). `scripts/schedule-nightly.ps1` makes Windows run it every night.
 

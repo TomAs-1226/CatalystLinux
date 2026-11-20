@@ -433,7 +433,46 @@ pub mod sim {
                 .expect("open simulator window");
             // The shell starts frames on its own beat, as it does on the device.
             window.set_target_fps(0);
+            #[cfg(windows)]
+            show_icon(&window);
             Sim { window, shown: Vec::new(), esc: Hold::default(), panel: Vec::new() }
+        }
+    }
+
+    /// Catalyst's icon on the window and its taskbar button, from the
+    /// program's own resources (`build.rs` puts it there; a test build has none,
+    /// and keeps Windows' plain one).
+    #[cfg(windows)]
+    fn show_icon(window: &Window) {
+        use std::ffi::c_void;
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetModuleHandleW(name: *const u16) -> *mut c_void;
+        }
+        #[link(name = "user32")]
+        extern "system" {
+            fn LoadImageW(instance: *mut c_void, name: *const u16, kind: u32, cx: i32, cy: i32, flags: u32) -> *mut c_void;
+            fn GetSystemMetrics(index: i32) -> i32;
+            fn SendMessageW(window: *mut c_void, message: u32, wparam: usize, lparam: isize) -> isize;
+        }
+        const IMAGE_ICON: u32 = 1;
+        const WM_SETICON: u32 = 0x0080;
+        // The icon's number in the resources, as build.rs names it.
+        const ICON_NAME: usize = 1;
+        // (ICON_BIG, SM_CXICON) for Alt-Tab and the taskbar, (ICON_SMALL, SM_CXSMICON) for the title bar.
+        let sizes = [(1usize, 11), (0usize, 49)];
+        // SAFETY: plain Win32 calls on this program's own module and window;
+        // a missing icon comes back null and is left alone.
+        unsafe {
+            let module = GetModuleHandleW(std::ptr::null());
+            let hwnd = window.get_window_handle();
+            for (which, metric) in sizes {
+                let side = GetSystemMetrics(metric);
+                let icon = LoadImageW(module, ICON_NAME as *const u16, IMAGE_ICON, side, side, 0);
+                if !icon.is_null() {
+                    SendMessageW(hwnd, WM_SETICON, which, icon as isize);
+                }
+            }
         }
     }
 
