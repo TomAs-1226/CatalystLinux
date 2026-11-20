@@ -2143,7 +2143,7 @@ impl SettingsApp {
             About => section("About", crate::sysupdate::version()),
             Help => section("Help", "tour · keys".to_owned()),
             TakeTour => ("Take the tour".into(), "›".into(), true),
-            KeyboardShortcuts => ("Keyboard shortcuts".into(), "? ›".into(), true),
+            KeyboardShortcuts => ("Keyboard shortcuts".into(), "›".into(), true),
             DeveloperSection => section("Developer options", "on".to_owned()),
             DevMode => ("Use developer options".into(), onoff(g.developer), g.developer),
             MotionScale => (

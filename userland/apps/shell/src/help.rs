@@ -1,6 +1,6 @@
 //! Help: a tour of the keys, offered once after first-boot setup and always
-//! from Settings › Help, and the list of keyboard shortcuts, which `?` brings
-//! up over any screen that is not taking text.
+//! from Settings › Help, and the list of keyboard shortcuts, which `?` held
+//! for five seconds brings up over any screen that is not taking text.
 
 use bezel::{Align, Color, Rect};
 use detent::{role, Animated};
@@ -47,7 +47,7 @@ const STEPS: [Step; 8] = [
     Step { spot: Spot::Pager, title: "Pages", words: "Home turns its pages as you go. Left of the first app is the glance page: the robot and this handheld at a glance." },
     Step { spot: Spot::Nothing, title: "Control centre", words: "Ctrl Space brings it down over any screen: Wi-Fi, light mode, brightness. Up from Home's top row works too." },
     Step { spot: Spot::Nothing, title: "Search", words: "Space on Home searches the apps and settings. Just start typing." },
-    Step { spot: Spot::Nothing, title: "Forgot a key?", words: "Press ? on any screen for the list of shortcuts. Settings › Help has this tour again." },
+    Step { spot: Spot::Nothing, title: "Forgot a key?", words: "Hold ? for five seconds on any screen for the list of shortcuts. Settings › Help has this tour again." },
 ];
 
 /// How dark the screen goes behind the tour.
@@ -311,7 +311,7 @@ const SHORTCUTS: &[Line] = &[
     Line::Keys("Back", "esc"),
     Line::Keys("Leave any app", "esc held · ctrl q"),
     Line::Keys("Control centre", "ctrl space"),
-    Line::Keys("This list", "?"),
+    Line::Keys("This list, after 5 s", "? held"),
     Line::Head("home"),
     Line::Keys("Next or last app", "← →"),
     Line::Keys("Up and down a page", "↑ ↓"),
@@ -375,7 +375,7 @@ impl Screen for Shortcuts {
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         match key {
-            Key::Back | Key::Char('?') => Nav::Pop,
+            Key::Back => Nav::Pop,
             other => {
                 self.step(other);
                 Nav::Stay

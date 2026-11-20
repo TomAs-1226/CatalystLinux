@@ -75,9 +75,10 @@ Cardputer) move, Enter opens, Esc goes back. On Home, Left and Right go
 through the apps in order (on to the next row, and the next page), Up and
 Down within a page. Space on Home searches.
 Ctrl-Space brings the control centre down over any screen; Left from Home's
-first tile is the glance page. `?` on any screen that is not taking text
-brings up the list of shortcuts. The window shows what the panel shows:
-16-bit colour, dithered as on the device.
+first tile is the glance page. `?` held for five seconds on any screen that
+is not taking text brings up the list of shortcuts (the island counts down
+from the first second; a `?` typed in passing does nothing). The window
+shows what the panel shows: 16-bit colour, dithered as on the device.
 
 A held key repeats on the shell's own clock, the same on the handheld and in
 the simulator: once as it lands, then after 0.4 s about 13 times a second,
@@ -107,8 +108,10 @@ one large unit, which Rust 1.92 on Windows fails to compile.
   screen dims, a spotlight glides to each thing in turn (the apps, the
   island, the page dots) and a card says what it is and what the keys do.
   Enter goes on, Left goes back, Esc skips it.
-- **Shortcuts.** `?` over any screen not taking text, or Settings › Help ›
-  Keyboard shortcuts: every key by where it works, drawn as keycaps.
+- **Shortcuts.** `?` held for five seconds over any screen not taking text,
+  or Settings › Help › Keyboard shortcuts: every key by where it works,
+  drawn as keycaps. Where text is typed (search, a text field, the
+  terminal), `?` is only ever typed.
 - **About**, laid out as Android's "About phone": the handheld's name large
   at the top with Catalyst's icon (the header folds away as the list goes
   down), its model, the Catalyst Linux version (a page of its own: channel,

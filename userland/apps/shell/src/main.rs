@@ -1030,7 +1030,17 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     save(&mut shell, "39b-easter-egg-settled");
     press(&mut shell, &[Back, Back, Down, Down, Enter], 60);
     save(&mut shell, "40-licences");
-    press(&mut shell, &[Char('?')], 90);
+    // ? held for five seconds: it repeats as a held key does, and the island counts down.
+    shell.key(Char('?'));
+    settle(&mut shell, 24);
+    for i in 0..80 {
+        shell.key(Char('?'));
+        settle(&mut shell, 4);
+        if i == 40 {
+            save(&mut shell, "41a-hold-for-shortcuts");
+        }
+    }
+    settle(&mut shell, 90);
     save(&mut shell, "41-shortcuts");
     press(&mut shell, &[Down; 9], 20);
     save(&mut shell, "41b-shortcuts-home");

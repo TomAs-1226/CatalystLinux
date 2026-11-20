@@ -500,7 +500,28 @@ pub struct Shell {
     places: crate::help::Places,
     /// Developer options › Show key presses: the last few keys, and how long each has shown.
     echo: Vec<(String, f32)>,
+    /// The shell's own clock, in seconds, which `?` being held is timed by.
+    clock: f32,
+    /// `?` held on a screen not taking text: since when, when it last came
+    /// (a held key keeps coming, repeating), the countdown last said, and
+    /// whether the shortcut list has opened.
+    help_hold: Option<HelpHold>,
 }
+
+#[derive(Clone, Copy)]
+struct HelpHold {
+    since: f32,
+    last: f32,
+    said: u32,
+    opened: bool,
+}
+
+/// How long `?` is held to bring up the shortcut list, so a `?` typed in
+/// passing never does.
+const HOLD_FOR_SHORTCUTS: f32 = 5.0;
+/// A held key repeats; a gap longer than this means it was let go. (The
+/// first repeat comes 0.4 s after the press.)
+const HELD_GAP: f32 = 0.5;
 
 /// How long a key shown by Show key presses stays, the last part fading.
 const ECHO_SECONDS: f32 = 1.6;
@@ -585,7 +606,38 @@ impl Shell {
             tour_after: None,
             places: crate::help::Places::default(),
             echo: Vec::new(),
+            clock: 0.0,
+            help_hold: None,
         }
+    }
+
+    /// `?` came, on a screen not taking text. Held for five seconds, it
+    /// brings up the shortcut list; the island counts the last seconds
+    /// down. A `?` pressed and let go does nothing.
+    fn question_mark(&mut self) {
+        let now = self.clock;
+        let mut hold = match self.help_hold {
+            Some(h) if now - h.last <= HELD_GAP => HelpHold { last: now, ..h },
+            _ => HelpHold { since: now, last: now, said: 0, opened: false },
+        };
+        // Over the list itself, holding ? does nothing more.
+        if self.top_title() == "Shortcuts" {
+            hold.opened = true;
+        }
+        let held = now - hold.since;
+        if !hold.opened && held >= HOLD_FOR_SHORTCUTS {
+            hold.opened = true;
+            self.help_hold = Some(hold);
+            self.message = None;
+            return self.open(Box::new(crate::help::Shortcuts::new()), Path::Slide);
+        }
+        // Held a second or more: say what holding on will do.
+        let left = (HOLD_FOR_SHORTCUTS - held).ceil() as u32;
+        if !hold.opened && held >= 1.0 && left != hold.said {
+            hold.said = left;
+            self.say(format!("shortcuts in {left} s"));
+        }
+        self.help_hold = Some(hold);
     }
 
     /// Take the tour now, over whatever is showing (Home, after setup or from
@@ -792,12 +844,13 @@ impl Shell {
         if key == Key::Ctrl(' ') {
             return self.set_control(true);
         }
-        // ? brings the shortcut list up over any screen that is not taking
-        // text (in a terminal or a text field, it types).
+        // ? held for five seconds brings the shortcut list up over any
+        // screen that is not taking text (in a terminal or a text field, it
+        // types as ever).
         if key == Key::Char('?') {
             let (top, _) = self.stack.last().expect("the home screen is always there");
-            if !top.wants_text() && !top.full_screen() && top.title() != "Shortcuts" {
-                return self.open(Box::new(crate::help::Shortcuts::new()), Path::Slide);
+            if !top.wants_text() && !top.full_screen() {
+                return self.question_mark();
             }
         }
         // The living wallpaper: a move sets its light drifting the same way,
@@ -1119,6 +1172,15 @@ impl Shell {
 
     /// Advance time. Returns whether a frame should be drawn.
     pub fn tick(&mut self, dt: f32) -> bool {
+        self.clock += dt;
+        // `?` let go: its hold is over, and a countdown it left in the island goes.
+        if let Some(hold) = self.help_hold.filter(|h| self.clock - h.last > HELD_GAP) {
+            self.help_hold = None;
+            if !hold.opened && self.message.as_ref().is_some_and(|(text, _)| text.starts_with("shortcuts in")) {
+                self.message = None;
+                self.dirty = true;
+            }
+        }
         self.gfx.tick_gpu();
         self.watch_link(dt);
         // Motion only moves forward in time if it was already moving; slower
@@ -2530,21 +2592,50 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn question_mark_brings_up_the_shortcuts_except_where_it_types() {
+    fn question_mark_held_five_seconds_brings_up_the_shortcuts() {
         let mut shell = shell();
         frames(&mut shell, 30, FRAME);
-        shell.key(Key::Char('?'));
+        // Held, a key keeps coming: the first repeat 0.4 s in, then every
+        // 75 ms (here a little slower, every four frames).
+        let hold = |shell: &mut Shell, seconds: f32| {
+            shell.key(Key::Char('?'));
+            frames(shell, 24, FRAME);
+            let mut held = 0.4;
+            while held < seconds {
+                shell.key(Key::Char('?'));
+                frames(shell, 4, FRAME);
+                held += 4.0 * FRAME;
+            }
+        };
+        // Typed in passing, even a few at once: nothing at all.
+        for _ in 0..3 {
+            shell.key(Key::Char('?'));
+            frames(&mut shell, 40, FRAME);
+        }
+        assert_eq!(title(&shell), "Catalyst");
+        assert!(shell.message.is_none(), "not even a word");
+        // Held three seconds: not yet, but the island says what holding on will do.
+        hold(&mut shell, 3.0);
+        assert_eq!(title(&shell), "Catalyst");
+        assert!(shell.message.as_ref().is_some_and(|(m, _)| m == "shortcuts in 2 s" || m == "shortcuts in 3 s"), "{:?}", shell.message);
+        frames(&mut shell, 60, FRAME);
+        assert!(shell.message.is_none(), "let go, the countdown goes");
+        // Held five: the list.
+        hold(&mut shell, 5.3);
         frames(&mut shell, 60, FRAME);
         assert_eq!(title(&shell), "Shortcuts");
-        shell.key(Key::Char('?'));
+        // Held again over it: it stays, and no second list comes.
+        hold(&mut shell, 6.0);
         frames(&mut shell, 60, FRAME);
-        assert_eq!(title(&shell), "Catalyst", "? again puts it away");
-        // In search, ? is typed.
+        assert_eq!((title(&shell), shell.stack.len()), ("Shortcuts".to_owned(), 2));
+        shell.key(Key::Back);
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(title(&shell), "Catalyst");
+        // Where text is typed, ? is typed, held or not.
         shell.key(Key::Char(' '));
         frames(&mut shell, 60, FRAME);
         let searching = title(&shell);
-        shell.key(Key::Char('?'));
-        frames(&mut shell, 60, FRAME);
+        hold(&mut shell, 5.5);
         assert_eq!(title(&shell), searching);
     }
 
