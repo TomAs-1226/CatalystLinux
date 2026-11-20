@@ -155,7 +155,8 @@ impl Recorder {
         Toggled::Added
     }
 
-    /// Nothing on the graph.
+    /// Nothing on the graph (the screenshot tour starts from it).
+    #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     pub fn clear(&mut self) {
         self.load();
         self.keys.clear();
