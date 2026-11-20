@@ -296,20 +296,54 @@ impl Screen for About {
 
 // ------------------------------------------------------------ easter egg ---
 
-/// Lines from the pits, one at a time.
-const LINES: [&str; 12] = [
+/// Lines from the pits, one at a time, in no fixed order.
+const LINES: &[&str] = &[
+    // The robot.
     "It worked in simulation.",
     "Have you tried power-cycling the robot?",
     "That brownout was a feature.",
     "CAN bus at 100%. So is morale.",
-    "Zip ties: load-bearing since forever.",
-    "Gracious professionalism, now at 60 fps.",
-    "One more deploy before queueing.",
-    "The intake ate the bumper again.",
-    "Drive team: this is your sign to hydrate.",
-    "Ship it. Fix it in the pits.",
     "Loop overrun? Never heard of it.",
     "Battery 3 still sags to 6 volts.",
+    "Ten volts is still a battery. Ish.",
+    "Swerve: eight motors, one opinion.",
+    "PID tuned by vibes.",
+    "Odometry says we're in the lobby.",
+    "Autonomous worked. Once. In the pits.",
+    "Is the robot enabled? Is it, though?",
+    "Elevator: going up, eventually.",
+    "Pneumatics: the hiss means it works.",
+    "Somewhere, a loose CAN wire.",
+    "The camera saw an AprilTag. Probably.",
+    "The intake ate the bumper again.",
+    "Zero warnings. Suspicious.",
+    "Not a bug. A match strategy.",
+    // The pits.
+    "Ship it. Fix it in the pits.",
+    "One more deploy before queueing.",
+    "Zip ties: load-bearing since forever.",
+    "Duct tape is a valid fastener.",
+    "Every bolt is the 10 mm one.",
+    "Check the breaker before the code.",
+    "Somebody unplugged the radio again.",
+    "Bumpers on. Battery in. Breathe.",
+    "Inspection passed. Celebrate quietly.",
+    "The field is never quite level.",
+    "Safety glasses on. Yes, even now.",
+    "First rule of the pits: snacks.",
+    // The team.
+    "Gracious professionalism, now at 60 fps.",
+    "Drive team: this is your sign to hydrate.",
+    "The scouts saw everything.",
+    "Pit crew: legends, every one of them.",
+    "Mentor says it'll be fine. Probably.",
+    "Comment your code. Please.",
+    "Coffee is a robot subsystem.",
+    // This handheld.
+    "Built in Rust. Driven by Java.",
+    "Springs by Detent. Glass by Bezel.",
+    "Systemcore says hello.",
+    "Forty frames a second, all yours.",
 ];
 
 /// How long a line shows before the next.
@@ -415,8 +449,10 @@ impl Confetti {
         }
     }
 
+    /// Another line, any but the one showing.
     fn next_line(&mut self) {
-        self.line = (self.line + 1) % LINES.len();
+        let pick = (self.random() * LINES.len() as f32) as usize % LINES.len();
+        self.line = if pick == self.line { (pick + 1) % LINES.len() } else { pick };
         self.line_at = Instant::now();
         if !self.calm {
             self.words.jump(0.0);
