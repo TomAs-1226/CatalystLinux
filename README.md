@@ -829,11 +829,13 @@ whether its USB-C port takes the device role when plugged into a computer.
 
 ## Command-line tools
 
-From the Terminal (and over SSH): Python 3, vim (with its syntax files) and
-nano, htop, tmux, rsync, jq, strace, i2c-tools, picocom for serial ports, and
-Dropbear's SSH client (`dbclient`, with `dropbearkey`), beside BusyBox's own
-small tools and git. Nothing of them runs until called; together they take
-about 40 MB of the 160 MB system partition.
+From the Terminal (and over SSH): Python 3 (with zlib, ssl, readline,
+curses, sqlite3, xml and the xz and bzip2 archives), vim (with its syntax
+files) and nano, htop, tmux, rsync, jq, strace, i2c-tools, picocom for serial
+ports, and Dropbear's SSH client (`dbclient`, with `dropbearkey`), beside
+BusyBox's own small tools and git. Nothing of them runs until called;
+together they take about 50 MB of the 160 MB system partition, which has
+18 MB to spare.
 
 ## Updates, over the air
 
