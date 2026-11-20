@@ -49,7 +49,7 @@ struct App {
     open: fn(&Robot) -> Box<dyn Screen>,
 }
 
-const APPS: [App; 13] = [
+const APPS: [App; 17] = [
     App { icon: "smart_toy", name: "Robot", open: |_| Box::new(RobotScreen::default()) },
     App { icon: "monitor_heart", name: "Health", open: |_| Box::new(Health::default()) },
     App { icon: "description", name: "Logs", open: |_| Box::new(LogsScreen::default()) },
@@ -62,6 +62,10 @@ const APPS: [App; 13] = [
     App { icon: "folder", name: "Files", open: |_| Box::new(crate::files::Files::new()) },
     App { icon: "commit", name: "Git", open: |_| Box::new(crate::git::GitScreen::new()) },
     App { icon: "storefront", name: "Catalogue", open: |_| Box::new(crate::catalogue::CatalogueScreen::new()) },
+    App { icon: "monitoring", name: "Monitor", open: |_| Box::new(crate::monitor::Monitor::new()) },
+    App { icon: "network_check", name: "Net tools", open: |_| Box::new(crate::nettools::NetTools::new()) },
+    App { icon: "settings_ethernet", name: "Connect", open: |_| Box::new(crate::connect::Connect::new()) },
+    App { icon: "play_circle", name: "Actions", open: |_| Box::new(crate::commands::Commands::new()) },
     App { icon: "settings", name: "Settings", open: |_| Box::new(SettingsApp::new()) },
 ];
 
@@ -390,6 +394,10 @@ impl Home {
             "Files" => ("storage".into(), None),
             "Git" => ("repositories".into(), None),
             "Catalogue" => ("get apps".into(), None),
+            "Monitor" => ("cpu · memory".into(), None),
+            "Net tools" => ("find · ping".into(), None),
+            "Connect" => ("ssh · serial".into(), None),
+            "Actions" => ("one key".into(), None),
             "Logs" => {
                 let rows = robot.logs.list();
                 let worst = rows.iter().filter_map(|r| r.digest.as_ref()).map(|d| d.headline().0).min();
@@ -2750,6 +2758,21 @@ mod tests {
         // Back as it came.
         home.arrange(&arrangement(&[], &[], &[]));
         assert_eq!(names(&home), all);
+    }
+
+    #[test]
+    fn every_app_name_fits_its_tile_three_across() {
+        let mut g = Gfx::new(bezel::Tokens::dark());
+        // Three across at the standard size: the name gets the tile less its margins.
+        let room = (W - 2.0 * PAD - 2.0 * GAP) / 3.0 - 16.0;
+        for (_, _, name) in builtin_apps() {
+            let w = g.measure(name, g.ty.name);
+            assert!(w <= room, "{name} is {w:.0} px, the tile has {room:.0}");
+        }
+        // And the lines under the tools' names, which never change.
+        for line in ["cpu · memory", "find · ping", "ssh · serial", "one key"] {
+            assert!(g.measure(line, g.ty.caption) <= room, "{line}");
+        }
     }
 
     #[test]

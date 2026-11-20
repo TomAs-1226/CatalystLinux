@@ -27,6 +27,11 @@ pub struct Terminal {
     /// The program to run instead of the login shell: a command line, and the
     /// folder to run it from.
     program: Option<(String, PathBuf)>,
+    /// Or a serial port to talk to, and its speed.
+    serial: Option<(String, u32)>,
+    /// A dim line put at the top before the session's own words: what it
+    /// is (the command, the host, the port), the title being short.
+    banner: Option<String>,
     /// What is running, and the screen it has drawn. The emulator stays after
     /// the program ends, so its last words can still be read.
     session: Option<Session>,
@@ -42,12 +47,45 @@ impl Terminal {
     /// The login shell, picked up where it was left.
     pub fn new() -> Self {
         let (session, term) = KEPT.with_borrow_mut(Option::take).map_or((None, None), |(s, t)| (Some(s), Some(t)));
-        Terminal { title: "Terminal".into(), program: None, session, term, back: 0, ended: false, greeted: false }
+        Terminal { title: "Terminal".into(), program: None, serial: None, banner: None, session, term, back: 0, ended: false, greeted: false }
     }
 
-    /// One program in a terminal of its own: an external app.
+    /// The same, with a dim first line saying what it is.
+    pub fn with_banner(mut self, banner: &str) -> Self {
+        self.banner = Some(banner.to_owned());
+        self
+    }
+
+    /// One program in a terminal of its own: an external app, an SSH
+    /// session, a saved command.
     pub fn running(title: &str, command: &str, dir: PathBuf) -> Self {
-        Terminal { title: title.to_owned(), program: Some((command.to_owned(), dir)), session: None, term: None, back: 0, ended: false, greeted: false }
+        Terminal {
+            title: title.to_owned(),
+            program: Some((command.to_owned(), dir)),
+            serial: None,
+            banner: None,
+            session: None,
+            term: None,
+            back: 0,
+            ended: false,
+            greeted: false,
+        }
+    }
+
+    /// A serial port at `baud`, shown as a terminal: what the device sends,
+    /// and the keys typed to it. Ctrl-Q (or Esc held) leaves.
+    pub fn serial(title: &str, path: &str, baud: u32) -> Self {
+        Terminal {
+            title: title.to_owned(),
+            program: None,
+            serial: Some((path.to_owned(), baud)),
+            banner: None,
+            session: None,
+            term: None,
+            back: 0,
+            ended: false,
+            greeted: false,
+        }
     }
 
     /// The grid that fits the panel at the current text size: columns, rows,
@@ -67,7 +105,7 @@ impl Drop for Terminal {
     fn drop(&mut self) {
         // The login shell waits for the next visit; an app's program goes
         // with its screen (dropping the session hangs up on it).
-        if self.program.is_none() && !self.ended {
+        if self.program.is_none() && self.serial.is_none() && !self.ended {
             if let (Some(session), Some(term)) = (self.session.take(), self.term.take()) {
                 KEPT.with_borrow_mut(|kept| *kept = Some((session, term)));
             }
@@ -174,11 +212,24 @@ impl Screen for Terminal {
         g.surface(panel, 10.0, t.surface1);
         let style = g.ty.caption;
         if self.term.is_none() && !self.ended {
-            self.session = Some(match &self.program {
-                Some((command, dir)) => Session::run(cols, rows, command, dir),
-                None => Session::start(cols, rows),
-            });
-            self.term = Some(Term::new(cols, rows));
+            let mut term = Term::new(cols, rows);
+            if let Some(banner) = &self.banner {
+                term.feed(format!("\x1b[2m{banner}\x1b[0m\r\n").as_bytes());
+            }
+            self.session = match (&self.program, &self.serial) {
+                (Some((command, dir)), _) => Some(Session::run(cols, rows, command, dir)),
+                (None, Some((path, baud))) => match Session::serial(path, *baud) {
+                    Ok(port) => Some(port),
+                    // Said where the device's words would have been; any key leaves.
+                    Err(why) => {
+                        term.feed(format!("{why}\r\n").as_bytes());
+                        self.ended = true;
+                        None
+                    }
+                },
+                (None, None) => Some(Session::start(cols, rows)),
+            };
+            self.term = Some(term);
         }
         let Some(term) = &mut self.term else { return };
         if (term.cols, term.rows) != (cols, rows) {

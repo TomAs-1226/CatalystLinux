@@ -14,7 +14,7 @@ windows that grow out of tiles whenever it is there.
 | `userland/crates/detent` | Detent's spring model in Rust: every vocabulary, closed-form, interruptible. |
 | `userland/crates/bezel` | Bezel on the CPU: tonal surfaces, the two type voices, Material Symbols, and the full glass pass (refraction, frost, edge light, groups, shadow). |
 | `userland/crates/nt4` | A NetworkTables 4.1 client: one thread, read-only, reconnects on its own. |
-| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, the built-in apps (Robot, Health, Logs, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Settings) and the launcher for external ones. |
+| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, the built-in apps (Robot, Health, Logs, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, Settings) and the launcher for external ones. |
 | `userland/apps/update` | `catalyst-update`: system updates on the handheld (A/B, tried once, rolled back if it does not come up), and the release tool that makes and signs them. |
 | `userland/apps/flasher` | Catalyst Flasher: the newest release onto an SD card in one go. |
 | `userland/assets/app-icon` | Catalyst's icon (the FrcCatalyst bolt) at each size Windows uses, built into the simulator; `assets/` holds it for Raspberry Pi Imager's listing. |
@@ -481,6 +481,45 @@ pseudo-terminal to use the same way. The real one is exercised by
 and talks to an actual shell through the emulator, and by `scripts/vm.py`,
 which types into it on the image's own kernel.
 
+## The developer's tools: Monitor, Net tools, Connect, Actions
+
+Four apps for using the handheld as a pocket Linux machine. Each reads or
+works only while it is open (a thread of its own at most, stopped when the
+page goes), so none of them costs anything once closed.
+
+- **Monitor**: how the handheld itself is doing, read once a second from
+  `/proc` and `/sys`. Four cards: the processor (all of it, each core as a
+  bar, the load), memory in use and in all, the processor's temperature
+  (amber from 70 °C, red from 80) with the time since start, and network
+  traffic in and out; each with the last half minute as a graph. Right (or
+  Enter) turns to the processes using the most of the processor, Enter
+  sorting them by memory instead. On a computer there is no `/proc`, so a
+  simulated handheld stands in and says so.
+- **Net tools**: the robot finder looks everywhere a team's robot can be at
+  once (its address 10.TE.AM.2, the roboRIO by name and over USB at
+  172.22.11.2, the radio) and says what answered: NetworkTables (5810), the
+  Catalyst Agent (9010), SSH, the web; Enter on one that is a robot makes it
+  the robot the shell links to. Ping pings once a second with the replies as
+  bars (lost ones in red) and the loss and times; Ports checks a host's ports
+  (by default those a robot uses; `p` changes the list, as `22 80
+  5800-5810`); Name lookup turns a name into its addresses; the Wi-Fi survey
+  lists what is in range by signal, in dBm and bars. They work in the
+  simulator too, against the computer's own network.
+- **Connect**: saved SSH hosts (`user@host`, `user@host:port`; `e` edits, `d`
+  twice forgets), each opened in a terminal through Dropbear's client, which
+  asks for a password or a new server's say-so there as `ssh` does. Key for
+  servers makes the handheld's own key (ed25519, kept in `/data/ssh`) once
+  and shows its public half to put in a server's `authorized_keys`. Below,
+  the serial ports there are (USB adapters and boards, by their own names
+  from `/dev/serial/by-id`), opened raw at the speed chosen (9600 to 921600
+  baud) in the terminal. Ctrl-Q (or Esc held) leaves a session.
+- **Actions**: shell commands kept under a name and run with Enter, each in
+  a terminal of its own with its output left on screen. Some come ready:
+  ping the robot, ask its agent how it is, disk space, memory, addresses,
+  the busiest processes, the kernel's messages, the system log. `n` adds
+  one, `e` edits, `d` twice removes; `{robot}` and `{team}` in a command are
+  filled in when it runs. They are kept in `commands` beside the settings.
+
 ## Wi-Fi
 
 Settings › Network › Wi-Fi networks switches Wi-Fi on, lists what is in range,
@@ -755,12 +794,11 @@ analysis, the camera, audio.
 ## Roadmap
 
 Chosen so far, not yet built: scripting with a kit for writing Bezel apps (so
-an external app can draw like a built-in one); an SSH client and serial
-console; a network toolkit; USB gadget modes (serial, network and a drive of
-logs when plugged into a PC); a system monitor; standby and power saving;
-image updates with rollback; an AprilTag reader on the built-in camera,
-calibrated so it can measure for the robot; a pit checklist and match timer;
-a robot finder; the AI log analysis.
+an external app can draw like a built-in one); USB gadget modes (serial,
+network and a drive of logs when plugged into a PC); standby and power
+saving; image updates with rollback; an AprilTag reader on the built-in
+camera, calibrated so it can measure for the robot; a pit checklist and match
+timer; the AI log analysis.
 
 Added since, also not yet built:
 
@@ -770,7 +808,7 @@ Added since, also not yet built:
   offered and not chosen.
 - For the pit: QR codes for a match summary or an address.
 - For development: an HTTP tester; a hex viewer and programmer's calculator;
-  saved commands run in the terminal with one key; a serial plotter.
+  a serial plotter.
 - For the system: an app switcher; screenshots; sounds on the speaker, with a
   mute switch in the control centre; a lock screen with a PIN.
 
@@ -778,7 +816,9 @@ Built since: the post-match report, the code version check, the event
 schedule, search, the app catalogue, git, the glance page's cards, first-boot
 setup (on the handheld or from a computer) and the start animation; then the
 themes and looks, Home's arrangement, clock, island and greeting, the
-personal start, the new motion, and the GPU.
+personal start, the new motion, and the GPU; then the system monitor, the
+network toolkit with the robot finder, the SSH client and serial console,
+and saved commands.
 
 ## Third-party pieces
 
