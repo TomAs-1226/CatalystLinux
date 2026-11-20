@@ -29,6 +29,8 @@ pub struct Summary {
     pub fired: Vec<(String, u32)>,
     /// Hottest and hardest-driven mechanisms: (name, peak °C, peak A).
     pub mechanisms: Vec<(String, Option<f64>, Option<f64>)>,
+    /// The busiest CAN bus at its busiest, as a fraction of its capacity.
+    pub can_peak: Option<f64>,
     pub records: u64,
     /// The log ended mid-record.
     pub truncated: bool,
@@ -65,6 +67,10 @@ impl Summary {
             }
             out.push((level, format!("{name} peak {}", parts.join(" · "))));
         }
+        if let Some(can) = self.can_peak {
+            let level = if can >= 0.9 { Level::Warn } else { Level::Fine };
+            out.push((level, format!("CAN peak {:.0}%", can * 100.0)));
+        }
         if self.truncated {
             out.push((Level::Fine, "log ends mid-record".into()));
         }
@@ -91,6 +97,8 @@ enum Want {
     Brownout,
     LoopMs,
     Enabled,
+    /// CAN utilisation: one number, or one per bus.
+    Can,
     Firing(String),
     Temperature(String),
     Current(String),
@@ -108,6 +116,7 @@ fn want(name: &str, kind: &str) -> Option<Want> {
         ("Systemcore/BatteryVolts", "double") => Some(Want::Battery),
         ("Systemcore/BrownedOut", "boolean") => Some(Want::Brownout),
         ("Loop/Robot/LastMs", "double") => Some(Want::LoopMs),
+        ("Systemcore/CanUtilization", "double[]" | "double") => Some(Want::Can),
         _ => {
             if let Some(path) = key.strip_prefix("Health/").and_then(|k| k.strip_suffix("/firing")) {
                 let (subsystem, id) = path.split_once('/')?;
@@ -251,6 +260,13 @@ pub fn summarize(mut r: impl Read) -> io::Result<Summary> {
                     _ => {}
                 }
             }
+            Some(Want::Can) => {
+                // The busiest bus, whether one number or one per bus.
+                let busiest = payload.chunks_exact(8).map(|b| f64::from_le_bytes(b.try_into().unwrap())).filter(|v| v.is_finite()).fold(None, |m: Option<f64>, v| Some(m.map_or(v, |m| m.max(v))));
+                if let Some(v) = busiest {
+                    s.can_peak = Some(s.can_peak.map_or(v, |p: f64| p.max(v)));
+                }
+            }
             Some(Want::Firing(name)) => {
                 let state = fired.entry(name.clone()).or_insert((false, 0));
                 if flag == Some(true) && !state.0 {
@@ -303,7 +319,7 @@ pub fn sample() -> Vec<u8> {
         out.extend_from_slice(&time.to_le_bytes());
         out.extend_from_slice(payload);
     };
-    let entries: [(&str, &str); 9] = [
+    let entries: [(&str, &str); 10] = [
         ("NT:/Catalyst/Systemcore/BatteryVolts", "double"),
         ("NT:/Catalyst/Systemcore/BrownedOut", "boolean"),
         ("NT:/Catalyst/Loop/Robot/LastMs", "double"),
@@ -313,6 +329,7 @@ pub fn sample() -> Vec<u8> {
         ("Elevator/TemperatureC", "double"),
         ("Elevator/StatorCurrentAmps", "double"),
         ("NT:/Catalyst/Swerve/HeadingDeg", "double"),
+        ("NT:/Catalyst/Systemcore/CanUtilization", "double[]"),
     ];
     for (i, (name, kind)) in entries.iter().enumerate() {
         let mut p = vec![0u8];
@@ -342,6 +359,11 @@ pub fn sample() -> Vec<u8> {
         double(&mut out, 7, temp);
         double(&mut out, 8, if playing { 22.0 + 30.0 * (t * 1.3).sin().abs() } else { 0.0 });
         double(&mut out, 9, (t * 12.0) % 360.0);
+        // Five buses; the first busier while the match is played, busiest at
+        // the brownout's scramble.
+        let busy = if playing { 0.46 + 0.1 * (t * 0.4).sin().abs() } else { 0.18 } + if (86.0..92.0).contains(&t) { 0.18 } else { 0.0 };
+        let buses: Vec<u8> = [busy, 0.12, 0.0, 0.21, 0.0].iter().flat_map(|v: &f64| v.to_le_bytes()).collect();
+        record(&mut out, 10, time, &buses);
     }
     out
 }
@@ -364,7 +386,10 @@ mod tests {
         assert_eq!(name, "Elevator");
         assert!(temp.unwrap() > 79.0 && amps.unwrap() > 50.0);
         assert!(!s.truncated);
-        assert_eq!(s.records, 9 + 1500 * 9);
+        assert_eq!(s.records, 10 + 1500 * 10);
+        // The busiest of the five buses, at the scramble after the brownout.
+        let can = s.can_peak.unwrap();
+        assert!((0.7..0.75).contains(&can), "{can}");
         // The first thing read is the worst thing.
         let highlights = s.highlights();
         assert_eq!(highlights[0], (Level::Fault, "1 brownout".to_owned()));

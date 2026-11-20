@@ -41,11 +41,13 @@ mod gfx;
 mod git;
 mod glance;
 mod gpu;
+mod graphs;
 mod help;
 mod intro;
 mod keys;
 mod logs;
 mod look;
+mod pit;
 mod pty;
 mod platform;
 mod remote;
@@ -59,6 +61,7 @@ mod sys;
 mod sysupdate;
 mod term;
 mod terminal;
+mod trends;
 mod wifi;
 mod wpilog;
 
@@ -1059,7 +1062,78 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
         settle(&mut shell, 60);
         save(&mut shell, name);
     }
+
+    // Live graphs: two of the battery's table graphed from Tables, two more,
+    // a minute of them, then paused.
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    shell.robot.graphs.clear();
+    settle(&mut shell, 100);
+    let press = |shell: &mut Shell, keys: &[Key], frames: usize| {
+        for key in keys {
+            shell.key(*key);
+            settle(shell, frames);
+        }
+    };
+    press(&mut shell, &vec![Right; steps_to("Tables")], 20);
+    press(&mut shell, &[Enter], 90);
+    let systemcore = robot_tables(&shell.robot).iter().position(|t| t == "Systemcore").unwrap_or(0);
+    press(&mut shell, &vec![Down; systemcore], 12);
+    press(&mut shell, &[Enter, Enter, Down, Down, Down, Enter], 40);
+    save(&mut shell, "50-tables-graphing");
+    shell.robot.graphs.toggle("Elevator/PositionMeters", true);
+    shell.robot.graphs.toggle("Elevator/TemperatureC", true);
+    press(&mut shell, &[Char('g')], 90);
+    settle(&mut shell, 60 * 62);
+    press(&mut shell, &[Down, Down], 30);
+    save(&mut shell, "51-graphs");
+    press(&mut shell, &[Char(' ')], 120);
+    save(&mut shell, "52-graphs-paused");
+
+    // The pit: its two cards, the checklist part ticked, and the match timer.
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    press(&mut shell, &vec![Right; steps_to("Pit")], 20);
+    press(&mut shell, &[Enter], 90);
+    save(&mut shell, "53-pit");
+    press(&mut shell, &[Enter], 90);
+    press(&mut shell, &[Char('r'), Enter, Down, Enter, Down, Down, Enter, Down, Enter, Down], 20);
+    settle(&mut shell, 150);
+    save(&mut shell, "54-pit-checklist");
+    // A practice match, two shifts into TELEOP, running.
+    press(&mut shell, &[Back, Right, Enter], 90);
+    press(&mut shell, &[Char('r'), Right, Right, Right, Enter], 20);
+    settle(&mut shell, 40);
+    save(&mut shell, "55-match-timer");
+    press(&mut shell, &[Right, Right, Right, Right], 20);
+    settle(&mut shell, 40);
+    save(&mut shell, "56-match-timer-end-game");
+    press(&mut shell, &[Enter, Back], 90);
+    save(&mut shell, "57-pit-timer-card");
+    press(&mut shell, &[Enter, Char('r'), Back], 30);
+
+    // Trends: Logs' row for them, then the robot going wrong over an event.
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    press(&mut shell, &vec![Right; steps_to("Logs")], 20);
+    press(&mut shell, &[Enter], 90);
+    press(&mut shell, &[Up], 40);
+    save(&mut shell, "58-logs-trends");
+    press(&mut shell, &[Enter], 90);
+    save(&mut shell, "59-trends");
+    press(&mut shell, &[Down, Down, Down, Left, Left], 30);
+    save(&mut shell, "59b-trends-earlier-match");
     println!("{} screens in {}, {frames} frames at {:.2} ms each", tour.len() + apps.len() + 22, dir.display(), started.elapsed().as_secs_f64() * 1e3 / frames as f64);
+}
+
+/// The robot's top-level tables, as Tables lists them.
+#[cfg(not(target_arch = "aarch64"))]
+fn robot_tables(robot: &Robot) -> Vec<String> {
+    let mut tables: Vec<String> = robot.under("").into_iter().filter_map(|(k, _)| k.split_once('/').map(|(t, _)| t.to_owned())).collect();
+    tables.dedup();
+    tables
 }
 
 /// Home's tiles come in the order of the built-in apps, and Left and Right go

@@ -33,6 +33,11 @@ fn keep_free(partition: u64) -> u64 {
     KEEP_FREE.min(partition / 4)
 }
 
+/// The digest's layout: 2 added what trends across matches read (brownouts,
+/// loop overruns, the hottest motor, CAN). A digest of an older layout is
+/// made again when its log is next looked at.
+const DIGEST_LAYOUT: u64 = 2;
+
 /// What the screens show for one log.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Digest {
@@ -41,6 +46,13 @@ pub struct Digest {
     pub battery_low: Option<f64>,
     pub worst_loop_ms: Option<f64>,
     pub highlights: Vec<(Level, String)>,
+    /// For trends across matches; absent from a digest an older shell wrote.
+    pub brownouts: Option<u32>,
+    pub loop_overruns: Option<u32>,
+    /// The hottest mechanism and its peak, °C.
+    pub hottest: Option<(String, f64)>,
+    /// The busiest CAN bus at its busiest, 0 to 1.
+    pub can_peak: Option<f64>,
 }
 
 impl Digest {
@@ -51,6 +63,10 @@ impl Digest {
             battery_low: summary.battery_low,
             worst_loop_ms: summary.worst_loop_ms,
             highlights: summary.highlights(),
+            brownouts: Some(summary.brownouts),
+            loop_overruns: Some(summary.loop_overruns),
+            hottest: summary.mechanisms.iter().find_map(|(name, temp, _)| temp.map(|t| (name.clone(), t))),
+            can_peak: summary.can_peak,
         }
     }
 
@@ -66,10 +82,19 @@ impl Digest {
             Level::Fine => "fine",
         };
         json!({
+            "layout": DIGEST_LAYOUT,
             "bytes": bytes, "seconds": self.seconds, "enabledSeconds": self.enabled_seconds,
             "batteryLow": self.battery_low, "worstLoopMs": self.worst_loop_ms,
             "highlights": self.highlights.iter().map(|(l, text)| json!([level(l), text])).collect::<Vec<_>>(),
+            "brownouts": self.brownouts, "loopOverruns": self.loop_overruns,
+            "hottest": self.hottest.as_ref().map(|(name, temp)| json!([name, temp])),
+            "canPeak": self.can_peak,
         })
+    }
+
+    /// Whether a digest on disk is of the current layout.
+    fn current(v: &Value) -> bool {
+        v["layout"].as_u64().is_some_and(|l| l >= DIGEST_LAYOUT)
     }
 
     /// The digest, if it was made from a file of exactly `bytes`.
@@ -95,8 +120,30 @@ impl Digest {
             battery_low: v["batteryLow"].as_f64(),
             worst_loop_ms: v["worstLoopMs"].as_f64(),
             highlights,
+            brownouts: v["brownouts"].as_u64().map(|n| n as u32),
+            loop_overruns: v["loopOverruns"].as_u64().map(|n| n as u32),
+            hottest: v["hottest"].as_array().and_then(|pair| Some((pair.first()?.as_str()?.to_owned(), pair.get(1)?.as_f64()?))),
+            can_peak: v["canPeak"].as_f64(),
         })
     }
+}
+
+/// A scripted match for the demo robot's logs, summarised as a real one is.
+fn demo_match(battery: f64, overruns: u32, worst_loop: f64, elevator: (f64, f64), can: f64, fired: &[(&str, u32)]) -> Digest {
+    let summary = Summary {
+        seconds: 150.2,
+        enabled_seconds: Some(135.0),
+        battery_low: Some(battery),
+        brownouts: 0,
+        worst_loop_ms: Some(worst_loop),
+        loop_overruns: overruns,
+        fired: fired.iter().map(|(name, times)| ((*name).to_owned(), *times)).collect(),
+        mechanisms: vec![("Elevator".into(), Some(elevator.0), Some(elevator.1)), ("Shooter".into(), Some(elevator.0 - 9.0), Some(38.0))],
+        can_peak: Some(can),
+        records: 0,
+        truncated: false,
+    };
+    Digest::of(&summary)
 }
 
 /// One log as the list shows it.
@@ -207,21 +254,24 @@ impl Logs {
         Logs { dir: None, shared: Arc::new(Shared::default()), demo: Vec::new(), listed: Mutex::new(None), demo_held: None }
     }
 
-    /// Two scripted matches, for the demo robot.
+    /// An event's worth of scripted matches, for the demo robot: a day and
+    /// a half of qualifying in which the robot slowly gets worse (the
+    /// battery sags further, the elevator runs hotter, the loop starts to
+    /// overrun) until the newest match browns out. And a practice log not
+    /// yet read.
     pub fn demo() -> Self {
         let sample = wpilog::sample();
         let digest = wpilog::summarize(&sample[..]).ok().map(|s| Digest::of(&s));
-        let calm = Digest {
-            seconds: 151.2,
-            enabled_seconds: Some(135.0),
-            battery_low: Some(11.4),
-            worst_loop_ms: Some(9.8),
-            highlights: vec![(Level::Fine, "battery low point 11.4 v".into()), (Level::Fine, "worst loop 9.8 ms".into()), (Level::Fine, "Elevator peak 58 °c · 41 a".into())],
-        };
+        let can = "CAN · can_s0/HighUtilization";
         let demo = vec![
             Row { name: "FRC_20261116_101500_NYRO_Q14.wpilog".into(), bytes: sample.len() as u64, digest },
-            Row { name: "FRC_20261116_093200_NYRO_Q9.wpilog".into(), bytes: 18_400_000, digest: Some(calm) },
+            Row { name: "FRC_20261116_095800_NYRO_Q12.wpilog".into(), bytes: 19_100_000, digest: Some(demo_match(10.6, 3, 24.0, (74.0, 49.0), 0.58, &[(can, 1)])) },
+            Row { name: "FRC_20261116_093200_NYRO_Q9.wpilog".into(), bytes: 18_400_000, digest: Some(demo_match(11.4, 0, 9.8, (58.0, 41.0), 0.47, &[])) },
             Row { name: "FRC_20261115_171800.wpilog".into(), bytes: 31_250_000, digest: None },
+            Row { name: "FRC_20261115_164000_NYRO_Q7.wpilog".into(), bytes: 18_900_000, digest: Some(demo_match(11.6, 0, 8.9, (56.0, 40.0), 0.44, &[])) },
+            Row { name: "FRC_20261115_151200_NYRO_Q5.wpilog".into(), bytes: 18_200_000, digest: Some(demo_match(11.8, 1, 21.4, (53.0, 38.0), 0.42, &[])) },
+            Row { name: "FRC_20261115_135000_NYRO_Q3.wpilog".into(), bytes: 18_700_000, digest: Some(demo_match(11.9, 0, 8.4, (54.0, 37.0), 0.41, &[])) },
+            Row { name: "FRC_20261115_110500_NYRO_Q1.wpilog".into(), bytes: 18_300_000, digest: Some(demo_match(12.0, 0, 8.1, (51.0, 36.0), 0.40, &[])) },
         ];
         let logs = Logs { dir: None, shared: Arc::new(Shared::default()), demo, listed: Mutex::new(None), demo_held: None };
         *logs.shared.status.lock().unwrap() = "demo logs".into();
@@ -428,7 +478,9 @@ fn pull_once(shared: &Shared, dir: &Path, host: &str) -> Result<usize, String> {
         let path = dir.join(name);
         let have = fs::metadata(&path).map_or(0, |m| m.len());
         if have >= total {
-            if !dir.join(format!("{name}.json")).exists() {
+            // Not read yet, or read by an older shell into an older layout.
+            let current = fs::read(dir.join(format!("{name}.json"))).ok().and_then(|t| serde_json::from_slice::<Value>(&t).ok()).is_some_and(|v| Digest::current(&v));
+            if !current {
                 digest_file(dir, name);
                 shared.generation.fetch_add(1, Ordering::Relaxed);
             }
@@ -528,8 +580,17 @@ mod tests {
         let summary = wpilog::summarize(&wpilog::sample()[..]).unwrap();
         let digest = Digest::of(&summary);
         let json: Value = serde_json::from_str(&digest.to_json(4096).to_string()).unwrap();
+        assert!(Digest::current(&json));
+        assert_eq!(digest.brownouts, Some(1));
+        assert_eq!(digest.hottest.as_ref().map(|(name, _)| name.as_str()), Some("Elevator"));
+        assert!(digest.can_peak.is_some());
         assert_eq!(Digest::from_json(&json, 4096), Some(digest));
         assert_eq!(Digest::from_json(&json, 4097), None);
+        // One an older shell wrote still reads, with what it lacks absent, and is made again.
+        let old = json!({"bytes": 10, "seconds": 150.0, "batteryLow": 11.2, "highlights": []});
+        let read = Digest::from_json(&old, 10).unwrap();
+        assert_eq!((read.battery_low, read.brownouts, read.can_peak), (Some(11.2), None, None));
+        assert!(!Digest::current(&old));
     }
 
     /// Against a real catalyst-agent serving a folder that holds the sample log:
