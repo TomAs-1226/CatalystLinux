@@ -20,6 +20,12 @@ impl Session {
         Session { inner: imp::Inner::start(cols, rows, Some((command, dir))) }
     }
 
+    /// A serial port, raw, at `baud`: what the device on the other end
+    /// sends, and the keys typed to it. It ends if the adapter is pulled out.
+    pub fn serial(path: &str, baud: u32) -> Result<Session, String> {
+        Ok(Session { inner: imp::Inner::serial(path, baud)? })
+    }
+
     /// Whatever the shell has printed since the last read; never waits.
     pub fn read(&mut self) -> Vec<u8> {
         self.inner.read()
@@ -46,8 +52,27 @@ mod imp {
 
     pub struct Inner {
         master: libc::c_int,
+        /// The program on the pseudo-terminal; none for a serial port.
         child: libc::pid_t,
         exited: bool,
+    }
+
+    /// The speeds a serial port can be set to, as termios names them.
+    fn speed(baud: u32) -> Option<libc::speed_t> {
+        Some(match baud {
+            1200 => libc::B1200,
+            2400 => libc::B2400,
+            4800 => libc::B4800,
+            9600 => libc::B9600,
+            19200 => libc::B19200,
+            38400 => libc::B38400,
+            57600 => libc::B57600,
+            115200 => libc::B115200,
+            230400 => libc::B230400,
+            460800 => libc::B460800,
+            921600 => libc::B921600,
+            _ => return None,
+        })
     }
 
     fn size(cols: usize, rows: usize) -> libc::winsize {
@@ -104,6 +129,37 @@ mod imp {
             Inner { master, child, exited: child <= 0 }
         }
 
+        /// A serial port opened raw: eight bits, no parity, one stop bit, no
+        /// flow control, nothing translated either way.
+        pub fn serial(path: &str, baud: u32) -> Result<Inner, String> {
+            let speed = speed(baud).ok_or_else(|| format!("{baud} is not a serial speed"))?;
+            let name = CString::new(path).map_err(|_| "not a port".to_owned())?;
+            let fd = unsafe { libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK | libc::O_CLOEXEC) };
+            if fd < 0 {
+                let why = std::io::Error::last_os_error();
+                return Err(match why.kind() {
+                    std::io::ErrorKind::NotFound => format!("{path} is gone"),
+                    std::io::ErrorKind::PermissionDenied => format!("not allowed to open {path}"),
+                    _ => format!("cannot open {path}: {why}"),
+                });
+            }
+            unsafe {
+                let mut tio: libc::termios = std::mem::zeroed();
+                if libc::tcgetattr(fd, &mut tio) != 0 {
+                    libc::close(fd);
+                    return Err(format!("{path} is not a serial port"));
+                }
+                libc::cfmakeraw(&mut tio);
+                tio.c_cflag |= libc::CLOCAL | libc::CREAD;
+                tio.c_cflag &= !(libc::CRTSCTS | libc::CSTOPB | libc::PARENB);
+                libc::cfsetispeed(&mut tio, speed);
+                libc::cfsetospeed(&mut tio, speed);
+                libc::tcsetattr(fd, libc::TCSANOW, &tio);
+                libc::tcflush(fd, libc::TCIOFLUSH);
+            }
+            Ok(Inner { master: fd, child: -1, exited: false })
+        }
+
         pub fn read(&mut self) -> Vec<u8> {
             let mut out = Vec::new();
             let mut buf = [0u8; 4096];
@@ -111,6 +167,12 @@ mod imp {
             while out.len() < 64 * 1024 && self.master >= 0 {
                 let n = unsafe { libc::read(self.master, buf.as_mut_ptr() as *mut _, buf.len()) };
                 if n <= 0 {
+                    // A serial adapter pulled out: the port reads as ended,
+                    // or fails with anything but "nothing yet".
+                    let err = std::io::Error::last_os_error().raw_os_error();
+                    if self.child < 0 && (n == 0 || !matches!(err, Some(libc::EAGAIN) | Some(libc::EINTR))) {
+                        self.exited = true;
+                    }
                     break;
                 }
                 out.extend_from_slice(&buf[..n as usize]);
@@ -130,14 +192,14 @@ mod imp {
         }
 
         pub fn resize(&mut self, cols: usize, rows: usize) {
-            if self.master >= 0 {
+            if self.master >= 0 && self.child > 0 {
                 let window = size(cols, rows);
                 unsafe { libc::ioctl(self.master, libc::TIOCSWINSZ, &window) };
             }
         }
 
         pub fn alive(&mut self) -> bool {
-            if !self.exited {
+            if !self.exited && self.child > 0 {
                 let mut status = 0;
                 if unsafe { libc::waitpid(self.child, &mut status, libc::WNOHANG) } == self.child {
                     self.exited = true;
@@ -187,15 +249,23 @@ mod imp {
 #[cfg(not(target_os = "linux"))]
 mod imp {
     /// A stand-in shell: it echoes, edits a line, and knows a few commands.
+    /// As a serial port, it is a device that sends back whatever it is sent.
     pub struct Inner {
         out: Vec<u8>,
         line: String,
         open: bool,
+        loopback: bool,
     }
 
     const PROMPT: &str = "\x1b[1;34m/data\x1b[0m $ ";
 
     impl Inner {
+        pub fn serial(path: &str, baud: u32) -> Result<Inner, String> {
+            let _ = (path, baud);
+            let note = "\x1b[2mstand-in: on the handheld, the device's own words come here. This one sends back what it is sent.\x1b[0m\r\n".to_owned();
+            Ok(Inner { out: note.into_bytes(), line: String::new(), open: true, loopback: true })
+        }
+
         pub fn start(_cols: usize, _rows: usize, program: Option<(&str, &std::path::Path)>) -> Inner {
             let mut out = Vec::new();
             match program {
@@ -205,7 +275,7 @@ mod imp {
                 None => out.extend_from_slice(b"\x1b[2mstand-in shell: the handheld runs a real /bin/sh here\x1b[0m\r\n"),
             }
             out.extend_from_slice(PROMPT.as_bytes());
-            Inner { out, line: String::new(), open: true }
+            Inner { out, line: String::new(), open: true, loopback: false }
         }
 
         pub fn read(&mut self) -> Vec<u8> {
@@ -213,6 +283,16 @@ mod imp {
         }
 
         pub fn write(&mut self, bytes: &[u8]) {
+            if self.loopback {
+                for &b in bytes {
+                    if b == b'\r' {
+                        self.out.extend_from_slice(b"\r\n");
+                    } else {
+                        self.out.push(b);
+                    }
+                }
+                return;
+            }
             for &b in bytes {
                 match b {
                     b'\r' | b'\n' => {
@@ -324,5 +404,40 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(!session.alive());
+    }
+
+    /// A serial port, as a pseudo-terminal's other end stands in for the
+    /// device: what it sends arrives, what is typed reaches it, raw.
+    #[test]
+    fn a_serial_port_passes_bytes_both_ways_raw() {
+        let (master, path) = unsafe {
+            let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+            assert!(master >= 0);
+            libc::grantpt(master);
+            libc::unlockpt(master);
+            let name = std::ffi::CStr::from_ptr(libc::ptsname(master)).to_string_lossy().into_owned();
+            (master, name)
+        };
+        let mut port = Session::serial(&path, 115200).expect("the pseudo-terminal opens as a port");
+        assert!(Session::serial(&path, 1234).is_err(), "not a speed a port has");
+        assert!(Session::serial("/dev/no-such-port", 9600).is_err());
+        // The device speaks; a carriage return arrives as it was sent.
+        let hello = b"ok\r";
+        unsafe { libc::write(master, hello.as_ptr() as *const _, hello.len()) };
+        let start = Instant::now();
+        let mut got = Vec::new();
+        while got.len() < 3 && start.elapsed() < Duration::from_secs(5) {
+            got.extend(port.read());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(got, b"ok\r");
+        // A key typed reaches the device as it is.
+        port.write(b"AT\r");
+        std::thread::sleep(Duration::from_millis(50));
+        let mut buf = [0u8; 16];
+        let n = unsafe { libc::read(master, buf.as_mut_ptr() as *mut _, buf.len()) };
+        assert_eq!(&buf[..n.max(0) as usize], b"AT\r");
+        assert!(port.alive());
+        unsafe { libc::close(master) };
     }
 }

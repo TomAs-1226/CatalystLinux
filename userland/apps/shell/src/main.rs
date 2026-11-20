@@ -36,6 +36,8 @@ mod apps;
 mod apriltags;
 mod brand;
 mod catalogue;
+mod commands;
+mod connect;
 mod control;
 mod files;
 mod gfx;
@@ -47,6 +49,8 @@ mod intro;
 mod keys;
 mod logs;
 mod look;
+mod monitor;
+mod nettools;
 mod pty;
 mod platform;
 mod recents;
@@ -64,6 +68,7 @@ mod sysupdate;
 mod usb;
 mod term;
 mod terminal;
+mod tools;
 mod wifi;
 mod wpilog;
 
@@ -831,6 +836,9 @@ fn motion(dir: &std::path::Path) {
 fn shots(mut shell: Shell, dir: &std::path::Path) {
     use Key::*;
     std::fs::create_dir_all(dir).expect("create the screenshot folder");
+    // From Files to Settings, however many apps lie between.
+    let files_to_settings: Vec<Key> =
+        [Ctrl('q'), Back].into_iter().chain(std::iter::repeat_n(Right, steps_to("Settings") - steps_to("Files"))).chain([Enter]).collect();
     let tour: &[(&str, &[Key])] = &[
         ("01-home", &[]),
         ("02-robot", &[Enter]),
@@ -839,7 +847,8 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
         ("04b-match", &[Enter]),
         // Home's tiles: Robot, Health, Logs / Schedule, Tables, Loop on the
         // first page; Motors, Console, Terminal / Files, Git, Catalogue on the
-        // second; Settings, then the external apps, on the third.
+        // second; the developer's tools after them, then Settings, then the
+        // external apps.
         ("04c-tables", &[Back, Back, Down, Left, Enter]),
         ("05-tables-elevator", &[Down, Down, Enter]),
         ("06-loop", &[Back, Back, Right, Enter]),
@@ -849,7 +858,7 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
         ("08b-terminal", &[Back, Right, Enter, Char('l'), Char('s'), Enter, Char('c'), Char('o'), Char('l'), Char('o'), Char('r'), Char('s'), Enter, Char('u'), Char('n'), Char('a'), Char('m'), Char('e'), Enter]),
         ("08c-files", &[Ctrl('q'), Down, Left, Left, Enter]),
         ("08d-editor", &[Down, Down, Enter, Down, Down, Right, Right, Right, Right]),
-        ("09-settings", &[Ctrl('q'), Back, Right, Right, Right, Enter]),
+        ("09-settings", &files_to_settings),
         ("09b-appearance", &[Down, Enter]),
         ("09c-light-blue", &[Down, Enter, Down, Enter, Enter]),
         ("09d-network", &[Back, Down, Down, Down, Down, Enter]),
@@ -1157,7 +1166,89 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     settle(&mut shell, 60 * 24);
     assert_eq!(shell.standby_state(), standby::State::Dim);
     save(&mut shell, "78-standby-dimmed");
-    println!("{} screens in {}, {frames} frames at {:.2} ms each", tour.len() + apps.len() + 22, dir.display(), started.elapsed().as_secs_f64() * 1e3 / frames as f64);
+
+    // The developer's tools, each from a fresh Home. What they read comes
+    // in real time (a reading a second, a ping a second), so real time is
+    // let pass before each picture.
+    let fresh = || {
+        let mut shell = Shell::new(Robot::demo());
+        shell.apply_settings();
+        settle(&mut shell, 100);
+        shell
+    };
+    let open = |shell: &mut Shell, name: &str| {
+        for _ in 0..steps_to(name) {
+            shell.key(Right);
+            settle(shell, 12);
+        }
+        shell.key(Enter);
+        settle(shell, 90);
+    };
+    let wait = |shell: &mut Shell, seconds: f32| {
+        let until = Instant::now() + Duration::from_secs_f32(seconds);
+        while Instant::now() < until {
+            settle(shell, 6);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let retype = |shell: &mut Shell, text: &str| {
+        for _ in 0..40 {
+            shell.key(Backspace);
+        }
+        for c in text.chars() {
+            shell.key(Char(c));
+        }
+        shell.key(Enter);
+        settle(shell, 30);
+    };
+    let mut shell = fresh();
+    open(&mut shell, "Monitor");
+    wait(&mut shell, 20.0);
+    save(&mut shell, "60-monitor");
+    press(&mut shell, &[Right], 60);
+    save(&mut shell, "61-monitor-processes");
+    let mut shell = fresh();
+    open(&mut shell, "Net tools");
+    save(&mut shell, "62-net-tools");
+    press(&mut shell, &[Enter], 30);
+    wait(&mut shell, 4.0);
+    save(&mut shell, "63-find-the-robot");
+    press(&mut shell, &[Back, Down, Enter, Enter], 40);
+    retype(&mut shell, "127.0.0.1");
+    wait(&mut shell, 6.0);
+    save(&mut shell, "64-ping");
+    press(&mut shell, &[Back, Down, Enter, Enter], 40);
+    retype(&mut shell, "127.0.0.1");
+    wait(&mut shell, 3.0);
+    save(&mut shell, "65-ports");
+    press(&mut shell, &[Back, Down, Enter], 40);
+    retype(&mut shell, "localhost");
+    wait(&mut shell, 1.5);
+    save(&mut shell, "65b-name-lookup");
+    press(&mut shell, &[Back, Down, Enter], 40);
+    wait(&mut shell, 2.5);
+    save(&mut shell, "66-wifi-survey");
+    std::fs::write(config_dir().join("ssh-hosts"), "admin@10.58.5.2\npi@build.local:2222\n").ok();
+    let mut shell = fresh();
+    open(&mut shell, "Connect");
+    save(&mut shell, "67-connect");
+    press(&mut shell, &[Down, Down, Down, Down, Enter], 30);
+    for c in "hello".chars() {
+        shell.key(Char(c));
+    }
+    shell.key(Enter);
+    settle(&mut shell, 60);
+    save(&mut shell, "68-serial");
+    let mut shell = fresh();
+    open(&mut shell, "Actions");
+    save(&mut shell, "69-actions");
+    press(&mut shell, &[Down, Down, Enter], 90);
+    save(&mut shell, "69b-action-running");
+    press(&mut shell, &[Ctrl('q')], 60);
+    press(&mut shell, &[Char('e')], 90);
+    save(&mut shell, "69c-action-edit");
+    let written = std::fs::read_dir(dir).map_or(0, |d| d.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "png")).count());
+    println!("{written} screens in {}, {frames} frames at {:.2} ms each", dir.display(), started.elapsed().as_secs_f64() * 1e3 / frames as f64);
 }
 
 /// Home's tiles come in the order of the built-in apps, and Left and Right go
