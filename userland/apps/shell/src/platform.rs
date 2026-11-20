@@ -64,6 +64,59 @@ impl Hold {
     }
 }
 
+/// How long a key is held before it repeats, and then how often.
+pub const REPEAT_AFTER: Duration = Duration::from_millis(400);
+pub const REPEAT_EVERY: Duration = Duration::from_millis(75);
+
+/// Held keys repeat on the shell's own clock, the same on the handheld and in
+/// the simulator: once when pressed, then after 0.4 s about 13 times a second,
+/// so a list can be run through by holding a key without racing to its end.
+/// Only keys that move or type repeat; Enter, Esc, Tab and the shortcuts count
+/// once a press. The key pressed last is the one that repeats, as on a
+/// computer. `Id` is whatever names a physical key (a key code).
+pub struct Repeat<Id> {
+    held: Option<(Id, Key, std::time::Instant)>,
+}
+
+impl<Id> Default for Repeat<Id> {
+    fn default() -> Self {
+        Repeat { held: None }
+    }
+}
+
+impl<Id: PartialEq + Copy> Repeat<Id> {
+    /// A key went down, meaning `key`.
+    pub fn press(&mut self, id: Id, key: Key, now: std::time::Instant) {
+        let repeats = matches!(key, Key::Up | Key::Down | Key::Left | Key::Right | Key::PageUp | Key::PageDown | Key::Backspace | Key::Char(_));
+        self.held = repeats.then_some((id, key, now + REPEAT_AFTER));
+    }
+
+    /// A key came up.
+    pub fn release(&mut self, id: Id) {
+        if self.held.is_some_and(|(held, ..)| held == id) {
+            self.held = None;
+        }
+    }
+
+    /// The repeat due by `now`, if one is. One at a time: after a stall, the
+    /// next comes a full interval later rather than several at once.
+    pub fn due(&mut self, now: std::time::Instant) -> Option<Key> {
+        let (_, key, next) = self.held.as_mut()?;
+        if *next > now {
+            return None;
+        }
+        *next = (*next + REPEAT_EVERY).max(now + REPEAT_EVERY / 2);
+        Some(*key)
+    }
+
+    /// When the next repeat is due, for a wait to end in time for it (the
+    /// handheld's; the simulator looks every few milliseconds anyway).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn next(&self) -> Option<std::time::Instant> {
+        self.held.map(|(_, _, next)| next)
+    }
+}
+
 pub trait Platform {
     /// Wait up to `timeout` for keys. `None` means the user closed the shell.
     fn poll(&mut self, timeout: Duration) -> Option<Vec<Key>>;
@@ -139,6 +192,9 @@ pub mod device {
         watch: Option<File>,
         shift: bool,
         ctrl: bool,
+        /// The key held down, repeating on the shell's clock (the kernel's
+        /// own repeats are let go), by its key code.
+        repeat: Repeat<u16>,
         /// The frame the panel is showing, to find what changed.
         shown: Vec<u32>,
         rows: Vec<u8>,
@@ -261,6 +317,7 @@ pub mod device {
                 watch: watch_inputs(),
                 shift: false,
                 ctrl: false,
+                repeat: Repeat::default(),
                 shown: Vec::new(),
                 rows: Vec::new(),
                 _console: quiet_console(),
@@ -328,6 +385,8 @@ pub mod device {
             if let Some(watch) = &self.watch {
                 fds.push(libc::pollfd { fd: watch.as_raw_fd(), events: libc::POLLIN, revents: 0 });
             }
+            // Wake in time for a held key's next repeat.
+            let timeout = self.repeat.next().map_or(timeout, |at| timeout.min(at.saturating_duration_since(std::time::Instant::now())));
             unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, timeout.as_millis() as i32) };
             let mut keys = Vec::new();
             let mut events = Vec::new();
@@ -362,9 +421,25 @@ pub mod device {
                     }
                 }
             }
+            let now = std::time::Instant::now();
             for (code, value) in events {
-                keys.extend(self.translate(code, value));
+                match value {
+                    // Released: modifiers and Esc note it, and a held key stops repeating.
+                    0 => {
+                        self.translate(code, 0);
+                        self.repeat.release(code);
+                    }
+                    1 => {
+                        if let Some(key) = self.translate(code, 1) {
+                            self.repeat.press(code, key, now);
+                            keys.push(key);
+                        }
+                    }
+                    // The kernel's own repeats: the shell keeps its own pace.
+                    _ => {}
+                }
             }
+            keys.extend(self.repeat.due(now));
             if changed {
                 self.find_inputs();
             }
@@ -416,13 +491,17 @@ pub mod device {
 #[cfg(not(target_arch = "aarch64"))]
 pub mod sim {
     use super::*;
-    use minifb::{Key as K, KeyRepeat, Scale, Window, WindowOptions};
+    use minifb::{Key as K, Scale, Window, WindowOptions};
 
     /// A desktop window showing the panel at 4×.
     pub struct Sim {
         window: Window,
         shown: Vec<u32>,
         esc: Hold,
+        /// The keys down at the last look, to find the ones just pressed and
+        /// let go; the held one repeats on the shell's own clock.
+        down: Vec<K>,
+        repeat: Repeat<K>,
         /// The frame as the panel would show it.
         panel: Vec<u32>,
     }
@@ -435,7 +514,7 @@ pub mod sim {
             window.set_target_fps(0);
             #[cfg(windows)]
             show_icon(&window);
-            Sim { window, shown: Vec::new(), esc: Hold::default(), panel: Vec::new() }
+            Sim { window, shown: Vec::new(), esc: Hold::default(), down: Vec::new(), repeat: Repeat::default(), panel: Vec::new() }
         }
     }
 
@@ -505,6 +584,46 @@ pub mod sim {
         }
     }
 
+    impl Sim {
+        /// What a key on the PC's keyboard means to the shell, with Shift and
+        /// Ctrl as they are; `None` for keys it has no use for (and the
+        /// modifiers themselves).
+        fn meaning(k: K, shift: bool, ctrl: bool) -> Option<Key> {
+            Some(match k {
+                K::Up => Key::Up,
+                K::Down => Key::Down,
+                K::Left => Key::Left,
+                K::Right => Key::Right,
+                K::Enter | K::NumPadEnter => Key::Enter,
+                K::Escape => Key::Back,
+                K::Backspace => Key::Backspace,
+                K::Tab => Key::Tab,
+                K::PageUp => Key::PageUp,
+                K::PageDown => Key::PageDown,
+                K::Space if ctrl => Key::Ctrl(' '),
+                K::Space => Key::Char(' '),
+                K::Period => Key::Char('.'),
+                K::Minus => Key::Char('-'),
+                K::Slash => Key::Char(if shift { '?' } else { '/' }),
+                other => {
+                    let code = other as usize;
+                    let ch = if code <= K::Key9 as usize {
+                        (b'0' + (code - K::Key0 as usize) as u8) as char
+                    } else if (K::A as usize..=K::Z as usize).contains(&code) {
+                        (b'a' + (code - K::A as usize) as u8) as char
+                    } else {
+                        return None;
+                    };
+                    if ctrl && ch.is_ascii_alphabetic() {
+                        Key::Ctrl(ch)
+                    } else {
+                        Key::Char(if shift { ch.to_ascii_uppercase() } else { ch })
+                    }
+                }
+            })
+        }
+    }
+
     impl Platform for Sim {
         fn poll(&mut self, timeout: Duration) -> Option<Vec<Key>> {
             if !self.window.is_open() {
@@ -512,51 +631,32 @@ pub mod sim {
             }
             // A window has to be looked after often, so never the whole wait.
             std::thread::sleep(timeout.min(Duration::from_millis(8)));
+            // Take in what the keyboard did since the last look. Which keys
+            // are down is read here, every look; minifb's own "pressed" is
+            // only renewed when a frame is shown, so between frames it would
+            // report one press two or three times, and its repeats with it.
+            self.window.update();
+            let now = std::time::Instant::now();
             let shift = self.window.is_key_down(K::LeftShift) || self.window.is_key_down(K::RightShift);
             let ctrl = self.window.is_key_down(K::LeftCtrl) || self.window.is_key_down(K::RightCtrl);
             let leave = self.esc.update(self.window.is_key_down(K::Escape));
-            let mut keys: Vec<Key> = self
-                .window
-                .get_keys_pressed(KeyRepeat::Yes)
-                .into_iter()
+            let down = self.window.get_keys();
+            for gone in self.down.iter().filter(|k| !down.contains(k)) {
+                self.repeat.release(*gone);
+            }
+            let pressed: Vec<K> = down.iter().copied().filter(|k| !self.down.contains(k)).collect();
+            self.down = down;
+            let mut keys: Vec<Key> = Vec::new();
+            for k in pressed {
                 // Esc counts once per press (held, it becomes Leave), and so
                 // does Ctrl-Space, which would otherwise open and shut the
-                // control centre in turns while held.
-                .filter(|k| !(*k == K::Escape || (*k == K::Space && ctrl)) || self.window.is_key_pressed(*k, KeyRepeat::No))
-                .filter_map(|k| {
-                    Some(match k {
-                        K::Up => Key::Up,
-                        K::Down => Key::Down,
-                        K::Left => Key::Left,
-                        K::Right => Key::Right,
-                        K::Enter | K::NumPadEnter => Key::Enter,
-                        K::Escape => Key::Back,
-                        K::Backspace => Key::Backspace,
-                        K::Tab => Key::Tab,
-                        K::PageUp => Key::PageUp,
-                        K::PageDown => Key::PageDown,
-                        K::Space if ctrl => Key::Ctrl(' '),
-                        K::Space => Key::Char(' '),
-                        K::Period => Key::Char('.'),
-                        K::Minus => Key::Char('-'),
-                        other => {
-                            let code = other as usize;
-                            let ch = if code <= K::Key9 as usize {
-                                (b'0' + (code - K::Key0 as usize) as u8) as char
-                            } else if (K::A as usize..=K::Z as usize).contains(&code) {
-                                (b'a' + (code - K::A as usize) as u8) as char
-                            } else {
-                                return None;
-                            };
-                            if ctrl && ch.is_ascii_alphabetic() {
-                                Key::Ctrl(ch)
-                            } else {
-                                Key::Char(if shift { ch.to_ascii_uppercase() } else { ch })
-                            }
-                        }
-                    })
-                })
-                .collect();
+                // control centre in turns while held: neither repeats.
+                if let Some(key) = Self::meaning(k, shift, ctrl) {
+                    self.repeat.press(k, key, now);
+                    keys.push(key);
+                }
+            }
+            keys.extend(self.repeat.due(now));
             if leave {
                 keys.push(Key::Leave);
             }
@@ -624,5 +724,45 @@ pub mod sim {
             writer.write_image_data(&rgb).unwrap();
         }
         writer.finish().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn a_held_key_repeats_on_the_shells_own_clock() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut held = Repeat::default();
+        held.press(1u16, Key::Down, t0);
+        assert_eq!(held.due(at(100)), None, "a press counts once");
+        assert_eq!(held.due(at(399)), None);
+        assert_eq!(held.due(at(400)), Some(Key::Down), "held 0.4 s, it repeats");
+        assert_eq!(held.due(at(420)), None);
+        assert_eq!(held.due(at(475)), Some(Key::Down), "then every 75 ms");
+        // Looked at late: one repeat, not a burst of them.
+        assert_eq!(held.due(at(1000)), Some(Key::Down));
+        assert_eq!(held.due(at(1001)), None);
+        held.release(1);
+        assert_eq!(held.due(at(5000)), None, "let go, it stops");
+        // Enter, Esc, Tab and the shortcuts count once a press.
+        for key in [Key::Enter, Key::Back, Key::Tab, Key::Ctrl(' '), Key::Ctrl('q')] {
+            held.press(2, key, t0);
+            assert_eq!(held.next(), None, "{key:?} does not repeat");
+        }
+        // The key pressed last is the one that repeats; letting go of an
+        // earlier one does not stop it.
+        held.press(4, Key::Up, t0);
+        held.press(5, Key::Right, t0);
+        held.release(4);
+        assert_eq!(held.due(at(400)), Some(Key::Right));
+        // Over two seconds held, a list moves about 25 rows, not to its end at once.
+        let mut held = Repeat::default();
+        held.press(6u16, Key::Down, t0);
+        let moves = 1 + (0..2000).filter(|ms| held.due(at(*ms)).is_some()).count();
+        assert!((20..=26).contains(&moves), "{moves}");
     }
 }

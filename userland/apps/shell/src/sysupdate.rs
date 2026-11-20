@@ -50,7 +50,8 @@ pub fn read() -> Status {
 /// This system's version.
 pub fn version() -> String {
     let text = std::fs::read_to_string("/etc/catalyst/version").unwrap_or_default();
-    text.lines().find_map(|l| l.strip_prefix("version=")).map(|v| v.trim().to_owned()).unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned())
+    // Not on a handheld (the simulator): the version this source tree builds.
+    text.lines().find_map(|l| l.strip_prefix("version=")).map(|v| v.trim().to_owned()).unwrap_or_else(|| include_str!("../../../../os/VERSION").trim().to_owned())
 }
 
 /// A choice in Settings › System update, with its default.

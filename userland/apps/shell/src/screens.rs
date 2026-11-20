@@ -769,6 +769,16 @@ impl Home {
 }
 
 impl Screen for Home {
+    fn spot(&self) -> Option<Rect> {
+        if self.on_glance() {
+            return None;
+        }
+        match self.style {
+            HomeStyle::Grid => self.rects.get(self.focus).copied().filter(|r| r.w > 0.0),
+            HomeStyle::Carousel => Some(self.middle).filter(|r| r.w > 0.0),
+        }
+    }
+
     fn title(&self) -> &str {
         if self.on_glance() {
             "Glance"
@@ -1809,6 +1819,16 @@ enum Item {
     UpdateAuto,
     UpdateOvernight,
     About,
+    /// Settings › Help: the tour again, and the keyboard shortcuts.
+    Help,
+    TakeTour,
+    KeyboardShortcuts,
+    /// Developer options, once About › Build number has been pressed seven
+    /// times: the switch for them, the animation scale, Show key presses.
+    DeveloperSection,
+    DevMode,
+    MotionScale,
+    ShowKeys,
     /// Setup's page offered to a computer, outside first start.
     FromComputer,
     // Appearance.
@@ -1922,7 +1942,7 @@ fn glance_items(order: &[Widget]) -> Vec<Item> {
 
 /// Where everything in Settings is, for search: what it is called, the
 /// section it is in, and its place there (none: the section itself).
-const SETTING_PLACES: [(&str, Item, Option<usize>); 42] = [
+const SETTING_PLACES: [(&str, Item, Option<usize>); 45] = [
     ("Robot settings", Item::RobotSection, None),
     ("Open Robot on link", Item::RobotSection, Some(0)),
     ("Match report after a match", Item::RobotSection, Some(1)),
@@ -1964,6 +1984,9 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 42] = [
     ("Update channel", Item::UpdateSection, Some(3)),
     ("About this handheld", Item::About, None),
     ("Version", Item::About, Some(0)),
+    ("Help", Item::Help, None),
+    ("Take the tour", Item::Help, Some(0)),
+    ("Keyboard shortcuts", Item::Help, Some(1)),
     ("Set up from a computer", Item::FromComputer, None),
 ];
 
@@ -1975,6 +1998,11 @@ pub fn setting_names() -> impl Iterator<Item = (usize, &'static str)> {
 /// Settings opened at one of `SETTING_PLACES`.
 pub fn open_setting(index: usize) -> Box<dyn Screen> {
     let (_, section, place) = SETTING_PLACES[index];
+    // About is a page of its own; its version, the page about the version.
+    if section == Item::About {
+        let kind = if place.is_some() { crate::about::Kind::Version } else { crate::about::Kind::Main };
+        return Box::new(crate::about::About::new(kind));
+    }
     match SettingsApp::section(section) {
         Some(mut page) => {
             page.list.focus = place.unwrap_or(0);
@@ -1996,7 +2024,7 @@ fn keys_file() -> std::path::PathBuf {
 impl SettingsApp {
     pub fn new() -> Self {
         use Item::*;
-        Self::page("Settings", vec![RobotSection, Appearance, TextSection, HomeSection, Display, Network, KeysSection, Access, UpdateSection, About, FromComputer])
+        Self::page("Settings", vec![RobotSection, Appearance, TextSection, HomeSection, Display, Network, KeysSection, Access, UpdateSection, Help, About, FromComputer])
     }
 
     fn page(title: &'static str, items: Vec<Item>) -> Self {
@@ -2036,7 +2064,8 @@ impl SettingsApp {
             KeysSection => Self::page("Keys", (0..crate::keys::SERVICES.len()).map(KeyFor).chain(std::iter::once(KeysFromFile)).collect()),
             Access => Self::page("Access", vec![Ssh]),
             UpdateSection => Self::page("Updates", vec![UpdateState, UpdateAction, UpdateNote, UpdateChannel, UpdateAuto, UpdateOvernight]),
-            About => Self::page("About", (0..10).map(Info).collect()),
+            Help => Self::page("Help", vec![TakeTour, KeyboardShortcuts]),
+            DeveloperSection => Self::page("Developer", vec![DevMode, MotionScale, ShowKeys]),
             _ => return None,
         })
     }
@@ -2053,18 +2082,6 @@ impl SettingsApp {
                 ("Ethernet", dash(sys::address("eth0"))),
                 ("Wi-Fi", dash(sys::address("wlan0"))),
                 ("USB link", dash(sys::address("usb0"))),
-            ],
-            "About" => vec![
-                ("Catalyst Linux", env!("CARGO_PKG_VERSION").to_owned()),
-                ("Device", dash(sys::model())),
-                ("Kernel", dash(sys::kernel())),
-                ("Up for", dash(sys::uptime())),
-                ("Memory in use", dash(sys::memory())),
-                ("This shell", dash(sys::shell_memory())),
-                ("Storage", dash(sys::storage())),
-                ("Battery", dash(sys::battery())),
-                ("Processor", dash(sys::cpu_temperature())),
-                ("Graphics", crate::gpu::note()),
             ],
             _ => Vec::new(),
         };
@@ -2123,7 +2140,18 @@ impl SettingsApp {
                 (label.to_owned(), value, self.keys.get(name).is_some())
             }
             KeysFromFile => ("Read from a file".into(), keys_file().display().to_string(), false),
-            About => section("About", env!("CARGO_PKG_VERSION").to_owned()),
+            About => section("About", crate::sysupdate::version()),
+            Help => section("Help", "tour · keys".to_owned()),
+            TakeTour => ("Take the tour".into(), "›".into(), true),
+            KeyboardShortcuts => ("Keyboard shortcuts".into(), "? ›".into(), true),
+            DeveloperSection => section("Developer options", "on".to_owned()),
+            DevMode => ("Use developer options".into(), onoff(g.developer), g.developer),
+            MotionScale => (
+                "Animation scale".into(),
+                if g.motion_scale == 1.0 { "1× · as designed".to_owned() } else { format!("{}×", g.motion_scale) },
+                g.motion_scale != 1.0,
+            ),
+            ShowKeys => ("Show key presses".into(), onoff(g.show_keys), g.show_keys),
             Mode => ("Mode".into(), (if g.tokens.tone == bezel::Tone::Light { "light" } else { "dark" }).into(), true),
             AccentColor => ("Accent".into(), g.accent.name().into(), true),
             HomeScreen => ("Home screen".into(), g.home.name().into(), true),
@@ -2292,6 +2320,12 @@ impl SettingsApp {
             }
             OpenRobot => cx.settings.open_robot = !cx.settings.open_robot,
             MatchReport => cx.settings.match_report = !cx.settings.match_report,
+            MotionScale => {
+                let all = crate::shell::MOTION_SCALES;
+                let at = all.iter().position(|s| *s == cx.settings.motion_scale).unwrap_or(1) as i32;
+                cx.settings.motion_scale = all[(at + step).clamp(0, all.len() as i32 - 1) as usize];
+            }
+            ShowKeys => cx.settings.show_keys = !cx.settings.show_keys,
             _ => {}
         }
         crate::save_settings(cx.settings);
@@ -2400,6 +2434,17 @@ impl Screen for SettingsApp {
             Key::Back => return Nav::Pop,
             Key::Enter | Key::Right if item == Item::WifiSetup => return Nav::Push(Box::new(WifiScreen::new())),
             Key::Enter | Key::Right if item == Item::FromComputer => return Nav::Push(Box::new(crate::setup::Setup::from_computer())),
+            Key::Enter | Key::Right if item == Item::About => return Nav::Push(Box::new(crate::about::About::new(crate::about::Kind::Main))),
+            Key::Enter | Key::Right if item == Item::TakeTour => return Nav::Tour,
+            Key::Enter | Key::Right if item == Item::KeyboardShortcuts => return Nav::Push(Box::new(crate::help::Shortcuts::new())),
+            // Switched off, developer options go, and their page with them.
+            Key::Enter | Key::Right | Key::Left if item == Item::DevMode => {
+                let s = &mut *cx.settings;
+                (s.developer, s.motion_scale, s.show_keys) = (false, 1.0, false);
+                crate::save_settings(s);
+                *cx.say = Some("developer options off".into());
+                return Nav::Pop;
+            }
             Key::Enter | Key::Right | Key::Left => {
                 if let Some(page) = Self::section(item) {
                     if key != Key::Left {
@@ -2434,6 +2479,17 @@ impl Screen for SettingsApp {
                 self.items = order;
                 self.list.focus = focused.and_then(|f| self.items.iter().position(|it| *it == f)).unwrap_or(0);
             }
+        }
+        // Developer options are listed after About once they are unlocked.
+        if self.title == "Settings" && g.developer != self.items.contains(&Item::DeveloperSection) {
+            let focused = self.items.get(self.list.focus).copied();
+            if g.developer {
+                let at = self.items.iter().position(|it| *it == Item::About).map_or(self.items.len(), |a| a + 1);
+                self.items.insert(at, Item::DeveloperSection);
+            } else {
+                self.items.retain(|it| *it != Item::DeveloperSection);
+            }
+            self.list.focus = focused.and_then(|f| self.items.iter().position(|it| *it == f)).unwrap_or(0);
         }
         let arranging = self.title == "Arrange apps";
         if arranging {

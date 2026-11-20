@@ -75,8 +75,15 @@ Cardputer) move, Enter opens, Esc goes back. On Home, Left and Right go
 through the apps in order (on to the next row, and the next page), Up and
 Down within a page. Space on Home searches.
 Ctrl-Space brings the control centre down over any screen; Left from Home's
-first tile is the glance page. The window shows what the panel shows: 16-bit
-colour, dithered as on the device.
+first tile is the glance page. `?` on any screen that is not taking text
+brings up the list of shortcuts. The window shows what the panel shows:
+16-bit colour, dithered as on the device.
+
+A held key repeats on the shell's own clock, the same on the handheld and in
+the simulator: once as it lands, then after 0.4 s about 13 times a second,
+so a list can be run through without racing to its end. Only keys that move
+or type repeat; Enter, Esc and the shortcuts count once a press. (The
+kernel's repeats on the handheld, 30 a second, are let go.)
 
 At `-Speed pc` (and in the packed simulator) frames keep time with the PC's
 screen, 60 a second on most. Otherwise the simulator holds itself to the
@@ -92,6 +99,28 @@ actually changed).
 The simulator is built with its own profile (`cargo run --profile sim`): the
 same optimisation where it counts, compiled in pieces. The device build makes
 one large unit, which Rust 1.92 on Windows fails to compile.
+
+## Help, About and developer options
+
+- **The tour.** Once first-boot setup is done, a tour of the keys follows as
+  Home arrives (and Settings › Help › Take the tour runs it again): the
+  screen dims, a spotlight glides to each thing in turn (the apps, the
+  island, the page dots) and a card says what it is and what the keys do.
+  Enter goes on, Left goes back, Esc skips it.
+- **Shortcuts.** `?` over any screen not taking text, or Settings › Help ›
+  Keyboard shortcuts: every key by where it works, drawn as keycaps.
+- **About**, laid out as Android's "About phone": the handheld's name large
+  at the top with Catalyst's icon (the header folds away as the list goes
+  down), its model, the Catalyst Linux version (a page of its own: channel,
+  build date, kernel, shell, graphics), its status, the open-source
+  licences, and the build number at the bottom.
+- **Developer options.** As on Android, pressing Enter on Build number seven
+  times makes you a developer (the island counts down the last presses), and
+  Settings gains Developer options: an animation scale (0.5× to 10× slower,
+  to study motion frame by frame; Android's animator duration scale) and
+  Show key presses (each key on a keycap at the bottom of the screen, for
+  testing the keyboard and for recordings). Switched off, they go again.
+- As on Android, the version hides an Easter egg.
 
 ## Starting up, and setting up
 
@@ -230,8 +259,12 @@ Motion is Detent's, by Bezel's roles, and every piece of it is a spring that
 starts from what is on screen:
 
 - An app grows out of the tile it was opened from and shrinks back into it
-  (`release`). Press Esc while it opens and it turns round where it is,
-  keeping its speed; press Enter while it closes and the same window returns.
+  (`release`). Small, the window is the tile itself (its icon and name,
+  scaled with it); the app takes it over by two thirds of the way, and
+  closing, the app melts back into the tile's own picture, so the tile is
+  what lands: nothing is swapped at the end. Press Esc while it opens and it
+  turns round where it is, keeping its speed; press Enter while it closes
+  and the same window returns.
 - A page inside an app slides in from the right and back out (`page`), and
   turns round the same way. Home's pages and the glance page turn on the same
   spring; the carousel turns on `detent`.

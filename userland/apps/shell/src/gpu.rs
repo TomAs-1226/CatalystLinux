@@ -64,7 +64,8 @@ mod stub {
         pub fn glass(&mut self, _: &mut Canvas, _: &[GlassShape], _: &Tokens, _: (f32, f32), _: bool) -> Result<bool, String> {
             Ok(false)
         }
-        pub fn grow(&mut self, _: &mut Canvas, _: &[u32], _: &[u32], _: u64, _: Rect, _: f32, _: bezel::Color) -> Result<bool, String> {
+        #[allow(clippy::too_many_arguments)]
+        pub fn grow(&mut self, _: &mut Canvas, _: &[u32], _: &[u32], _: u64, _: Rect, _: f32, _: bezel::Color, _: Option<&crate::shell::Morph>) -> Result<bool, String> {
             Ok(false)
         }
     }
@@ -440,6 +441,10 @@ uniform vec2 u_size;
 uniform vec4 u_window;
 uniform float u_radius;
 uniform vec3 u_edge;
+// The tile the window grows from, in the picture beneath, and how much of
+// the window the screen has taken over (1: all screen).
+uniform vec4 u_tile;
+uniform float u_screen;
 
 float sd(vec2 p, vec4 r, float radius) {
     float k = min(radius, min(r.z, r.w) * 0.5);
@@ -459,7 +464,12 @@ void main() {
     float d = sd(p, u_window, u_radius);
     vec3 o = base;
     if (d <= 0.5) {
-        vec3 c = texture2D(u_over, (p - u_window.xy) / u_window.zw).bgr;
+        vec2 uv = (p - u_window.xy) / u_window.zw;
+        vec3 c = texture2D(u_over, uv).bgr;
+        if (u_screen < 1.0) {
+            vec3 tile = texture2D(u_under, (u_tile.xy + uv * u_tile.zw) / u_size).bgr;
+            c = mix(tile, c, u_screen);
+        }
         if (d > -1.0 && u_radius > 0.5) c = mix(c, u_edge, 90.0 / 256.0 * clamp(d + 1.0, 0.0, 1.0));
         o = mix(base, c, clamp(0.5 - d, 0.0, 1.0));
     }
@@ -971,7 +981,7 @@ void main() {
         /// drawn into `window` over `under`, the whole frame back into `canvas`.
         /// `pictures` names the pair, so they go up only when they change.
         #[allow(clippy::too_many_arguments)]
-        pub fn grow(&mut self, canvas: &mut Canvas, under: &[u32], over: &[u32], pictures: u64, window: Rect, radius: f32, edge: bezel::Color) -> Result<bool, String> {
+        pub fn grow(&mut self, canvas: &mut Canvas, under: &[u32], over: &[u32], pictures: u64, window: Rect, radius: f32, edge: bezel::Color, morph: Option<&crate::shell::Morph>) -> Result<bool, String> {
             if !self.use_grow || under.len() != (W * H) as usize || over.len() != under.len() || canvas.px.len() != under.len() {
                 return Ok(false);
             }
@@ -988,6 +998,11 @@ void main() {
             self.uniform4(p, "u_window", [window.x, window.y, window.w, window.h]);
             self.uniform1(p, "u_radius", radius);
             self.uniform3(p, "u_edge", edge);
+            // The tile, as the processor reads it (`blit_scaled`): only one really there.
+            let morph = morph.filter(|m| m.screen < 1.0 && m.tile.w >= 1.0 && m.tile.h >= 1.0);
+            let tile = morph.map_or([0.0, 0.0, 1.0, 1.0], |m| [m.tile.x, m.tile.y, m.tile.w, m.tile.h]);
+            self.uniform4(p, "u_tile", tile);
+            self.uniform1(p, "u_screen", morph.map_or(1.0, |m| m.screen.clamp(0.0, 1.0)));
             self.rect(0.0, 0.0, W as f32, H as f32);
             self.read_back(canvas, (0, 0, W, H));
             self.check("growing a window")?;
@@ -1014,10 +1029,12 @@ void main() {
             let window = Rect::new(40.5, 30.25, 150.0, 80.0);
             let mut over = scene.clone();
             over.px.iter_mut().for_each(|p| *p ^= 0x00ff_ffff);
+            // Part way between the tile it grew from and the screen.
+            let morph = crate::shell::Morph { under: &scene.px, tile: Rect::new(20.25, 18.5, 64.0, 44.0), screen: 0.4 };
             let mut cpu = scene.clone();
-            crate::shell::blit_scaled(&mut cpu, &over.px, window, 9.0, tokens.ground);
+            crate::shell::blit_scaled(&mut cpu, &over.px, window, 9.0, tokens.ground, Some(&morph));
             let mut gpu = scene.clone();
-            self.grow(&mut gpu, &scene.px, &over.px, u64::MAX, window, 9.0, tokens.ground)?;
+            self.grow(&mut gpu, &scene.px, &over.px, u64::MAX, window, 9.0, tokens.ground, Some(&morph))?;
             self.pictures = None;
             let grow = Difference::of(&cpu.px, &gpu.px);
             if !grow.close() {
@@ -1051,11 +1068,11 @@ void main() {
             });
             let cpu_grow = best(&mut || {
                 frame.px.copy_from_slice(&scene.px);
-                crate::shell::blit_scaled(&mut frame, &over.px, window, 9.0, tokens.ground);
+                crate::shell::blit_scaled(&mut frame, &over.px, window, 9.0, tokens.ground, Some(&morph));
             });
-            self.grow(&mut frame, &scene.px, &over.px, u64::MAX, window, 9.0, tokens.ground)?;
+            self.grow(&mut frame, &scene.px, &over.px, u64::MAX, window, 9.0, tokens.ground, Some(&morph))?;
             let gpu_grow = best(&mut || {
-                if let Err(why) = self.grow(&mut frame, &scene.px, &over.px, u64::MAX, window, 9.0, tokens.ground) {
+                if let Err(why) = self.grow(&mut frame, &scene.px, &over.px, u64::MAX, window, 9.0, tokens.ground, Some(&morph)) {
                     failed = Some(why);
                 }
             });

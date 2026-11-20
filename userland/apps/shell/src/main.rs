@@ -30,6 +30,7 @@
 // console comes up beside it.
 #![cfg_attr(all(windows, feature = "packed"), windows_subsystem = "windows")]
 
+mod about;
 mod agent;
 mod apps;
 mod brand;
@@ -40,6 +41,7 @@ mod gfx;
 mod git;
 mod glance;
 mod gpu;
+mod help;
 mod intro;
 mod keys;
 mod logs;
@@ -159,6 +161,10 @@ fn settings_text(s: &shell::Settings) -> String {
         ("greeting", s.greeting.to_string()),
         ("robot_name", s.robot_name.clone().unwrap_or_default()),
         ("graphics", (if s.gpu { "auto" } else { "processor" }).to_owned()),
+        ("developer", s.developer.to_string()),
+        ("motion_scale", s.motion_scale.to_string()),
+        ("show_keys", s.show_keys.to_string()),
+        ("toured", s.toured.to_string()),
     ];
     lines.iter().map(|(k, v)| format!("{k}={v}\n")).collect()
 }
@@ -197,6 +203,12 @@ fn parse_settings(text: &str, settings: &mut shell::Settings) {
             Some(("greeting", v)) => settings.greeting = v != "false",
             Some(("robot_name", v)) => settings.robot_name = Some(v.trim().to_owned()).filter(|n| !n.is_empty()),
             Some(("graphics", v)) => settings.gpu = v != "processor",
+            Some(("developer", v)) => settings.developer = v == "true",
+            Some(("motion_scale", v)) => {
+                settings.motion_scale = v.parse::<f32>().ok().filter(|s| shell::MOTION_SCALES.contains(s)).unwrap_or(settings.motion_scale)
+            }
+            Some(("show_keys", v)) => settings.show_keys = v == "true",
+            Some(("toured", v)) => settings.toured = v == "true",
             _ => {}
         }
     }
@@ -556,7 +568,7 @@ fn start_caption(shell: &Shell) -> String {
     match (team, &shell.settings.robot_name) {
         (Some(team), Some(name)) => format!("team {team} · {name}"),
         (Some(team), None) => format!("team {team}"),
-        _ => format!("{} · cardputer zero", env!("CARGO_PKG_VERSION")),
+        _ => format!("{} · cardputer zero", sysupdate::version()),
     }
 }
 
@@ -719,6 +731,11 @@ fn motion(dir: &std::path::Path) {
     shell.key(Enter);
     let frames = film(&mut shell, 0.8);
     strip(&frames, &beats, dir, "5-press-tile");
+    // Back: the app shrinks into its tile, melting into the tile's own
+    // picture on the way, so the tile is what lands.
+    shell.key(Back);
+    let frames = film(&mut shell, 0.8);
+    strip(&frames, &[0, 4, 7, 9, 11, 13, 15, 18, 30], dir, "5b-close-app");
 
     // A robot back from a match: the Logs tile pulses as the match's log
     // arrives and its warning comes with it.
@@ -815,7 +832,7 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
         ("09d-network", &[Back, Down, Down, Down, Down, Enter]),
         ("09e-wifi", &[Enter, Down, Down, Down]),
         ("09f-wifi-password", &[Enter, Char('c'), Char('a'), Char('t'), Char('a'), Char('l'), Char('y'), Char('s'), Char('t'), Char('7')]),
-        ("09g-about", &[Back, Back, Back, Down, Down, Down, Enter]),
+        ("09g-about", &[Back, Back, Back, Down, Down, Down, Down, Down, Enter]),
         ("10-home-page-3-light", &[Back, Back]),
     ];
     let frame = |shell: &mut Shell| {
@@ -972,6 +989,66 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
         settle(&mut shell, 60);
     }
     save(&mut shell, "33-git");
+
+    // About, laid out as Android's; seven presses on Build number make a
+    // developer, and Developer options appear.
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    let press = |shell: &mut Shell, keys: &[Key], frames: usize| {
+        for key in keys {
+            shell.key(*key);
+            settle(shell, frames);
+        }
+    };
+    press(&mut shell, &vec![Right; steps_to("Settings")], 30);
+    press(&mut shell, &[Enter], 90);
+    press(&mut shell, &[Down; 10], 20);
+    press(&mut shell, &[Enter], 90);
+    save(&mut shell, "34-about");
+    press(&mut shell, &[Down; 5], 30);
+    press(&mut shell, &[Enter; 4], 12);
+    save(&mut shell, "35-build-number");
+    press(&mut shell, &[Enter; 3], 12);
+    settle(&mut shell, 30);
+    save(&mut shell, "35b-a-developer");
+    press(&mut shell, &[Back, Down, Enter], 90);
+    press(&mut shell, &[Down, Right, Right, Down], 30);
+    save(&mut shell, "36-developer-options");
+    press(&mut shell, &[Enter, Up], 10);
+    save(&mut shell, "37-show-keys");
+    press(&mut shell, &[Down, Enter, Up, Left, Left, Back, Up, Enter, Down, Down, Enter], 60);
+    save(&mut shell, "38-version");
+    // Three quick presses on the version: the Easter egg, caught mid-burst and settled.
+    for _ in 0..3 {
+        shell.key(Enter);
+        settle(&mut shell, 2);
+    }
+    settle(&mut shell, 70);
+    save(&mut shell, "39-easter-egg");
+    settle(&mut shell, 60 * 5);
+    save(&mut shell, "39b-easter-egg-settled");
+    press(&mut shell, &[Back, Back, Down, Down, Enter], 60);
+    save(&mut shell, "40-licences");
+    press(&mut shell, &[Char('?')], 90);
+    save(&mut shell, "41-shortcuts");
+    press(&mut shell, &[Down; 9], 20);
+    save(&mut shell, "41b-shortcuts-home");
+
+    // The tour, as it follows first-boot setup: its first steps.
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    shell.start_tour();
+    settle(&mut shell, 60);
+    save(&mut shell, "42-tour-welcome");
+    for (name, step) in [("43-tour-apps", 1), ("44-tour-back", 2), ("45-tour-island", 3), ("46-tour-pages", 4), ("47-tour-end", 7)] {
+        while shell.tour_step() != Some(step) {
+            shell.key(Enter);
+        }
+        settle(&mut shell, 60);
+        save(&mut shell, name);
+    }
     println!("{} screens in {}, {frames} frames at {:.2} ms each", tour.len() + apps.len() + 22, dir.display(), started.elapsed().as_secs_f64() * 1e3 / frames as f64);
 }
 
@@ -1232,6 +1309,7 @@ mod tests {
         s.favourites = vec!["Logs".into()];
         (s.clock24, s.seconds, s.island, s.greeting) = (false, true, shell::IslandRest::Battery, false);
         (s.robot_name, s.gpu) = (Some("atlas".into()), false);
+        (s.developer, s.motion_scale, s.show_keys, s.toured) = (true, 5.0, true, true);
         let saved = settings_text(&s);
         assert!(saved != settings_text(&shell::Settings::default()), "every one of these differs from the default");
         let mut back = shell::Settings::default();

@@ -130,6 +130,10 @@ pub struct Gfx {
     /// What the island shows at rest, and whether Home is greeted.
     pub island: crate::shell::IslandRest,
     pub greeting: bool,
+    /// Developer options: on or not, the animation scale, and Show key presses.
+    pub developer: bool,
+    pub motion_scale: f32,
+    pub show_keys: bool,
     /// The look chosen, its theme on its own for brevity, what every corner
     /// is multiplied by, and tiles across Home.
     pub look: crate::look::Look,
@@ -213,6 +217,9 @@ impl Gfx {
             clock: (true, false),
             island: crate::shell::IslandRest::Robot,
             greeting: true,
+            developer: false,
+            motion_scale: 1.0,
+            show_keys: false,
             look: crate::look::Look::default(),
             theme: crate::look::Theme::Catalyst,
             corner: 1.0,

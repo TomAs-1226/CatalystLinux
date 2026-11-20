@@ -56,7 +56,19 @@ pub struct Settings {
     /// Draw the glass and growing windows on the GPU when there is one
     /// (otherwise everything is the processor's).
     pub gpu: bool,
+    /// Developer options, unlocked by pressing About › Build number seven
+    /// times; while they are on, how much slower motion runs (Android's
+    /// animator duration scale: 1 as designed, 5 five times slower) and
+    /// whether each key is shown at the bottom of the screen.
+    pub developer: bool,
+    pub motion_scale: f32,
+    pub show_keys: bool,
+    /// The tour has been taken (or skipped): it is not offered again.
+    pub toured: bool,
 }
+
+/// The animation scales developer options offer.
+pub const MOTION_SCALES: [f32; 6] = [0.5, 1.0, 1.5, 2.0, 5.0, 10.0];
 
 /// How Home is arranged: apps in the order chosen, those hidden, and the
 /// favourites pinned first.
@@ -159,6 +171,10 @@ impl Default for Settings {
             greeting: true,
             robot_name: None,
             gpu: true,
+            developer: false,
+            motion_scale: 1.0,
+            show_keys: false,
+            toured: false,
         }
     }
 }
@@ -266,6 +282,8 @@ pub enum Nav {
     Control,
     /// Done: give way to the screen beneath, fading out over it as it appears.
     Done,
+    /// Back to Home, and take the tour there.
+    Tour,
 }
 
 pub trait Screen {
@@ -325,6 +343,10 @@ pub trait Screen {
     /// Robot's tile first, and then opens the app out of it.
     fn robot_linked(&mut self, _calm: bool) -> Nav {
         Nav::Stay
+    }
+    /// What the tour lights up when it shows the apps: the focused tile.
+    fn spot(&self) -> Option<Rect> {
+        None
     }
 }
 
@@ -470,6 +492,38 @@ pub struct Shell {
     said_well: bool,
     last_key: std::time::Instant,
     last_check: Option<std::time::Instant>,
+    /// The tour of the keys, over everything while it shows; and, after
+    /// first-boot setup, how long until it is offered (Home's tiles arrive first).
+    tour: Option<crate::help::Tour>,
+    tour_after: Option<f32>,
+    /// Where the island and the page dots were last drawn, for the tour to light up.
+    places: crate::help::Places,
+    /// Developer options › Show key presses: the last few keys, and how long each has shown.
+    echo: Vec<(String, f32)>,
+}
+
+/// How long a key shown by Show key presses stays, the last part fading.
+const ECHO_SECONDS: f32 = 1.6;
+
+/// A key as Show key presses names it.
+fn key_name(key: Key) -> String {
+    match key {
+        Key::Up => "↑".into(),
+        Key::Down => "↓".into(),
+        Key::Left => "←".into(),
+        Key::Right => "→".into(),
+        Key::Enter => "enter".into(),
+        Key::Back => "esc".into(),
+        Key::Backspace => "bksp".into(),
+        Key::Tab => "tab".into(),
+        Key::PageUp => "pg up".into(),
+        Key::PageDown => "pg dn".into(),
+        Key::Char(' ') => "space".into(),
+        Key::Char(c) => c.to_string(),
+        Key::Ctrl(' ') => "ctrl space".into(),
+        Key::Ctrl(c) => format!("ctrl {c}"),
+        Key::Leave => "esc held".into(),
+    }
 }
 
 /// The clock, battery and links at the top right, re-read now and then.
@@ -527,6 +581,52 @@ impl Shell {
             control_under: None,
             control_glass: None,
             spent: Default::default(),
+            tour: None,
+            tour_after: None,
+            places: crate::help::Places::default(),
+            echo: Vec::new(),
+        }
+    }
+
+    /// Take the tour now, over whatever is showing (Home, after setup or from
+    /// Settings › Help).
+    pub fn start_tour(&mut self) {
+        self.tour = Some(crate::help::Tour::new(self.settings.calm));
+        self.tour_after = None;
+        self.moving = true;
+        self.dirty = true;
+    }
+
+    /// Whether the tour is showing, and which step it is on.
+    pub fn tour_step(&self) -> Option<usize> {
+        self.tour.as_ref().map(|t| t.step())
+    }
+
+    /// Settings › Help › Take the tour: back to Home (the screens in between
+    /// fade out over it), and the tour there.
+    fn tour_from_home(&mut self) {
+        if self.stack.len() > 1 {
+            if !self.settings.calm {
+                let mut fade = Animated::new(1.0, role::smooth()).with_rest(0.004);
+                fade.set(0.0);
+                self.curtain = Some((self.gfx.canvas.px.clone(), fade));
+            }
+            self.stack.truncate(1);
+            self.transition = None;
+            self.gfx.focus_reset();
+            if let Some((home, _)) = self.stack.last_mut() {
+                home.resume();
+            }
+        }
+        self.start_tour();
+    }
+
+    /// How much slower motion runs: developer options' animation scale.
+    fn motion_scale(&self) -> f32 {
+        if self.settings.developer {
+            self.settings.motion_scale.clamp(0.25, 10.0)
+        } else {
+            1.0
         }
     }
 
@@ -575,7 +675,11 @@ impl Shell {
         if self.stack.len() <= 1 {
             return;
         }
-        self.stack.pop();
+        let (finished, _) = self.stack.pop().expect("more than Home");
+        // First-boot setup done: the tour is offered once Home has arrived.
+        if finished.title() == "Setup" && self.stack.len() == 1 && !self.settings.toured {
+            self.tour_after = Some(1.2);
+        }
         self.transition = None;
         self.gfx.focus_reset();
         // What it changed (setup's look, from the handheld or a computer)
@@ -624,6 +728,14 @@ impl Shell {
     pub fn key(&mut self, key: Key) {
         self.dirty = true;
         self.last_key = std::time::Instant::now();
+        // Developer options › Show key presses: every key, as it lands.
+        if self.settings.developer && self.settings.show_keys {
+            self.echo.push((key_name(key), 0.0));
+            if self.echo.len() > 4 {
+                self.echo.remove(0);
+            }
+            self.moving = true;
+        }
         // A key during the start animation skips it, and is spent doing so;
         // once it is on its way out, keys go to the screen beneath at once.
         if let Some(intro) = &self.intro {
@@ -631,6 +743,12 @@ impl Shell {
                 return self.end_intro();
             }
             self.intro = None;
+        }
+        // The tour takes every key while it shows.
+        if let Some(tour) = &mut self.tour {
+            tour.key(key);
+            self.moving = true;
+            return;
         }
         // Whoever is pressing keys is busy: a robot that arrived a moment
         // ago does not take the screen from under them.
@@ -674,6 +792,14 @@ impl Shell {
         if key == Key::Ctrl(' ') {
             return self.set_control(true);
         }
+        // ? brings the shortcut list up over any screen that is not taking
+        // text (in a terminal or a text field, it types).
+        if key == Key::Char('?') {
+            let (top, _) = self.stack.last().expect("the home screen is always there");
+            if !top.wants_text() && !top.full_screen() && top.title() != "Shortcuts" {
+                return self.open(Box::new(crate::help::Shortcuts::new()), Path::Slide);
+            }
+        }
         // The living wallpaper: a move sets its light drifting the same way,
         // and it settles back still.
         if !self.settings.calm {
@@ -714,6 +840,7 @@ impl Shell {
             Nav::Pop => self.close(),
             Nav::Control => self.set_control(true),
             Nav::Done => self.finish_top(),
+            Nav::Tour => self.tour_from_home(),
         }
     }
 
@@ -739,6 +866,7 @@ impl Shell {
         }
         self.gfx.island = self.settings.island;
         self.gfx.greeting = self.settings.greeting;
+        (self.gfx.developer, self.gfx.motion_scale, self.gfx.show_keys) = (self.settings.developer, self.settings.motion_scale, self.settings.show_keys);
         self.gfx.want_gpu(self.settings.gpu);
         let s = &self.settings;
         let look = crate::look::Look { theme: s.theme, wallpaper: s.wallpaper, corners: s.corners, letters: s.letters, width: s.width };
@@ -993,9 +1121,37 @@ impl Shell {
     pub fn tick(&mut self, dt: f32) -> bool {
         self.gfx.tick_gpu();
         self.watch_link(dt);
-        // Motion only moves forward in time if it was already moving.
-        let motion_dt = if self.moving { dt.min(0.05) } else { 0.0 };
+        // Motion only moves forward in time if it was already moving; slower
+        // under developer options' animation scale.
+        let motion_dt = if self.moving { dt.min(0.05) / self.motion_scale() } else { 0.0 };
         let mut moving = false;
+        // The tour: offered a moment after setup, once Home has arrived.
+        if let Some(left) = &mut self.tour_after {
+            *left -= dt;
+            if *left <= 0.0 && self.transition.is_none() && self.curtain.is_none() && self.stack.len() == 1 && self.intro.is_none() {
+                self.start_tour();
+            }
+        }
+        if let Some(tour) = &mut self.tour {
+            moving |= tour.tick(motion_dt);
+            if tour.gone() {
+                self.tour = None;
+                self.settings.toured = true;
+                crate::save_settings(&self.settings);
+                self.dirty = true;
+            }
+        }
+        // Keys shown by Show key presses fade on the clock, not the motion.
+        if !self.echo.is_empty() {
+            for (_, age) in &mut self.echo {
+                *age += dt;
+            }
+            self.echo.retain(|(_, age)| *age < ECHO_SECONDS);
+            moving = true;
+            if self.echo.is_empty() {
+                self.dirty = true;
+            }
+        }
         if let Some(t) = &mut self.transition {
             if t.progress.tick(motion_dt) || motion_dt == 0.0 {
                 moving = true;
@@ -1131,6 +1287,41 @@ impl Shell {
         }
         if let Some(intro) = &self.intro {
             intro.draw(&mut self.gfx);
+        }
+        // The tour, over everything.
+        if let Some(tour) = &mut self.tour {
+            let at_home = self.stack.len() == 1 && self.transition.is_none();
+            let tile = if at_home { self.stack.last().and_then(|(s, _)| s.spot()) } else { None };
+            let places = crate::help::Places { tile, ..self.places };
+            tour.draw(&mut self.gfx, &places);
+            if self.gfx.take_motion_started() {
+                self.moving = true;
+            }
+        }
+        self.draw_echo();
+    }
+
+    /// Developer options › Show key presses: the last keys, each on a cap,
+    /// along the bottom of the screen, fading as they age.
+    fn draw_echo(&mut self) {
+        if self.echo.is_empty() {
+            return;
+        }
+        let g = &mut self.gfx;
+        let t = g.tokens;
+        let style = g.ty.label;
+        let cap_h = style.size + 8.0;
+        let widths: Vec<f32> = self.echo.iter().map(|(name, _)| g.measure(name, style) + 12.0).collect();
+        let total = widths.iter().sum::<f32>() + 4.0 * (widths.len() - 1) as f32;
+        let mut x = ((W - total) * 0.5).round();
+        let y = H - 34.0;
+        for ((name, age), w) in self.echo.iter().zip(widths) {
+            let alpha = ((ECHO_SECONDS - age) / 0.4).clamp(0.0, 1.0);
+            let cap = Rect::new(x, y, w, cap_h);
+            g.shadow(cap, 5.0, alpha);
+            g.canvas.rrect(cap, 5.0, t.surface3, alpha);
+            g.text.draw_aligned(&mut g.canvas, cap.cx(), (cap.cy() + style.size * 0.36).round(), Align::Center, name, &style, t.ink, alpha);
+            x += w + 4.0;
         }
     }
 
@@ -1278,9 +1469,11 @@ impl Shell {
                     let grown = p.clamp(0.0, 1.0);
                     let window = from.lerp(&Rect::new(0.0, 0.0, W, H), grown);
                     let corner = g.tile_radius() * (1.0 - grown);
+                    // Small, the window is the tile it grows from; the app takes it over as it grows.
+                    let morph = Morph { under, tile: from, screen: Morph::screen_at(grown) };
                     // On the GPU when it is drawing; otherwise, or if it fails, here.
                     let on_gpu = match &mut g.gpu {
-                        Some(gpu) => gpu.grow(&mut g.canvas, under, over, transition.made, window, corner, t.ground),
+                        Some(gpu) => gpu.grow(&mut g.canvas, under, over, transition.made, window, corner, t.ground, Some(&morph)),
                         None => Ok(false),
                     };
                     if let Err(why) = &on_gpu {
@@ -1288,7 +1481,7 @@ impl Shell {
                     }
                     if on_gpu != Ok(true) {
                         g.canvas.px.copy_from_slice(under);
-                        blit_scaled(&mut g.canvas, over, window, corner, t.ground);
+                        blit_scaled(&mut g.canvas, over, window, corner, t.ground, Some(&morph));
                     }
                     // The page dots belong to the screen underneath, until the window covers them.
                     if window.bottom() < H - 14.0 {
@@ -1365,6 +1558,7 @@ impl Shell {
         }
         let iw = self.island_w.value().max(island_h);
         let island = Rect::new((W - iw) * 0.5, 4.0, iw, island_h);
+        self.places.island = Some(island);
         // Every glass shape goes through one pass; each family is its own group.
         let mut shapes = vec![GlassShape::new(island, island_h * 0.5, 0)];
         let pager = g.pager.map(|(pages, current, ox)| {
@@ -1374,6 +1568,7 @@ impl Shell {
         if let Some((platter, ..)) = pager {
             shapes.push(GlassShape::new(platter, 5.0, 1));
         }
+        self.places.pager = pager.map(|(platter, ..)| platter);
         let before_glass = std::time::Instant::now();
         g.glass(&shapes);
         self.spent.0 += before_glass - began;
@@ -1514,13 +1709,36 @@ static PICTURES_MADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 /// This runs every frame an app opens or closes, so it is written to cost
 /// little: sampling is fixed-point, and the distance to the window's edge is
 /// only worked out for pixels near that edge.
-pub(crate) fn blit_scaled(canvas: &mut Canvas, src: &[u32], window: Rect, radius: f32, edge: Color) {
+/// What a growing window shows besides its screen: the tile it grows out of,
+/// read from the picture beneath and scaled with the window, and how much of
+/// the window the screen has taken over (1: all screen, 0: all tile). Small,
+/// the window is the tile; it becomes the screen as it grows, and the screen
+/// melts back into the tile as it shrinks, so neither is swapped at an edge.
+pub(crate) struct Morph<'a> {
+    pub under: &'a [u32],
+    pub tile: Rect,
+    pub screen: f32,
+}
+
+impl Morph<'_> {
+    /// How much of the window is the screen, as it grows from the tile
+    /// (`grown` 0) to the panel (1): the tile alone at first, the screen
+    /// alone from about two thirds of the way.
+    pub fn screen_at(grown: f32) -> f32 {
+        let t = ((grown - 0.08) / (0.62 - 0.08)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    }
+}
+
+pub(crate) fn blit_scaled(canvas: &mut Canvas, src: &[u32], window: Rect, radius: f32, edge: Color, morph: Option<&Morph>) {
     let (w, h) = (canvas.w, canvas.h);
     if window.w < 1.0 || window.h < 1.0 {
         return;
     }
+    // Only a tile that is really there, and partly showing, is drawn.
+    let morph = morph.filter(|m| m.screen < 1.0 && m.tile.w >= 1.0 && m.tile.h >= 1.0 && m.under.len() == src.len());
     // The whole panel: a straight copy.
-    if window.w >= w as f32 - 0.5 && window.h >= h as f32 - 0.5 {
+    if morph.is_none() && window.w >= w as f32 - 0.5 && window.h >= h as f32 - 0.5 {
         canvas.px.copy_from_slice(src);
         return;
     }
@@ -1563,8 +1781,21 @@ pub(crate) fn blit_scaled(canvas: &mut Canvas, src: &[u32], window: Rect, radius
             (u0, (u0 + 1).min(w as usize - 1), (u.fract() * 256.0) as u32)
         })
         .collect();
+    // The tile, likewise: where each column of the window reads from in it.
+    let tile_columns: Vec<(usize, usize, u32)> = match morph {
+        Some(m) => (x0..x1)
+            .map(|x| {
+                let u = (m.tile.x + (x as f32 + 0.5 - window.x) * m.tile.w / window.w - 0.5).clamp(0.0, (w - 1) as f32);
+                let u0 = u as usize;
+                (u0, (u0 + 1).min(w as usize - 1), (u.fract() * 256.0) as u32)
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    let screen = morph.map_or(256, |m| (m.screen.clamp(0.0, 1.0) * 256.0) as u32);
     let edge_px = edge.to_u32();
     let mut scaled = vec![0u32; columns.len()];
+    let mut tile_row = vec![0u32; tile_columns.len()];
     for y in y0..y1 {
         let v = ((y as f32 + 0.5 - window.y) * sy - 0.5).clamp(0.0, (h - 1) as f32);
         let v0 = v as usize;
@@ -1576,6 +1807,15 @@ pub(crate) fn blit_scaled(canvas: &mut Canvas, src: &[u32], window: Rect, radius
         // whole row at once, four pixels at a time with NEON.
         let width = w as usize;
         bezel::simd::bilinear_row(&src[top..top + width], &src[bottom..bottom + width], &columns, fv, &mut scaled);
+        if let Some(m) = morph {
+            let v = (m.tile.y + (y as f32 + 0.5 - window.y) * m.tile.h / window.h - 0.5).clamp(0.0, (h - 1) as f32);
+            let v0 = v as usize;
+            let (top, bottom) = (v0 * width, (v0 + 1).min(h as usize - 1) * width);
+            bezel::simd::bilinear_row(&m.under[top..top + width], &m.under[bottom..bottom + width], &tile_columns, (v.fract() * 256.0) as u32, &mut tile_row);
+            for (px, &tile) in scaled.iter_mut().zip(&tile_row) {
+                *px = mix_px(tile, *px, screen);
+            }
+        }
         for ((x, _), &px) in (x0..x1).zip(&columns).zip(&scaled) {
             let at = row + x as usize;
             let fx = x as f32 + 0.5;
@@ -1597,7 +1837,7 @@ pub(crate) fn blit_scaled(canvas: &mut Canvas, src: &[u32], window: Rect, radius
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const FRAME: f32 = 1.0 / 60.0;
@@ -2250,5 +2490,90 @@ mod tests {
         assert_eq!((shell.stack.len(), shell.progress()), (2, None));
         shell.key(Key::Back);
         assert_eq!((shell.stack.len(), shell.progress()), (1, None));
+    }
+
+    #[test]
+    fn the_tour_follows_first_boot_setup_once() {
+        let mut shell = shell();
+        shell.start_setup();
+        frames(&mut shell, 30, FRAME);
+        // Setup put off from its first page ("later"): Home, then the tour.
+        shell.key(Key::Down);
+        shell.key(Key::Down);
+        shell.key(Key::Enter);
+        frames(&mut shell, 60 * 3, FRAME);
+        assert_eq!((shell.stack.len(), shell.tour_step()), (1, Some(0)), "offered once Home has arrived");
+        // It takes the keys: Enter goes on, and Home's focus does not move.
+        shell.key(Key::Enter);
+        shell.key(Key::Right);
+        assert_eq!(shell.tour_step(), Some(2));
+        shell.key(Key::Back);
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(shell.tour_step(), None, "skipped, it fades away");
+        assert!(shell.settings.toured, "and is not offered again");
+    }
+
+    #[test]
+    fn settings_help_takes_the_tour_from_home() {
+        let mut shell = shell();
+        shell.settings.toured = true;
+        // An app open over Home, and Settings › Help › Take the tour over that.
+        open(&mut shell, FRAME);
+        frames(&mut shell, 60, FRAME);
+        let tour = crate::screens::setting_names().find(|(_, n)| *n == "Take the tour").map(|(i, _)| i).unwrap();
+        shell.open(crate::screens::open_setting(tour), Path::Slide);
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(title(&shell), "Help");
+        shell.key(Key::Enter);
+        frames(&mut shell, 60, FRAME);
+        assert_eq!((shell.stack.len(), shell.tour_step()), (1, Some(0)), "back on Home, touring");
+    }
+
+    #[test]
+    fn question_mark_brings_up_the_shortcuts_except_where_it_types() {
+        let mut shell = shell();
+        frames(&mut shell, 30, FRAME);
+        shell.key(Key::Char('?'));
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(title(&shell), "Shortcuts");
+        shell.key(Key::Char('?'));
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(title(&shell), "Catalyst", "? again puts it away");
+        // In search, ? is typed.
+        shell.key(Key::Char(' '));
+        frames(&mut shell, 60, FRAME);
+        let searching = title(&shell);
+        shell.key(Key::Char('?'));
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(title(&shell), searching);
+    }
+
+    #[test]
+    fn developer_options_slow_motion_and_show_the_keys() {
+        // 0.2 s into an app opening; at 5x the tile's press takes longer too.
+        let at = |scale: f32| {
+            let mut shell = shell();
+            (shell.settings.developer, shell.settings.motion_scale) = (true, scale);
+            shell.key(Key::Enter);
+            while shell.transition.is_none() {
+                frames(&mut shell, 1, FRAME);
+            }
+            frames(&mut shell, 12, FRAME);
+            shell.progress().unwrap()
+        };
+        let (normal, slow) = (at(1.0), at(5.0));
+        assert!(slow < normal * 0.6, "5x: {slow} against {normal}");
+        // Without developer options, the scale is not used.
+        let mut shell = shell();
+        (shell.settings.developer, shell.settings.motion_scale, shell.settings.show_keys) = (false, 5.0, true);
+        assert_eq!(shell.motion_scale(), 1.0);
+        shell.key(Key::Down);
+        assert!(shell.echo.is_empty(), "nor are keys shown");
+        shell.settings.developer = true;
+        shell.key(Key::Down);
+        shell.key(Key::Enter);
+        assert_eq!(shell.echo.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), ["↓", "enter"]);
+        frames(&mut shell, 120, FRAME);
+        assert!(shell.echo.is_empty(), "they fade after a moment");
     }
 }
