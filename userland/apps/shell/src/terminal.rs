@@ -36,18 +36,23 @@ pub struct Terminal {
     /// The program has exited; the next key leaves.
     ended: bool,
     greeted: bool,
+    /// When the program last printed: while it does, the screen stays awake.
+    printed: Option<std::time::Instant>,
 }
+
+/// How long after a program last printed the screen may go off.
+const AWAKE_AFTER_OUTPUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl Terminal {
     /// The login shell, picked up where it was left.
     pub fn new() -> Self {
         let (session, term) = KEPT.with_borrow_mut(Option::take).map_or((None, None), |(s, t)| (Some(s), Some(t)));
-        Terminal { title: "Terminal".into(), program: None, session, term, back: 0, ended: false, greeted: false }
+        Terminal { title: "Terminal".into(), program: None, session, term, back: 0, ended: false, greeted: false, printed: None }
     }
 
     /// One program in a terminal of its own: an external app.
     pub fn running(title: &str, command: &str, dir: PathBuf) -> Self {
-        Terminal { title: title.to_owned(), program: Some((command.to_owned(), dir)), session: None, term: None, back: 0, ended: false, greeted: false }
+        Terminal { title: title.to_owned(), program: Some((command.to_owned(), dir)), session: None, term: None, back: 0, ended: false, greeted: false, printed: None }
     }
 
     /// The grid that fits the panel at the current text size: columns, rows,
@@ -113,6 +118,12 @@ impl Screen for Terminal {
         !self.ended
     }
 
+    fn keeps_awake(&self) -> bool {
+        // An app's program, while it runs; the login shell, while what runs in
+        // it is printing (a build, a log being followed), not at a quiet prompt.
+        !self.ended && (self.program.is_some() || self.printed.is_some_and(|at| at.elapsed() < AWAKE_AFTER_OUTPUT))
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         // Esc belongs to the programs in the terminal, so leaving is Ctrl-Q,
         // or Esc held down.
@@ -154,6 +165,9 @@ impl Screen for Terminal {
         };
         let bytes = session.read();
         let mut changed = !bytes.is_empty();
+        if changed {
+            self.printed = Some(std::time::Instant::now());
+        }
         term.feed(&bytes);
         let replies = term.take_replies();
         if !replies.is_empty() {

@@ -65,6 +65,10 @@ pub struct Settings {
     pub show_keys: bool,
     /// The tour has been taken (or skipped): it is not offered again.
     pub toured: bool,
+    /// Standby: how long with no key before the screen goes off (seconds;
+    /// 0 never), and how the processor chooses its speed.
+    pub screen_off: u32,
+    pub power: crate::standby::Power,
 }
 
 /// The animation scales developer options offer.
@@ -175,6 +179,8 @@ impl Default for Settings {
             motion_scale: 1.0,
             show_keys: false,
             toured: false,
+            screen_off: 60,
+            power: crate::standby::Power::Balanced,
         }
     }
 }
@@ -348,6 +354,16 @@ pub trait Screen {
     fn spot(&self) -> Option<Rect> {
         None
     }
+    /// Kept among the recent apps once left. Not a screen that takes the
+    /// whole panel (setup), nor a passing one (search, the shortcut list).
+    fn keep_in_recents(&self) -> bool {
+        !self.full_screen()
+    }
+    /// Something on it needs watching, so the screen does not dim or go off
+    /// while it shows (a program running in a terminal, a match timer).
+    fn keeps_awake(&self) -> bool {
+        false
+    }
 }
 
 const MESSAGE_SECONDS: f32 = 2.4;
@@ -387,7 +403,7 @@ struct ReportWatch {
 
 /// How a screen arrived, which is also how it leaves.
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Path {
+pub(crate) enum Path {
     Slide,
     Grow(Rect),
 }
@@ -420,6 +436,10 @@ struct Transition {
     /// The screen on top while it leaves: already off the stack, kept until
     /// it has gone (or is asked back).
     leaving: Option<Box<dyn Screen>>,
+    /// What an arriving screen grows over when it is not the screen beneath
+    /// it: the recent apps as they showed, for a card to grow out of, or
+    /// Home, for an app brought back several pages deep.
+    backdrop: Option<Vec<u32>>,
 }
 
 pub struct Shell {
@@ -506,6 +526,16 @@ pub struct Shell {
     /// (a held key keeps coming, repeating), the countdown last said, and
     /// whether the shortcut list has opened.
     help_hold: Option<HelpHold>,
+    /// Apps left recently, kept alive as they were; the switcher while it
+    /// shows, and the screen it came up over (held still behind it).
+    recents: crate::recents::Recents,
+    switcher: Option<crate::recents::Switcher>,
+    switcher_under: Option<(Vec<u32>, Vec<u32>)>,
+    /// A screenshot being saved, and the flash that says it was taken.
+    saving: Option<std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>>,
+    flash: Option<Animated>,
+    /// Standby: after a while with no key the screen dims, then goes off.
+    standby: crate::standby::Standby,
 }
 
 #[derive(Clone, Copy)]
@@ -542,6 +572,7 @@ fn key_name(key: Key) -> String {
         Key::Char(' ') => "space".into(),
         Key::Char(c) => c.to_string(),
         Key::Ctrl(' ') => "ctrl space".into(),
+        Key::Ctrl('\t') => "ctrl tab".into(),
         Key::Ctrl(c) => format!("ctrl {c}"),
         Key::Leave => "esc held".into(),
     }
@@ -608,6 +639,12 @@ impl Shell {
             echo: Vec::new(),
             clock: 0.0,
             help_hold: None,
+            recents: crate::recents::Recents::default(),
+            switcher: None,
+            switcher_under: None,
+            saving: None,
+            flash: None,
+            standby: crate::standby::Standby::new(),
         }
     }
 
@@ -780,6 +817,11 @@ impl Shell {
     pub fn key(&mut self, key: Key) {
         self.dirty = true;
         self.last_key = std::time::Instant::now();
+        // A key while the screen is dimmed or off wakes it, and is spent doing so.
+        if self.standby.key() {
+            self.moving = true;
+            return;
+        }
         // Developer options › Show key presses: every key, as it lands.
         if self.settings.developer && self.settings.show_keys {
             self.echo.push((key_name(key), 0.0));
@@ -801,6 +843,18 @@ impl Shell {
             tour.key(key);
             self.moving = true;
             return;
+        }
+        // The recent apps take the keys while they show; one on its way out
+        // goes at once, and the key lands on the screen beneath.
+        if self.switcher.as_ref().is_some_and(|s| !s.leaving()) {
+            return self.switcher_key(key);
+        }
+        self.switcher = None;
+        self.switcher_under = None;
+        // Ctrl-Tab brings them up over any screen, a terminal included: no
+        // program in a terminal can be sent Ctrl-Tab, so it takes nothing.
+        if key == Key::Ctrl('\t') {
+            return self.open_recents(None);
         }
         // Whoever is pressing keys is busy: a robot that arrived a moment
         // ago does not take the screen from under them.
@@ -835,6 +889,22 @@ impl Shell {
                     crate::save_settings(&self.settings);
                     // The screen behind changed its look: take it again.
                     self.control_under = None;
+                }
+                // The recent apps, over the screen the sheet came down on.
+                Some(Outcome::Recents) => {
+                    let under = self.control_under.take();
+                    self.control.set_open(false, &self.settings);
+                    self.control.shown.jump(0.0);
+                    self.control_glass = None;
+                    self.open_recents(under);
+                }
+                // A picture of the screen beneath the sheet, as the sheet goes.
+                Some(Outcome::Screenshot) => {
+                    let picture = self.control_under.clone();
+                    self.set_control(false);
+                    if let Some(picture) = picture {
+                        self.screenshot(picture);
+                    }
                 }
                 Some(Outcome::Nothing) => {}
             }
@@ -920,6 +990,8 @@ impl Shell {
         self.gfx.island = self.settings.island;
         self.gfx.greeting = self.settings.greeting;
         (self.gfx.developer, self.gfx.motion_scale, self.gfx.show_keys) = (self.settings.developer, self.settings.motion_scale, self.settings.show_keys);
+        (self.gfx.screen_off, self.gfx.power) = (self.settings.screen_off, self.settings.power);
+        self.standby.set_power(self.settings.power);
         self.gfx.want_gpu(self.settings.gpu);
         let s = &self.settings;
         let look = crate::look::Look { theme: s.theme, wallpaper: s.wallpaper, corners: s.corners, letters: s.letters, width: s.width };
@@ -967,6 +1039,18 @@ impl Shell {
                 return;
             }
         }
+        // An app opened from Home that was left a moment ago comes back as it
+        // was (its pages, its place): the new copy is not needed. It closes
+        // into the tile it was opened from this time.
+        if let (Path::Grow(from), 1, None) = (path, self.stack.len(), &self.transition) {
+            if let Some(mut recent) = self.recents.find(screen.title()).and_then(|at| self.recents.take(at)) {
+                drop(screen);
+                recent.stack[0].1 = path;
+                // Pages deep, it grows over Home rather than over its own first page.
+                let home = (recent.stack.len() > 1 && self.last_depth == 1).then(|| self.last_screen.0.clone());
+                return self.bring_back(recent, from, home);
+            }
+        }
         self.stack.push((screen, path));
         self.gfx.reveal_start();
         if self.settings.calm {
@@ -975,7 +1059,7 @@ impl Shell {
         }
         let mut progress = Animated::new(0.0, path.spring()).with_rest(0.002);
         progress.set(1.0);
-        self.transition = Some(Transition { path, progress, pictures: None, made: 0, leaving: None });
+        self.transition = Some(Transition { path, progress, pictures: None, made: 0, leaving: None, backdrop: None });
     }
 
     fn close(&mut self) {
@@ -990,7 +1074,8 @@ impl Shell {
         }
         if self.settings.calm {
             self.transition = None;
-            return;
+            let picture = (self.last_depth == self.stack.len() + 1).then(|| self.last_screen.0.clone());
+            return self.left(screen, path, picture);
         }
         match &mut self.transition {
             // Still arriving: turn it round where it is, keeping its speed.
@@ -1001,7 +1086,7 @@ impl Shell {
             _ => {
                 let mut progress = Animated::new(1.0, path.spring()).with_rest(0.002);
                 progress.set(0.0);
-                self.transition = Some(Transition { path, progress, pictures: None, made: 0, leaving: Some(screen) });
+                self.transition = Some(Transition { path, progress, pictures: None, made: 0, leaving: Some(screen), backdrop: None });
             }
         }
     }
@@ -1042,6 +1127,8 @@ impl Shell {
         if !self.was_linked {
             self.was_linked = true;
             if self.unlinked_for >= LINK_GONE_SECONDS {
+                // A robot plugged in wakes the screen to show it.
+                self.standby.wake_now();
                 self.arrival = Some(0.0);
                 let known = self.robot.logs.list().into_iter().map(|row| row.name).collect();
                 self.report_watch = Some(ReportWatch { known, waited: 0.0, touched: false, seen: self.robot.logs.generation() });
@@ -1233,8 +1320,14 @@ impl Shell {
                     self.drift.1.nudge(push.1);
                     moving = true;
                 }
+                // An app gone back to Home is kept among the recent apps.
+                if let Some(screen) = ended.leaving {
+                    let picture = ended.pictures.map(|[_, (over, _)]| over);
+                    self.left(screen, ended.path, picture);
+                }
             }
         }
+        moving |= self.tick_recents_and_standby(dt, motion_dt);
         if let Some(intro) = &mut self.intro {
             moving |= intro.tick(motion_dt);
             if intro.finished() && !intro.leaving() {
@@ -1310,7 +1403,8 @@ impl Shell {
         }
         self.watch_update(dt);
         let changed = self.robot.refresh(dt);
-        let draw = moving || changed || self.dirty;
+        // With the screen off and dark, nothing is drawn (or sent to the panel).
+        let draw = (moving || changed || self.dirty) && !self.standby.asleep();
         self.dirty = false;
         self.moving = moving;
         draw
@@ -1361,6 +1455,7 @@ impl Shell {
             }
         }
         self.draw_echo();
+        self.draw_flash_and_standby();
     }
 
     /// Developer options › Show key presses: the last keys, each on a cap,
@@ -1388,6 +1483,19 @@ impl Shell {
     }
 
     fn draw_under_intro(&mut self) {
+        // The recent apps, over the wallpaper alone (no screen's words show
+        // through between the cards): the screen in front fades into it as
+        // they come, and back as they go. Both are held still meanwhile.
+        if self.switcher.is_some() {
+            if self.switcher_under.is_none() {
+                self.draw_frame();
+                self.switcher_under = Some((self.background.clone(), self.gfx.canvas.px.clone()));
+            }
+            if let (Some(switcher), Some((wall, front))) = (&mut self.switcher, &self.switcher_under) {
+                switcher.draw(&mut self.gfx, wall, front);
+            }
+            return;
+        }
         let over = self.control.visible();
         match (&self.control_under, over) {
             // The control centre is out: the screen behind is held as it was.
@@ -1491,7 +1599,8 @@ impl Shell {
                     }
                     None => {
                         let (under, over) = self.stack.split_at_mut(depth - 1);
-                        let under = kept(depth - 1).or_else(|| under.last_mut().map(|(s, _)| picture(g, s.as_mut(), depth == 2, false)));
+                        let backdrop = transition.backdrop.take().map(|px| (px, None));
+                        let under = backdrop.or_else(|| kept(depth - 1)).or_else(|| under.last_mut().map(|(s, _)| picture(g, s.as_mut(), depth == 2, false)));
                         [under.unwrap_or_else(|| (self.background.clone(), None)), picture(g, over[0].0.as_mut(), false, true)]
                     }
                 });
@@ -1894,6 +2003,212 @@ pub(crate) fn blit_scaled(canvas: &mut Canvas, src: &[u32], window: Rect, radius
             let px = mix_px(px, edge_px, rim);
             let cover = ((0.5 - d).clamp(0.0, 1.0) * 256.0) as u32;
             canvas.px[at] = mix_px(canvas.px[at], px, cover);
+        }
+    }
+}
+
+// ------------------------------------- recent apps, screenshots, standby ---
+
+impl Shell {
+    /// Where the app in front starts on the stack: its first page kept among
+    /// the recent apps (search, the shortcut list and the like are not).
+    /// None on Home.
+    fn app_start(&self) -> Option<usize> {
+        (1..self.stack.len()).find(|&i| self.stack[i].0.keep_in_recents())
+    }
+
+    /// A screen gone: an app gone back to Home is kept among the recent apps,
+    /// with the picture it last showed; any other page is done with.
+    fn left(&mut self, screen: Box<dyn Screen>, path: Path, picture: Option<Vec<u32>>) {
+        if self.stack.len() == 1 && screen.keep_in_recents() {
+            self.recents.remember(vec![(screen, path)], picture.as_deref());
+        }
+    }
+
+    /// A screen still on its way in or out lands where it was going, at once.
+    fn settle_transition(&mut self) {
+        if let Some(t) = self.transition.take() {
+            if let Some(screen) = t.leaving {
+                let picture = t.pictures.map(|[_, (over, _)]| over);
+                self.left(screen, t.path, picture);
+            }
+        }
+    }
+
+    /// The recent apps. The card of the app in front shows it as it was last
+    /// drawn, or `under`, the picture the control centre came down over.
+    pub fn open_recents(&mut self, under: Option<Vec<u32>>) {
+        use crate::recents::{icon_for, thumbnail, Card, Switcher};
+        self.settle_transition();
+        let current = self.app_start().map(|start| {
+            let title = self.stack[start].0.title().to_owned();
+            let picture = under.as_deref().or_else(|| (self.last_depth == self.stack.len()).then_some(self.last_screen.0.as_slice()));
+            Card { icon: icon_for(&title), title, thumb: picture.map_or_else(Vec::new, thumbnail), current: true }
+        });
+        let kept = self.recents.iter().map(|r| Card { title: r.title().to_owned(), icon: icon_for(r.title()), thumb: r.thumb.clone(), current: false });
+        self.switcher = Some(Switcher::new(current.into_iter().chain(kept).collect(), self.settings.calm));
+        self.switcher_under = None;
+        self.moving = true;
+        self.dirty = true;
+    }
+
+    /// Whether the recent apps are showing (and not on their way out): for
+    /// the tests and the galleries.
+    #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+    pub fn recents_open(&self) -> bool {
+        self.switcher.as_ref().is_some_and(|s| !s.leaving())
+    }
+
+    fn switcher_key(&mut self, key: Key) {
+        use crate::recents::Action;
+        self.moving = true;
+        let Some(switcher) = &mut self.switcher else { return };
+        match switcher.key(key) {
+            Action::Stay => {}
+            Action::Close => switcher.close(),
+            Action::Open(at) => self.switch_to(at),
+            Action::Dismiss(at) => self.let_go(at),
+        }
+    }
+
+    /// The app on card `at` to the front, growing out of its card; the app
+    /// that was in front joins the recent apps.
+    fn switch_to(&mut self, at: usize) {
+        let Some(mut switcher) = self.switcher.take() else { return };
+        let current = switcher.cards.first().is_some_and(|c| c.current);
+        if current && at == 0 {
+            // The app in front already: the cards go, and there it is.
+            switcher.close();
+            self.switcher = Some(switcher);
+            return;
+        }
+        let Some(recent) = self.recents.take(at - current as usize) else { return };
+        let from = switcher.card_rect(at);
+        // It grows out of its card, over the cards as they showed.
+        let backdrop = self.gfx.canvas.px.clone();
+        if let Some(start) = self.app_start() {
+            let pages = self.stack.split_off(start);
+            let thumb = switcher.cards.swap_remove(0).thumb;
+            self.recents.keep(pages, thumb);
+        }
+        self.stack.truncate(1);
+        self.switcher_under = None;
+        self.bring_back(recent, from, Some(backdrop));
+    }
+
+    /// Let the app on card `at` go. The app in front, let go, closes for good
+    /// and Home shows behind the cards.
+    fn let_go(&mut self, at: usize) {
+        let Some(switcher) = &mut self.switcher else { return };
+        let current = switcher.cards.first().is_some_and(|c| c.current);
+        switcher.remove(at);
+        if current && at == 0 {
+            self.stack.truncate(1);
+            self.transition = None;
+            self.gfx.focus_reset();
+            if let Some((home, _)) = self.stack.last_mut() {
+                home.resume();
+            }
+            self.switcher_under = None;
+        } else {
+            self.recents.forget(at - current as usize);
+        }
+    }
+
+    /// An app kept among the recent apps, back in front with its pages as
+    /// they were, growing out of `from` over `backdrop` (or the screen beneath).
+    fn bring_back(&mut self, recent: crate::recents::Recent, from: Rect, backdrop: Option<Vec<u32>>) {
+        self.gfx.focus_reset();
+        self.gfx.reveal_stop();
+        if let Some(words) = recent.stack.last().and_then(|(s, _)| s.greeting()) {
+            self.say(words);
+        }
+        self.stack.extend(recent.stack);
+        if let Some((top, _)) = self.stack.last_mut() {
+            top.resume();
+        }
+        self.moving = true;
+        self.dirty = true;
+        if self.settings.calm {
+            self.transition = None;
+            return;
+        }
+        let path = Path::Grow(from);
+        let mut progress = Animated::new(0.0, path.spring()).with_rest(0.002);
+        progress.set(1.0);
+        self.transition = Some(Transition { path, progress, pictures: None, made: 0, leaving: None, backdrop });
+    }
+
+    /// Save `picture`, the panel as it showed, as a screenshot: a flash says
+    /// it was taken, and the island once it is saved.
+    fn screenshot(&mut self, picture: Vec<u32>) {
+        self.saving = Some(crate::screenshot::save(picture));
+        if !self.settings.calm {
+            let mut flash = Animated::new(1.0, role::smooth()).with_rest(0.004);
+            flash.set(0.0);
+            self.flash = Some(flash);
+        }
+        self.moving = true;
+        self.dirty = true;
+    }
+
+    /// The switcher, a screenshot's flash and its saving, and standby, in time.
+    fn tick_recents_and_standby(&mut self, dt: f32, motion_dt: f32) -> bool {
+        let mut moving = false;
+        if let Some(switcher) = &mut self.switcher {
+            moving |= switcher.tick(motion_dt);
+            if switcher.gone() {
+                self.switcher = None;
+                self.switcher_under = None;
+                self.dirty = true;
+            }
+        }
+        if let Some(flash) = &mut self.flash {
+            moving |= flash.tick(motion_dt);
+            if flash.value() <= 0.004 {
+                self.flash = None;
+                self.dirty = true;
+            }
+        }
+        if let Some(saving) = &self.saving {
+            match saving.try_recv() {
+                Ok(done) => {
+                    self.saving = None;
+                    self.say(match done {
+                        Ok(_) => "screenshot saved".to_owned(),
+                        Err(why) => why,
+                    });
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.saving = None,
+            }
+        }
+        let keep = self.stack.last().is_some_and(|(s, _)| s.keeps_awake()) || self.saving.is_some();
+        moving |= self.standby.tick(dt, self.settings.screen_off, keep, self.settings.calm);
+        moving
+    }
+
+    /// Where standby stands: awake, dimmed or off (for the tests and galleries).
+    #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+    pub fn standby_state(&self) -> crate::standby::State {
+        self.standby.state()
+    }
+
+    /// Drawn over everything: a screenshot's flash, and (where there is no
+    /// backlight to dim, as in the simulator) standby's dimming.
+    fn draw_flash_and_standby(&mut self) {
+        let px = &mut self.gfx.canvas.px;
+        if let Some(flash) = &self.flash {
+            let f = (flash.value().clamp(0.0, 1.0) * 0.8 * 256.0) as u32;
+            if f > 0 {
+                for p in px.iter_mut() {
+                    *p = mix_px(*p, 0xffffff, f);
+                }
+            }
+        }
+        let shade = self.standby.shade();
+        if shade > 0.0 {
+            bezel::simd::mix_into(px, None, (shade.clamp(0.0, 1.0) * 256.0) as u32);
         }
     }
 }
@@ -2666,5 +2981,162 @@ pub(crate) mod tests {
         assert_eq!(shell.echo.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), ["↓", "enter"]);
         frames(&mut shell, 120, FRAME);
         assert!(shell.echo.is_empty(), "they fade after a moment");
+    }
+
+    /// The screen in front's own address: the same app, or a new copy.
+    fn which(shell: &Shell) -> usize {
+        &*shell.stack.last().unwrap().0 as *const dyn Screen as *const u8 as usize
+    }
+
+    /// Home's focus moved from the built-in app called `from` to `name`,
+    /// and that app opened out of its tile.
+    fn open_app(shell: &mut Shell, from: &str, name: &str) {
+        let place = |n: &str| crate::screens::builtin_apps().position(|(_, _, a)| a == n).unwrap() as i32;
+        let steps = place(name) - place(from);
+        for _ in 0..steps.abs() {
+            shell.key(if steps > 0 { Key::Right } else { Key::Left });
+        }
+        open(shell, FRAME);
+        frames(shell, 60, FRAME);
+        assert_eq!(title(shell), name);
+    }
+
+    fn back_home(shell: &mut Shell) {
+        while shell.stack.len() > 1 {
+            shell.key(Key::Back);
+            frames(shell, 60, FRAME);
+        }
+    }
+
+    #[test]
+    fn an_app_left_is_kept_and_comes_back_as_it_was() {
+        let mut shell = shell();
+        open_app(&mut shell, "Robot", "Settings");
+        let settings = which(&shell);
+        shell.key(Key::Back);
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(title(&shell), "Catalyst");
+        assert_eq!(shell.recents.find("Settings"), Some(0), "kept");
+        // Opened again from its tile (the focus is still on it): the same
+        // Settings, as it was left.
+        open(&mut shell, FRAME);
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(title(&shell), "Settings");
+        assert_eq!(which(&shell), settings, "not a new copy");
+        assert_eq!(shell.recents.find("Settings"), None, "in front, so not among the recent apps");
+    }
+
+    #[test]
+    fn ctrl_tab_goes_back_and_forth_between_two_apps() {
+        let mut shell = shell();
+        open_app(&mut shell, "Robot", "Robot");
+        let robot = which(&shell);
+        back_home(&mut shell);
+        open_app(&mut shell, "Robot", "Health");
+        let health = which(&shell);
+        // Ctrl-Tab, Enter: the app before.
+        shell.key(Key::Ctrl('\t'));
+        frames(&mut shell, 30, FRAME);
+        assert!(shell.recents_open());
+        shell.key(Key::Enter);
+        assert!(!shell.recents_open());
+        frames(&mut shell, 60, FRAME);
+        assert_eq!((title(&shell), which(&shell)), ("Robot".to_owned(), robot));
+        assert_eq!(shell.stack.len(), 2, "in place of Health, not over it");
+        // And back again.
+        shell.key(Key::Ctrl('\t'));
+        frames(&mut shell, 30, FRAME);
+        shell.key(Key::Enter);
+        frames(&mut shell, 60, FRAME);
+        assert_eq!((title(&shell), which(&shell)), ("Health".to_owned(), health));
+        // Enter on the app in front: the cards go, and there it is.
+        shell.key(Key::Ctrl('\t'));
+        frames(&mut shell, 30, FRAME);
+        shell.key(Key::Left);
+        shell.key(Key::Enter);
+        frames(&mut shell, 60, FRAME);
+        assert_eq!((title(&shell), which(&shell), shell.recents_open()), ("Health".to_owned(), health, false));
+    }
+
+    #[test]
+    fn the_recent_apps_come_up_over_a_terminal_and_let_apps_go() {
+        let mut shell = shell();
+        open_app(&mut shell, "Robot", "Logs");
+        back_home(&mut shell);
+        open_app(&mut shell, "Logs", "Terminal");
+        // Ctrl-Tab is the shell's, even over a terminal that takes every key.
+        shell.key(Key::Ctrl('\t'));
+        frames(&mut shell, 30, FRAME);
+        assert!(shell.recents_open());
+        // Let Logs go (the card after the terminal's own).
+        shell.key(Key::Up);
+        frames(&mut shell, 30, FRAME);
+        assert_eq!(shell.recents.find("Logs"), None, "let go");
+        // Let the terminal go too: Home behind the cards, nothing kept.
+        shell.key(Key::Left);
+        shell.key(Key::Up);
+        frames(&mut shell, 30, FRAME);
+        assert_eq!(shell.stack.len(), 1);
+        shell.key(Key::Back);
+        frames(&mut shell, 60, FRAME);
+        assert_eq!((title(&shell), shell.recents_open()), ("Catalyst".to_owned(), false));
+        // From Home with nothing kept: the cards say so, and Esc puts them away.
+        shell.key(Key::Ctrl('\t'));
+        frames(&mut shell, 30, FRAME);
+        assert!(shell.recents_open());
+        shell.key(Key::Enter);
+        frames(&mut shell, 60, FRAME);
+        assert!(!shell.recents_open());
+    }
+
+    #[test]
+    fn a_screenshot_is_taken_from_the_control_centre() {
+        let mut shell = shell();
+        frames(&mut shell, 30, FRAME);
+        let folder = crate::screenshot::folder();
+        let count = || std::fs::read_dir(&folder).map_or(0, |d| d.count());
+        let before = count();
+        shell.key(Key::Ctrl(' '));
+        frames(&mut shell, 40, FRAME);
+        shell.key(Key::Char('s'));
+        assert!(shell.flash.is_some(), "a flash says it was taken");
+        assert!(!shell.control_open(), "and the sheet goes");
+        // It is written on a thread of its own: wait for it, in real time.
+        for _ in 0..300 {
+            frames(&mut shell, 1, FRAME);
+            if shell.saving.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(shell.message.as_ref().map(|(m, _)| m.as_str()), Some("screenshot saved"));
+        assert_eq!(count(), before + 2, "at the panel's size and twice it");
+    }
+
+    #[test]
+    fn standby_dims_turns_the_screen_off_and_the_waking_key_is_spent() {
+        use crate::standby::State;
+        let mut shell = shell();
+        shell.settings.screen_off = 30;
+        // Half a minute: it dims eight seconds before (the shell is two seconds old).
+        frames(&mut shell, 18 * 4, 0.25);
+        assert_eq!(shell.standby_state(), State::Awake);
+        frames(&mut shell, 4 * 4, 0.25);
+        assert_eq!(shell.standby_state(), State::Dim);
+        frames(&mut shell, 10 * 4, 0.25);
+        assert_eq!(shell.standby_state(), State::Off);
+        assert!(!shell.tick(0.25), "off and dark: nothing is drawn");
+        // Enter wakes it, and does not also open the tile in focus.
+        shell.key(Key::Enter);
+        frames(&mut shell, 30, FRAME);
+        assert_eq!((shell.standby_state(), shell.stack.len()), (State::Awake, 1));
+        // What runs in a terminal printing keeps it awake past the wait.
+        open_app(&mut shell, "Robot", "Terminal");
+        for key in [Key::Char('l'), Key::Char('s'), Key::Enter] {
+            shell.key(key);
+        }
+        frames(&mut shell, 40 * 4, 0.25);
+        assert!(shell.stack.last().unwrap().0.keeps_awake());
+        assert_eq!(shell.standby_state(), State::Awake);
     }
 }

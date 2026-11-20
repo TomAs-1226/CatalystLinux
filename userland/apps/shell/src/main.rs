@@ -49,13 +49,16 @@ mod logs;
 mod look;
 mod pty;
 mod platform;
+mod recents;
 mod remote;
 mod robot;
 mod schedule;
 mod screens;
+mod screenshot;
 mod search;
 mod setup;
 mod shell;
+mod standby;
 mod sys;
 mod sysupdate;
 mod usb;
@@ -167,6 +170,8 @@ fn settings_text(s: &shell::Settings) -> String {
         ("motion_scale", s.motion_scale.to_string()),
         ("show_keys", s.show_keys.to_string()),
         ("toured", s.toured.to_string()),
+        ("screen_off", s.screen_off.to_string()),
+        ("power", s.power.key().to_owned()),
     ];
     lines.iter().map(|(k, v)| format!("{k}={v}\n")).collect()
 }
@@ -211,6 +216,10 @@ fn parse_settings(text: &str, settings: &mut shell::Settings) {
             }
             Some(("show_keys", v)) => settings.show_keys = v == "true",
             Some(("toured", v)) => settings.toured = v == "true",
+            Some(("screen_off", v)) => {
+                settings.screen_off = v.parse::<u32>().ok().filter(|s| standby::SCREEN_OFF_CHOICES.contains(s)).unwrap_or(settings.screen_off)
+            }
+            Some(("power", v)) => settings.power = standby::Power::from_key(v).unwrap_or(settings.power),
             _ => {}
         }
     }
@@ -739,6 +748,18 @@ fn motion(dir: &std::path::Path) {
     let frames = film(&mut shell, 0.8);
     strip(&frames, &[0, 4, 7, 9, 11, 13, 15, 18, 30], dir, "5b-close-app");
 
+    // The recent apps: Ctrl-Tab over Logs, the cards rising in, Robot's
+    // offered first; Enter, and Robot grows out of its card in Logs' place.
+    let mut shell = fresh(Robot::demo());
+    press(&mut shell, &[Enter, Back, Right, Right, Enter]);
+    film(&mut shell, 0.6);
+    shell.key(Ctrl('\t'));
+    let frames = film(&mut shell, 0.8);
+    strip(&frames, &beats, dir, "5c-recent-apps");
+    shell.key(Enter);
+    let frames = film(&mut shell, 0.8);
+    strip(&frames, &beats, dir, "5d-recent-app-back");
+
     // A robot back from a match: the Logs tile pulses as the match's log
     // arrives and its warning comes with it.
     let mut shell = fresh(Robot::demo_back_from_a_match());
@@ -1067,13 +1088,75 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     shell.start_tour();
     settle(&mut shell, 60);
     save(&mut shell, "42-tour-welcome");
-    for (name, step) in [("43-tour-apps", 1), ("44-tour-back", 2), ("45-tour-island", 3), ("46-tour-pages", 4), ("47-tour-end", 7)] {
+    for (name, step) in [("43-tour-apps", 1), ("44-tour-back", 2), ("45-tour-island", 3), ("46-tour-pages", 4), ("47-tour-end", 8)] {
         while shell.tour_step() != Some(step) {
             shell.key(Enter);
         }
         settle(&mut shell, 60);
         save(&mut shell, name);
     }
+
+    // The recent apps: Robot and Logs used and left, Health in front.
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    for key in [Enter, Back, Right, Right, Enter, Back, Left, Enter] {
+        shell.key(key);
+        settle(&mut shell, 70);
+    }
+    shell.key(Ctrl(' '));
+    settle(&mut shell, 90);
+    save(&mut shell, "70-control-centre");
+    shell.key(Back);
+    settle(&mut shell, 60);
+    shell.key(Ctrl('\t'));
+    settle(&mut shell, 90);
+    assert!(shell.recents_open());
+    save(&mut shell, "71-recent-apps");
+    shell.key(Right);
+    settle(&mut shell, 60);
+    save(&mut shell, "72-recent-apps-chosen");
+    // Enter: the app grows out of its card.
+    shell.key(Enter);
+    settle(&mut shell, 6);
+    save(&mut shell, "73-recent-app-growing");
+    settle(&mut shell, 90);
+    // Up lets one go: it rises away as the others close up.
+    shell.key(Ctrl('\t'));
+    settle(&mut shell, 60);
+    shell.key(Up);
+    settle(&mut shell, 7);
+    save(&mut shell, "74-recent-app-let-go");
+    settle(&mut shell, 60);
+    shell.key(Back);
+    settle(&mut shell, 60);
+    // A screenshot from the control centre: a flash, then the island.
+    shell.key(Ctrl(' '));
+    settle(&mut shell, 90);
+    shell.key(Char('s'));
+    settle(&mut shell, 4);
+    save(&mut shell, "75-screenshot-flash");
+    // It is saved on a thread of its own, in real time; then the island says so.
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    settle(&mut shell, 75);
+    save(&mut shell, "76-screenshot-saved");
+    // Settings › Display: the screen off after a minute, the processor balanced.
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    let keys = std::iter::repeat_n(Right, steps_to("Settings")).chain([Enter, Down, Down, Down, Down, Enter, Down, Down, Down]);
+    for key in keys {
+        shell.key(key);
+        settle(&mut shell, 40);
+    }
+    save(&mut shell, "77-display-standby");
+    // Standby, dimmed (on a computer the picture dims; on the handheld, the backlight).
+    shell.key(Back);
+    settle(&mut shell, 60);
+    shell.settings.screen_off = 30;
+    settle(&mut shell, 60 * 24);
+    assert_eq!(shell.standby_state(), standby::State::Dim);
+    save(&mut shell, "78-standby-dimmed");
     println!("{} screens in {}, {frames} frames at {:.2} ms each", tour.len() + apps.len() + 22, dir.display(), started.elapsed().as_secs_f64() * 1e3 / frames as f64);
 }
 
@@ -1335,6 +1418,7 @@ mod tests {
         (s.clock24, s.seconds, s.island, s.greeting) = (false, true, shell::IslandRest::Battery, false);
         (s.robot_name, s.gpu) = (Some("atlas".into()), false);
         (s.developer, s.motion_scale, s.show_keys, s.toured) = (true, 5.0, true, true);
+        (s.screen_off, s.power) = (300, standby::Power::Saving);
         let saved = settings_text(&s);
         assert!(saved != settings_text(&shell::Settings::default()), "every one of these differs from the default");
         let mut back = shell::Settings::default();

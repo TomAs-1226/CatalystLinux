@@ -4,7 +4,8 @@
 //!
 //! It is a sheet of glass that drops from the top on a spring and can be
 //! turned back at any point. The switches' knobs slide, and the brightness
-//! bar glides to its level.
+//! bar glides to its level. Along its foot, two actions: the recent apps,
+//! and a screenshot of the screen beneath (R and S while it is down).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -16,7 +17,7 @@ use crate::platform::Key;
 use crate::shell::Settings;
 
 /// Where the sheet rests when it is down.
-pub const SHEET: Rect = Rect { x: 8.0, y: 5.0, w: W - 16.0, h: 122.0 };
+pub const SHEET: Rect = Rect { x: 8.0, y: 5.0, w: W - 16.0, h: 159.0 };
 pub const SHEET_RADIUS: f32 = 18.0;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -26,9 +27,33 @@ enum Item {
     Light,
     Calm,
     Brightness,
+    Recents,
+    Screenshot,
 }
 
-const ITEMS: [Item; 5] = [Item::Wifi, Item::Ssh, Item::Light, Item::Calm, Item::Brightness];
+/// In rows: two switches, two switches, the brightness bar, two actions.
+const ITEMS: [Item; 7] = [Item::Wifi, Item::Ssh, Item::Light, Item::Calm, Item::Brightness, Item::Recents, Item::Screenshot];
+
+/// Each item's row and column.
+fn place(at: usize) -> (usize, usize) {
+    match at {
+        0..=3 => (at / 2, at % 2),
+        4 => (2, 0),
+        _ => (3, at - 5),
+    }
+}
+
+/// The item at a row and column (the brightness bar spans its row).
+fn at(row: usize, col: usize) -> usize {
+    match row {
+        0 | 1 => row * 2 + col,
+        2 => 4,
+        _ => 5 + col,
+    }
+}
+
+/// The actions along the sheet's foot: icon, name, and the key for each.
+const ACTIONS: [(&str, &str, &str); 2] = [("history", "Recents", "r"), ("photo_camera", "Screenshot", "s")];
 
 /// Off the handheld there is no radio or SSH server to switch: these stand in.
 static DEMO_SSH: AtomicBool = AtomicBool::new(false);
@@ -64,6 +89,10 @@ pub enum Outcome {
     Nothing,
     /// A setting changed: apply and save it.
     Settings,
+    /// The recent apps, in place of the sheet.
+    Recents,
+    /// A screenshot of the screen beneath, as the sheet goes.
+    Screenshot,
 }
 
 impl Control {
@@ -123,13 +152,18 @@ impl Control {
     /// A key while the sheet is down. `None` means "put it away".
     pub fn key(&mut self, key: Key, settings: &mut Settings) -> Option<Outcome> {
         let item = ITEMS[self.focus];
-        let (row, col) = (self.focus / 2, self.focus % 2);
+        let (row, col) = place(self.focus);
         match key {
             Key::Back | Key::Leave | Key::Ctrl(' ') => return None,
             // Up past the top row pushes the sheet back where it came from.
             Key::Up if row == 0 => return None,
-            Key::Up => self.focus = if item == Item::Brightness { 2 } else { self.focus - 2 },
-            Key::Down if row < 2 => self.focus = (self.focus + 2).min(4),
+            Key::Up => self.focus = at(row - 1, col),
+            Key::Down if row < 3 => self.focus = at(row + 1, col),
+            // The two actions have keys of their own while the sheet is down.
+            Key::Char('r') => return Some(Outcome::Recents),
+            Key::Char('s') => return Some(Outcome::Screenshot),
+            Key::Enter | Key::Char(' ') if item == Item::Recents => return Some(Outcome::Recents),
+            Key::Enter | Key::Char(' ') if item == Item::Screenshot => return Some(Outcome::Screenshot),
             Key::Left | Key::Right if item == Item::Brightness => {
                 let step = if key == Key::Left { -10 } else { 10 };
                 self.level = (self.level as i32 + step).clamp(10, 100) as u32;
@@ -173,7 +207,7 @@ impl Control {
                 settings.calm = !settings.calm;
                 Outcome::Settings
             }
-            Item::Brightness => Outcome::Nothing,
+            Item::Brightness | Item::Recents | Item::Screenshot => Outcome::Nothing,
         };
         let states = self.states(settings);
             for (knob, on) in self.knobs.iter_mut().zip(states) {
@@ -230,7 +264,7 @@ impl Control {
                 focus_rect = Some((r, 12.0));
             }
         }
-        let r = Rect::new(inner.x, inner.y + 2.0 * (th + gap), inner.w, inner.bottom() - inner.y - 2.0 * (th + gap));
+        let r = Rect::new(inner.x, inner.y + 2.0 * (th + gap), inner.w, th);
         g.canvas.rrect(r, 12.0, t.surface1, 0.72);
         g.icon("lightbulb", true, r.x + 16.0, r.cy(), 16.0, t.dim);
         let value = format!("{}%", self.level);
@@ -239,6 +273,19 @@ impl Control {
         g.meter(Rect::new(r.x + 32.0, r.cy() - 3.0, r.w - 50.0 - value_w, 6.0), self.bar.value(), t.ice);
         if self.focus == 4 {
             focus_rect = Some((r, 12.0));
+        }
+        // The two actions, each with the key that does it while the sheet is down.
+        for (i, (icon, name, key)) in ACTIONS.iter().enumerate() {
+            let r = Rect::new(inner.x + i as f32 * (tw + gap), inner.y + 3.0 * (th + gap), tw, th);
+            g.canvas.rrect(r, 12.0, t.surface1, 0.72);
+            g.icon(icon, false, r.x + 16.0, r.cy(), 16.0, t.ink);
+            g.text_fit(r.x + 30.0, r.cy(), name, ty.body, t.ink, r.w - 30.0 - 26.0);
+            let cap = Rect::new(r.right() - 22.0, r.cy() - 7.5, 14.0, 15.0);
+            g.canvas.rrect(cap, 4.0, t.surface2, 0.9);
+            g.text_at(cap.cx(), r.cy(), Align::Center, key, ty.caption, t.dim);
+            if self.focus == 5 + i {
+                focus_rect = Some((r, 12.0));
+            }
         }
         if let Some((r, radius)) = focus_rect {
             // The ring glides between switches, and rides down with the sheet:
@@ -320,5 +367,45 @@ mod tests {
         c.key(Key::Up, &mut s);
         assert!(c.key(Key::Up, &mut s).is_none());
         assert!(c.key(Key::Back, &mut s).is_none());
+    }
+
+    #[test]
+    fn the_foot_of_the_sheet_has_the_recent_apps_and_a_screenshot() {
+        let mut s = settings();
+        let mut c = Control::new();
+        c.set_open(true, &s);
+        // Down past the brightness bar to Recents; right to Screenshot.
+        for key in [Key::Down, Key::Down, Key::Down] {
+            c.key(key, &mut s);
+        }
+        assert!(matches!(c.key(Key::Enter, &mut s), Some(Outcome::Recents)));
+        c.key(Key::Right, &mut s);
+        assert!(matches!(c.key(Key::Enter, &mut s), Some(Outcome::Screenshot)));
+        // Up from there: the bar, then the switches.
+        c.key(Key::Up, &mut s);
+        assert_eq!(c.focus, 4);
+        c.key(Key::Up, &mut s);
+        assert_eq!(c.focus, 2);
+        // Their keys work from anywhere on the sheet.
+        assert!(matches!(c.key(Key::Char('r'), &mut s), Some(Outcome::Recents)));
+        assert!(matches!(c.key(Key::Char('s'), &mut s), Some(Outcome::Screenshot)));
+    }
+
+    #[test]
+    fn every_name_on_the_sheet_fits() {
+        let mut g = Gfx::new(bezel::Tokens::dark());
+        let tw = (SHEET.inset(8.0).w - 5.0) * 0.5;
+        for size in [crate::gfx::TextSize::Standard, crate::gfx::TextSize::Large] {
+            g.set_text_size(size);
+            let body = g.ty.body;
+            for (_, name, _) in ACTIONS {
+                assert!(g.measure(name, body) <= tw - 56.0, "{name}");
+            }
+            for name in ["Wi-Fi", "SSH", "Light", "Calm"] {
+                assert!(g.measure(name, body) <= tw - 66.0, "{name}");
+            }
+        }
+        // The sheet, its four rows, rests on the panel.
+        assert!(SHEET.bottom() <= crate::gfx::H - 4.0);
     }
 }

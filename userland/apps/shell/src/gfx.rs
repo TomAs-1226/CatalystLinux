@@ -134,6 +134,10 @@ pub struct Gfx {
     pub developer: bool,
     pub motion_scale: f32,
     pub show_keys: bool,
+    /// Standby: seconds with no key before the screen goes off (0 never),
+    /// and the processor's speed choice.
+    pub screen_off: u32,
+    pub power: crate::standby::Power,
     /// The look chosen, its theme on its own for brevity, what every corner
     /// is multiplied by, and tiles across Home.
     pub look: crate::look::Look,
@@ -220,6 +224,8 @@ impl Gfx {
             developer: false,
             motion_scale: 1.0,
             show_keys: false,
+            screen_off: 60,
+            power: crate::standby::Power::Balanced,
             look: crate::look::Look::default(),
             theme: crate::look::Theme::Catalyst,
             corner: 1.0,

@@ -75,8 +75,8 @@ Arrow keys or `F` `X` `Z` `C` (the keys that carry the arrows on the
 Cardputer) move, Enter opens, Esc goes back. On Home, Left and Right go
 through the apps in order (on to the next row, and the next page), Up and
 Down within a page. Space on Home searches.
-Ctrl-Space brings the control centre down over any screen; Left from Home's
-first tile is the glance page. `?` held for five seconds on any screen that
+Ctrl-Space brings the control centre down over any screen, and Ctrl-Tab the
+recent apps; Left from Home's first tile is the glance page. `?` held for five seconds on any screen that
 is not taking text brings up the list of shortcuts (the island counts down
 from the first second; a `?` typed in passing does nothing). The window
 shows what the panel shows: 16-bit colour, dithered as on the device.
@@ -223,11 +223,66 @@ two together: no robot at first, then the demo one, back from a match.
 
 The **control centre** is a sheet of glass that drops from the top over
 whatever is showing: Wi-Fi, SSH, light or dark, the calm version, and
-brightness. Ctrl-Space brings it down from any screen, a terminal included
-(so does the Opt key, if the keyboard reports one), and Up from the top of
-Home pulls it down too. Esc, Ctrl-Space again, or Up from its top row puts it
-away. The screen behind is held still while it is out, so the glass is worked
-out once and moved as a picture.
+brightness, with two actions along its foot, Recents and Screenshot (R and S
+while it is down). Ctrl-Space brings it down from any screen, a terminal
+included (so does the Opt key, if the keyboard reports one), and Up from the
+top of Home pulls it down too. Esc, Ctrl-Space again, or Up from its top row
+puts it away. The screen behind is held still while it is out, so the glass
+is worked out once and moved as a picture.
+
+## Recent apps
+
+An app left is kept alive just as it was: its pages, its place in a list, a
+terminal's session. The last six are kept, one card an app; an older one is
+let go as a new one comes.
+
+- **Ctrl-Tab** (or Recents in the control centre) brings up the **recent
+  apps** over any screen, a terminal included: no program in a terminal can
+  be sent Ctrl-Tab, so it takes nothing from one. The screen in front fades
+  into the wallpaper as the cards rise in: a tonal card for each app with the
+  picture it last showed, the chosen one in the middle in the focus ring, the
+  others sitting back beside it.
+- The app before the one in front is offered first, so **Ctrl-Tab, Enter**
+  goes back and forth between two. Left and Right (or Tab, or Ctrl-Tab again)
+  choose; **Enter** brings an app back growing out of its card (the card's
+  picture melting into the app as it grows), in place of the one in front,
+  which joins the recent apps; **Up** (or Backspace, the handheld's Del) lets
+  one go, rising away as the others close up; Esc puts the cards away.
+- An app **opened again from Home** comes back as it was too, as Android
+  brings a task back, rather than as a new copy.
+- Memory stays small: a card's picture is the panel at 0.425 (39 kB).
+
+## Screenshots
+
+Screenshot in the control centre (or S while it is down) saves the screen
+beneath the sheet, not the sheet: a flash, and the island says when it is
+saved. Each is saved twice, as PNG: at the panel's own size, pixel for pixel,
+and at twice that, for looking at on a phone or putting in a document.
+They go in `/data/screenshots` on the handheld (Files opens onto `/data`), or
+`screenshots` beside the settings on a computer. Saving is done on a thread
+of its own, so no frame waits for it.
+
+## Standby and power saving
+
+After a while with no key, the screen **dims** (eight seconds before it would
+go off), then goes **off**: the backlight fades down and out, and nothing more
+is drawn or sent to the panel. **Any key wakes it**, and is spent doing so (it
+does not also open or move something); a robot plugged in wakes it too.
+Settings › Display:
+
+- **Screen off after**: 30 seconds, 1 minute (the default), 2, 5, or never.
+- **Processor**: *balanced* (fast when there is work, slow when not:
+  `schedutil` or `ondemand`), *power saving* (`conservative`, or
+  `powersave`), or *performance*. While the screen is off the processor runs
+  at its slowest (`powersave`), whatever is chosen. The kernel's own
+  governors, so only on the handheld.
+
+A screen with something to watch keeps it awake while it shows (the hook is
+`Screen::keeps_awake`): an app's program running in a terminal, and the login
+shell while what runs in it is printing (a build, a log being followed), for
+a minute after it last printed. On battery, Settings › About › Status shows
+how long the battery has left, when the fuel gauge can say. On a computer,
+with no backlight to dim, the picture itself dims.
 
 ## Looks
 
@@ -814,8 +869,8 @@ analysis, the camera, audio.
 
 Chosen so far, not yet built: scripting with a kit for writing Bezel apps (so
 an external app can draw like a built-in one); an SSH client and serial
-console; a network toolkit; a system monitor; standby and power saving; a
-pit checklist and match timer; a robot finder; the AI log analysis.
+console; a network toolkit; a system monitor; a pit checklist and match
+timer; a robot finder; the AI log analysis.
 
 Added since, also not yet built:
 
@@ -826,14 +881,15 @@ Added since, also not yet built:
 - For the pit: QR codes for a match summary or an address.
 - For development: an HTTP tester; a hex viewer and programmer's calculator;
   saved commands run in the terminal with one key; a serial plotter.
-- For the system: an app switcher; screenshots; sounds on the speaker, with a
-  mute switch in the control centre; a lock screen with a PIN.
+- For the system: sounds on the speaker, with a mute switch in the control
+  centre; a lock screen with a PIN.
 
 Built since: the post-match report, the code version check, the event
 schedule, search, the app catalogue, git, the glance page's cards, first-boot
 setup (on the handheld or from a computer) and the start animation; then the
 themes and looks, Home's arrangement, clock, island and greeting, the
-personal start, the new motion, and the GPU.
+personal start, the new motion, and the GPU; then the recent apps (an app
+switcher), screenshots, and standby and power saving.
 
 ## Third-party pieces
 

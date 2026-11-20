@@ -234,6 +234,17 @@ impl Screen for Reader {
         !self.paused
     }
 
+    /// While the picture is live, someone is aiming the camera.
+    fn keeps_awake(&self) -> bool {
+        !self.paused
+    }
+
+    /// Not kept among recent apps: leaving it stops the camera, which would
+    /// otherwise go on running unseen.
+    fn keep_in_recents(&self) -> bool {
+        false
+    }
+
     fn tick(&mut self, _dt: f32) -> bool {
         if self.paused {
             return false;
