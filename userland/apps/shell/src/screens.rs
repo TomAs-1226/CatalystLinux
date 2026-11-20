@@ -490,17 +490,15 @@ impl Home {
     fn grid_key(&mut self, key: Key, calm: bool) -> bool {
         let (columns, per_page, count) = (self.columns, self.per_page(), self.count());
         let page = self.focus / per_page;
-        let local = self.focus % per_page;
-        let (col, row) = (local % columns, local / columns);
+        let row = (self.focus % per_page) / columns;
         let page_end = ((page + 1) * per_page).min(count);
         match key {
-            Key::Left if col > 0 => self.focus -= 1,
-            // Past the edge of the grid is the next page; past the first page, the glance page.
-            Key::Left if page > 0 => self.focus = (page - 1) * per_page + row * columns + columns - 1,
+            // Left and Right go through the apps in order: past a row's end to
+            // the next row, past a page's last tile to the next page (which
+            // turns), and before the first app to the glance page.
+            Key::Left if self.focus > 0 => self.focus -= 1,
             Key::Left => self.show_glance(true, calm),
-            Key::Right if col + 1 < columns && self.focus + 1 < page_end => self.focus += 1,
-            // The same row on the next page, or its first tile if that row is not there.
-            Key::Right if page_end < count => self.focus = if page_end + row * columns < count { page_end + row * columns } else { page_end },
+            Key::Right if self.focus + 1 < count => self.focus += 1,
             Key::Right => return true,
             Key::Up if row > 0 => self.focus -= columns,
             Key::Down if self.focus + columns < page_end => self.focus += columns,
@@ -2696,6 +2694,36 @@ mod tests {
         // Back as it came.
         home.arrange(&arrangement(&[], &[], &[]));
         assert_eq!(names(&home), all);
+    }
+
+    #[test]
+    fn left_and_right_go_through_home_apps_in_order() {
+        let mut home = Home::new();
+        let (columns, per_page, count) = (home.columns, home.per_page(), home.count());
+        assert!(count > per_page, "more than one page of apps");
+        // Right at the end of a row goes on to the next row, not the next page.
+        home.focus = columns - 1;
+        assert!(!home.grid_key(Key::Right, false));
+        assert_eq!(home.focus, columns);
+        // Left at the start of a row goes back to the end of the row before.
+        home.grid_key(Key::Left, false);
+        assert_eq!(home.focus, columns - 1);
+        // From a page's last tile on to the next page's first, and back.
+        home.focus = per_page - 1;
+        home.grid_key(Key::Right, false);
+        assert_eq!(home.focus, per_page);
+        home.grid_key(Key::Left, false);
+        assert_eq!(home.focus, per_page - 1);
+        // Past the last app, Right pushes against the edge.
+        home.focus = count - 1;
+        assert!(home.grid_key(Key::Right, false));
+        assert_eq!(home.focus, count - 1);
+        // Up and Down stay within the page, column by column.
+        home.focus = 1;
+        home.grid_key(Key::Down, false);
+        assert_eq!(home.focus, 1 + columns);
+        home.grid_key(Key::Up, false);
+        assert_eq!(home.focus, 1);
     }
 
     #[test]

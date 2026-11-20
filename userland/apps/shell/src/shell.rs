@@ -1780,9 +1780,11 @@ mod tests {
     fn the_control_centre_comes_down_over_any_screen_and_takes_the_keys() {
         let mut shell = shell();
         // Over the Terminal, which otherwise takes every key for its program.
-        for key in [Key::Right, Key::Right, Key::Right, Key::Right, Key::Right, Key::Enter] {
-            shell.key(key);
+        let terminal = crate::screens::builtin_apps().position(|(_, _, name)| name == "Terminal").unwrap();
+        for _ in 0..terminal {
+            shell.key(Key::Right);
         }
+        shell.key(Key::Enter);
         frames(&mut shell, 120, FRAME);
         assert_eq!(shell.stack.last().unwrap().0.title(), "Terminal");
         shell.key(Key::Ctrl(' '));
@@ -2058,8 +2060,25 @@ mod tests {
     }
 
     #[test]
+    fn setup_in_the_simulator_saves_the_team_but_keeps_the_demo_robot() {
+        let mut shell = shell();
+        assert!(shell.robot.is_demo());
+        shell.start_setup();
+        frames(&mut shell, 30, FRAME);
+        shell.key(Key::Enter);
+        for c in "5805".chars() {
+            shell.key(Key::Char(c));
+        }
+        shell.key(Key::Enter);
+        assert_eq!(std::fs::read_to_string(crate::config_path()).unwrap(), "5805", "the team is saved");
+        assert!(shell.robot.is_demo(), "and the demo robot still stands in for it");
+    }
+
+    #[test]
     fn first_start_sets_the_handheld_up_and_gives_way_to_home() {
         let mut shell = shell();
+        // A handheld out of the box: no robot yet.
+        shell.robot = Robot::none();
         shell.start_setup();
         frames(&mut shell, 30, FRAME);
         assert_eq!(title(&shell), "Setup");

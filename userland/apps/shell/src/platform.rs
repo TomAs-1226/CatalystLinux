@@ -439,6 +439,35 @@ pub mod sim {
         }
     }
 
+    /// How long the computer's screen shows each picture (1000 ÷ its refresh
+    /// rate), or a 60 Hz screen's when the screen cannot be asked.
+    pub fn screen_frame_ms() -> f32 {
+        let hz = refresh_hz().filter(|hz| (30..=500).contains(hz)).unwrap_or(60);
+        1000.0 / hz as f32
+    }
+
+    #[cfg(windows)]
+    fn refresh_hz() -> Option<u32> {
+        #[link(name = "user32")]
+        extern "system" {
+            fn EnumDisplaySettingsW(device: *const u16, mode: u32, devmode: *mut u32) -> i32;
+        }
+        const ENUM_CURRENT_SETTINGS: u32 = u32::MAX;
+        // A DEVMODEW (220 bytes) as words: dmSize is the low half of word 17
+        // (byte 68), dmDisplayFrequency word 46 (byte 184).
+        let mut mode = [0u32; 55];
+        mode[17] = 220;
+        // SAFETY: a DEVMODEW-sized, aligned buffer with its size filled in, as
+        // the call asks; null names the screen this program is on.
+        let ok = unsafe { EnumDisplaySettingsW(std::ptr::null(), ENUM_CURRENT_SETTINGS, mode.as_mut_ptr()) };
+        (ok != 0).then_some(mode[46])
+    }
+
+    #[cfg(not(windows))]
+    fn refresh_hz() -> Option<u32> {
+        None
+    }
+
     /// Catalyst's icon on the window and its taskbar button, from the
     /// program's own resources (`build.rs` puts it there; a test build has none,
     /// and keeps Windows' plain one).

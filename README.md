@@ -47,21 +47,23 @@ Settings, or read from a file.
 ## Try it on any Windows PC
 
 Download **[catalyst-sim.exe](https://github.com/TomAs-1226/CatalystLinux/releases/latest/download/catalyst-sim.exe)**
-from the newest release and double-click it. The simulator opens with a demo
-robot, at the handheld's estimated speed, starting with first-boot setup as a
-new handheld does. It is one file with nothing to install: its fonts, icons
-and C runtime are inside it. What it saves (settings, the robot's address,
-keys) goes in `%LOCALAPPDATA%\CatalystLinux`. It is not signed, so Windows
-may stop it the first time: *More info*, then *Run anyway*. From a terminal it
-takes the shell's own options: `--no-intro`, `--setup`, `--light`,
-`--speed pc`, `--robot 5805`, `--arrive 5`.
+from the newest release and double-click it. The simulator opens on the demo
+robot every time (a team number typed in setup is saved but the demo stays),
+starting with first-boot setup as a new handheld does, and runs at the PC's
+full speed in step with its screen. It is one file with nothing to install:
+its fonts, icons and C runtime are inside it. What it saves (settings, the
+robot's address, keys) goes in `%LOCALAPPDATA%\CatalystLinux`. It is not
+signed, so Windows may stop it the first time: *More info*, then *Run
+anyway*. From a terminal it takes the shell's own options: `--no-intro`,
+`--setup`, `--light`, `--speed device` (paced as the handheld, see below),
+`--robot 5805` (a real robot instead of the demo), `--arrive 5`.
 
 ## Try the UI on this PC
 
 ```powershell
 .\scripts\run-sim.ps1               # the panel at 4x, a demo robot, at the handheld's estimated speed
 .\scripts\run-sim.ps1 -Speed worse  # slower than the handheld, to see whether it still holds up
-.\scripts\run-sim.ps1 -Speed pc     # as fast as this PC goes
+.\scripts\run-sim.ps1 -Speed pc     # as fast as this PC goes, in step with its screen
 .\scripts\run-sim.ps1 -Robot 5805   # a real robot: team number, IP or hostname
 .\scripts\run-sim.ps1 -Setup        # first-boot setup, as on a new handheld
 .\scripts\run-sim.ps1 -Arrive 5     # the demo robot plugged in, back from a match, after 5 s
@@ -69,12 +71,16 @@ takes the shell's own options: `--no-intro`, `--setup`, `--light`,
 ```
 
 Arrow keys or `F` `X` `Z` `C` (the keys that carry the arrows on the
-Cardputer) move, Enter opens, Esc goes back. Space on Home searches.
+Cardputer) move, Enter opens, Esc goes back. On Home, Left and Right go
+through the apps in order (on to the next row, and the next page), Up and
+Down within a page. Space on Home searches.
 Ctrl-Space brings the control centre down over any screen; Left from Home's
 first tile is the glance page. The window shows what the panel shows: 16-bit
 colour, dithered as on the device.
 
-The simulator holds itself to the handheld's speed: the processor work is
+At `-Speed pc` (and in the packed simulator) frames keep time with the PC's
+screen, 60 a second on most. Otherwise the simulator holds itself to the
+handheld's speed, which is at most 40 frames a second: the processor work is
 stretched 20 times (40 at `worse`) and each frame waits 15 ms (25) for the
 panel, and the window title shows frames per second, the cost of a frame and
 how busy the handheld's processor would be. Those factors are estimates until

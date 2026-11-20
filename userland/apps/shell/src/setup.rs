@@ -205,7 +205,10 @@ impl Setup {
             return;
         }
         crate::save_robot_address(&team);
-        *cx.robot = Robot::connect(&crate::screens::resolve_address(&team));
+        // In the simulator the demo robot stands in for the team's own: keep it.
+        if !cx.robot.is_demo() {
+            *cx.robot = Robot::connect(&crate::screens::resolve_address(&team));
+        }
     }
 
     /// How many rows the page has, not counting its Next button.

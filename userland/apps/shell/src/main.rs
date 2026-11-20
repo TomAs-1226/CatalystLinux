@@ -22,8 +22,9 @@
 //! ```
 //!
 //! Built with the `packed` feature (each release's `catalyst-sim.exe`), it is
-//! the simulator for a computer with nothing installed: started with nothing,
-//! it opens the window at the handheld's speed with the demo robot.
+//! the simulator for a computer with nothing installed: it always opens the
+//! window, on the demo robot, at the computer's full speed in step with its
+//! screen (`--speed device` for the handheld's pacing).
 
 // The packed simulator is a windowed program on Windows: double-clicked, no
 // console comes up beside it.
@@ -263,16 +264,13 @@ fn main() {
     #[cfg(all(windows, feature = "packed"))]
     attach_console();
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    // The packed simulator is always the simulator, at the handheld's
-    // estimated speed unless told another: double-clicked, or started from a
-    // terminal with options of its own (`--no-intro`, `--light`).
-    if cfg!(feature = "packed") {
-        if !args.iter().any(|a| a == "--sim") {
-            args.push("--sim".into());
-        }
-        if !args.iter().any(|a| a == "--speed") {
-            args.extend(["--speed".into(), "device".into()]);
-        }
+    // The packed simulator is always the simulator, double-clicked or started
+    // from a terminal with options of its own (`--no-intro`, `--light`). It
+    // runs at the computer's full speed, in step with its screen, unless asked
+    // for the handheld's pacing (`--speed device`), which is only an estimate
+    // scaled from the computer it runs on.
+    if cfg!(feature = "packed") && !args.iter().any(|a| a == "--sim") {
+        args.push("--sim".into());
     }
     let flag = |name: &str| args.iter().any(|a| a == name);
     let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
@@ -287,7 +285,9 @@ fn main() {
         }
     }
 
-    let saved = std::fs::read_to_string(config_path()).ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
+    // The packed simulator starts on the demo robot every time, whatever
+    // address setup or Settings saved; `--robot` connects a real one.
+    let saved = std::fs::read_to_string(config_path()).ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).filter(|_| !cfg!(feature = "packed"));
     // The demo robot plugged in a while after start, to see what its arrival does.
     let mut arrive = value("--arrive").and_then(|s| s.parse::<f32>().ok()).map(|s| Instant::now() + Duration::from_secs_f32(s.max(0.0)));
     let robot = match (flag("--demo"), value("--robot").or(saved)) {
@@ -369,6 +369,17 @@ fn main() {
         shell.start_intro(if flag("--setup") || !setup_done() { "let's get you set up".to_owned() } else { start_caption(&shell) });
     }
     let speed = Speed::named(value("--speed").as_deref());
+    // The simulator at full speed keeps time with the computer's own screen
+    // (60 pictures a second on most), where the handheld's beat of 40 would
+    // land unevenly on its refreshes and judder. Paced as the handheld
+    // (`--speed device`), it keeps the handheld's beat.
+    #[cfg(not(target_arch = "aarch64"))]
+    let mut beat = if flag("--sim") && speed.cpu <= 1.0 && std::env::var_os("CATALYST_FRAME_MS").is_none() {
+        Beat::every(platform::sim::screen_frame_ms())
+    } else {
+        Beat::new()
+    };
+    #[cfg(target_arch = "aarch64")]
     let mut beat = Beat::new();
     let mut meter = Meter::default();
     let perf = flag("--perf");
@@ -436,7 +447,8 @@ fn main() {
 /// Frames evenly spaced look smooth; frames that alternate fast and slow do
 /// not, however good their average. So the beat is the fastest of a few
 /// steady rates that the handheld is actually holding: 40 frames a second
-/// (25 ms, or `CATALYST_FRAME_MS`), then 30, 20 and 10. One late frame is
+/// (25 ms, or `CATALYST_FRAME_MS`), then 30, 20 and 10; the simulator at full
+/// speed starts from the computer's screen rate instead. One late frame is
 /// let go: it takes an extra beat and the rhythm carries on. A second soon
 /// after means the beat is too fast, and it steps down. It steps back up only
 /// after a long run of frames with room to spare, so it settles rather than
@@ -451,9 +463,15 @@ struct Beat {
 }
 
 impl Beat {
+    /// The handheld's beat: 25 ms, or `CATALYST_FRAME_MS`.
     fn new() -> Beat {
         let ms = std::env::var("CATALYST_FRAME_MS").ok().and_then(|v| v.parse::<f32>().ok()).filter(|ms| (5.0..=100.0).contains(ms)).unwrap_or(25.0);
-        let base = Duration::from_secs_f32(ms / 1000.0);
+        Beat::every(ms)
+    }
+
+    /// A beat whose fastest rate is a frame every `ms`.
+    fn every(ms: f32) -> Beat {
+        let base = Duration::from_secs_f32(ms.clamp(4.0, 100.0) / 1000.0);
         Beat { steps: [base, base.mul_f32(4.0 / 3.0), base * 2, base * 4], level: 0, roomy: 0, since_late: u32::MAX }
     }
 
@@ -604,7 +622,7 @@ fn looks(dir: &std::path::Path) {
         platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}-robot.png")), 3);
         shell.key(Back);
         settle(&mut shell, 120);
-        for key in [Right, Right, Right, Right, Right, Right, Enter, Down, Enter, Down, Down, Down] {
+        for key in std::iter::repeat_n(Right, steps_to("Settings")).chain([Enter, Down, Enter, Down, Down, Down]) {
             shell.key(key);
             settle(&mut shell, 60);
         }
@@ -674,7 +692,8 @@ fn motion(dir: &std::path::Path) {
 
     // Settings growing out of its tile, its rows rising inside the window.
     let mut shell = fresh(Robot::demo());
-    press(&mut shell, &[Right, Right, Right, Right, Right, Right]);
+    let to_settings = vec![Right; steps_to("Settings")];
+    press(&mut shell, &to_settings);
     shell.key(Enter);
     let frames = film(&mut shell, 1.0);
     strip(&frames, &beats, dir, "1-open-settings");
@@ -713,7 +732,8 @@ fn motion(dir: &std::path::Path) {
 
     // Settings › Home, Arrange apps, and Home arranged.
     let mut shell = fresh(Robot::demo());
-    press(&mut shell, &[Right, Right, Right, Right, Right, Right, Enter, Down, Down, Down, Enter]);
+    press(&mut shell, &to_settings);
+    press(&mut shell, &[Enter, Down, Down, Down, Enter]);
     still(&mut shell, dir, "7-settings-home");
     press(&mut shell, &[Down, Down, Down, Down, Down, Down, Down]);
     still(&mut shell, dir, "8-settings-home-end");
@@ -721,13 +741,15 @@ fn motion(dir: &std::path::Path) {
     // Schedule moved to the front; Tables hidden; Logs a favourite, so first of all.
     press(&mut shell, &[Down, Down, Down, Left, Left, Left, Down, Down, Down, Down, Enter, Up, Char(' ')]);
     still(&mut shell, dir, "9-arrange-apps");
-    // Home, arranged so, from its first page of apps.
-    press(&mut shell, &[Back, Back, Back, Left, Left, Left, Left, Left]);
+    // Home, arranged so, from its first page of apps: back from Settings (the
+    // twelfth tile now, Tables hidden) to the fourth.
+    press(&mut shell, &[Back, Back, Back, Left, Left, Left, Left, Left, Left, Left, Left]);
     still(&mut shell, dir, "10-home-arranged");
 
     // Settings › Display: brightness, and what draws (here, the processor).
     let mut shell = fresh(Robot::demo());
-    press(&mut shell, &[Right, Right, Right, Right, Right, Right, Enter, Down, Down, Down, Down, Enter, Down]);
+    press(&mut shell, &to_settings);
+    press(&mut shell, &[Enter, Down, Down, Down, Down, Enter, Down]);
     still(&mut shell, dir, "14-settings-display");
 
     // Settings › System update, part-way through installing (a pretend status).
@@ -735,7 +757,8 @@ fn motion(dir: &std::path::Path) {
     std::fs::create_dir_all(&update_dir).ok();
     std::fs::write(update_dir.join("status.json"), r#"{"state":"installing","version":"0.3.0","progress":0.46,"detail":"","size":6800000,"checked":0,"notes":"faster glass, favourites"}"#).ok();
     let mut shell = fresh(Robot::demo());
-    press(&mut shell, &[Right, Right, Right, Right, Right, Right, Enter, Down, Down, Down, Down, Down, Down, Down, Down, Enter]);
+    press(&mut shell, &to_settings);
+    press(&mut shell, &[Enter, Down, Down, Down, Down, Down, Down, Down, Down, Enter]);
     still(&mut shell, dir, "15-system-update");
     std::fs::write(update_dir.join("status.json"), r#"{"state":"ready","version":"0.3.0","progress":1.0,"detail":"","size":6800000,"checked":0,"notes":"faster glass, favourites"}"#).ok();
     // The page reads it again every two seconds, of real time.
@@ -781,12 +804,12 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
         ("05-tables-elevator", &[Down, Down, Enter]),
         ("06-loop", &[Back, Back, Right, Enter]),
         ("06b-schedule", &[Back, Left, Left, Enter]),
-        ("07-motors", &[Back, Right, Right, Right, Up, Enter, Down]),
+        ("07-motors", &[Back, Right, Right, Right, Enter, Down]),
         ("08-console", &[Back, Right, Enter]),
         ("08b-terminal", &[Back, Right, Enter, Char('l'), Char('s'), Enter, Char('c'), Char('o'), Char('l'), Char('o'), Char('r'), Char('s'), Enter, Char('u'), Char('n'), Char('a'), Char('m'), Char('e'), Enter]),
         ("08c-files", &[Ctrl('q'), Down, Left, Left, Enter]),
         ("08d-editor", &[Down, Down, Enter, Down, Down, Right, Right, Right, Right]),
-        ("09-settings", &[Ctrl('q'), Back, Up, Right, Right, Right, Enter]),
+        ("09-settings", &[Ctrl('q'), Back, Right, Right, Right, Enter]),
         ("09b-appearance", &[Down, Enter]),
         ("09c-light-blue", &[Down, Enter, Down, Enter, Enter]),
         ("09d-network", &[Back, Down, Down, Down, Down, Enter]),
@@ -903,7 +926,8 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     save(&mut shell, "21-robot-arriving");
     settle(&mut shell, 60 * 5);
     save(&mut shell, "21b-match-report");
-    for key in [Back, Back, Right, Right, Right, Right, Right, Enter, Enter] {
+    let keys = [Back, Back].into_iter().chain(std::iter::repeat_n(Right, steps_to("Settings"))).chain([Enter, Enter]);
+    for key in keys {
         shell.key(key);
         settle(&mut shell, 90);
     }
@@ -941,13 +965,20 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
         settle(&mut shell, 40);
     }
     save(&mut shell, "32-search");
-    // Git, with no repositories yet: Terminal's tile, down, then left.
-    for key in [Back, Back, Right, Right, Right, Right, Right, Down, Left, Enter] {
+    // Git, with no repositories yet.
+    let keys = [Back, Back].into_iter().chain(std::iter::repeat_n(Right, steps_to("Git"))).chain([Enter]);
+    for key in keys {
         shell.key(key);
         settle(&mut shell, 60);
     }
     save(&mut shell, "33-git");
     println!("{} screens in {}, {frames} frames at {:.2} ms each", tour.len() + apps.len() + 22, dir.display(), started.elapsed().as_secs_f64() * 1e3 / frames as f64);
+}
+
+/// Home's tiles come in the order of the built-in apps, and Left and Right go
+/// through them in turn: from the first tile, this many Rights reach `name`.
+fn steps_to(name: &str) -> usize {
+    screens::builtin_apps().position(|(_, _, n)| n == name).expect("a built-in app")
 }
 
 /// Draw every screen repeatedly without a display, to time the renderer and
@@ -1136,6 +1167,7 @@ fn smooth(mut shell: Shell) {
     // the key that sets it off, the key that undoes it, and whether to leave
     // it done. They begin on Home with the Settings tile focused (Settings is
     // an app with pages inside it) and run in order.
+    let to_first = vec![Left; steps_to("Settings")];
     let steps: [(&[Key], &str, Key, Key, bool); 10] = [
         (&[], "app opens", Enter, Back, true),
         (&[], "app closes", Back, Enter, true),
@@ -1149,14 +1181,14 @@ fn smooth(mut shell: Shell) {
         // Home again, on the Settings tile: left is the page before.
         (&[Back, Back], "home page turns", Left, Right, false),
         // To the first tile of the first page: left again is the glance page.
-        (&[Left, Left, Left, Left, Left, Left], "glance slides in", Left, Right, false),
+        (&to_first, "glance slides in", Left, Right, false),
     ];
     for name in ["device", "worse"] {
         let speed = Speed::named(Some(name));
         let mut beat = Beat::new();
         // Home, the Settings tile focused: first on the third page.
-        for key in [Right, Right, Right, Right, Right, Right] {
-            shell.key(key);
+        for _ in 0..steps_to("Settings") {
+            shell.key(Right);
         }
         settle(&mut shell);
         println!("{}: processor x{}, panel {} ms a full frame", speed.name, speed.cpu, speed.panel.as_millis());
