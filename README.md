@@ -463,6 +463,57 @@ What deep standby still draws is mostly the processor idling (it has no
 suspend), its memory, and the 5 V boost converter feeding the board. For
 days, slide the switch off.
 
+## StandBy and the lock screen
+
+**StandBy.** On the charger and left alone, the screen dims as ever, and
+where it would go off a StandBy face comes up instead; set down on the
+charger with the screen off (or in deep standby, within the minute), it
+comes up at once. Six faces, designed for this panel in the spirit of
+Bezel's standby scapes (`faces.rs`): a large clock (digits, a Braun-style
+dial with a second hand stepping into each second, or a dot matrix), the
+time with the charge and when it will be full, the team's next match and
+those after it, the weather and the next hours, photos from the album, and
+a little of everything. ↑↓ turn the faces (the page spring, rubber-banding
+at either end, the page dots tucking away 2.5 s after the last key), ←→
+their style (or the photo); any other key leaves, and is spent doing so.
+Nothing blinks: the time's changed digits roll into place, the charge ring
+glides. From 10 pm to 7 am (by the clock: the board has no light sensor)
+every face turns a deep red monochrome and the backlight comes down to 40%
+of its brightness, over three seconds. Everything drifts a few pixels on a
+slow path against burn-in. While it shows, frames come at 30 a second at
+most and only while something moves, a face is drawn again only when what
+it shows changes, the processor is at its saving pace, and only the panel's
+changed rows are sent. Off the charger it goes dark as the screen would
+have, and deep standby's wait runs from then; on the charger the screen is
+never dark, so deep standby never begins. Settings › StandBy switches it
+off, or night, and shows it now (off the charger too).
+
+**The lock screen.** None by default: a key wakes the handheld straight to
+where it was. With a passcode (Settings › Lock screen: digits, or a word of
+up to 24 letters, digits and signs), the handheld starts locked, and locks
+whenever the screen has gone off or StandBy has come; the next wake shows
+the lock screen. It takes every key before anything else in the shell can
+(the recent apps, the control centre, Spotlight, every shortcut), nothing
+beneath it is drawn, no app is handed the panel, and Show key presses
+leaves passcodes out. A wrong passcode shakes the field; from the fifth in
+a row each try waits longer (30 s, 1 min, 5, 15, then an hour), across
+restarts too. Its look is the user's own: Settings › Lock screen ›
+Customise is the lock screen itself, live, with the clock (centre, stacked,
+dots), its colour, and what shows with it (the date, the charge, the next
+match, notices, the next reminder). Notices said while it is locked are
+kept: the lock screen says how many (their words only if Settings › Lock
+screen › Notices on it says so), and the island says them once it opens.
+
+The passcode is kept only as an Argon2id hash (19 MiB, two passes, a random
+salt) in `/data/catalyst/passcode`, readable by root alone. It is checked on
+a thread of its own; it is timed as it is made, and a handheld that took
+longer than 260 ms makes it again at the largest lower cost that fits, so
+unlocking stays under about 300 ms. It keeps out someone at
+the keys; it does not cover SSH, the setup page a computer opens, or the
+card itself. Forgotten, it comes off with `rm /data/catalyst/passcode` over
+SSH, or from the card on a Linux computer. `catalyst-shell --passcode-bench`
+says what a check takes on the handheld.
+
 ## Battery
 
 Settings › Battery has:

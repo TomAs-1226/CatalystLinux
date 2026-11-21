@@ -7,6 +7,9 @@
 //! catalyst-shell --bench         draw 600 frames off screen; print time and memory
 //! catalyst-shell --smooth        how even the frames of each transition are, at the
 //!                                handheld's estimated speed and at worse
+//! catalyst-shell --passcode-bench   what making and checking the lock screen's
+//!                                passcode takes on this processor
+//! catalyst-shell --standby-shots <dir>   StandBy's faces and the lock screen, to PNG
 //!     --robot <team|ip|host>     robot to connect to (overrides the saved one)
 //!     --demo                     a scripted robot instead of a real one
 //!     --arrive <seconds>         the scripted robot, plugged in that long after start
@@ -47,6 +50,7 @@ mod connect;
 mod control;
 mod deep;
 mod device;
+mod faces;
 mod files;
 mod gfx;
 mod git;
@@ -66,12 +70,15 @@ mod keys;
 mod lights;
 mod level;
 mod local;
+mod lock;
+mod lockpages;
 mod logs;
 mod look;
 mod monitor;
 mod nettools;
 mod notes;
 mod panel;
+mod passcode;
 mod photos;
 mod pit;
 mod power;
@@ -97,6 +104,7 @@ mod terminal;
 mod tools;
 mod trends;
 mod units;
+mod upnext;
 mod weather;
 mod wifi;
 mod wpilog;
@@ -210,7 +218,7 @@ fn settings_text(s: &shell::Settings) -> String {
         ("face_down", s.face_down.to_string()),
         ("brightness", s.brightness.to_string()),
     ];
-    lines.iter().chain(s.battery.lines().iter()).map(|(k, v)| format!("{k}={v}\n")).collect()
+    lines.iter().chain(s.battery.lines().iter()).chain(s.lock.lines().iter()).map(|(k, v)| format!("{k}={v}\n")).collect()
 }
 
 fn load_settings(settings: &mut shell::Settings) {
@@ -222,7 +230,7 @@ fn load_settings(settings: &mut shell::Settings) {
 /// Read settings from their file's text; anything not understood is left as it was.
 fn parse_settings(text: &str, settings: &mut shell::Settings) {
     for line in text.lines() {
-        if line.split_once('=').is_some_and(|(k, v)| settings.battery.parse(k, v)) {
+        if line.split_once('=').is_some_and(|(k, v)| settings.battery.parse(k, v) || settings.lock.parse(k, v)) {
             continue;
         }
         match line.split_once('=') {
@@ -340,6 +348,11 @@ fn main() {
     }
     let flag = |name: &str| args.iter().any(|a| a == name);
     let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    // What making and checking the lock screen's passcode takes here.
+    if flag("--passcode-bench") {
+        println!("{}", passcode::bench());
+        return;
+    }
 
     // The simulator on a computer saves in the user's folder unless told otherwise.
     if flag("--sim") && std::env::var_os("CATALYST_CONF").is_none() {
@@ -390,6 +403,10 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--shots") {
         return shots(shell, std::path::Path::new(&dir));
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--standby-shots") {
+        return standby_shots(std::path::Path::new(&dir));
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--looks") {
@@ -489,7 +506,7 @@ fn main() {
             platform.panel_sleep(false);
             panel_asleep = false;
         }
-        beat.set_floor(shell.saving().then_some(power::SAVER_FRAME_MS));
+        beat.set_floor(shell.frame_floor());
         if moving && Instant::now() < next_frame {
             continue;
         }
@@ -2353,6 +2370,340 @@ fn robot_tables(robot: &Robot) -> Vec<String> {
     let mut tables: Vec<String> = robot.under("").into_iter().filter_map(|(k, _)| k.split_once('/').map(|(t, _)| t.to_owned())).collect();
     tables.dedup();
     tables
+}
+
+/// StandBy's faces (by day, at night, in light mode, turning), the lock
+/// screen (waiting, typed into, wrong, shaking, waiting out, opening, each
+/// face and colour, with notices), and their Settings pages, the passcode's
+/// steps and the editor: all as the simulator draws them, at 9:41.
+#[cfg(not(target_arch = "aarch64"))]
+fn standby_shots(dir: &std::path::Path) {
+    use Key::*;
+    std::fs::create_dir_all(dir).expect("create the screenshot folder");
+    tour_fixtures();
+    photos::seed_demo();
+    upnext::set_reminders(upnext::demo_reminder);
+    let morning = chrono::NaiveDate::from_ymd_opt(2026, 11, 21).and_then(|d| d.and_hms_opt(9, 41, 0));
+    faces::pretend_time(morning);
+    let settle = |shell: &mut Shell, frames: usize| {
+        for _ in 0..frames {
+            if shell.tick(1.0 / 60.0) {
+                shell.draw();
+            }
+        }
+    };
+    let save = |shell: &mut Shell, name: &str| {
+        shell.draw();
+        platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}.png")), 3);
+        println!("{name}");
+    };
+    let fresh = |light: bool| {
+        let mut shell = Shell::new(Robot::demo());
+        shell.settings.light = light;
+        shell.apply_settings();
+        shell
+    };
+    // Left on the charger: the screen dims, then StandBy comes.
+    let to_standby = |shell: &mut Shell| {
+        shell.pretend_charger(Some(true));
+        shell.settings.screen_off = 30;
+        for _ in 0..32 {
+            shell.tick(1.0);
+        }
+        settle(shell, 120);
+        assert!(shell.faces_showing(), "StandBy on the charger");
+    };
+    let mut shell = fresh(false);
+    settle(&mut shell, 100);
+    to_standby(&mut shell);
+    save(&mut shell, "01-clock-digits");
+    // The pager tucks away 2.5 s after the last key.
+    shell.key(Right);
+    settle(&mut shell, 8);
+    save(&mut shell, "02-clock-style-turning");
+    settle(&mut shell, 200);
+    save(&mut shell, "03-clock-dial");
+    shell.key(Right);
+    settle(&mut shell, 200);
+    save(&mut shell, "04-clock-dots");
+    shell.key(Left);
+    shell.key(Left);
+    settle(&mut shell, 60);
+    for name in ["05-charge", "06-next-match", "07-weather", "08-photos", "09-everything"] {
+        shell.key(Down);
+        settle(&mut shell, if name == "08-photos" { 30 } else { 200 });
+        if name == "08-photos" {
+            // The photo is decoded on a thread of its own.
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            settle(&mut shell, 200);
+        }
+        save(&mut shell, name);
+    }
+    // Past the last face: a give, and back.
+    shell.key(Down);
+    settle(&mut shell, 5);
+    save(&mut shell, "10-rubber-band-at-the-end");
+    settle(&mut shell, 60);
+    shell.key(Up);
+    settle(&mut shell, 9);
+    save(&mut shell, "11-turning-between-faces");
+    settle(&mut shell, 200);
+    // Night: red, and the light down (the simulator dims the picture itself).
+    for _ in 0..5 {
+        shell.key(Up);
+    }
+    settle(&mut shell, 200);
+    faces::pretend_time(chrono::NaiveDate::from_ymd_opt(2026, 11, 21).and_then(|d| d.and_hms_opt(23, 18, 0)));
+    for _ in 0..6 {
+        shell.tick(1.0);
+    }
+    settle(&mut shell, 300);
+    save(&mut shell, "12-night-clock");
+    shell.key(Right);
+    settle(&mut shell, 200);
+    save(&mut shell, "13-night-dial-resting");
+    shell.key(Left);
+    for _ in 0..5 {
+        shell.key(Down);
+    }
+    settle(&mut shell, 300);
+    save(&mut shell, "14-night-everything");
+    faces::pretend_time(morning);
+    // Light mode is its own design: StandBy goes light too.
+    let mut shell = fresh(true);
+    shell.settings.lock.face = lock::Face::Clock;
+    settle(&mut shell, 100);
+    to_standby(&mut shell);
+    save(&mut shell, "15-light-clock");
+    shell.key(Down);
+    settle(&mut shell, 200);
+    save(&mut shell, "16-light-charge");
+
+    // The lock screen: a passcode set, so it starts locked.
+    let (phc, _, _) = passcode::make("2468").expect("hashes");
+    passcode::keep(&phc).expect("kept");
+    let mut shell = fresh(false);
+    shell.settings.lock.face = lock::Face::Clock;
+    settle(&mut shell, 120);
+    assert!(shell.locked());
+    save(&mut shell, "20-lock-screen");
+    for c in "24".chars() {
+        shell.key(Char(c));
+    }
+    settle(&mut shell, 4);
+    save(&mut shell, "21-lock-typing-dots-growing");
+    settle(&mut shell, 60);
+    save(&mut shell, "22-lock-typed");
+    for c in "99".chars() {
+        shell.key(Char(c));
+    }
+    shell.key(Enter);
+    settle(&mut shell, 2);
+    save(&mut shell, "23-lock-checking");
+    while shell.checking_passcode() {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        settle(&mut shell, 1);
+    }
+    settle(&mut shell, 4);
+    save(&mut shell, "24-lock-wrong-shaking");
+    settle(&mut shell, 90);
+    save(&mut shell, "25-lock-wrong");
+    // Four more wrong: a wait.
+    for wrong in ["1111", "2222", "3333", "4444"] {
+        for c in wrong.chars() {
+            shell.key(Char(c));
+        }
+        shell.key(Enter);
+        while shell.checking_passcode() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            settle(&mut shell, 1);
+        }
+        settle(&mut shell, 90);
+        if wrong == "3333" {
+            save(&mut shell, "25b-lock-one-more-before-a-wait");
+        }
+    }
+    save(&mut shell, "26-lock-wait");
+    // Kept again: the wrong tries forgotten.
+    passcode::keep(&phc).expect("kept");
+    let mut shell = fresh(false);
+    settle(&mut shell, 120);
+    shell.say("time to queue for Q31");
+    shell.say("timer done · 5:00");
+    settle(&mut shell, 200);
+    save(&mut shell, "27-lock-notices");
+    shell.settings.lock.previews = true;
+    shell.apply_settings();
+    settle(&mut shell, 60);
+    save(&mut shell, "28-lock-notice-words");
+    shell.settings.lock.previews = false;
+    for (name, face, colour) in [("29-lock-stacked-ice", lock::LockFace::Stacked, lock::LockColour::Ice), ("30-lock-dots-amber", lock::LockFace::Dots, lock::LockColour::Amber), ("31-lock-centre-accent", lock::LockFace::Centre, lock::LockColour::Accent)] {
+        (shell.settings.lock.lock_face, shell.settings.lock.colour) = (face, colour);
+        shell.apply_settings();
+        settle(&mut shell, 30);
+        save(&mut shell, name);
+    }
+    (shell.settings.lock.lock_face, shell.settings.lock.colour) = (lock::LockFace::Centre, lock::LockColour::White);
+    shell.apply_settings();
+    // The right one: it lifts away, over where it was.
+    for c in "2468".chars() {
+        shell.key(Char(c));
+    }
+    shell.key(Enter);
+    while shell.checking_passcode() {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        settle(&mut shell, 1);
+    }
+    settle(&mut shell, 9);
+    save(&mut shell, "32-lock-opening");
+    settle(&mut shell, 120);
+    save(&mut shell, "33-unlocked-notices-said");
+    // The larger text, and the light mode.
+    let mut shell = fresh(true);
+    settle(&mut shell, 120);
+    save(&mut shell, "34-lock-light");
+    let mut shell = fresh(false);
+    shell.settings.text = gfx::TextSize::Large;
+    shell.apply_settings();
+    settle(&mut shell, 120);
+    save(&mut shell, "35-lock-large-text");
+    // StandBy with a passcode: leaving it is the lock screen.
+    let mut shell = fresh(false);
+    settle(&mut shell, 60);
+    for c in "2468".chars() {
+        shell.key(Char(c));
+    }
+    shell.key(Enter);
+    while shell.checking_passcode() {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        settle(&mut shell, 1);
+    }
+    settle(&mut shell, 120);
+    to_standby(&mut shell);
+    shell.key(Char(' '));
+    settle(&mut shell, 12);
+    save(&mut shell, "36-standby-giving-way-to-the-lock");
+    settle(&mut shell, 120);
+
+    // Settings: the two new sections, Lock screen, the passcode's steps,
+    // the editor, StandBy.
+    let mut shell = fresh(false);
+    settle(&mut shell, 60);
+    for c in "2468".chars() {
+        shell.key(Char(c));
+    }
+    shell.key(Enter);
+    while shell.checking_passcode() {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        settle(&mut shell, 1);
+    }
+    settle(&mut shell, 120);
+    let to_settings = std::iter::repeat_n(Right, steps_to("Settings")).chain([Enter]).chain(std::iter::repeat_n(Down, screens::settings_row("Lock screen")));
+    for key in to_settings {
+        shell.key(key);
+        settle(&mut shell, 40);
+    }
+    settle(&mut shell, 60);
+    save(&mut shell, "40-settings-list");
+    shell.key(Enter);
+    settle(&mut shell, 90);
+    save(&mut shell, "41-settings-lock-screen");
+    for _ in 0..4 {
+        shell.key(Down);
+        settle(&mut shell, 30);
+    }
+    settle(&mut shell, 60);
+    save(&mut shell, "42-settings-lock-screen-note");
+    for _ in 0..4 {
+        shell.key(Up);
+        settle(&mut shell, 20);
+    }
+    shell.key(Enter);
+    settle(&mut shell, 90);
+    save(&mut shell, "43-passcode-current");
+    for c in "2468".chars() {
+        shell.key(Char(c));
+    }
+    shell.key(Enter);
+    while shell.checking_passcode() {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        settle(&mut shell, 1);
+    }
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        settle(&mut shell, 2);
+    }
+    save(&mut shell, "44-passcode-new");
+    for c in "hunt".chars() {
+        shell.key(Char(c));
+    }
+    settle(&mut shell, 60);
+    shell.key(Enter);
+    settle(&mut shell, 60);
+    save(&mut shell, "45-passcode-again");
+    for c in "hung".chars() {
+        shell.key(Char(c));
+    }
+    shell.key(Enter);
+    settle(&mut shell, 5);
+    save(&mut shell, "46-passcode-not-the-same-shaking");
+    settle(&mut shell, 50);
+    save(&mut shell, "46b-passcode-not-the-same");
+    settle(&mut shell, 60);
+    shell.key(Back);
+    settle(&mut shell, 90);
+    // Customise: the lock screen itself, live.
+    shell.key(Down);
+    settle(&mut shell, 20);
+    shell.key(Down);
+    settle(&mut shell, 20);
+    shell.key(Enter);
+    settle(&mut shell, 120);
+    save(&mut shell, "47-editor-clock");
+    shell.key(Right);
+    settle(&mut shell, 60);
+    save(&mut shell, "48-editor-clock-stacked");
+    shell.key(Down);
+    shell.key(Right);
+    settle(&mut shell, 60);
+    save(&mut shell, "49-editor-colour-ice");
+    for _ in 0..3 {
+        shell.key(Down);
+    }
+    shell.key(Left);
+    settle(&mut shell, 60);
+    save(&mut shell, "50-editor-match-hidden");
+    shell.key(Right);
+    shell.key(Up);
+    shell.key(Up);
+    shell.key(Up);
+    shell.key(Left);
+    shell.key(Up);
+    shell.key(Left);
+    settle(&mut shell, 30);
+    shell.key(Back);
+    settle(&mut shell, 90);
+    shell.key(Back);
+    settle(&mut shell, 90);
+    shell.key(Down);
+    settle(&mut shell, 40);
+    shell.key(Enter);
+    settle(&mut shell, 90);
+    save(&mut shell, "51-settings-standby");
+    for _ in 0..3 {
+        shell.key(Down);
+        settle(&mut shell, 20);
+    }
+    settle(&mut shell, 40);
+    save(&mut shell, "52-settings-standby-note");
+    shell.key(Up);
+    settle(&mut shell, 20);
+    shell.key(Enter);
+    settle(&mut shell, 200);
+    save(&mut shell, "53-standby-shown-now");
+    passcode::remove().ok();
+    faces::pretend_time(None);
+    println!("StandBy and lock screen shots in {}", dir.display());
 }
 
 /// Home's tiles come in the order of the built-in apps, and Left and Right go
