@@ -17,6 +17,7 @@ the first section (this introduction) is not shown.
 - Before the assistant runs anything that could change something, a page shows it in full and asks you to confirm.
 - Everything the assistant runs is kept in /data/assistant, with its output.
 - Actions has 26 built-in commands for the robot, the network and the handheld.
+- Web: pages as text with lynx, from a start page of searches and FRC sites. links is in the Terminal too.
 - Weather: now, the next 24 hours and the week, from Open-Meteo. No key needed.
 - Update logs: what's new before an update installs, once after it does, and every version's notes in About › Update history.
 - OpenAI and Claude keys in Settings › Keys, on the handheld's setup and on the page for setting up from a computer.
@@ -30,6 +31,9 @@ the first section (this introduction) is not shown.
 - Setup from a computer: sending the form works, and the handheld shows each item arriving.
 - Setup from a computer goes on to the keyboard lesson and the handheld's own pages.
 - Graphs has its icon again.
+- The tear-free panel (a developer option) truly waits for the panel's refresh now, and runs at 60 Hz again.
+- Lower voltage restarts to try it, says what the processor was given, and backs off by itself if it hangs.
+- Display › Graphics says what draws, and why.
 
 ## 0.4.0 · 20 Nov 2026
 

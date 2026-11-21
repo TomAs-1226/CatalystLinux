@@ -83,6 +83,10 @@ BR2_PACKAGE_JQ=y
 BR2_PACKAGE_STRACE=y
 BR2_PACKAGE_I2C_TOOLS=y
 BR2_PACKAGE_PICOCOM=y
+# Text web browsers for the Terminal and the Web app: a few MB, no
+# JavaScript, keyboard first; HTTPS through the OpenSSL Python already uses.
+BR2_PACKAGE_LYNX=y
+BR2_PACKAGE_LINKS=y
 # The Terminal says it is an xterm, which ncurses describes; tmux's own
 # descriptions too, for what runs inside it.
 BR2_PACKAGE_NCURSES_ADDITIONAL_TERMINFO="t/tmux t/tmux-256color"

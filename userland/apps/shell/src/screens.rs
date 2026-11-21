@@ -52,7 +52,7 @@ struct App {
     open: fn(&Robot) -> Box<dyn Screen>,
 }
 
-const APPS: [App; 25] = [
+const APPS: [App; 26] = [
     App { icon: "smart_toy", name: "Robot", open: |_| Box::new(RobotScreen::default()) },
     App { icon: "monitor_heart", name: "Health", open: |_| Box::new(Health::default()) },
     App { icon: "description", name: "Logs", open: |_| Box::new(LogsScreen::default()) },
@@ -77,6 +77,12 @@ const APPS: [App; 25] = [
     App { icon: "explore", name: "Compass", open: |_| Box::new(crate::level::Compass::new()) },
     App { icon: "sunny", name: "Weather", open: |_| Box::new(crate::weather::Weather::new()) },
     App { icon: "auto_awesome", name: "Assistant", open: |_| Box::new(crate::ai::Assistant::new()) },
+    // Pages as text: lynx in a terminal, on a start page of searches and FRC sites.
+    App {
+        icon: "language",
+        name: "Web",
+        open: |_| Box::new(crate::terminal::Terminal::running("Web", "lynx -accept_all_cookies -nopause file:///usr/share/catalyst/web.html", crate::connect::session_dir())),
+    },
     App { icon: "settings", name: "Settings", open: |_| Box::new(SettingsApp::new()) },
 ];
 
@@ -442,6 +448,7 @@ impl Home {
             "Compass" => ("heading".into(), None),
             "Weather" => crate::weather::tile(),
             "Assistant" => crate::ai::tile(),
+            "Web" => ("pages as text".into(), None),
             "Logs" => {
                 let rows = robot.logs.list();
                 let worst = rows.iter().filter_map(|r| r.digest.as_ref()).map(|d| d.headline().0).min();
@@ -3181,9 +3188,9 @@ mod tests {
                 look(&mut home, &mut g);
             }
         }
-        // Every built-in app as it opens (not those that start a shell or the
-        // camera; their icons are on Home's tiles above).
-        for app in APPS.iter().filter(|a| !matches!(a.name, "Terminal" | "AprilTag")) {
+        // Every built-in app as it opens (not those that start a shell, a
+        // browser or the camera; their icons are on Home's tiles above).
+        for app in APPS.iter().filter(|a| !matches!(a.name, "Terminal" | "Web" | "AprilTag")) {
             look((app.open)(&robot).as_mut(), &mut g);
         }
         // Settings and each of its pages.
@@ -3298,7 +3305,7 @@ mod tests {
         pretend(Some(Found::Nothing));
         let shown = builtin(&Home::new());
         assert!(!shown.iter().any(|n| n == "Level" || n == "Compass"), "{shown:?}");
-        assert_eq!(shown.len(), 23, "the twenty-three the emulator's run counts on (Remote, Weather and Assistant are on every unit)");
+        assert_eq!(shown.len(), 24, "the twenty-four the emulator's run counts on (Remote, Weather, Assistant and Web are on every unit)");
         assert_eq!(shown.last().map(String::as_str), Some("Settings"), "Settings stays last");
         assert_eq!(builtin_apps().position(|(_, _, n)| n == "Terminal"), Some(8), "Terminal where it was");
         assert!(!builtin_apps().any(|(_, _, n)| n == "Level"), "nor in search");
