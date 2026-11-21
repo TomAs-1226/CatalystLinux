@@ -363,8 +363,9 @@ picture itself dims. Where there is a motion sensor, picking the handheld up
 wakes it for a look and laying it face down puts it out (see *Level, Compass
 and the motion sensor*).
 
-**Deep standby.** The CM0's chip has no suspend-to-RAM, so standby means
-switching off everything that can be. Once the screen is off and dark:
+**What standby switches off.** The CM0's chip has no suspend-to-RAM, so
+standby means switching off everything that can be. Once the screen is off
+and dark (and, half an hour on, deep standby goes further: see below):
 
 - the panel itself sleeps: the framebuffer is blanked, and a patch to
   M5Stack's panel driver sends the ST7789 display-off and sleep-in (enabling
@@ -381,6 +382,86 @@ wakes on a cable or a packet. ifplugd reads the link from the interface's
 own flags (`-m iff`), so it never wakes the chip to ask. The speaker
 amplifier is held off from the first instant (`gpio=24=op,dl`). Wi-Fi's
 own power save is on, which is brcmfmac's default.
+
+## Deep standby
+
+After half an hour with no key (Settings › Battery › Deep standby: 10
+minutes, 30, an hour, or never), with the screen already off, the handheld
+goes as near off as it can while a key can still wake it. It is not off:
+the CM0 has no suspend-to-RAM and its cores cannot be taken offline, the
+board has no power-management chip, the clock chip's alarm line is not
+wired, and only the slide switch cuts the power. So deep standby is
+everything a key does not need, switched off, in this order, each undone in
+the reverse order on waking (`deep.rs`, and `catalyst-power deep on|off`):
+
+1. **Polling stops.** The robot's link is let go (its client otherwise
+   tries ten times a second with no robot there), and every thread that
+   looks in on something (the robot's logs, the event schedule, an open
+   Wi-Fi, agent or setup page) waits on a condition variable, with no
+   wakeups at all. Update checks and the weather wait for the next look,
+   as nothing ticks.
+2. **The motion sensor stops watching**: no lift to wake. Its interrupt is
+   not usable here, and polling it would spend what deep standby saves.
+3. **The keyboard's three lights go out**, and come back as they were (a
+   modifier pressed meanwhile stands).
+4. **`catalyst-power deep on`**, on a thread of its own: Wi-Fi stopped and
+   its driver unloaded (if it was on), any other radio blocked (Bluetooth
+   is off from boot, `disable-bt`), the USB host stopped by unbinding dwc2
+   so the hub and the Ethernet chip go quiet (not while a USB mode has the
+   handheld as a computer's device), the Grove and HAT 5 V outputs off, and
+   the red light dark. What it switched off is noted in `/run/catalyst-deep`
+   and `deep off` brings back just that; a shell that starts and finds the
+   note (the last one stopped while deep) runs `deep off` itself.
+5. **The shell waits a minute at a time** for a key, with a second of timer
+   slack so the kernel can fold that wakeup in with another.
+
+Standby has already put the panel to sleep, the backlight out and the
+processor at its lowest speed (`powersave`).
+
+**Waking.** Any key on the handheld's keyboard wakes it, and is spent:
+neither it nor its repeats while held reach an app. The screen comes on at
+once; Wi-Fi comes back in the background over a few seconds. The island
+says how long it slept and what it drew on average ("slept 7 h 12 m · about
+0.68 W"), from the BQ27220's readings taken once a minute while it slept,
+weighted by time, or from the charge it lost when there were too few; on
+the charger it says so instead. Settings › Battery › Last sleep keeps the
+last one, and Settings › Battery › Deep standby (Enter) gives the measured
+draw in place of the estimate once there is one.
+
+What deep standby cannot do: wake by itself (for a robot, a message, or the
+time to queue for a match: the schedule is not watched meanwhile), or wake
+on a USB keyboard, a robot or computer plugged in, a lift, or a network
+packet: only the keyboard is watched. So it is not entered
+while a robot is linked, a computer has the handheld as its device, someone
+is logged in over SSH, an update is being checked, downloaded or installed,
+a Clock timer is running, or a screenshot is being saved; and anything that
+keeps the screen awake keeps it out too. Low-battery care still runs once a
+minute: at 5% the screen wakes to count down and turn off cleanly.
+Tailscale is left as it was set (with Wi-Fi off it has no network anyway).
+
+**The reminder.** Twelve hours in, or at 10%, on battery, the red light
+blinks once a minute for 150 ms: still on, slide the switch off. The
+kernel's LED timer trigger blinks it, so nothing wakes for it; at a few mA
+for a quarter of a percent of the time it costs well under 0.1 mW. On the
+estimates below a full battery lasts 6.5 to 11 hours in deep standby, so
+the 10% blink, with something like 40 to 60 minutes left, is the one most
+will see.
+
+**What it draws.** Estimates, apart from the first line, until deep
+standby is measured on the handheld (the island and the Battery page give
+the measured figure after the first one):
+
+| State | Draw | A full battery (about 6.5 Wh) |
+|---|---|---|
+| Awake, screen on, idle | about 2 W (measured) | about 3 h |
+| Standby, screen off | 0.8–1.2 W (estimate) | 5–8 h |
+| Deep standby | 0.6–1 W (estimate) | 6.5–11 h |
+| Turned off by software (halted) | 0.3–0.5 W (estimate) | 13–20 h, and it needs the switch to start again |
+| The switch off | 10–60 µA (estimate) | months |
+
+What deep standby still draws is mostly the processor idling (it has no
+suspend), its memory, and the 5 V boost converter feeding the board. For
+days, slide the switch off.
 
 ## Battery
 
@@ -408,6 +489,10 @@ Its choices:
   Plugging in keeps it on, and Esc puts it off until 2%. Slide the switch off
   afterwards: a software power-off leaves the switch to cut the power.
 - **Wi-Fi in standby**: off after ten minutes with the screen off, or left on.
+- **Deep standby**: after 10 minutes with no key, 30 (the default), an
+  hour, or never; ←→ choose, and Enter says what it does and what it draws
+  (see *Deep standby*). Beneath the battery's own figures, **Last sleep**
+  gives the last one's length and average draw.
 - **Red light**: quiet (dark, blinking only if the kernel panics) or card
   activity, as the CM0 does by default.
 

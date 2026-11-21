@@ -357,6 +357,8 @@ fn run(shared: &Shared, team: u32) {
             if shared.stop.load(Ordering::Relaxed) {
                 return;
             }
+            // In deep standby, parked here: no wakeups until it wakes.
+            crate::deep::rest();
             std::thread::sleep(Duration::from_millis(200));
         }
     }

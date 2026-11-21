@@ -31,6 +31,8 @@ pub struct Robot {
     /// The values on the live graph, sampled whichever screen is showing.
     pub graphs: crate::graphs::Recorder,
     last_generation: u64,
+    /// Deep standby let the link go: made again as it wakes.
+    paused: bool,
 }
 
 impl Robot {
@@ -43,7 +45,31 @@ impl Robot {
             schedule: crate::schedule::Schedule::none(),
             graphs: crate::graphs::Recorder::default(),
             last_generation: u64::MAX,
+            paused: false,
         }
+    }
+
+    /// Deep standby: the link to the robot let go, so its thread stops
+    /// trying to reach one (ten tries a second otherwise). The demo robot
+    /// is left as it is.
+    pub fn pause(&mut self) {
+        if matches!(self.source, Source::Live(_)) {
+            self.source = Source::None;
+            self.paused = true;
+        }
+    }
+
+    /// Awake again: the link made again, to the same robot.
+    pub fn resume(&mut self) {
+        if std::mem::take(&mut self.paused) {
+            self.source = Source::Live(Client::connect(&self.address, "catalyst-linux", &[ROOT]));
+        }
+    }
+
+    /// Whether deep standby has the link let go.
+    #[cfg(test)]
+    pub fn paused(&self) -> bool {
+        self.paused
     }
 
     pub fn connect(address: &str) -> Self {
@@ -290,4 +316,26 @@ fn demo_table(t: f64) -> BTreeMap<String, Value> {
             .collect(),
     ));
     m
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deep_standby_lets_the_link_go_and_makes_it_again() {
+        crate::shell::tests::sandbox();
+        // A robot that is not there: its client keeps trying, until let go.
+        let mut robot = Robot::connect("127.0.0.1:9");
+        robot.pause();
+        assert!(robot.paused() && !robot.linked());
+        robot.resume();
+        assert!(!robot.paused());
+        assert!(matches!(robot.source, Source::Live(_)), "trying the same robot again");
+        assert_eq!(robot.address, "127.0.0.1:9");
+        // The demo robot is not let go.
+        let mut demo = Robot::demo();
+        demo.pause();
+        assert!(!demo.paused() && demo.linked());
+    }
 }

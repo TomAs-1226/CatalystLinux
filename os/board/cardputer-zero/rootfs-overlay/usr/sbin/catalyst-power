@@ -7,6 +7,9 @@
 #   catalyst-power wifi-wake      and back, if it is switched on
 #   catalyst-power undervolt try|on|off|status|confirm
 #   catalyst-power panel try|on|off|status|confirm|revert
+#   catalyst-power deep on|off|status
+#                                 deep standby: everything a key need not
+#                                 have off, and back (see deep_on)
 #   catalyst-power boot           at start: a trial that never held is undone
 #
 # Both trials are lines in config.txt, above the system block, tried before
@@ -36,6 +39,9 @@ WATCHDOG_PID=/run/catalyst-power-watchdog.pid
 # Set by the firmware (4 bytes, big-endian 1) when this start is an update
 # being tried ("0 tryboot"): catalyst-update feeds the watchdog then.
 TRYBOOT=/proc/device-tree/chosen/bootloader/tryboot
+# Where deep standby finds the hardware, and keeps what it switched off.
+SYS=/sys
+RUN=/run
 
 # Each trial: its marker line, its lines in config.txt, and its state file.
 begin_of() {
@@ -188,7 +194,114 @@ boot_trial() {
 	esac
 }
 
+# Deep standby: as near off as the handheld can be while a key can still wake
+# it. The CM0 has no suspend, and only the slide switch cuts the power, so
+# this is everything the keyboard does not need, switched off. The shell has
+# already put out the screen and the keyboard's lights, slowed the processor
+# to its least and paused its own polling; this does the rest, in this order:
+#
+#   1. Wi-Fi off, its driver unloaded (if it was running);
+#   2. any other radio blocked (Bluetooth is off from the start: disable-bt);
+#   3. the USB host stopped: the dwc2 controller unbound, so the hub and the
+#      Ethernet chip on it go quiet. Not while the handheld is a computer's
+#      device (USB mode serial, network or drive);
+#   4. the Grove and HAT 5 V outputs off;
+#   5. the red light dark.
+#
+# What each step switched off is noted in $DEEP, and `deep off` brings back
+# just that, in the reverse order. Wi-Fi comes back last, in the background:
+# it takes a few seconds, and nothing before it waits.
+DEEP=$RUN/catalyst-deep
+
+deep_on() {
+	# Already deep: what is noted is what to bring back, not what is off now.
+	[ -e "$DEEP" ] && return 0
+	mkdir -p "$RUN"
+	: >"$DEEP.new"
+	case "$(cat "$RUN/catalyst-wifi.status" 2>/dev/null)" in
+	running | starting)
+		rc-service catalyst-wifi stop >/dev/null 2>&1
+		echo wifi >>"$DEEP.new"
+		;;
+	esac
+	for r in "$SYS"/class/rfkill/rfkill*; do
+		[ -e "$r/soft" ] || continue
+		if [ "$(cat "$r/soft")" = 0 ] && echo 1 >"$r/soft"; then
+			echo "radio ${r##*/}" >>"$DEEP.new"
+		fi
+	done
+	peripheral=no
+	for m in "$SYS"/firmware/devicetree/base/soc/usb@*/dr_mode; do
+		[ "$(tr -d '\000' <"$m" 2>/dev/null)" = peripheral ] && peripheral=yes
+	done
+	if [ $peripheral = no ]; then
+		for d in "$SYS"/bus/platform/drivers/dwc2/*.usb; do
+			[ -e "$d" ] || continue
+			name=${d##*/}
+			# A computer has it as its device: left be.
+			[ "$(cat "$SYS/class/udc/$name/state" 2>/dev/null)" = configured ] && continue
+			if echo "$name" >"$SYS/bus/platform/drivers/dwc2/unbind"; then
+				echo "usb $name" >>"$DEEP.new"
+			fi
+		done
+	fi
+	for led in grove_5v_out ext_5v_out; do
+		b=$SYS/class/leds/$led/brightness
+		[ -e "$b" ] || continue
+		level=$(cat "$b")
+		if [ "$level" != 0 ] && echo 0 >"$b"; then
+			echo "out $led $level" >>"$DEEP.new"
+		fi
+	done
+	for led in ACT led0; do
+		d=$SYS/class/leds/$led
+		[ -e "$d/trigger" ] || continue
+		trigger=$(sed -n 's/.*\[\([^]]*\)\].*/\1/p' "$d/trigger")
+		echo "red $led ${trigger:-none} $(cat "$d/brightness")" >>"$DEEP.new"
+		# Brightness 0 first: it lets go of any trigger (a card access
+		# could light it between the two writes otherwise).
+		echo 0 >"$d/brightness"
+		echo none >"$d/trigger"
+		break
+	done
+	mv "$DEEP.new" "$DEEP"
+}
+
+deep_off() {
+	[ -e "$DEEP" ] || return 0
+	# The noted steps, last first.
+	awk '{ line[NR] = $0 } END { for (i = NR; i > 0; i--) print line[i] }' "$DEEP" | while read -r what name value extra; do
+		case "$what" in
+		red)
+			d=$SYS/class/leds/$name
+			echo "$value" >"$d/trigger"
+			[ "$value" = none ] && echo "$extra" >"$d/brightness"
+			;;
+		out) echo "$value" >"$SYS/class/leds/$name/brightness" ;;
+		usb) echo "$name" >"$SYS/bus/platform/drivers/dwc2/bind" ;;
+		radio) [ -e "$SYS/class/rfkill/$name/soft" ] && echo 0 >"$SYS/class/rfkill/$name/soft" ;;
+		wifi)
+			if [ -e /data/catalyst/wifi-enabled ]; then
+				(rc-service catalyst-wifi start >/dev/null 2>&1 &)
+			fi
+			;;
+		esac
+	done
+	rm -f "$DEEP"
+}
+
 case "$1" in
+deep)
+	case "$2" in
+	on) deep_on ;;
+	off) deep_off ;;
+	status) if [ -e "$DEEP" ]; then echo on; else echo off; fi ;;
+	*)
+		echo "usage: $0 deep on|off|status" >&2
+		exit 2
+		;;
+	esac
+	;;
 wifi-sleep)
 	rc-service catalyst-wifi stop >/dev/null 2>&1
 	;;
@@ -231,7 +344,7 @@ boot)
 	boot_trial panel
 	;;
 *)
-	echo "usage: $0 wifi-sleep|wifi-wake|undervolt ...|panel ...|boot" >&2
+	echo "usage: $0 wifi-sleep|wifi-wake|undervolt ...|panel ...|deep ...|boot" >&2
 	exit 2
 	;;
 esac

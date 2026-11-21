@@ -2145,7 +2145,7 @@ fn glance_items(order: &[Widget]) -> Vec<Item> {
 
 /// Where everything in Settings is, for search: what it is called, the
 /// section it is in, and its place there (none: the section itself).
-const SETTING_PLACES: [(&str, Item, Option<usize>); 62] = [
+const SETTING_PLACES: [(&str, Item, Option<usize>); 63] = [
     ("Robot settings", Item::RobotSection, None),
     ("Open Robot on link", Item::RobotSection, Some(0)),
     ("Match report after a match", Item::RobotSection, Some(1)),
@@ -2179,7 +2179,8 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 62] = [
     ("Battery", Item::BatterySection, None),
     ("Battery saver", Item::BatterySection, Some(0)),
     ("Turn off at 5%", Item::BatterySection, Some(2)),
-    ("Red light", Item::BatterySection, Some(4)),
+    ("Deep standby", Item::BatterySection, Some(crate::power::DEEP_ROW)),
+    ("Red light", Item::BatterySection, Some(crate::power::DEEP_ROW + 1)),
     ("Lift to wake", Item::Display, Some(4)),
     ("Face down to sleep", Item::Display, Some(5)),
     ("Network", Item::Network, None),

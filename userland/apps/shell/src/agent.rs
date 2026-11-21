@@ -53,6 +53,8 @@ impl Agent {
                     thread_shared.generation.fetch_add(1, Ordering::Relaxed);
                     let mut waited = Duration::ZERO;
                     while waited < POLL && !thread_shared.stop.load(Ordering::Relaxed) {
+                        // In deep standby, parked here: no wakeups until it wakes.
+                        crate::deep::rest();
                         thread::sleep(Duration::from_millis(100));
                         waited += Duration::from_millis(100);
                     }

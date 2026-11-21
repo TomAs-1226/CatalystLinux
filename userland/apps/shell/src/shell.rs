@@ -601,6 +601,12 @@ pub struct Shell {
     care: crate::power::Care,
     /// The keyboard's lights, borrowed for notices and warnings.
     lights: crate::lights::Lights,
+    /// Deep standby: after a long while with the screen off, everything a
+    /// key need not have, off.
+    deep: crate::deep::Deep,
+    /// The key that woke it from deep standby, and when it last came (on
+    /// the shell's clock): held, its repeats are spent too.
+    woke_by: Option<(Key, f32)>,
     /// Matches already warned about for queueing: (match, 0 soon / 1 now).
     queue_warned: Vec<(String, u8)>,
     queue_age: f32,
@@ -608,6 +614,23 @@ pub struct Shell {
 
 /// How long before the time to queue the island says it is coming.
 const QUEUE_AHEAD: i64 = 300;
+
+/// A Clock timer is running: deep standby waits for it to be said.
+#[cfg(not(test))]
+fn timer_running() -> bool {
+    crate::clock::any_running()
+}
+
+// In the tests a stand-in: Clock's timers are shared by every test at once.
+#[cfg(test)]
+thread_local! {
+    static TIMER_RUNNING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn timer_running() -> bool {
+    TIMER_RUNNING.with(std::cell::Cell::get)
+}
 
 #[derive(Clone, Copy)]
 struct HelpHold {
@@ -725,6 +748,8 @@ impl Shell {
             standby: crate::standby::Standby::new(),
             care: crate::power::Care::new(),
             lights: crate::lights::Lights::new(),
+            deep: crate::deep::Deep::new(),
+            woke_by: None,
             queue_warned: Vec::new(),
             queue_age: 0.0,
         }
@@ -903,6 +928,21 @@ impl Shell {
     pub fn key(&mut self, key: Key) {
         self.dirty = true;
         self.last_key = std::time::Instant::now();
+        // The key that woke it from deep standby, still held: its repeats
+        // are spent too, so none reaches the app as it wakes.
+        if let Some((woke, last)) = self.woke_by.take() {
+            if key == woke && self.clock - last <= HELD_GAP {
+                self.woke_by = Some((key, self.clock));
+                return;
+            }
+        }
+        // Any key wakes it from deep standby, and is spent doing so.
+        if self.deep.on() {
+            self.standby.key();
+            self.leave_deep();
+            self.woke_by = Some((key, self.clock));
+            return;
+        }
         // A key while the screen is dimmed or off wakes it, and is spent doing so.
         if self.standby.key() {
             self.moving = true;
@@ -1379,6 +1419,22 @@ impl Shell {
 
     /// Advance time. Returns whether a frame should be drawn.
     pub fn tick(&mut self, dt: f32) -> bool {
+        // Deep standby: the shell looks in once a minute (`dt` is the time
+        // that passed), for the battery and the red light's reminder.
+        let mut dt = dt;
+        if self.deep.on() {
+            self.clock += dt;
+            self.tick_deep(dt);
+            if self.standby.asleep() {
+                return false;
+            }
+            // Woken by something other than a key (the battery running out).
+            self.leave_deep();
+            dt = dt.min(0.25);
+        }
+        if self.deep.waking() {
+            self.finish_waking();
+        }
         self.clock += dt;
         // `?` let go: its hold is over, and a countdown it left in the island goes.
         if let Some(hold) = self.help_hold.filter(|h| self.clock - h.last > HELD_GAP) {
@@ -1533,6 +1589,11 @@ impl Shell {
         }
         self.watch_update(dt);
         let changed = self.robot.refresh(dt);
+        // Deep standby, once the screen has been off long enough with no
+        // key, unless something would be cut off.
+        if self.standby.asleep() && self.deep.due(self.standby.idle(), self.settings.battery.deep_after, dt) && self.deep_blocker().is_none() {
+            self.enter_deep();
+        }
         // With the screen off and dark, nothing is drawn (or sent to the panel).
         let draw = (moving || changed || self.dirty) && !self.standby.asleep();
         self.dirty = false;
@@ -2361,24 +2422,10 @@ impl Shell {
     /// The battery and the lights, in time: the saver's rules, the
     /// warnings, turning off when empty; and the queue for the next match.
     fn tick_power(&mut self, dt: f32) {
-        use crate::power::Event;
         let asleep = self.standby.asleep();
-        let busy = matches!(self.update.state.as_str(), "checking" | "downloading" | "installing");
+        let busy = self.update_busy();
         for event in self.care.tick(dt, asleep, &mut self.settings.battery, busy) {
-            match event {
-                Event::Say(text) => self.say(text),
-                Event::Warn => self.lights.warning(),
-                Event::Saver => {
-                    self.apply_settings();
-                    crate::save_settings(&self.settings);
-                }
-                Event::Empty => {
-                    self.standby.wake_now();
-                    let card = crate::power::Empty::new(self.settings.calm);
-                    let card = if crate::power::postponed_floor(&self.care) { card.at_floor() } else { card };
-                    self.open(Box::new(card), Path::Slide);
-                }
-            }
+            self.care_event(event);
         }
         if self.standby.state() == crate::standby::State::Awake {
             self.lights.seen();
@@ -2391,6 +2438,134 @@ impl Shell {
             self.say(said);
             self.lights.warning();
         }
+    }
+
+    /// What the battery's care asks for.
+    fn care_event(&mut self, event: crate::power::Event) {
+        use crate::power::Event;
+        match event {
+            Event::Say(text) => self.say(text),
+            // In deep standby the keyboard's lights stay dark: the red
+            // light's reminder says it instead.
+            Event::Warn if self.deep.on() => {}
+            Event::Warn => self.lights.warning(),
+            Event::Saver => {
+                self.apply_settings();
+                crate::save_settings(&self.settings);
+            }
+            Event::Empty => {
+                self.standby.wake_now();
+                let card = crate::power::Empty::new(self.settings.calm);
+                let card = if crate::power::postponed_floor(&self.care) { card.at_floor() } else { card };
+                self.open(Box::new(card), Path::Slide);
+            }
+        }
+    }
+
+    /// An update is being checked for, downloaded or installed.
+    fn update_busy(&self) -> bool {
+        matches!(self.update.state.as_str(), "checking" | "downloading" | "installing")
+    }
+
+    /// In deep standby: the main loop waits a minute at a time for a key.
+    pub fn deep_asleep(&self) -> bool {
+        self.deep.on()
+    }
+
+    /// What going deep now would cut off, if anything.
+    fn deep_blocker(&self) -> Option<&'static str> {
+        crate::deep::blocker(crate::deep::Busy {
+            robot: self.robot.linked() && !self.robot.is_demo(),
+            computer: crate::usb::connected() == Some(true),
+            ssh: crate::power::ssh_session(),
+            update: self.update_busy(),
+            timer: timer_running(),
+            saving: self.saving.is_some(),
+        })
+    }
+
+    /// Into deep standby: its steps in order (deep.rs says what each is).
+    fn enter_deep(&mut self) {
+        self.deep.begin(self.care.reading.as_ref());
+        for step in crate::deep::STEPS {
+            self.deep_step(step, true);
+        }
+    }
+
+    /// One of deep standby's steps, taken (`deep`) or undone.
+    fn deep_step(&mut self, step: crate::deep::Step, deep: bool) {
+        use crate::deep::Step;
+        match step {
+            Step::Pollers if deep => self.robot.pause(),
+            Step::Pollers => self.robot.resume(),
+            Step::Lights => self.lights.set_dark(deep),
+            _ => {}
+        }
+        crate::deep::take(step, deep, &mut self.deep);
+    }
+
+    /// A minute in deep standby: the battery read (low-battery care still
+    /// watches over it), the draw noted, the red light's reminder.
+    fn tick_deep(&mut self, dt: f32) {
+        let events = self.care.tick(dt, true, &mut self.settings.battery, false);
+        for event in events {
+            self.care_event(event);
+        }
+        let reading = self.care.reading.clone();
+        self.deep.sample(reading.as_ref(), dt);
+        if let Some(on) = self.deep.reminder(reading.as_ref()) {
+            crate::lights::red_reminder(on);
+        }
+    }
+
+    /// Woken from deep standby: its steps undone in the reverse order. The
+    /// screen comes on at once (that is standby's); catalyst-power runs on
+    /// its own thread, and the steps taken before it wait for it.
+    fn leave_deep(&mut self) {
+        let reading = self.care.reading.clone();
+        let Some((slept, reminding)) = self.deep.end(reading.as_ref()) else { return };
+        // The reminder began after the system went deep: out before it comes back.
+        if reminding {
+            crate::lights::red_reminder(false);
+        }
+        for step in crate::deep::waking_first() {
+            self.deep_step(step, false);
+        }
+        self.finish_waking();
+        // How long, and what it drew (the charge is at the top right).
+        self.say(slept.island());
+        // The clock and the battery at the top, read afresh for the first frame.
+        self.status.age = f32::MAX;
+        self.dirty = true;
+        self.moving = true;
+    }
+
+    /// The system is back: the last of deep standby's steps undone.
+    fn finish_waking(&mut self) {
+        if !self.deep.ready_to_finish() {
+            return;
+        }
+        for step in crate::deep::waking_after() {
+            self.deep_step(step, false);
+        }
+        self.deep.woke();
+    }
+
+    /// Deep standby as if it had lasted `seconds` drawing what `reading`
+    /// says, for the gallery and the tests.
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn deep_for(&mut self, seconds: f32, reading: crate::power::Reading) {
+        if !self.deep.on() {
+            self.enter_deep();
+        }
+        let step = 60.0;
+        let mut left = seconds;
+        while left > 0.0 {
+            let dt = left.min(step);
+            self.deep.sample(Some(&reading), dt);
+            left -= dt;
+        }
+        self.care.reading = Some(reading);
     }
 
     /// Time to queue for the team's next match (FRC Nexus, when its key is
@@ -3416,6 +3591,111 @@ pub(crate) mod tests {
         frames(&mut shell, 40 * 4, 0.25);
         assert!(shell.stack.last().unwrap().0.keeps_awake());
         assert_eq!(shell.standby_state(), State::Awake);
+    }
+
+    /// Seconds of ticks, one a second (as the main loop's idle looks add
+    /// up), until deep standby or `most` seconds.
+    fn until_deep(shell: &mut Shell, most: u32) -> Option<u32> {
+        for s in 1..=most {
+            shell.tick(1.0);
+            if shell.deep_asleep() {
+                return Some(s);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn deep_standby_comes_after_the_wait_and_its_steps_are_undone_in_reverse() {
+        use crate::deep::STEPS;
+        let mut shell = shell();
+        shell.settings.screen_off = 30;
+        shell.settings.battery.deep_after = 10;
+        // Ten minutes with no key (the shell is a few seconds old already).
+        let at = until_deep(&mut shell, 700).expect("deep standby");
+        assert!((590..=605).contains(&at), "deep after {at} s");
+        assert!(shell.panel_off() && !shell.animating());
+        assert_eq!(shell.deep.log, STEPS.map(|s| (s, true)), "pollers, motion, lights, system, slack, in that order");
+        // A minute at a time, and nothing drawn.
+        assert!(!shell.tick(60.0));
+        assert!(shell.deep_asleep());
+        // A key: awake, and every step undone, the last first.
+        shell.key(Key::Down);
+        assert!(!shell.deep_asleep());
+        assert_eq!(shell.standby_state(), crate::standby::State::Awake);
+        let mut back: Vec<_> = STEPS.map(|s| (s, false)).to_vec();
+        back.reverse();
+        assert_eq!(shell.deep.log[STEPS.len()..], back[..]);
+        assert_eq!(shell.message.as_ref().map(|(m, _)| m.as_str()), Some("slept 1 m"), "too short to tell its draw");
+        // The wait starts again from the key.
+        assert_eq!(until_deep(&mut shell, 300), None);
+    }
+
+    #[test]
+    fn the_key_that_wakes_deep_standby_reaches_no_app_nor_do_its_repeats() {
+        let mut shell = shell();
+        shell.settings.screen_off = 30;
+        shell.settings.battery.deep_after = 10;
+        until_deep(&mut shell, 700).expect("deep standby");
+        // Enter on Home's first tile: it wakes the handheld, and opens nothing.
+        shell.key(Key::Enter);
+        assert!(!shell.deep_asleep());
+        // Held, it repeats (the first repeat 0.4 s in, then quicker).
+        for gap in [0.4, 0.1, 0.1, 0.1] {
+            frames(&mut shell, 1, gap);
+            shell.key(Key::Enter);
+        }
+        frames(&mut shell, 40, FRAME);
+        assert_eq!(shell.stack.len(), 1, "neither the waking key nor its repeats opened the tile");
+        // Let go and pressed again: a key like any other.
+        frames(&mut shell, 40, FRAME);
+        shell.key(Key::Enter);
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(shell.stack.len(), 2, "Enter opens the tile now");
+        // Another key straight after waking is not the waking key's repeat.
+        let mut shell = self::shell();
+        shell.settings.screen_off = 30;
+        shell.settings.battery.deep_after = 10;
+        until_deep(&mut shell, 700).expect("deep standby");
+        shell.key(Key::Right);
+        shell.key(Key::Enter);
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(shell.stack.len(), 2, "a different key goes through");
+    }
+
+    #[test]
+    fn what_would_be_cut_off_keeps_deep_standby_away() {
+        let mut shell = shell();
+        shell.settings.screen_off = 30;
+        // Never: the screen off, and nothing more.
+        shell.settings.battery.deep_after = 0;
+        assert_eq!(until_deep(&mut shell, 2 * 3600), None);
+        // A Clock timer running: it must be said when it runs out.
+        shell.settings.battery.deep_after = 10;
+        TIMER_RUNNING.with(|t| t.set(true));
+        assert_eq!(until_deep(&mut shell, 1200), None);
+        TIMER_RUNNING.with(|t| t.set(false));
+        let at = until_deep(&mut shell, 60).expect("deep once the timer is done");
+        assert!(at <= 11, "asked again within ten seconds: {at}");
+        shell.key(Key::Back);
+    }
+
+    #[test]
+    fn waking_says_how_long_it_slept_and_what_it_drew() {
+        use crate::power::{Flow, Reading};
+        let mut shell = shell();
+        let night = Reading { percent: 41, flow: Flow::Discharging, milliamps: Some(180.0), volts: Some(3.8), ..Reading::default() };
+        shell.deep_for(7.0 * 3600.0 + 12.0 * 60.0, night.clone());
+        shell.key(Key::Char('a'));
+        assert_eq!(shell.message.as_ref().map(|(m, _)| m.as_str()), Some("slept 7 h 12 m · ~0.68 W"));
+        assert_eq!(shell.stack.len(), 1, "the waking key typed nothing anywhere");
+        // Another night, drawing more; then on the charger, no draw to give.
+        shell.deep_for(2.0 * 3600.0, Reading { percent: 9, milliamps: Some(250.0), ..night.clone() });
+        shell.key(Key::Char('b'));
+        assert_eq!(shell.message.as_ref().map(|(m, _)| m.as_str()), Some("slept 2 h 0 m · ~0.95 W"));
+        shell.deep_for(3600.0, Reading { flow: Flow::Charging, ..night });
+        shell.key(Key::Char('c'));
+        assert_eq!(shell.message.as_ref().map(|(m, _)| m.as_str()), Some("slept 1 h 0 m · charging"));
     }
 
     /// A plain page for pushing.
