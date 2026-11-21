@@ -1557,10 +1557,20 @@ pub struct Assistant {
     /// has an answer worth keeping; and where they are kept (tests: apart).
     chat_id: Option<String>,
     chats: PathBuf,
+    /// A question just heard (push-to-talk) sends itself when this runs out,
+    /// unless a key stops it to edit.
+    countdown: Option<f32>,
+    /// The line holds what was said aloud; and the question under way was.
+    asked_aloud: bool,
+    aloud: bool,
 }
 
 const GAP: f32 = 6.0;
 const INPUT_LIMIT: usize = 600;
+/// How long a question heard stays in the line, to read (and stop and
+/// edit), before it sends itself. My own tuning: long enough to read a
+/// short question, short enough not to feel like waiting.
+const AUTO_SEND: f32 = 1.5;
 /// How far from the title (and the line typed into) a line fades out.
 const EDGE: f32 = 14.0;
 
@@ -1594,6 +1604,9 @@ impl Assistant {
             continuations: 0,
             chat_id: None,
             chats: chats_dir(),
+            countdown: None,
+            asked_aloud: false,
+            aloud: false,
         }
     }
 
@@ -1625,6 +1638,7 @@ impl Assistant {
         self.outcomes.clear();
         self.busy = Busy::Idle;
         self.chat_id = None;
+        self.countdown = None;
         self.revision += 1;
         self.scroll.jump(0.0);
     }
@@ -1672,6 +1686,8 @@ impl Assistant {
         self.mark = chat.len();
         chat.ask(&text);
         self.input.clear();
+        self.countdown = None;
+        self.aloud = std::mem::take(&mut self.asked_aloud);
         self.question = text.clone();
         self.rounds = 0;
         self.continuations = 0;
@@ -1736,7 +1752,13 @@ impl Assistant {
             self.push(Entry::Sources(reply.sources.clone()));
         }
         match reply.stop {
-            Stop::Answered => self.keep(),
+            Stop::Answered => {
+                self.keep();
+                // Said aloud too, when answers are (Assistant › choices).
+                if !reply.text.trim().is_empty() {
+                    crate::voice::answer(&plain(&reply.text), self.aloud);
+                }
+            }
             Stop::Paused => {
                 // The service's own loop ran long: the conversation goes back
                 // as it is, and it carries on where it stopped.
@@ -1927,10 +1949,18 @@ impl Assistant {
         let chat = chat_style(g);
         let radius = bar.h * 0.5;
         g.surface(bar, radius, t.surface2);
+        // A question heard, about to send itself: a thin track along the
+        // line's foot fills, and when it is full the question goes.
+        if let Some(left) = self.countdown {
+            let done = (1.0 - left / AUTO_SEND).clamp(0.0, 1.0);
+            let track = Rect::new(bar.x + radius, bar.bottom() - 4.0, bar.w - 2.0 * radius, 2.0).offset(g.ox, 0.0);
+            g.canvas.rrect(track, 1.0, t.faint, 0.45);
+            g.canvas.rrect(Rect::new(track.x, track.y, (track.w * done).max(2.0), track.h), 1.0, t.signal, 1.0);
+        }
         let cy = bar.cy();
         let send_w = 22.0;
         if self.input.is_empty() {
-            let words = if self.idle() || matches!(self.busy, Busy::Approving { .. }) { "type a question" } else { "esc: stop" };
+            let words = if self.idle() || matches!(self.busy, Busy::Approving { .. }) { "type, or hold alt to talk" } else { "esc: stop" };
             if focused {
                 g.surface(Rect::new(bar.x + 12.0, cy - chat.size * 0.5, 1.5, chat.size), 0.5, t.signal);
             }
@@ -2032,6 +2062,27 @@ impl Screen for Assistant {
         !self.idle()
     }
 
+    /// Push-to-talk here asks it: what was said is the question.
+    fn dictation(&self) -> Option<crate::voice::Dictation> {
+        self.service.is_some().then_some(crate::voice::Dictation::Question)
+    }
+
+    /// The question heard lands in the line, shown for a moment before it
+    /// sends itself; any key stops that, to edit it first. Words already
+    /// typed stay in front of it.
+    fn dictated(&mut self, text: &str, cx: &mut Cx) -> Nav {
+        let line = if self.input.trim().is_empty() { text.trim().to_owned() } else { format!("{} {}", self.input.trim_end(), text.trim()) };
+        self.input = line.chars().filter(|c| !c.is_control()).take(INPUT_LIMIT).collect();
+        self.asked_aloud = true;
+        if self.idle() {
+            self.countdown = Some(AUTO_SEND);
+            *cx.say = Some("sending · any key edits".into());
+        } else {
+            *cx.say = Some("still answering · enter sends it after".into());
+        }
+        Nav::Stay
+    }
+
     fn resume(&mut self) {
         // A kept conversation chosen: back to it, with its own service.
         if let Some(id) = take_open_chat() {
@@ -2063,6 +2114,9 @@ impl Screen for Assistant {
                 _ => Nav::Stay,
             };
         }
+        // A question heard and about to send itself: any key stops that and
+        // does what it does (Enter sends it now, Esc clears it).
+        self.countdown = None;
         let line = g_line_height();
         match key {
             Key::Up => self.scroll_by(line * 3.0),
@@ -2106,10 +2160,19 @@ impl Screen for Assistant {
             Key::Char(c) if !c.is_control() && self.input.chars().count() < INPUT_LIMIT => self.input.push(c),
             _ => {}
         }
+        // What was said, cleared away: what is typed next was not.
+        if self.input.is_empty() {
+            self.asked_aloud = false;
+        }
         Nav::Stay
     }
 
     fn update(&mut self, cx: &mut Cx) -> Nav {
+        // A question heard, left alone long enough: it goes.
+        if self.countdown.is_some_and(|left| left <= 0.0) {
+            self.countdown = None;
+            self.send();
+        }
         // Back from the confirm page with an answer.
         if matches!(self.busy, Busy::Approving { .. }) {
             if let Some(yes) = DECISION.lock().unwrap_or_else(|e| e.into_inner()).take() {
@@ -2155,7 +2218,14 @@ impl Screen for Assistant {
         self.waited += dt;
         let moving = self.scroll.tick(dt);
         let rising = self.entries.last().is_some_and(|(_, born)| self.clock - born < 0.8);
-        moving || rising || !self.idle()
+        let counting = match &mut self.countdown {
+            Some(left) => {
+                *left -= dt;
+                true
+            }
+            None => false,
+        };
+        moving || rising || counting || !self.idle()
     }
 
     fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
@@ -2448,13 +2518,15 @@ pub struct Choices {
     prefs: Prefs,
     keys: Keys,
     list: ListState,
+    /// Whether answers are said aloud, and by whom (`crate::voice`).
+    voice: crate::voice::Prefs,
 }
 
-const CHOICE_ROWS: usize = 5;
+const CHOICE_ROWS: usize = 7;
 
 impl Choices {
     fn new() -> Self {
-        Choices { prefs: Prefs::load(), keys: Keys::load(), list: ListState::default() }
+        Choices { prefs: Prefs::load(), keys: Keys::load(), list: ListState::default(), voice: crate::voice::Prefs::load() }
     }
 }
 
@@ -2509,6 +2581,20 @@ impl Screen for Choices {
                 return Nav::Pop;
             }
             (Key::Enter | Key::Right, 4) => return Nav::Push(Box::new(crate::screens::SettingsApp::keys_page())),
+            (Key::Enter | Key::Right, 5) => {
+                self.voice.speak = self.voice.speak.next();
+                self.voice.save();
+            }
+            (Key::Enter | Key::Right, 6) => {
+                self.voice.voice = self.voice.voice.next();
+                self.voice.save();
+                // Heard once, so the choice is made by ear.
+                if self.voice.speak != crate::voice::Speak::Off {
+                    if let Err(why) = crate::voice::say("This is how answers will sound.", self.voice.voice) {
+                        *cx.say = Some(why);
+                    }
+                }
+            }
             (other, _) => crate::screens::list_key(&mut self.list, other, CHOICE_ROWS),
         }
         Nav::Stay
@@ -2527,7 +2613,9 @@ impl Screen for Choices {
                 1 => ("Effort", if answering == Some(Service::Local) { "–".to_owned() } else { self.prefs.effort.name().to_owned() }, t.ink),
                 2 => ("Conversations", if kept == 0 { "none yet".to_owned() } else { format!("{kept} kept ›") }, t.dim),
                 3 => ("New conversation", String::new(), t.dim),
-                _ => ("Keys", format!("{keys} of 2 set"), t.dim),
+                4 => ("Keys", format!("{keys} of 2 set"), t.dim),
+                5 => ("Spoken answers", self.voice.speak.words().to_owned(), t.ink),
+                _ => ("Voice", self.voice.voice.words(), if self.voice.speak == crate::voice::Speak::Off { t.dim } else { t.ink }),
             };
             g.row(r, name, &value, color, i == self.list.focus);
         }
@@ -2538,7 +2626,9 @@ impl Screen for Choices {
             1 => "light answers sooner · medium thinks it through",
             2 => "enter: reopen one and carry on",
             3 => "enter: clear this one",
-            _ => "openai and claude keys",
+            4 => "openai and claude keys",
+            5 => "hold alt anywhere to ask aloud",
+            _ => self.voice.voice.about(),
         });
     }
 }
@@ -3247,6 +3337,42 @@ mod tests {
                 assert!(matches!(last, Some(Entry::Said(s)) if s.starts_with("Left it")));
             }
         }
+    }
+
+    #[test]
+    fn a_question_heard_shows_for_a_moment_then_sends_itself_unless_a_key_stops_it() {
+        crate::shell::tests::sandbox();
+        let (mut robot, mut settings, mut say) = cx_parts();
+        assert_eq!(Assistant::with(Prefs::default(), None).dictation(), None, "no key: nothing to ask");
+        let mut page = page_for(Service::Claude);
+        assert_eq!(page.dictation(), Some(crate::voice::Dictation::Question));
+        let step = |page: &mut Assistant, seconds: f32, robot: &mut Robot, settings: &mut crate::shell::Settings, say: &mut Option<String>| {
+            for _ in 0..(seconds * 10.0).round() as usize {
+                page.tick(0.1);
+                page.update(&mut Cx { robot, settings, say, at_rest: true });
+            }
+        };
+        page.dictated(" How is the robot doing? ", &mut Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true });
+        assert_eq!(page.input, "How is the robot doing?");
+        assert_eq!(say.take().as_deref(), Some("sending · any key edits"));
+        step(&mut page, 1.2, &mut robot, &mut settings, &mut say);
+        assert!(page.idle() && page.entries.is_empty(), "shown first, to read");
+        step(&mut page, 0.5, &mut robot, &mut settings, &mut say);
+        assert_eq!(page.entries[0].0, Entry::You("How is the robot doing?".into()), "then asked");
+        assert!(page.aloud, "a question asked aloud: its answer may be said aloud");
+        // A key stops it, and the words stay to edit.
+        let mut page = page_for(Service::Claude);
+        page.dictated("How is the robot doing?", &mut Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true });
+        page.key(Key::Backspace, &mut Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true });
+        step(&mut page, 3.0, &mut robot, &mut settings, &mut say);
+        assert_eq!((page.input.as_str(), page.entries.len()), ("How is the robot doing", 0));
+        // Words typed already stay in front of what is said.
+        let mut page = page_for(Service::Claude);
+        page.input = "at Q31,".into();
+        page.dictated("what was the battery?", &mut Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true });
+        assert_eq!(page.input, "at Q31, what was the battery?");
+        page.key(Key::Enter, &mut Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true });
+        assert_eq!(page.entries[0].0, Entry::You("at Q31, what was the battery?".into()), "enter sends it at once");
     }
 
     #[test]

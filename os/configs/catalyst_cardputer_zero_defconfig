@@ -93,6 +93,15 @@ BR2_PACKAGE_LINKS=y
 # other llama tool is taken out of the image in post-build.sh.
 BR2_PACKAGE_LLAMA_CPP=y
 BR2_PACKAGE_LLAMA_CPP_TOOLS=y
+# Voice for the assistant: arecord and aplay (alsa-utils) listen while the
+# talk key (Alt) is held and say answers aloud, each started for that and
+# gone after it, so the codec's input and the amplifier are only powered
+# then. espeak says answers offline when chosen (Assistant > choices >
+# Voice); about 3 MB with its voices, its WAV written to aplay. The ALSA
+# devices themselves (dsnoop and dmix on the ES8389) come with the codec.
+BR2_PACKAGE_ALSA_UTILS=y
+BR2_PACKAGE_ALSA_UTILS_APLAY=y
+BR2_PACKAGE_ESPEAK=y
 # The Terminal says it is an xterm, which ncurses describes; tmux's own
 # descriptions too, for what runs inside it.
 BR2_PACKAGE_NCURSES_ADDITIONAL_TERMINFO="t/tmux t/tmux-256color"

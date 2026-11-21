@@ -96,6 +96,7 @@ mod terminal;
 mod tools;
 mod trends;
 mod units;
+mod voice;
 mod weather;
 mod wifi;
 mod wpilog;
@@ -366,7 +367,7 @@ fn main() {
     };
     // The scripted tour brings its own files and apps to show.
     #[cfg(not(target_arch = "aarch64"))]
-    if flag("--shots") {
+    if flag("--shots") || flag("--voice-shots") {
         tour_fixtures();
     }
     // The motion sensor starts on a thread of its own (its program takes
@@ -401,6 +402,18 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(path) = value("--start-movie") {
         return start_movie(shell, std::path::Path::new(&path));
+    }
+    // The voice screens alone (push-to-talk, dictation, spoken answers),
+    // as the end of the full tour (`--shots`) shows them.
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--voice-shots") {
+        std::fs::create_dir_all(&dir).expect("create the screenshot folder");
+        for _ in 0..120 {
+            if shell.tick(1.0 / 60.0) {
+                shell.draw();
+            }
+        }
+        return voice::gallery(&mut shell, std::path::Path::new(&dir));
     }
 
     if flag("--bench") || flag("--about") {
@@ -2273,6 +2286,7 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     press(&mut shell, &[Enter], 60);
     save(&mut shell, "120b-files-hex-found");
     std::fs::remove_dir_all(&notes_dir).ok();
+    voice::gallery(&mut shell, dir);
     let written =std::fs::read_dir(dir).map_or(0, |d| d.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "png")).count());
     println!("{written} screens in {}, {frames} frames at {:.2} ms each", dir.display(), started.elapsed().as_secs_f64() * 1e3 / frames as f64);
     // An icon asked for and never built in draws as nothing: a blank where

@@ -593,6 +593,12 @@ pub mod device {
                 (30, "asdfghjkl;'`", "ASDFGHJKL:\"~"),
                 (44, "zxcvbnm,./", "ZXCVBNM<>?"),
             ];
+            // Alt is the talk key (`crate::voice`): held, the shell listens.
+            // It types nothing, here or in a terminal.
+            if crate::voice::is_talk_code(code) {
+                crate::voice::set_talk_key(value != 0);
+                return None;
+            }
             if code == 42 || code == 54 {
                 self.shift = value != 0;
                 return None;
@@ -953,6 +959,8 @@ pub mod sim {
             let shift = self.window.is_key_down(K::LeftShift) || self.window.is_key_down(K::RightShift);
             let ctrl = self.window.is_key_down(K::LeftCtrl) || self.window.is_key_down(K::RightCtrl);
             let leave = self.esc.update(self.window.is_key_down(K::Escape));
+            // Alt held is the talk key, as on the handheld (`crate::voice`).
+            crate::voice::set_talk_key(self.window.is_key_down(K::LeftAlt) || self.window.is_key_down(K::RightAlt));
             let down = self.window.get_keys();
             for gone in self.down.iter().filter(|k| !down.contains(k)) {
                 self.repeat.release(*gone);

@@ -254,6 +254,29 @@ impl Screen for Notes {
             g.hint_any(&["enter: open · p: pin · d: delete · /: search", "p: pin · d: delete · /: search"]);
         }
     }
+
+    /// Push-to-talk on the list dictates a new note (in a note, the editor
+    /// types what was said at the cursor).
+    fn dictation(&self) -> Option<crate::voice::Dictation> {
+        self.search.is_none().then_some(crate::voice::Dictation::Text)
+    }
+
+    /// A new note of what was said, kept at once and open to carry on.
+    fn dictated(&mut self, text: &str, cx: &mut Cx) -> Nav {
+        match self.start(cx.robot).and_then(|path| crate::files::Editor::open(&path)) {
+            Ok(mut editor) => {
+                editor.dictated(text, cx);
+                if !editor.save() {
+                    *cx.say = Some("could not keep the note".into());
+                }
+                Nav::Push(Box::new(editor))
+            }
+            Err(why) => {
+                *cx.say = Some(why);
+                Nav::Stay
+            }
+        }
+    }
 }
 
 impl Notes {

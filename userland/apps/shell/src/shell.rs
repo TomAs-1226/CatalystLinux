@@ -383,6 +383,17 @@ pub trait Screen {
     fn repeats_enter(&self) -> bool {
         false
     }
+    /// What push-to-talk does here ([`crate::voice`]): a question for the
+    /// assistant (the assistant itself), words typed in at the cursor (a
+    /// note, a file), or nothing of its own (None: the assistant opens with
+    /// what was said as its question).
+    fn dictation(&self) -> Option<crate::voice::Dictation> {
+        None
+    }
+    /// What was said, written down, for a screen that takes dictation.
+    fn dictated(&mut self, _text: &str, _cx: &mut Cx) -> Nav {
+        Nav::Stay
+    }
 }
 
 const MESSAGE_SECONDS: f32 = 2.4;
@@ -594,6 +605,8 @@ pub struct Shell {
     /// A screenshot being saved, and the flash that says it was taken.
     saving: Option<std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>>,
     flash: Option<Animated>,
+    /// Push-to-talk (Alt held, anywhere) and answers said aloud.
+    voice: crate::voice::Talk,
     /// Standby: after a while with no key the screen dims, then goes off.
     standby: crate::standby::Standby,
     /// The battery: its readings, the saver's rules, low-battery care, and
@@ -722,6 +735,7 @@ impl Shell {
             switcher_under: None,
             saving: None,
             flash: None,
+            voice: crate::voice::Talk::new(),
             standby: crate::standby::Standby::new(),
             care: crate::power::Care::new(),
             lights: crate::lights::Lights::new(),
@@ -905,6 +919,12 @@ impl Shell {
         self.last_key = std::time::Instant::now();
         // A key while the screen is dimmed or off wakes it, and is spent doing so.
         if self.standby.key() {
+            self.moving = true;
+            return;
+        }
+        // Voice: any key stops an answer being said (Esc does nothing else),
+        // and Esc lets go of what is being listened to or written down.
+        if self.voice.key(key) {
             self.moving = true;
             return;
         }
@@ -1449,6 +1469,7 @@ impl Shell {
             }
         }
         moving |= self.tick_recents_and_standby(dt, motion_dt);
+        moving |= self.tick_voice(dt);
         self.tick_power(dt);
         if let Some(intro) = &mut self.intro {
             moving |= intro.tick(motion_dt);
@@ -1849,12 +1870,17 @@ impl Shell {
             (None, IslandRest::Robot) if linked => (self.robot.string("Robot/Identity/Name").unwrap_or_else(|| "robot".into()).to_lowercase(), false),
             (None, IslandRest::Robot) => (self.robot.status(), false),
         };
+        // Push-to-talk listening, or an answer being said: the island says
+        // so, its meter live beside the words.
+        let talk = self.voice.island();
+        let (label, icon) = talk.as_ref().map_or((label, icon), |talk| (talk.words.clone(), true));
         let caption = g.ty.caption;
         let island_h = g.island_h();
         // A message may take most of the width; status stays out of the title's way.
         let room = if icon { 250.0 } else { 96.0 };
         let label = g.text.fit(&label, &caption, room);
         let want = g.measure(&label, caption) + 34.0;
+        let want = want + talk.as_ref().map_or(0.0, |_| crate::voice::METER_ROOM);
         if label != self.island_words {
             self.island_words = label.clone();
             self.island_from = self.island_w.value();
@@ -1898,9 +1924,13 @@ impl Shell {
         let grown = if travel.abs() < 1.0 { 1.0 } else { ((self.island_w.value() - self.island_from) / travel).clamp(0.0, 1.0) };
         let words = ((grown - 0.55) / 0.45).clamp(0.0, 1.0);
         g.canvas.set_clip(island.inset(2.0));
-        let dot = if icon { t.signal } else if linked { t.ice } else { t.faint };
-        g.canvas.circle(island.x + 12.0, island.cy(), 3.0, dot, 1.0);
-        g.text_alpha(island.x + 22.0, island.cy(), &label, caption, t.ink, words);
+        if let Some(talk) = &talk {
+            crate::voice::draw_island(g, island, talk, &label, words);
+        } else {
+            let dot = if icon { t.signal } else if linked { t.ice } else { t.faint };
+            g.canvas.circle(island.x + 12.0, island.cy(), 3.0, dot, 1.0);
+            g.text_alpha(island.x + 22.0, island.cy(), &label, caption, t.ink, words);
+        }
         g.canvas.clear_clip();
         if g.take_motion_started() {
             self.moving = true;
@@ -1922,6 +1952,85 @@ impl Shell {
             g.text_fit(PAD + 2.0, bar_cy, &title, ty.title, t.ink, room);
         }
         screen.draw(g, robot);
+    }
+}
+
+impl Shell {
+    /// Push-to-talk and answers said aloud, in time: the talk key held
+    /// anywhere listens; let go, what was said goes where it was meant to.
+    /// True while any of it is under way (the screen stays awake for it).
+    fn tick_voice(&mut self, dt: f32) -> bool {
+        use crate::voice::{Dictation, Event, Target};
+        let down = crate::voice::talk_key_down();
+        let awake = self.standby.state() == crate::standby::State::Awake;
+        // Where it would go, looked at only while the key is down. Not over
+        // the start, the tour, the control centre or the recent apps.
+        let in_the_way = self.intro.is_some() || self.tour.is_some() || self.switcher.is_some() || self.control.visible();
+        let here = match self.stack.last() {
+            Some((top, _)) if down && !in_the_way && !top.full_screen() => {
+                Some(Target { kind: top.dictation().unwrap_or(Dictation::Question), depth: self.stack.len(), title: top.title().to_owned() })
+            }
+            _ => None,
+        };
+        self.voice.calm = self.settings.calm;
+        match self.voice.tick(dt, down, awake, here) {
+            Some(Event::Woke) => {
+                self.standby.key();
+                self.last_key = std::time::Instant::now();
+            }
+            Some(Event::Say(text)) => self.say(text),
+            Some(Event::Heard(text, target)) => self.heard(&text, &target),
+            None => {}
+        }
+        // Someone holding the key and talking: no dimming meanwhile. (An
+        // answer being said keeps nothing awake: put down, it may sleep.)
+        if self.voice.listening() {
+            self.standby.key();
+        }
+        let busy = self.voice.active();
+        if busy {
+            self.dirty = true;
+        }
+        busy
+    }
+
+    /// What was said, written down: typed into the page it was said over
+    /// (if that is still in front), or asked of the assistant, which grows
+    /// out of the island with it (a kept one comes back, conversation and
+    /// all).
+    fn heard(&mut self, text: &str, target: &crate::voice::Target) {
+        use crate::voice::Dictation;
+        let takes = self.stack.last().and_then(|(top, _)| top.dictation());
+        let same_page = self.stack.len() == target.depth && self.stack.last().is_some_and(|(top, _)| top.title() == target.title);
+        let at = match (takes, target.kind) {
+            (Some(Dictation::Text), Dictation::Text) if same_page => Some(self.stack.len() - 1),
+            (Some(Dictation::Question), Dictation::Question) => Some(self.stack.len() - 1),
+            // The page it was for has gone: what was said is not lost.
+            (_, Dictation::Text) => return self.say(format!("heard: {text}")),
+            _ => {
+                let from = self.places.island.unwrap_or_else(|| Rect::new(W * 0.5 - 30.0, 4.0, 60.0, self.gfx.island_h()));
+                self.open(Box::new(crate::ai::Assistant::new()), Path::Grow(from));
+                self.stack.iter().rposition(|(s, _)| s.dictation() == Some(Dictation::Question))
+            }
+        };
+        let Some(at) = at else { return };
+        let mut say = None;
+        let at_rest = self.transition.is_none();
+        let nav = self.stack[at].0.dictated(text, &mut Cx { robot: &mut self.robot, settings: &mut self.settings, say: &mut say, at_rest });
+        if let Some(text) = say {
+            self.say(text);
+        }
+        if at + 1 == self.stack.len() {
+            self.follow(nav);
+        }
+        self.moving = true;
+        self.dirty = true;
+    }
+
+    /// What the island says for push-to-talk, else its message (the tests).
+    #[cfg(test)]
+    pub(crate) fn island_words(&self) -> Option<String> {
+        self.voice.island().map(|i| i.words).or_else(|| self.message.as_ref().map(|(m, _)| m.clone()))
     }
 }
 
