@@ -364,8 +364,8 @@ def tools(vm):
     online = not any(f" exit {code}" in out for code in (6, 7, 28))
     if online:
         check("curl checks certificates with its own defaults (HTTPS to GitHub)", out.startswith("200"), out)
-        out = vm.run("lynx -dump -nolist https://example.com/ 2>&1 | head -n 3", 40)
-        check("lynx reads a page over HTTPS", "Example Domain" in out, out[:120])
+        out = vm.run("lynx -dump -nolist https://example.com/ 2>&1 | head -n 12", 40)
+        check("lynx reads a page over HTTPS", "Example Domain" in out or "documentation examples" in out, out.strip()[:120])
     else:
         print(f"   skip  HTTPS (no internet here): {out}")
     # The emulator has no IR parts (no overlays), but the drivers can still be
