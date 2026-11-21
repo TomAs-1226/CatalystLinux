@@ -15,7 +15,7 @@ windows that grow out of tiles whenever it is there.
 | `userland/crates/bezel` | Bezel on the CPU: tonal surfaces, the two type voices, Material Symbols, and the full glass pass (refraction, frost, edge light, groups, shadow). |
 | `userland/crates/nt4` | A NetworkTables 4.1 client: one thread, read-only, reconnects on its own. |
 | `userland/crates/apriltag` | AprilTag detection: AprilRobotics' C library (3.4.5, BSD 2-Clause, vendored with the 36h11 family FRC uses) behind a small flat shim, with each tag's pose. |
-| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, AprilTag, Graphs, Pit, Remote, Settings) and the launcher for external ones. |
+| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, AprilTag, Graphs, Pit, Remote, Level, Compass, Weather, Settings) and the launcher for external ones. |
 | `userland/apps/update` | `catalyst-update`: system updates on the handheld (A/B, tried once, rolled back if it does not come up), and the release tool that makes and signs them. |
 | `userland/apps/flasher` | Catalyst Flasher: the newest release onto an SD card in one go. |
 | `userland/assets/app-icon` | Catalyst's icon (the FrcCatalyst bolt) at each size Windows uses, built into the simulator; `assets/` holds it for Raspberry Pi Imager's listing. |
@@ -1102,6 +1102,56 @@ Not yet checked on a CardputerZero: the sensor answering over the real bus
 show it), how a lift and face down feel in the hand, and the calibration on
 the real board's magnetic field.
 
+## Weather
+
+The Weather app shows the weather where the handheld is: **now** (the
+temperature large, what it is like in a few words and an icon for day or
+night, what it feels like, the wind, the humidity, and where), the next 24
+**hours** along a strip, and the **week** as rows (each day's weather, its
+chance of rain, and its low and high on a bar against the whole week's,
+today's with a dot at now). Up and Down (F and X) go between the three, and
+now folds away under the title as the week comes up; Left and Right (Z and C)
+go along the hours. Enter on a day, or on an hour, opens that day: its
+temperature hour by hour over its daylight, the chance of rain beneath, its
+warmest and coolest hours, and now on today's; Left and Right go through the
+week from there. Its Home tile says how warm it is and what it is like in a
+word ("27° sunny").
+
+**No key, on purpose.** The forecasts come from
+[Open-Meteo](https://open-meteo.com), which serves the national weather
+services' models free for non-commercial use with no key and no account.
+So there is nothing to sign up for and nothing to type into Settings › Keys,
+and no key is built into the firmware, where anyone could lift it from an
+image and where one revoked or over its quota would stop every handheld at
+once. What goes out is the place's latitude and longitude (and, when a place
+is searched for, its name), nothing about the handheld. Open-Meteo's data is
+CC BY 4.0; the Place page credits it.
+
+It is fetched with `curl` over HTTPS on a thread of its own: when the app
+opens on a forecast older than half an hour, every half hour while it stays
+open, and on **r**. The last forecast is kept (`weather.json` beside the
+settings), so the app opens on it at once, and offline it still shows, its
+bottom line saying so ("offline · as of 13:15"; a failed fetch is tried again
+after five minutes). An hour and a half on, the forecast's own reading of now
+gives way to that hour's forecast; a kept forecast that has run out (after a
+week) says so rather than show old weather.
+
+**Where** is the time zone's city (Settings › Name & time), looked up once
+by name with Open-Meteo's place search (the one in that zone, where several
+places share the name) and kept in `weather-place.json`; a new time zone
+looks again. **l** (or Enter on now) chooses another place: type a city,
+Enter searches, Enter on a result chooses it; the first row goes back to the
+time zone's city. With the zone UTC and nothing chosen, the app asks for a
+place. **Units** are °F and mph in the United States' zones and °C and km/h
+everywhere else; **u** switches them, and the choice is kept.
+
+In the simulator the forecast is one captured from Open-Meteo (Sydney on a
+November afternoon, `weather-demo.json`, which the tests read too) and the
+place search knows a few cities, so nothing needs the network;
+`CATALYST_WEATHER_LIVE=1` asks Open-Meteo instead. The fetch, the search and
+the kept file are tested against the live services from a PC (an ignored
+test, `live_open_meteo`); not yet from a CardputerZero over its own Wi-Fi.
+
 ## USB to a computer
 
 Settings › USB chooses what the handheld is to a computer its USB-C port is
@@ -1312,3 +1362,5 @@ fonts built into the shell are subsets of them. The board drivers come from
 `m5stack/m5stack-linux-dtoverlays` (GPL-2.0) at build time. The BMI270's
 program is Bosch's (`bmi270_config_file` from the BMI270 Sensor API,
 BSD-3-Clause), vendored under `userland/assets/bmi270` with its licence.
+Weather's forecasts and place names come from Open-Meteo at run time (CC BY
+4.0), as does the simulator's captured forecast.

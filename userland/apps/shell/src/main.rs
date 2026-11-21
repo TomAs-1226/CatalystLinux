@@ -81,6 +81,7 @@ mod term;
 mod terminal;
 mod tools;
 mod trends;
+mod weather;
 mod wifi;
 mod wpilog;
 
@@ -1551,6 +1552,34 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     press(&mut shell, &[Down, Down, Down, Down, Enter], 90);
     press(&mut shell, &[Down, Down, Down, Down], 40);
     save(&mut shell, "98-display-lift-to-wake");
+
+    // Weather, on the simulator's own forecast (Sydney, mid-afternoon): its
+    // tile, now and the hours, along the hours, the week, a day, and a place
+    // searched for.
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    press(&mut shell, &vec![Right; steps_to("Weather")], 20);
+    settle(&mut shell, 60);
+    save(&mut shell, "100-home-weather-tile");
+    press(&mut shell, &[Enter], 90);
+    save(&mut shell, "101-weather");
+    press(&mut shell, &[Down, Right, Right, Right, Right, Right, Right, Right], 20);
+    settle(&mut shell, 60);
+    save(&mut shell, "101b-weather-hours");
+    press(&mut shell, &[Down], 90);
+    save(&mut shell, "102-weather-week");
+    press(&mut shell, &[Down, Down, Enter], 90);
+    save(&mut shell, "103-weather-day");
+    press(&mut shell, &[Back, Char('l')], 90);
+    for c in "san".chars() {
+        shell.key(Char(c));
+        settle(&mut shell, 6);
+    }
+    press(&mut shell, &[Enter], 60);
+    save(&mut shell, "104-weather-place");
+    press(&mut shell, &[Back, Char('u')], 90);
+    save(&mut shell, "104b-weather-fahrenheit");
     let written =std::fs::read_dir(dir).map_or(0, |d| d.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "png")).count());
     println!("{written} screens in {}, {frames} frames at {:.2} ms each", dir.display(), started.elapsed().as_secs_f64() * 1e3 / frames as f64);
 }
