@@ -1,0 +1,37 @@
+// Catalyst Linux: the CardputerZero's panel driven tear-free.
+//
+// Applied after cardputerzero-v5-overlay (which makes the panel's node), it
+// drives the ST7789 in its own scan order and in step with its refresh:
+//
+// - its own init sequence (cardputerzero,st7789v_portrait.bin): MADCTL 0x00,
+//   no row/column exchange, so memory is written from the first gate line
+//   on, the way the panel refreshes; and 40 refreshes a second, slower than
+//   a whole frame takes to send;
+// - the framebuffer upright to the panel, 170 x 320, on the 170 of the
+//   controller's 240 columns that the glass shows (from the 36th);
+// - the tearing-effect line, GPIO5: each flush waits for the panel's
+//   vertical blank (the driver, with Catalyst Linux's patch 0003).
+//
+// The shell turns its 320 x 170 picture a quarter turn as it sends it.
+// Settings > Developer options > Tear-free panel tries it (catalyst-power).
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2835";
+
+	fragment@0 {
+		target-path = "/soc/spi@7e204000/st7789v@0";
+		__overlay__ {
+			compatible = "cardputerzero,st7789v_portrait", "panel-mipi-dbi-m5stack";
+			te-gpios = <&gpio 5 0>;
+
+			panel-timing {
+				hactive = <170>;
+				vactive = <320>;
+				hback-porch = <35>;
+				vback-porch = <0>;
+			};
+		};
+	};
+};

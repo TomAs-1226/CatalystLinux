@@ -2350,6 +2350,17 @@ impl Shell {
         self.say(if stage == 1 { format!("time to queue for {label}") } else { format!("queue for {label} in 5 min") });
     }
 
+    /// At start: the start the tear-free panel is tried in asks, over
+    /// everything, whether to keep it; a try not kept is said once.
+    pub fn check_the_panel(&mut self) {
+        if crate::panel::trial() == crate::panel::Trial::Trying {
+            let calm = self.settings.calm;
+            self.open(Box::new(crate::panel::KeepPanel::new(calm)), Path::Slide);
+        } else if let Some(note) = crate::panel::not_kept_note() {
+            self.say(note);
+        }
+    }
+
     /// The battery running out, as the gallery shows it.
     #[cfg(not(target_arch = "aarch64"))]
     pub fn show_battery_empty(&mut self) {

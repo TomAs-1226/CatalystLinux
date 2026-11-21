@@ -1946,6 +1946,9 @@ enum Item {
     /// Developer options › Lower voltage: the processor's core a step lower,
     /// tried before it is kept.
     Undervolt,
+    /// Developer options › Tear-free panel: the panel driven upright and in
+    /// step with its refresh, tried before it is kept.
+    TearFree,
     /// Settings › Battery: a page of its own (power.rs).
     BatterySection,
     /// Setup's page offered to a computer, outside first start.
@@ -2230,7 +2233,7 @@ impl SettingsApp {
             Help => Self::page("Help", vec![TakeTour, KeyboardShortcuts, KeyboardLesson]),
             NameSection => Self::page("Name & time", vec![DeviceName, TimeZone, ClockNote]),
             UsbSection => Self::page("USB", vec![UsbMode, UsbLink]),
-            DeveloperSection => Self::page("Developer", vec![DevMode, MotionScale, ShowKeys, Undervolt]),
+            DeveloperSection => Self::page("Developer", vec![DevMode, MotionScale, ShowKeys, Undervolt, TearFree]),
             _ => return None,
         })
     }
@@ -2337,6 +2340,10 @@ impl SettingsApp {
                 g.motion_scale != 1.0,
             ),
             ShowKeys => ("Show key presses".into(), onoff(g.show_keys), g.show_keys),
+            TearFree => {
+                let state = crate::panel::trial();
+                ("Tear-free panel".into(), state.name().into(), state.on())
+            }
             Undervolt => {
                 let state = crate::power::undervolt();
                 ("Lower voltage".into(), state.name().into(), matches!(state, crate::power::Undervolt::On | crate::power::Undervolt::Trying))
@@ -2541,6 +2548,8 @@ impl SettingsApp {
                 let on = !matches!(crate::power::undervolt(), U::On | U::Trying);
                 *cx.say = Some(crate::power::set_undervolt(on).unwrap_or_else(|why| why));
             }
+            // On: the handheld restarts into it and asks whether to keep it.
+            TearFree => *cx.say = Some(crate::panel::switch(!crate::panel::trial().on()).unwrap_or_else(|why| why)),
             UsbMode => {
                 let n = crate::usb::MODES.len() as i32;
                 let next = (crate::usb::mode() as i32 + step).rem_euclid(n) as usize;

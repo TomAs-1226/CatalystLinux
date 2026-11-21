@@ -1,25 +1,61 @@
 #!/bin/sh
-# catalyst-power: the parts of power saving that need the system's hands.
+# catalyst-power: the parts of power saving (and the panel) that need the
+# system's hands.
 #
 #   catalyst-power wifi-sleep     Wi-Fi off while the screen is off (the
 #                                 choice to have Wi-Fi is kept)
 #   catalyst-power wifi-wake      and back, if it is switched on
 #   catalyst-power undervolt on|off|status|confirm
-#   catalyst-power boot           at start: an undervolt that never held is undone
+#   catalyst-power panel try|on|off|status|confirm|revert
+#   catalyst-power boot           at start: a trial that never held is undone
+#
+# Both trials are lines in config.txt, above the system block, tried before
+# they are kept: the first start with them counts, and the shell confirms
+# them (lower voltage once it has run on it for five minutes; the tear-free
+# panel once Enter answers its question). A start that finds one tried but
+# never confirmed (that start crashed, hung, was cut off, or nobody could see
+# to answer) takes it out again and restarts.
 #
 # Lower voltage: the processor's core a step lower than the firmware's own
 # (over_voltage -1, -25 mV at full speed; over_voltage_min -2, -50 mV when
-# idle, where there is the most to spare). It is tried before it is kept: the
-# first start with it counts, and once the shell has run on it for five
-# minutes it is confirmed. A start that finds it tried but never confirmed
-# (that start crashed, hung or was cut off) takes it out again and restarts.
+# idle, where there is the most to spare).
+#
+# Tear-free panel: the cardputerzero-portrait overlay after M5Stack's, which
+# drives the panel in its own scan order and in step with its refresh.
 
-STATE=/data/catalyst/undervolt
 BOOT_DEV=/dev/mmcblk0p1
 MNT=/run/catalyst-boot
-BEGIN="# catalyst-power: lower voltage (Settings > Developer options)"
 END="# catalyst-power: end"
 SLOTS="# Which system starts:"
+
+# Each trial: its marker line, its lines in config.txt, and its state file.
+begin_of() {
+	case "$1" in
+	undervolt) echo "# catalyst-power: lower voltage (Settings > Developer options)" ;;
+	panel) echo "# catalyst-power: tear-free panel (Settings > Developer options)" ;;
+	esac
+}
+
+lines_of() {
+	case "$1" in
+	undervolt) printf 'over_voltage=-1\nover_voltage_min=-2\n' ;;
+	panel) printf 'dtoverlay=cardputerzero-portrait\n' ;;
+	esac
+}
+
+state_file() {
+	echo "/data/catalyst/$1"
+}
+
+state() {
+	cat "$(state_file "$1")" 2>/dev/null || echo off
+}
+
+set_state() {
+	mkdir -p /data/catalyst
+	echo "$2" >"$(state_file "$1")"
+	sync
+}
 
 # Run "$@" with the boot partition mounted read-write at $MNT.
 with_boot() {
@@ -32,26 +68,81 @@ with_boot() {
 	return $status
 }
 
-# config.txt without the block, then with it before the system block.
+# config.txt without a trial's block (and the blank line put after it), the
+# marker matched as plain text.
 strip_block() {
-	sed "/^$BEGIN\$/,/^$END\$/d" "$MNT/config.txt" >"$MNT/config.new" &&
-		mv "$MNT/config.new" "$MNT/config.txt"
-}
-
-add_block() {
-	strip_block || return 1
-	awk -v begin="$BEGIN" -v end="$END" -v slots="$SLOTS" '
-		!done && index($0, slots) == 1 {
-			print begin; print "over_voltage=-1"; print "over_voltage_min=-2"; print end; print ""
-			done = 1
-		}
+	begin=$(begin_of "$1")
+	awk -v begin="$begin" -v end="$END" '
+		skip == 1 { if ($0 == end) skip = 2; next }
+		skip == 2 { skip = 0; if ($0 == "") next }
+		$0 == begin { skip = 1; next }
 		{ print }
-		END { if (!done) { print begin; print "over_voltage=-1"; print "over_voltage_min=-2"; print end } }
 	' "$MNT/config.txt" >"$MNT/config.new" && mv "$MNT/config.new" "$MNT/config.txt"
 }
 
-state() {
-	cat "$STATE" 2>/dev/null || echo off
+# config.txt with a trial's block just before the system block (so after the
+# board's own lines: an overlay there comes after the one it builds on).
+add_block() {
+	strip_block "$1" || return 1
+	block=$(
+		begin_of "$1"
+		lines_of "$1"
+		echo "$END"
+	)
+	awk -v block="$block" -v slots="$SLOTS" '
+		!done && index($0, slots) == 1 { print block; print ""; done = 1 }
+		{ print }
+		END { if (!done) print block }
+	' "$MNT/config.txt" >"$MNT/config.new" && mv "$MNT/config.new" "$MNT/config.txt"
+}
+
+# undervolt|panel on|off|confirm|status
+trial() {
+	name=$1
+	case "$2" in
+	on)
+		with_boot add_block "$name" || exit 1
+		# trying 0: set, not yet started with.
+		set_state "$name" "trying 0"
+		;;
+	off)
+		with_boot strip_block "$name" || exit 1
+		rm -f "$(state_file "$name")"
+		sync
+		;;
+	confirm)
+		[ "$(state "$name")" = "trying 1" ] && set_state "$name" on
+		;;
+	status)
+		case "$(state "$name")" in
+		trying*) echo trying ;;
+		*) state "$name" ;;
+		esac
+		;;
+	*)
+		echo "usage: $0 $name on|off|status|confirm" >&2
+		exit 2
+		;;
+	esac
+}
+
+# At start: a trial set is now being tried; one tried and never confirmed is
+# taken out again, and the machine restarts without it.
+boot_trial() {
+	name=$1
+	case "$(state "$name")" in
+	"trying 0")
+		set_state "$name" "trying 1"
+		;;
+	"trying 1")
+		if with_boot strip_block "$name"; then
+			set_state "$name" failed
+			echo "catalyst-power: $name did not hold; restarting without it" >&2
+			umount /data 2>/dev/null
+			busybox reboot -f
+		fi
+		;;
+	esac
 }
 
 case "$1" in
@@ -63,56 +154,32 @@ wifi-wake)
 	exit 0
 	;;
 undervolt)
+	trial undervolt "$2"
+	;;
+panel)
 	case "$2" in
-	on)
-		with_boot add_block || exit 1
-		mkdir -p /data/catalyst
-		# trying 0: set, not yet started with.
-		echo "trying 0" >"$STATE"
-		sync
+	# Set it and restart into it at once: the start it is tried in asks.
+	try)
+		trial panel on
+		reboot
 		;;
-	off)
-		with_boot strip_block || exit 1
-		rm -f "$STATE"
-		sync
-		;;
-	confirm)
-		case "$(state)" in
-		"trying 1") echo on >"$STATE" && sync ;;
-		esac
-		;;
-	status)
-		case "$(state)" in
-		trying*) echo trying ;;
-		*) state ;;
-		esac
+	# Not kept (no answer, or Esc): out again, and back to the panel as it was.
+	revert)
+		with_boot strip_block panel
+		set_state panel failed
+		reboot
 		;;
 	*)
-		echo "usage: $0 undervolt on|off|status|confirm" >&2
-		exit 2
+		trial panel "$2"
 		;;
 	esac
 	;;
 boot)
-	case "$(state)" in
-	"trying 0")
-		echo "trying 1" >"$STATE"
-		sync
-		;;
-	"trying 1")
-		# The last start ran with it and never confirmed: take it out.
-		if with_boot strip_block; then
-			echo failed >"$STATE"
-			sync
-			echo "catalyst-power: lower voltage did not hold; restarting without it" >&2
-			umount /data 2>/dev/null
-			busybox reboot -f
-		fi
-		;;
-	esac
+	boot_trial undervolt
+	boot_trial panel
 	;;
 *)
-	echo "usage: $0 wifi-sleep|wifi-wake|undervolt ...|boot" >&2
+	echo "usage: $0 wifi-sleep|wifi-wake|undervolt ...|panel ...|boot" >&2
 	exit 2
 	;;
 esac
