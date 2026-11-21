@@ -27,6 +27,8 @@ enum Page {
     Welcome,
     /// Setting up from a computer: the address to open and the code to give.
     Computer,
+    /// Each part of the handheld looked for, the keys checked by typing.
+    Hardware,
     /// How the keyboard works: Shift, Fn and Sym, the arrows, a little practice.
     Lesson,
     Team,
@@ -35,6 +37,8 @@ enum Page {
     Wifi,
     Keys,
     Choices,
+    /// The screen going off, the battery saver, Wi-Fi in standby, lift to wake.
+    Power,
     Look,
     Finishing,
 }
@@ -42,7 +46,7 @@ enum Page {
 /// Setup's pages after the welcome, in order: Next goes one along, Esc one
 /// back, and the progress marks count them. A page added here is in the
 /// flow everywhere; it needs only its rows, its keys and its drawing.
-const FLOW: [Page; 7] = [Page::Lesson, Page::Team, Page::Place, Page::Wifi, Page::Keys, Page::Choices, Page::Look];
+const FLOW: [Page; 9] = [Page::Hardware, Page::Lesson, Page::Team, Page::Place, Page::Wifi, Page::Keys, Page::Choices, Page::Power, Page::Look];
 
 const SURFACE: Color = Color::hex(0x1c1d23);
 const SURFACE_FOCUSED: Color = Color::hex(0x272830);
@@ -67,6 +71,16 @@ const WORDS_WIFI: &str = "For updates and the event schedule.";
 const WORDS_KEYS: &str = "For the event schedule and log analysis.";
 const WORDS_TYPING: &str = "Enter keeps it; esc leaves it as it was.";
 const WORDS_LOOK: &str = "Change any of these later in Settings.";
+const WORDS_HARDWARE: &str = "Each part, looked for. Enter on Keys to type a line.";
+/// The power page's rows: a name, and the line under the title while it is focused.
+const POWER: [(&str, &str); 4] = [
+    ("Screen off after", "With no key for this long, the screen goes off."),
+    ("Battery saver at 20%", "Fewer frames and a slower processor from 20%."),
+    ("Wi-Fi off in standby", "After ten minutes with the screen off."),
+    ("Lift to wake", "Picking it up turns the screen on for a look."),
+];
+/// The hardware page's chips: three across.
+const CHIPS_ACROSS: usize = 3;
 const CHOICES: [(&str, &str); 4] = [
     ("Open Robot when one is plugged in", "Its page opens when a robot links on Home."),
     ("Show how the last match went", "A match's summary opens once its log is in."),
@@ -307,6 +321,8 @@ pub struct Setup {
     /// Opened from Settings rather than on first start: one page alone (the
     /// computer page, or the keyboard lesson), and back to Settings when done.
     from_settings: bool,
+    /// The hardware page's parts, looked for once it is first shown.
+    hardware: Option<crate::hwcheck::Check>,
 }
 
 impl Setup {
@@ -328,6 +344,7 @@ impl Setup {
             note: None,
             remote: None,
             from_settings: false,
+            hardware: None,
         }
     }
 
@@ -389,8 +406,51 @@ impl Setup {
         match page {
             Page::Lesson => self.lesson.arrive(if forward { 0 } else { CARDS.len() - 1 }),
             Page::Place => self.name = crate::device::suggested_name(&self.team),
+            Page::Hardware if self.hardware.is_none() => self.hardware = Some(crate::hwcheck::Check::run()),
             _ => {}
         }
+    }
+
+    /// The power page's rows: lift to wake only where there is a motion sensor.
+    fn power_rows(&self) -> usize {
+        if crate::imu::has_motion() {
+            POWER.len()
+        } else {
+            POWER.len() - 1
+        }
+    }
+
+    fn change_power(&mut self, row: usize, step: i32, cx: &mut Cx) {
+        let s = &mut cx.settings;
+        match row {
+            0 => {
+                let all = crate::standby::SCREEN_OFF_CHOICES;
+                let at = all.iter().position(|v| *v == s.screen_off).unwrap_or(1) as i32;
+                s.screen_off = all[(at + step).rem_euclid(all.len() as i32) as usize];
+            }
+            1 => s.battery.saver_auto = !s.battery.saver_auto,
+            2 => s.battery.wifi_sleeps = !s.battery.wifi_sleeps,
+            _ => s.lift_wake = !s.lift_wake,
+        }
+    }
+
+    /// The hardware page: the arrows go round the chips (three across) and
+    /// on to Next; Enter on Keys opens the line to type.
+    fn hardware_key(&mut self, key: Key, cx: &mut Cx) -> Nav {
+        let n = self.rows();
+        match key {
+            Key::Back => return self.back(),
+            Key::Tab => return self.next(cx),
+            Key::Enter if self.focus >= n => return self.next(cx),
+            Key::Enter => return self.hardware.as_ref().and_then(|h| h.open(self.focus)).map_or(Nav::Stay, Nav::Push),
+            Key::Right => self.focus = (self.focus + 1).min(n),
+            Key::Left => self.focus = self.focus.saturating_sub(1),
+            Key::Down => self.focus = if self.focus + CHIPS_ACROSS < n { self.focus + CHIPS_ACROSS } else { n },
+            Key::Up if self.focus >= n => self.focus = n.saturating_sub(1),
+            Key::Up => self.focus = self.focus.saturating_sub(CHIPS_ACROSS),
+            _ => {}
+        }
+        Nav::Stay
     }
 
     /// Keep what the page being left holds: the team, the keys, the name.
@@ -477,13 +537,15 @@ impl Setup {
             Page::Wifi => 2,
             Page::Keys => SERVICES.len(),
             Page::Choices => 4,
+            Page::Hardware => self.hardware.as_ref().map_or(0, |h| h.states.len()),
+            Page::Power => self.power_rows(),
             Page::Look => 4,
         }
     }
 
     /// Whether the page has a Next button below its rows.
     fn has_next(&self) -> bool {
-        matches!(self.page, Page::Team | Page::Place | Page::Wifi | Page::Keys | Page::Choices | Page::Look)
+        matches!(self.page, Page::Hardware | Page::Team | Page::Place | Page::Wifi | Page::Keys | Page::Choices | Page::Power | Page::Look)
     }
 
     /// The `k`th element of the page rising into place: its opacity and how
@@ -831,6 +893,55 @@ impl Setup {
         g.text_alpha(LEFT, BAR_CY, hint, TextStyle::code(9.0), INK_FAINT, a);
     }
 
+    /// The hardware page: a chip for each part, three across, ticked when
+    /// found, marked amber when not; the line under the title says what the
+    /// chip in focus found.
+    fn draw_hardware(&self, g: &mut Gfx) {
+        use crate::hwcheck::State;
+        let Some(check) = &self.hardware else { return };
+        let words = match check.states.get(self.focus) {
+            // The keys, not yet typed: what to do.
+            Some((_, State::Needs(_))) => WORDS_HARDWARE.to_owned(),
+            Some((part, state)) => format!("{}: {}", part.name(), state.words()),
+            None => {
+                let (found, all) = check.found();
+                format!("{found} of {all} found. It is in Settings › About too.")
+            }
+        };
+        self.heading(g, "Check the hardware", &words);
+        let gap = 5.0;
+        let cw = (W - 2.0 * LEFT - gap * (CHIPS_ACROSS - 1) as f32) / CHIPS_ACROSS as f32;
+        for (i, (part, state)) in check.states.iter().enumerate() {
+            let (a, dx, dy) = self.reveal(2 + i / CHIPS_ACROSS);
+            let (col, row) = (i % CHIPS_ACROSS, i / CHIPS_ACROSS);
+            let r = Rect::new(LEFT + col as f32 * (cw + gap) + dx, ROWS_TOP + 1.0 + row as f32 * 21.0 + dy, cw, 18.0);
+            let focused = self.focus == i;
+            g.canvas.rrect(r, 9.0, if focused { SURFACE_FOCUSED } else { SURFACE }, a);
+            // The mark: a tick in a disc when found, an amber disc with a bar
+            // when not, a ring while it waits for a hand (the keys).
+            let (mx, my) = (r.x + 10.0, r.cy());
+            match state {
+                State::Ok(_) => {
+                    g.canvas.circle(mx, my, 5.0, INK_STRONG, a);
+                    g.canvas.polyline(&[(mx - 2.4, my + 0.2), (mx - 0.7, my + 1.9), (mx + 2.5, my - 1.8)], 1.4, Color::hex(0x101116), a);
+                }
+                State::Missing(_) => {
+                    g.canvas.circle(mx, my, 5.0, LIT, a);
+                    g.canvas.rrect(Rect::new(mx - 0.75, my - 3.0, 1.5, 3.8), 0.75, Color::hex(0x101116), a);
+                    g.canvas.circle(mx, my + 2.4, 0.85, Color::hex(0x101116), a);
+                }
+                State::Needs(_) => g.canvas.stroke_rrect(Rect::new(mx - 4.5, my - 4.5, 9.0, 9.0), 4.5, 1.2, INK_FAINT, a),
+            }
+            let style = TextStyle::sans(10.5, if focused { 600.0 } else { 500.0 });
+            let name = g.text.fit(part.short(), &style, r.w - 24.0);
+            g.text_alpha(r.x + 19.0, r.cy(), &name, style, if state.ok() { INK_STRONG } else { INK_THIN }, a);
+            if focused {
+                g.canvas.stroke_rrect(r.inset(-2.0), 11.0, 1.5, RING, 0.9 * a);
+            }
+        }
+        self.bar(g, "arrows move · enter on keys · tab skip");
+    }
+
     fn draw_place(&self, g: &mut Gfx) {
         self.heading(g, "Name and time zone", WORDS_PLACE);
         let row_w = W - 2.0 * LEFT;
@@ -883,6 +994,10 @@ impl Screen for Setup {
     fn resume(&mut self) {
         // Back from choosing a network or a time zone: say how it went.
         self.entered = 0.0;
+        // Back from typing the line: the keys' chip says how it went.
+        if let Some(check) = &mut self.hardware {
+            check.tick(10.0);
+        }
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -905,6 +1020,9 @@ impl Screen for Setup {
         }
         if self.page == Page::Lesson {
             return self.lesson_key(key, cx);
+        }
+        if self.page == Page::Hardware {
+            return self.hardware_key(key, cx);
         }
         let (rows, last) = (self.rows(), self.rows() + self.has_next() as usize);
         match key {
@@ -948,9 +1066,13 @@ impl Screen for Setup {
                 (Page::Wifi, _) => return self.next(cx),
                 (Page::Keys, row) => self.typing = Some((row, String::new())),
                 (Page::Choices, row) => self.toggle_choice(row, cx),
+                (Page::Power, row) => self.change_power(row, 1, cx),
                 (Page::Look, row) => self.change_look(row, 1, cx),
                 _ => {}
             },
+            Key::Left | Key::Right if self.page == Page::Power && self.focus < rows => {
+                self.change_power(self.focus, if key == Key::Left { -1 } else { 1 }, cx);
+            }
             Key::Left | Key::Right if self.page == Page::Look && self.focus < rows => {
                 self.change_look(self.focus, if key == Key::Left { -1 } else { 1 }, cx);
             }
@@ -988,6 +1110,13 @@ impl Screen for Setup {
         if let Some(wifi) = &self.wifi {
             let seen = wifi.generation();
             changed |= std::mem::replace(&mut self.wifi_seen, seen) != seen;
+        }
+        // The parts looked for again now and then (the motion sensor starts a
+        // moment after the shell; the Ethernet adapter follows the USB switch).
+        if self.page == Page::Hardware {
+            if let Some(check) = &mut self.hardware {
+                changed |= check.tick(dt);
+            }
         }
         changed
     }
@@ -1087,6 +1216,20 @@ impl Screen for Setup {
                 }
                 self.bar(g, "enter switches · esc back");
             }
+            Page::Hardware => self.draw_hardware(g),
+            Page::Power => {
+                let words = POWER.get(self.focus).map_or(WORDS_LOOK, |p| p.1);
+                self.heading(g, "Battery and power", words);
+                let on = [g.screen_off != 0, g.battery.saver_auto, g.battery.wifi_sleeps, g.lift_wake];
+                for (i, ((label, _), on)) in POWER.iter().zip(on).enumerate().take(self.power_rows()) {
+                    let value = match i {
+                        0 => format!("‹ {} ›", crate::standby::screen_off_name(g.screen_off)),
+                        _ => (if on { "on" } else { "off" }).to_owned(),
+                    };
+                    self.row(g, i, ROWS_TOP + i as f32 * 20.0, row_w, 17.0, label, &value, on);
+                }
+                self.bar(g, "enter switches · ← → time · esc back");
+            }
             Page::Look => {
                 self.heading(g, "Make it yours", WORDS_LOOK);
                 let accent = g.accent;
@@ -1149,17 +1292,35 @@ mod tests {
     fn every_line_of_setup_fits_the_panel_whole() {
         let mut g = Gfx::new(Tokens::dark());
         let words = TextStyle::sans(11.0, 400.0);
-        let lines = [WORDS_WELCOME, WORDS_COMPUTER, WORDS_TEAM, WORDS_PLACE, WORDS_WIFI, WORDS_KEYS, WORDS_TYPING, WORDS_LOOK];
-        for line in lines.iter().chain(CHOICES.iter().map(|c| &c.1)) {
+        let lines = [WORDS_WELCOME, WORDS_COMPUTER, WORDS_TEAM, WORDS_PLACE, WORDS_WIFI, WORDS_KEYS, WORDS_TYPING, WORDS_LOOK, WORDS_HARDWARE];
+        for line in lines.iter().chain(CHOICES.iter().map(|c| &c.1)).chain(POWER.iter().map(|p| &p.1)) {
             let w = g.measure(line, words);
             assert!(w <= W - 2.0 * LEFT, "{line:?} is {w:.0} px, wider than {}", W - 2.0 * LEFT);
         }
-        // The choices' names fit their rows beside "off".
+        // The choices' names fit their rows beside "off", the power page's
+        // beside its longest value.
         let label = TextStyle::sans(11.5, 600.0);
         for (name, _) in CHOICES {
             let w = g.measure(name, label) + 22.0 + g.measure("off", TextStyle::code(9.5)) + 11.0;
             assert!(w <= W - 2.0 * LEFT, "{name:?} crowds its row: {w:.0} px");
         }
+        for (name, _) in POWER {
+            let w = g.measure(name, label) + 22.0 + g.measure("‹ never ›", TextStyle::code(9.5)) + 11.0;
+            assert!(w <= W - 2.0 * LEFT, "{name:?} crowds its row: {w:.0} px");
+        }
+        // Each part's chip on the hardware page, and what the line says of it.
+        let cw = (W - 2.0 * LEFT - 5.0 * (CHIPS_ACROSS - 1) as f32) / CHIPS_ACROSS as f32;
+        for part in crate::hwcheck::PARTS {
+            let w = g.measure(part.short(), TextStyle::sans(10.5, 600.0));
+            assert!(w <= cw - 24.0, "{:?} crowds its chip: {w:.0} px", part.short());
+            for state in [crate::hwcheck::look(part, false), crate::hwcheck::look(part, true)] {
+                let line = format!("{}: {}", part.name(), state.words());
+                assert!(g.measure(&line, words) <= W - 2.0 * LEFT, "{line:?}");
+            }
+        }
+        // Rows of chips end above the bar.
+        let rows = crate::hwcheck::PARTS.len().div_ceil(CHIPS_ACROSS) as f32;
+        assert!(ROWS_TOP + 1.0 + (rows - 1.0) * 21.0 + 18.0 <= BAR_CY - 9.0);
     }
 
     /// Setup in a sandbox, past the welcome and onto the lesson's first card.
@@ -1195,11 +1356,15 @@ mod tests {
         for want in FLOW.iter().rev().skip(1) {
             press(&mut setup, &mut settings, &mut robot, Key::Back);
             assert_eq!(setup.page, *want);
+            // The lesson, arrived at from behind, is on its last card: back through its cards.
+            if *want == Page::Lesson {
+                for _ in 1..CARDS.len() {
+                    press(&mut setup, &mut settings, &mut robot, Key::Back);
+                    assert_eq!(setup.page, Page::Lesson);
+                }
+            }
         }
-        // The lesson, arrived at from behind, is on its last card; back through it to the welcome.
-        for _ in 0..CARDS.len() {
-            press(&mut setup, &mut settings, &mut robot, Key::Back);
-        }
+        press(&mut setup, &mut settings, &mut robot, Key::Back);
         assert_eq!(setup.page, Page::Welcome);
     }
 

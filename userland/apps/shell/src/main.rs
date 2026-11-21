@@ -1053,8 +1053,11 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     let pages: &[(&str, &[Key])] = &[
         ("23-setup-welcome", &[]),
         ("24-setup-computer", &[Down, Enter]),
+        // The hardware check: each part on a chip, then one looked at.
+        ("84-setup-hardware", &[Back, Enter]),
+        ("84b-setup-hardware-battery", &[Right, Right]),
         // The keyboard lesson: its five cards, each practised a little.
-        ("85-setup-lesson-modifiers", &[Back, Enter]),
+        ("85-setup-lesson-modifiers", &[Tab]),
         ("85b-setup-lesson-moving", &[Enter, Char('x'), Char('c')]),
         ("85c-setup-lesson-capitals", &[Enter, Char('G'), Char('o'), Char('!')]),
         ("85d-setup-lesson-text-arrows", &[Enter, Left, Left, Left]),
@@ -1068,6 +1071,8 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
         ("26-setup-wifi", &[Tab]),
         ("27-setup-keys", &[Down, Enter, Down]),
         ("28-setup-choices", &[Tab, Down]),
+        // Battery and power: the screen off after two minutes.
+        ("84c-setup-power", &[Tab, Right]),
         ("29-setup-look", &[Tab, Right, Right]),
         ("30-setup-working", &[Down, Down, Down, Down, Enter]),
     ];

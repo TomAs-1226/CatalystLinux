@@ -2847,8 +2847,9 @@ pub(crate) mod tests {
         assert!(shell.robot.is_demo());
         shell.start_setup();
         frames(&mut shell, 30, FRAME);
-        // Set up here; past the keyboard lesson; the team.
+        // Set up here; past the hardware check and the keyboard lesson; the team.
         shell.key(Key::Enter);
+        shell.key(Key::Tab);
         shell.key(Key::Tab);
         for c in "5805".chars() {
             shell.key(Key::Char(c));
@@ -2868,9 +2869,11 @@ pub(crate) mod tests {
         assert_eq!(title(&shell), "Setup");
         let light = shell.settings.light;
         let accent = shell.settings.accent;
-        // Set up here; the keyboard lesson skipped; team 5805; the name and
-        // time zone as they are; no Wi-Fi now; keys skipped; choices: the first off.
+        // Set up here; the hardware check and the keyboard lesson skipped;
+        // team 5805; the name and time zone as they are; no Wi-Fi now; keys
+        // skipped; choices: the first off; power as it is.
         shell.key(Key::Enter);
+        shell.key(Key::Tab);
         shell.key(Key::Tab);
         for c in "5805".chars() {
             shell.key(Key::Char(c));
@@ -2883,6 +2886,7 @@ pub(crate) mod tests {
         assert!(shell.settings.open_robot);
         shell.key(Key::Enter);
         assert!(!shell.settings.open_robot, "the first choice switched off");
+        shell.key(Key::Tab);
         shell.key(Key::Tab);
         // The look: the next accent, light mode, then Finish.
         shell.key(Key::Right);

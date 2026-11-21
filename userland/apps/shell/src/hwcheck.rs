@@ -71,6 +71,13 @@ impl Part {
         }
     }
 
+    /// The name on a small chip (setup's hardware page).
+    pub fn short(self) -> &'static str {
+        match self {
+            Part::Motion => "Motion",
+            other => other.name(),
+        }
+    }
 }
 
 /// The line typed to check the keys: every letter, then every digit.

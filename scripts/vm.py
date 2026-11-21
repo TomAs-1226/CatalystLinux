@@ -374,10 +374,11 @@ def tools(vm):
     want = int(os.environ.get("CATALYST_CARD_GB", "0") or 0)
     grown = out.strip().isdigit() and (want == 0 or int(out) > (want - 6) * 1_000_000)
     check(f"/data grew to the card ({want or 'emulator'} GB card)", grown, f"{int(out) // 1024 if out.strip().isdigit() else out} MB")
-    out = vm.run("stat -f -c '%S %b %c' /data")
+    out = vm.run("tune2fs -l /dev/mmcblk0p4 2>/dev/null | grep -E '^(Block size|Block count|Inode count):' | tr -s ' ' | cut -d' ' -f3 | tr '\\n' ' '")
     f = out.split()
-    per_inode = int(f[0]) * int(f[1]) // max(1, int(f[2])) if len(f) == 3 and all(x.isdigit() for x in f) else 0
-    check("/data has 4 KB blocks and an inode per 64 KB", f[:1] == ["4096"] and per_inode >= 60_000, f"{out} ({per_inode} bytes an inode)")
+    # Inode count, block count, block size, as tune2fs lists them.
+    per_inode = int(f[1]) * int(f[2]) // max(1, int(f[0])) if len(f) == 3 and all(x.isdigit() for x in f) else 0
+    check("/data has 4 KB blocks and an inode per 64 KB", f[2:] == ["4096"] and per_inode >= 60_000, f"{out.strip()} ({per_inode} bytes an inode)")
     return failed
 
 
