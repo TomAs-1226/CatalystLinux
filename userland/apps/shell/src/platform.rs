@@ -616,6 +616,11 @@ pub mod device {
             if code == 125 || code == 126 || (code == 57 && self.ctrl) {
                 return (value == 1).then_some(Key::Ctrl(' '));
             }
+            // Ctrl-Enter brings Spotlight up over any screen: no program in a
+            // terminal can tell it from Enter, so it takes nothing from one.
+            if (code == 28 || code == 96) && self.ctrl {
+                return (value == 1).then_some(Key::Ctrl('\n'));
+            }
             if own {
                 if let Some(ch) = sym_char(code) {
                     return Some(Key::Char(ch));
@@ -891,6 +896,7 @@ pub mod sim {
                 K::Down => Key::Down,
                 K::Left => Key::Left,
                 K::Right => Key::Right,
+                K::Enter | K::NumPadEnter if ctrl => Key::Ctrl('\n'),
                 K::Enter | K::NumPadEnter => Key::Enter,
                 K::Escape => Key::Back,
                 K::Backspace => Key::Backspace,

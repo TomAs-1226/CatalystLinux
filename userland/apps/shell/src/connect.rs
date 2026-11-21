@@ -252,6 +252,20 @@ impl Connect {
     }
 }
 
+/// A session logging into `host`, as Enter on its row opens one (search
+/// opens the same).
+pub fn session(host: &Host) -> crate::terminal::Terminal {
+    let key = key_path().exists().then(key_path);
+    std::fs::create_dir_all(ssh_dir().join("client").join(".ssh")).ok();
+    let line = ssh_command(host, key.as_deref());
+    crate::terminal::Terminal::running("SSH", &line, session_dir()).with_banner(&format!("ssh {}", host.line()))
+}
+
+/// Where SSH keeps its keys on the handheld, which search leaves alone.
+pub fn private_dir() -> PathBuf {
+    ssh_dir()
+}
+
 /// Where a terminal session starts: the data partition, or the home folder.
 pub fn session_dir() -> PathBuf {
     if Path::new("/data").is_dir() {
@@ -304,14 +318,7 @@ impl Screen for Connect {
         let armed = self.deleting.take();
         match (key, row) {
             (Key::Back, _) => return Nav::Pop,
-            (Key::Enter | Key::Right, Row::Host(i)) => {
-                let host = &self.hosts[i];
-                let key = key_path().exists().then(key_path);
-                std::fs::create_dir_all(ssh_dir().join("client").join(".ssh")).ok();
-                let line = ssh_command(host, key.as_deref());
-                let session = crate::terminal::Terminal::running("SSH", &line, session_dir()).with_banner(&format!("ssh {}", host.line()));
-                return Nav::Push(Box::new(session));
-            }
+            (Key::Enter | Key::Right, Row::Host(i)) => return Nav::Push(Box::new(session(&self.hosts[i]))),
             (Key::Enter | Key::Right, Row::AddHost) => self.field = Some((Field::new("user@host, or user@host:port", "", 64), Typing::NewHost)),
             (Key::Enter | Key::Right, Row::Key) => match make_key() {
                 Ok(public) => return Nav::Push(Box::new(KeyScreen { public })),

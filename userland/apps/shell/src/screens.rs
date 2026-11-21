@@ -900,9 +900,10 @@ impl Screen for Home {
         if key == Key::Up && at_top {
             return Nav::Control;
         }
-        // Space or / searches everything; the bare letters stay arrows here.
+        // Space or / brings Spotlight up, as Ctrl-Enter does anywhere; the
+        // bare letters stay arrows here.
         if key == Key::Char(' ') || key == Key::Char('/') {
-            return Nav::Push(Box::new(crate::search::Search::new(None)));
+            return Nav::Spotlight;
         }
         // Esc anywhere on Home: back to its start, the first app of the first
         // page (or card), gliding there as a page turn does.
@@ -2214,6 +2215,19 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 62] = [
 pub fn setting_names() -> impl Iterator<Item = (usize, &'static str)> {
     let motion = crate::imu::has_motion();
     SETTING_PLACES.iter().enumerate().filter(move |(_, place)| motion || !matches!(place.0, "Lift to wake" | "Face down to sleep")).map(|(i, place)| (i, place.0))
+}
+
+/// Everything search finds in Settings: its place (for `open_setting`), its
+/// name, and the section it is in, by that section's own name (none: a
+/// section itself, or a row with no section of its own).
+pub fn setting_sections() -> Vec<(usize, &'static str, Option<&'static str>)> {
+    setting_names()
+        .map(|(i, name)| {
+            let (_, section, place) = SETTING_PLACES[i];
+            let parent = place.and_then(|_| SETTING_PLACES.iter().find(|(_, s, p)| *s == section && p.is_none()).map(|(n, _, _)| *n));
+            (i, name, parent)
+        })
+        .collect()
 }
 
 /// Where a section is in Settings' own list, by its name in `SETTING_PLACES`
