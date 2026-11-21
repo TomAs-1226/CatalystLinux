@@ -70,12 +70,40 @@ enum Source {
     Simulated { started: Instant, scratch: Vec<u8> },
 }
 
+/// libcamera's Raspberry Pi pipeline needs the firmware's image processor
+/// (the ISP) as well as the sensor, and the ISP is reached through vchiq,
+/// which the image does not load at start (nothing else needs it, and it
+/// holds memory): without it the sensor is found but libcamera reports no
+/// camera. Loaded here the first time the reader opens, then kept.
+fn ready_the_isp() {
+    let has_isp = || {
+        std::fs::read_dir("/sys/class/video4linux")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| std::fs::read_to_string(e.path().join("name")).is_ok_and(|n| n.contains("isp")))
+    };
+    if has_isp() {
+        return;
+    }
+    // By name: the blacklist only keeps them from loading by themselves.
+    std::process::Command::new("modprobe").args(["-a", "vchiq", "vc-sm-cma", "bcm2835-isp"]).status().ok();
+    // The ISP's video devices appear as vchiq finds the firmware's services.
+    for _ in 0..40 {
+        if has_isp() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 impl Source {
     /// The camera on the handheld; on a computer, the simulated one.
     fn open() -> Result<Source, String> {
         if !cfg!(target_arch = "aarch64") {
             return Ok(Source::Simulated { started: Instant::now(), scratch: Vec::new() });
         }
+        ready_the_isp();
         // 640 × 480 frames on stdout, from the sensor's full-view binned mode,
         // until stopped: catalyst-camera sends the brightness alone;
         // rpicam-vid (no preview window) whole YUV 4:2:0 frames.
