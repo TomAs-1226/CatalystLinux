@@ -78,6 +78,7 @@ mod power;
 mod pty;
 mod platform;
 mod recents;
+mod reminders;
 mod remote;
 mod robot;
 mod schedule;
@@ -471,11 +472,11 @@ fn main() {
     loop {
         let moving = shell.animating();
         // Idle, a look four times a second (for a lift); in deep standby,
-        // once a minute.
+        // once a minute (sooner when a reminder or the queue comes first).
         let timeout = if moving {
             next_frame.saturating_duration_since(Instant::now())
         } else if shell.deep_asleep() {
-            deep::WAIT
+            shell.deep_wait()
         } else {
             Duration::from_millis(250)
         };
@@ -2483,6 +2484,7 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     typed(&mut shell, "elevator");
     press(&mut shell, &[Enter], 60);
     save(&mut shell, "120b-files-hex-found");
+    reminder_shots(dir);
     std::fs::remove_dir_all(&notes_dir).ok();
     let written =std::fs::read_dir(dir).map_or(0, |d| d.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "png")).count());
     println!("{written} screens in {}, {frames} frames at {:.2} ms each", dir.display(), started.elapsed().as_secs_f64() * 1e3 / frames as f64);
@@ -2493,6 +2495,178 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
         eprintln!("icons asked for that are not built in: {}", missing.iter().cloned().collect::<Vec<_>>().join(", "));
         std::process::exit(1);
     }
+}
+
+/// Reminders in the gallery, on the demo event: Today with one come due and
+/// the pit's cues, the lists turning, Upcoming and Done; quick add reading
+/// what is typed; the pit routine; a note's bell in Notes and its reminder;
+/// Bezel's light look; and one coming due with the screen off, which wakes
+/// it with the island and opens Reminders.
+#[cfg(not(target_arch = "aarch64"))]
+fn reminder_shots(dir: &std::path::Path) {
+    use reminders::parse::Parsed;
+    use reminders::{Book, Link, Repeat, When};
+    use Key::*;
+    let settle = |shell: &mut Shell, frames: usize| {
+        for _ in 0..frames {
+            if shell.tick(1.0 / 60.0) {
+                shell.draw();
+            }
+        }
+    };
+    let save = |shell: &mut Shell, name: &str| {
+        shell.draw();
+        platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}.png")), 3);
+    };
+    let press = |shell: &mut Shell, keys: &[Key], frames: usize| {
+        for key in keys {
+            shell.key(*key);
+            settle(shell, frames);
+        }
+    };
+    let typed = |shell: &mut Shell, text: &str| {
+        for c in text.chars() {
+            shell.key(Char(c));
+        }
+        settle(shell, 12);
+    };
+    // Two pit notes, one of them to be reminded of (the tour's own folder,
+    // emptied first).
+    let notes_dir = notes::dir();
+    std::fs::remove_dir_all(&notes_dir).ok();
+    std::fs::create_dir_all(&notes_dir).ok();
+    for (file, text) in [
+        ("2026-11-20-1130.txt", "Elevator belt\nfollower slips at the top · retension\n\n— Q19 · nov 20 11:30\n"),
+        ("2026-11-21-0905.txt", "Intake off can_s0\nmove it to can_s1 before Q27\n\n— Q27 · nov 21 09:05\n"),
+    ] {
+        std::fs::write(notes_dir.join(file), text).ok();
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    // The demo event's reminders, a fresh book of them.
+    let view = shell.robot.schedule.view();
+    reminders::with(|s| {
+        std::fs::remove_file(reminders::path()).ok();
+        s.book = Book::open(reminders::path());
+        let n = reminders::plan::Now { at: reminders::now(), zone: &reminders::plan::Here, view: view.as_ref() };
+        let add = |book: &mut Book, typed: &str| {
+            for p in reminders::parse::parse(typed, &n).expect("a reminder") {
+                book.add(p, &n);
+            }
+        };
+        s.book.add(Parsed { text: "swap battery".into(), when: When::In(n.at - 150), repeat: Repeat::Never, list: None, link: Link::None }, &n);
+        add(&mut s.book, "run the pit checklist 20 min before each match");
+        add(&mut s.book, "after each match: check bumpers, download logs");
+        add(&mut s.book, "before Q40 charge the spare");
+        add(&mut s.book, "buy zip ties #personal");
+        add(&mut s.book, "tomorrow 8am robot inspection");
+        add(&mut s.book, "every weekday at 07:30 bus to school #personal");
+        s.book.add(Parsed { text: "Elevator belt".into(), when: When::Match(reminders::Cue::After, reminders::Of::Next), repeat: Repeat::Never, list: None, link: Link::Note("2026-11-20-1130.txt".into()) }, &n);
+        for done in ["charge battery 3", "zip-tie the radio"] {
+            let id = s.book.add(Parsed { text: done.into(), when: When::Whenever, repeat: Repeat::Never, list: None, link: Link::None }, &n);
+            s.book.tick(id, &n, true);
+        }
+        s.book.fire(&n, true);
+    });
+    settle(&mut shell, 30);
+    press(&mut shell, &vec![Right; steps_to("Reminders")], 12);
+    settle(&mut shell, 40);
+    save(&mut shell, "121-home-reminders");
+    press(&mut shell, &[Enter], 90);
+    press(&mut shell, &[Down], 30);
+    save(&mut shell, "121b-reminders-today");
+    press(&mut shell, &[Down, Down, Down], 20);
+    settle(&mut shell, 30);
+    save(&mut shell, "121c-reminders-today-cues");
+    shell.key(Right);
+    settle(&mut shell, 7);
+    save(&mut shell, "121d-reminders-turning");
+    settle(&mut shell, 60);
+    press(&mut shell, &[Down], 30);
+    save(&mut shell, "121e-reminders-upcoming");
+    press(&mut shell, &[Right], 60);
+    save(&mut shell, "121f-reminders-done");
+    // Quick add: the examples, then a line read as it is typed, then several at once.
+    press(&mut shell, &[Left, Left], 40);
+    press(&mut shell, &[Char('n')], 60);
+    save(&mut shell, "122-reminders-new");
+    typed(&mut shell, "before Q40 bring the cart");
+    settle(&mut shell, 20);
+    save(&mut shell, "122b-reminders-new-read");
+    for _ in 0.."before Q40 bring the cart".len() {
+        shell.key(Backspace);
+    }
+    typed(&mut shell, "tomorrow 8am check bumpers every day");
+    save(&mut shell, "122c-reminders-new-repeat");
+    for _ in 0.."tomorrow 8am check bumpers every day".len() {
+        shell.key(Backspace);
+    }
+    typed(&mut shell, "after each match: swap battery, check bumpers, download logs");
+    save(&mut shell, "122d-reminders-new-several");
+    press(&mut shell, &[Back], 40);
+    // The pit routine.
+    press(&mut shell, &[Char('p')], 60);
+    save(&mut shell, "123-reminders-pit-routine");
+    // Notes: the bell on the note with a reminder, and giving another one.
+    // (Esc on Home goes back to its first app.)
+    for _ in 0..4 {
+        shell.key(Back);
+        settle(&mut shell, 30);
+    }
+    // Each note's row in Notes, below its New note row.
+    let row = |title: &str| 1 + notes::load(&notes_dir).iter().position(|n| n.title == title).expect("the tour's note");
+    press(&mut shell, &vec![Right; steps_to("Notes")], 12);
+    press(&mut shell, &[Enter], 90);
+    press(&mut shell, &vec![Down; row("Elevator belt")], 30);
+    save(&mut shell, "124-notes-bell");
+    press(&mut shell, &[Home], 20);
+    press(&mut shell, &vec![Down; row("Intake off can_s0")], 20);
+    press(&mut shell, &[Char('r')], 60);
+    typed(&mut shell, "before Q40");
+    save(&mut shell, "124b-notes-remind");
+    for _ in 0..4 {
+        shell.key(Back);
+        settle(&mut shell, 30);
+    }
+    // In Bezel's light look.
+    shell.settings.theme = look::Theme::Bezel;
+    shell.settings.light = true;
+    shell.apply_settings();
+    press(&mut shell, &vec![Right; steps_to("Reminders")], 12);
+    press(&mut shell, &[Enter], 90);
+    press(&mut shell, &[Down], 30);
+    save(&mut shell, "125-reminders-bezel-light");
+    for _ in 0..3 {
+        shell.key(Back);
+        settle(&mut shell, 30);
+    }
+    shell.settings.theme = look::Theme::Catalyst;
+    shell.settings.light = false;
+    shell.apply_settings();
+    settle(&mut shell, 30);
+    // With the screen off, one comes due: the screen wakes with the island
+    // holding it, the keyboard's lights blink, and Reminders opens on it.
+    shell.settings.screen_off = 30;
+    reminders::with(|s| {
+        let n = reminders::plan::Now { at: reminders::now(), zone: &reminders::plan::Here, view: None };
+        s.book.add(Parsed { text: "tighten the intake chain".into(), when: When::In(n.at + 2), repeat: Repeat::Never, list: None, link: Link::None }, &n);
+    });
+    for _ in 0..40 {
+        shell.tick(1.0);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    settle(&mut shell, 14);
+    save(&mut shell, "126-reminder-due-waking");
+    settle(&mut shell, 60);
+    save(&mut shell, "126b-reminder-due");
+    let missing = shell.gfx.missing_icons();
+    if !missing.is_empty() {
+        eprintln!("icons asked for that are not built in: {}", missing.iter().cloned().collect::<Vec<_>>().join(", "));
+        std::process::exit(1);
+    }
+    std::fs::remove_file(reminders::path()).ok();
 }
 
 /// The robot's top-level tables, as Tables lists them.
@@ -2744,6 +2918,18 @@ fn smooth(mut shell: Shell) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gallery's Reminders pictures alone, into CATALYST_SHOTS (or the
+    /// temporary folder): `cargo test --profile sim -p catalyst-shell
+    /// reminders_gallery -- --ignored`.
+    #[test]
+    #[ignore]
+    fn reminders_gallery() {
+        shell::tests::sandbox();
+        let dir = std::env::var_os("CATALYST_SHOTS").map(std::path::PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("catalyst-reminder-shots"));
+        std::fs::create_dir_all(&dir).unwrap();
+        reminder_shots(&dir);
+    }
 
     fn ms(v: f32) -> Duration {
         Duration::from_secs_f32(v / 1000.0)

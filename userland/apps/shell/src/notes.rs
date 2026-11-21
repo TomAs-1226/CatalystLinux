@@ -16,7 +16,7 @@ use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
 use crate::tools::{Field, Typed};
 
-/// Where notes are kept (search reads them too).
+/// Where notes are kept (Spotlight and Reminders read them too).
 pub fn dir() -> PathBuf {
     if cfg!(target_os = "linux") && Path::new("/data").is_dir() {
         PathBuf::from("/data/notes")
@@ -189,6 +189,12 @@ impl Screen for Notes {
                 },
             },
             Key::Char('/') => self.search = Some(Field::new("search notes", &self.query, 40)),
+            // A reminder for the note, which opens it when it comes.
+            Key::Char('r') => {
+                if let Some(note) = focused {
+                    return Nav::Push(Box::new(crate::reminders::Compose::for_note(&note.file, &note.title)));
+                }
+            }
             Key::Char('p') => {
                 if let Some(note) = focused {
                     let now = toggle_pin(&self.dir, &note.file);
@@ -204,6 +210,7 @@ impl Screen for Notes {
                         if note.pinned {
                             toggle_pin(&self.dir, &note.file);
                         }
+                        crate::reminders::note_deleted(&note.file);
                         *cx.say = Some(format!("deleted {}", note.title.to_lowercase()));
                         self.notes = load(&self.dir);
                         self.list.focus = self.list.focus.min(self.shown().len());
@@ -229,6 +236,7 @@ impl Screen for Notes {
         let now = chrono::Local::now();
         // While a search is typed, the ring is on the field, not a row.
         let searching = self.search.is_some();
+        let reminded = crate::reminders::noted();
         for (i, y) in self.list.layout(g, shown.len() + 1, top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let focused = !searching && i == self.list.focus;
@@ -238,8 +246,14 @@ impl Screen for Notes {
                     let when = age(note.modified, now);
                     let value = if note.pinned { format!("pinned · {when}") } else { when };
                     let value_w = g.measure(&value, g.ty.label);
-                    let title = g.text.fit(&note.title, &g.ty.body, (r.w - value_w - 34.0).max(40.0));
+                    // A note with a reminder wears a small bell before its time.
+                    let bell = reminded.contains(&note.file);
+                    let title = g.text.fit(&note.title, &g.ty.body, (r.w - value_w - 34.0 - if bell { 14.0 } else { 0.0 }).max(40.0));
                     g.row(r, &title, &value, if note.pinned { t.ink } else { t.dim }, focused);
+                    if bell {
+                        let value_w = g.measure(&value, if g.theme == crate::look::Theme::Bezel { g.ty.body } else { g.ty.label });
+                        g.icon("notifications", true, r.right() - 10.0 - value_w - 9.0, r.cy(), 11.0, t.dim);
+                    }
                 }
             }
         }
@@ -252,7 +266,7 @@ impl Screen for Notes {
         } else if self.list.focus == 0 {
             g.hint(if self.notes.is_empty() { "enter: your first note · /: search" } else { "enter: a new note · /: search" });
         } else {
-            g.hint_any(&["enter: open · p: pin · d: delete · /: search", "p: pin · d: delete · /: search"]);
+            g.hint_any(&["enter: open · r: remind · p: pin · d: delete", "r: remind · p: pin · d: delete", "p: pin · d: delete · /: search"]);
         }
     }
 }
