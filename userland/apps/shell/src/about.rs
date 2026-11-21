@@ -104,9 +104,9 @@ fn dash(v: Option<String>) -> String {
     v.unwrap_or_else(|| "–".into())
 }
 
-/// The handheld's name: its hostname, `catalyst` as the image sets it.
+/// The handheld's name, as chosen in setup or Settings › Name & time.
 fn device_name() -> String {
-    crate::sys::hostname().unwrap_or_else(|| "catalyst".into())
+    crate::device::name()
 }
 
 /// What it is, from the device tree; on a computer, the simulator.

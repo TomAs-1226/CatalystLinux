@@ -40,8 +40,8 @@ struct Step {
 }
 
 const STEPS: [Step; 9] = [
-    Step { spot: Spot::Nothing, title: "A quick tour", words: "Half a minute on the keys. Enter goes on, Esc skips the tour." },
-    Step { spot: Spot::Tile, title: "Your apps", words: "The arrows go through them in order, and Enter opens the one in the ring." },
+    Step { spot: Spot::Nothing, title: "A quick tour", words: "Half a minute on the keys. F X Z C are the arrows: up, down, left, right. Enter goes on, Esc skips." },
+    Step { spot: Spot::Tile, title: "Your apps", words: "Z and C go through them in order, F and X a page at a time. Enter opens the one in the ring." },
     Step { spot: Spot::Nothing, title: "Going back", words: "Esc goes back a step. Held for a second, it leaves any app, even the terminal; so does Ctrl Q." },
     Step { spot: Spot::Island, title: "The island", words: "News arrives here: a robot linking, an update, a fault. It grows to say it, then settles." },
     Step { spot: Spot::Pager, title: "Pages", words: "Home turns its pages as you go. Left of the first app is the glance page: the robot and this handheld at a glance." },
@@ -307,7 +307,9 @@ enum Line {
 /// on a keyboard; " · " between two ways of doing the same thing.
 const SHORTCUTS: &[Line] = &[
     Line::Head("everywhere"),
-    Line::Keys("Move", "↑ ↓ ← →"),
+    Line::Keys("Up, down", "f x"),
+    Line::Keys("Left, right", "z c"),
+    Line::Keys("Arrows in a text field", "fn f x z c"),
     Line::Keys("Open, choose", "enter"),
     Line::Keys("Back", "esc"),
     Line::Keys("Leave any app", "esc held · ctrl q"),
@@ -370,9 +372,20 @@ const SHORTCUTS: &[Line] = &[
     Line::Keys("New command", "n"),
     Line::Keys("Edit", "e"),
     Line::Keys("Remove", "d d"),
-    Line::Head("on the handheld"),
-    Line::Keys("Arrows, outside typing", "f x z c"),
+    Line::Head("time zone"),
+    Line::Keys("A region at a time", "← →"),
+    Line::Keys("Search", "space"),
+    Line::Head("the keyboard"),
+    Line::Keys("For the next key only", "shift tapped"),
+    Line::Keys("Locked on, or off", "tapped twice"),
+    Line::Keys("Symbols, as printed", "sym"),
     Line::Keys("Back, outside typing", "bksp"),
+    Line::Keys("Delete", "fn bksp"),
+    Line::Keys("First, last", "fn k · fn n"),
+    Line::Keys("A page at a time", "fn l · fn m"),
+    Line::Keys("F1 to F10", "fn 1 to 0"),
+    Line::Keys("Brightness", "fn u · fn i"),
+    Line::Keys("The keyboard lesson", "settings help"),
 ];
 
 /// The keyboard shortcuts, by where they work, each key drawn as a keycap.
@@ -483,7 +496,7 @@ fn keycaps(g: &mut Gfx, right: f32, cy: f32, keys: &str, focused: bool) {
 /// Whether a word in a shortcut is a key (drawn on a cap) or a plain word
 /// ("held", "on the first").
 fn is_key_name(word: &str) -> bool {
-    word.chars().count() == 1 || matches!(word, "enter" | "esc" | "ctrl" | "space" | "tab" | "pg" | "up" | "dn" | "bksp" | "shift" | "fn")
+    word.chars().count() == 1 || matches!(word, "enter" | "esc" | "ctrl" | "space" | "tab" | "pg" | "up" | "dn" | "bksp" | "shift" | "fn" | "sym")
 }
 
 #[cfg(test)]

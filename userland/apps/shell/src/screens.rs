@@ -37,6 +37,9 @@ pub fn list_key(list: &mut ListState, key: Key, len: usize) {
         Key::Down => list.down(len),
         Key::PageUp => list.page(len, -1),
         Key::PageDown => list.page(len, 1),
+        // Fn + K and Fn + N on the handheld: the first row, and the last.
+        Key::Home => list.focus = 0,
+        Key::End => list.focus = len.saturating_sub(1),
         _ => {}
     }
 }
@@ -1894,10 +1897,18 @@ enum Item {
     UpdateAuto,
     UpdateOvernight,
     About,
-    /// Settings › Help: the tour again, and the keyboard shortcuts.
+    /// Settings › Help: the tour again, the keyboard shortcuts, and the
+    /// keyboard lesson from setup.
     Help,
     TakeTour,
     KeyboardShortcuts,
+    KeyboardLesson,
+    /// Settings › Name & time: the handheld's name, its time zone, and
+    /// how its clock was last set.
+    NameSection,
+    DeviceName,
+    TimeZone,
+    ClockNote,
     /// Developer options, once About › Build number has been pressed seven
     /// times: the switch for them, the animation scale, Show key presses.
     DeveloperSection,
@@ -1978,6 +1989,8 @@ pub struct SettingsApp {
     /// Keys for online services, and one being typed: which, and what so far.
     keys: crate::keys::Keys,
     typing: Option<(usize, String)>,
+    /// The handheld's name, while a new one is typed.
+    naming: Option<String>,
     /// On Arrange apps: every app Home can show, built-in then external.
     apps: Vec<String>,
 }
@@ -2025,7 +2038,7 @@ fn glance_items(order: &[Widget]) -> Vec<Item> {
 
 /// Where everything in Settings is, for search: what it is called, the
 /// section it is in, and its place there (none: the section itself).
-const SETTING_PLACES: [(&str, Item, Option<usize>); 48] = [
+const SETTING_PLACES: [(&str, Item, Option<usize>); 52] = [
     ("Robot settings", Item::RobotSection, None),
     ("Open Robot on link", Item::RobotSection, Some(0)),
     ("Match report after a match", Item::RobotSection, Some(1)),
@@ -2058,6 +2071,9 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 48] = [
     ("Power saving", Item::Display, Some(3)),
     ("Network", Item::Network, None),
     ("Wi-Fi networks", Item::Network, Some(0)),
+    ("Name & time", Item::NameSection, None),
+    ("Handheld name", Item::NameSection, Some(0)),
+    ("Time zone", Item::NameSection, Some(1)),
     ("Keys for online services", Item::KeysSection, None),
     ("The Blue Alliance key", Item::KeysSection, Some(0)),
     ("FRC Nexus key", Item::KeysSection, Some(1)),
@@ -2073,12 +2089,22 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 48] = [
     ("Help", Item::Help, None),
     ("Take the tour", Item::Help, Some(0)),
     ("Keyboard shortcuts", Item::Help, Some(1)),
+    ("Keyboard lesson", Item::Help, Some(2)),
     ("Set up from a computer", Item::FromComputer, None),
 ];
 
 /// The names search finds Settings by.
 pub fn setting_names() -> impl Iterator<Item = (usize, &'static str)> {
     SETTING_PLACES.iter().enumerate().map(|(i, place)| (i, place.0))
+}
+
+/// Where a section is in Settings' own list, by its name in `SETTING_PLACES`
+/// ("About this handheld", "Help"): the scripted tour counts its way there,
+/// so a section added before it does not throw the tour off.
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+pub fn settings_row(name: &str) -> usize {
+    let (_, section, _) = SETTING_PLACES.iter().find(|(n, _, place)| *n == name && place.is_none()).expect("a section of Settings");
+    SettingsApp::new().items.iter().position(|it| it == section).expect("listed in Settings")
 }
 
 /// Settings opened at one of `SETTING_PLACES`.
@@ -2110,7 +2136,7 @@ fn keys_file() -> std::path::PathBuf {
 impl SettingsApp {
     pub fn new() -> Self {
         use Item::*;
-        Self::page("Settings", vec![RobotSection, Appearance, TextSection, HomeSection, Display, Network, UsbSection, KeysSection, Access, UpdateSection, Help, About, FromComputer])
+        Self::page("Settings", vec![RobotSection, Appearance, TextSection, HomeSection, Display, Network, NameSection, UsbSection, KeysSection, Access, UpdateSection, Help, About, FromComputer])
     }
 
     fn page(title: &'static str, items: Vec<Item>) -> Self {
@@ -2125,6 +2151,7 @@ impl SettingsApp {
             update: crate::sysupdate::Status::default(),
             keys: crate::keys::Keys::load(),
             typing: None,
+            naming: None,
             apps: Vec::new(),
         };
         page.read_info();
@@ -2150,7 +2177,8 @@ impl SettingsApp {
             KeysSection => Self::page("Keys", (0..crate::keys::SERVICES.len()).map(KeyFor).chain(std::iter::once(KeysFromFile)).collect()),
             Access => Self::page("Access", vec![Ssh]),
             UpdateSection => Self::page("Updates", vec![UpdateState, UpdateAction, UpdateNote, UpdateChannel, UpdateAuto, UpdateOvernight]),
-            Help => Self::page("Help", vec![TakeTour, KeyboardShortcuts]),
+            Help => Self::page("Help", vec![TakeTour, KeyboardShortcuts, KeyboardLesson]),
+            NameSection => Self::page("Name & time", vec![DeviceName, TimeZone, ClockNote]),
             UsbSection => Self::page("USB", vec![UsbMode, UsbLink]),
             DeveloperSection => Self::page("Developer", vec![DevMode, MotionScale, ShowKeys]),
             _ => return None,
@@ -2229,6 +2257,14 @@ impl SettingsApp {
             KeysFromFile => ("Read from a file".into(), keys_file().display().to_string(), false),
             About => section("About", crate::sysupdate::version()),
             Help => section("Help", "tour · keys".to_owned()),
+            NameSection => section("Name & time", crate::device::name()),
+            DeviceName => match &self.naming {
+                Some(typed) => ("Name".into(), format!("{typed}▏"), true),
+                None => ("Name".into(), crate::device::name(), true),
+            },
+            TimeZone => ("Time zone".into(), crate::device::zone_label(&crate::device::zone()), true),
+            ClockNote => ("Clock".into(), crate::device::clock_note(), false),
+            KeyboardLesson => ("Keyboard lesson".into(), "›".into(), true),
             UsbSection => section("USB", crate::usb::MODES[crate::usb::mode()].1.to_owned()),
             UsbMode => {
                 let at = crate::usb::mode();
@@ -2457,10 +2493,30 @@ impl Screen for SettingsApp {
     }
 
     fn wants_text(&self) -> bool {
-        self.typing.is_some()
+        self.typing.is_some() || self.naming.is_some()
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
+        // A new name being typed: Enter keeps it, Esc leaves the one there was.
+        if let Some(name) = &mut self.naming {
+            match key {
+                Key::Char(c) => crate::device::type_name(name, c),
+                Key::Backspace => {
+                    name.pop();
+                }
+                Key::Enter => {
+                    let typed = std::mem::take(name);
+                    self.naming = None;
+                    *cx.say = Some(match crate::device::set_name(&typed) {
+                        Ok(kept) => format!("this handheld is {kept}"),
+                        Err(why) => why,
+                    });
+                }
+                Key::Back | Key::Leave => self.naming = None,
+                _ => {}
+            }
+            return Nav::Stay;
+        }
         // A key being typed: Enter keeps it, Esc leaves it as it was.
         if let Some((service, text)) = &mut self.typing {
             match key {
@@ -2556,6 +2612,11 @@ impl Screen for SettingsApp {
             Key::Enter | Key::Right if item == Item::About => return Nav::Push(Box::new(crate::about::About::new(crate::about::Kind::Main))),
             Key::Enter | Key::Right if item == Item::TakeTour => return Nav::Tour,
             Key::Enter | Key::Right if item == Item::KeyboardShortcuts => return Nav::Push(Box::new(crate::help::Shortcuts::new())),
+            Key::Enter | Key::Right if item == Item::KeyboardLesson => return Nav::Push(Box::new(crate::setup::Setup::lesson())),
+            Key::Enter | Key::Right if item == Item::TimeZone => return Nav::Push(Box::new(crate::device::ZonePicker::new())),
+            Key::Enter if item == Item::DeviceName => self.naming = Some(crate::device::name()),
+            // How the clock was set is only to read.
+            Key::Enter | Key::Right | Key::Left if item == Item::ClockNote => {}
             // Switched off, developer options go, and their page with them.
             Key::Enter | Key::Right | Key::Left if item == Item::DevMode => {
                 let s = &mut *cx.settings;
@@ -2693,6 +2754,11 @@ impl Screen for SettingsApp {
         }
         if self.title == "USB" {
             g.hint(crate::usb::MODES[crate::usb::mode()].2);
+        }
+        if self.naming.is_some() {
+            g.hint("letters, digits, hyphens · enter keeps it · esc: as it was");
+        } else if self.title == "Name & time" {
+            g.hint("the name a network knows it by");
         }
     }
 }
@@ -2838,6 +2904,63 @@ impl Screen for WifiScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn name_and_time_rows_fit_at_every_text_size() {
+        let mut g = Gfx::new(bezel::Tokens::dark());
+        // Its title beside the island: no wider than Settings' own "Appearance".
+        let ty = g.ty;
+        assert!(g.measure("Name & time", ty.title) <= g.measure("Appearance", ty.title) + 9.0);
+        assert!(g.measure("Time zone", ty.title) <= g.measure("Appearance", ty.title));
+        let width = W - 2.0 * PAD - 5.0;
+        let notes = ["network, 59 min ago", "network, 23 h ago", "network, just now", "clock chip", "this computer", "not set yet"];
+        for size in [TextSize::Compact, TextSize::Standard, TextSize::Large] {
+            g.set_text_size(size);
+            let ty = g.ty;
+            let fits = |g: &mut Gfx, name: &str, value: &str| g.measure(name, ty.body) + 30.0 + g.measure(value, ty.label) <= width;
+            for zone in crate::device::ZONES {
+                let value = crate::device::zone_label(zone.id);
+                assert!(fits(&mut g, "Time zone", &value), "{value} at {size:?}");
+            }
+            for note in notes {
+                assert!(fits(&mut g, "Clock", note), "{note} at {size:?}");
+            }
+            let longest = "a".repeat(crate::device::NAME_MOST);
+            assert!(fits(&mut g, "Name", &format!("{longest}▏")), "a name as long as one can be, at {size:?}");
+        }
+    }
+
+    #[test]
+    fn the_handheld_is_renamed_in_settings() {
+        crate::shell::tests::sandbox();
+        let mut page = SettingsApp::section(Item::NameSection).unwrap();
+        assert!(page.items == [Item::DeviceName, Item::TimeZone, Item::ClockNote]);
+        let (mut robot, mut settings, mut say) = (Robot::none(), crate::shell::Settings::default(), None);
+        let mut cx = Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true };
+        page.key(Key::Enter, &mut cx);
+        assert!(page.wants_text(), "typing a name");
+        for _ in 0..crate::device::NAME_MOST {
+            page.key(Key::Backspace, &mut cx);
+        }
+        for c in "Bench Two".chars() {
+            page.key(Key::Char(c), &mut cx);
+        }
+        assert_eq!(page.naming.as_deref(), Some("bench-two"));
+        page.key(Key::Enter, &mut cx);
+        assert!(!page.wants_text());
+        assert_eq!(say.as_deref(), Some("this handheld is bench-two"));
+        // Esc while typing leaves it as it was.
+        let mut cx = Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true };
+        page.key(Key::Enter, &mut cx);
+        page.key(Key::Char('x'), &mut cx);
+        page.key(Key::Back, &mut cx);
+        assert!(page.naming.is_none());
+        // The time zone row opens the picker; the clock's row is only to read.
+        page.list.focus = 1;
+        assert!(matches!(page.key(Key::Enter, &mut cx), Nav::Push(_)));
+        page.list.focus = 2;
+        assert!(matches!(page.key(Key::Enter, &mut cx), Nav::Stay));
+    }
 
     fn names(home: &Home) -> Vec<String> {
         (0..home.count()).map(|i| home.icon_and_name(i).1).collect()

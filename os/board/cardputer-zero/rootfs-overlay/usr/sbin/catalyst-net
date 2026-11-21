@@ -41,8 +41,9 @@ stop_dhcp() {
 case "${2:-}" in
 up)
 	stop_dhcp
-	# Four quick tries, then keep asking in the background.
-	udhcpc -i "$IF" -b -t 4 -T 1 -p "$PIDFILE" >/dev/null 2>&1
+	# Four quick tries, then keep asking in the background. The handheld's
+	# name goes with the request, so a router lists it by that name.
+	udhcpc -i "$IF" -b -t 4 -T 1 -p "$PIDFILE" -x "hostname:$(hostname)" >/dev/null 2>&1
 	if [ "${3:-}" != dhcp-only ] && ! ip -4 addr show dev "$IF" | grep -q 'inet '; then
 		addr=$(robot_static)
 		[ -n "$addr" ] && ip addr replace "$addr/24" dev "$IF"

@@ -120,6 +120,18 @@ impl Drop for Terminal {
     }
 }
 
+/// What a function key sends, as xterm does it: F1 to F4 as `ESC O P`…`S`,
+/// the rest as numbered sequences (htop's F10 quits, its F9 kills).
+fn function_key(n: u8) -> String {
+    match n {
+        1..=4 => format!("\x1bO{}", (b'P' + n - 1) as char),
+        5 => "\x1b[15~".into(),
+        6..=10 => format!("\x1b[{}~", 11 + n),
+        11 | 12 => format!("\x1b[{}~", 12 + n),
+        _ => String::new(),
+    }
+}
+
 /// The 16 terminal colours, in keeping with the palette in use.
 fn ansi(g: &Gfx, index: u8) -> Color {
     let t = &g.tokens;
@@ -196,6 +208,13 @@ impl Screen for Terminal {
             Key::Down => b"\x1b[B".to_vec(),
             Key::Right => b"\x1b[C".to_vec(),
             Key::Left => b"\x1b[D".to_vec(),
+            // As xterm sends them, which every program here understands.
+            Key::Delete => b"\x1b[3~".to_vec(),
+            Key::Home => b"\x1b[H".to_vec(),
+            Key::End => b"\x1b[F".to_vec(),
+            Key::F(n) => function_key(n).into_bytes(),
+            // The shell takes these for the backlight before any screen sees them.
+            Key::BrightnessDown | Key::BrightnessUp => return Nav::Stay,
             Key::Leave => return Nav::Pop,
         };
         // Typing returns to the live screen.
@@ -308,6 +327,15 @@ impl Screen for Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn function_keys_send_what_xterm_sends() {
+        let sent: Vec<String> = (1..=12).map(function_key).collect();
+        assert_eq!(
+            sent,
+            ["\x1bOP", "\x1bOQ", "\x1bOR", "\x1bOS", "\x1b[15~", "\x1b[17~", "\x1b[18~", "\x1b[19~", "\x1b[20~", "\x1b[21~", "\x1b[23~", "\x1b[24~"]
+        );
+    }
 
     #[test]
     fn only_the_login_shell_is_kept_among_recent_apps() {

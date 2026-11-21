@@ -18,6 +18,16 @@ pub enum Key {
     Tab,
     PageUp,
     PageDown,
+    /// Fn + Backspace on the handheld: the character after the cursor.
+    Delete,
+    /// Fn + K and Fn + N on the handheld.
+    Home,
+    End,
+    /// F1 to F12: Fn with the number row (F11 and F12 on O and P).
+    F(u8),
+    /// Fn + U and Fn + I on the handheld.
+    BrightnessDown,
+    BrightnessUp,
     Char(char),
     /// A letter with Ctrl held.
     Ctrl(char),
@@ -32,6 +42,74 @@ impl Key {
     pub fn leaves(self) -> bool {
         matches!(self, Key::Ctrl('q') | Key::Leave)
     }
+}
+
+/// The symbol printed on a key of the handheld's Sym layer, by the code its
+/// driver sends for it. The driver takes those codes from keys the
+/// CardputerZero does not have (brackets, the keypad, Japanese keys), and
+/// M5Stack's own system maps them back to the printed symbols with a console
+/// keymap (`tca8418_keypad_m5stack_keymap.map`); the shell reads key codes
+/// itself, so it does the same here. Only for the handheld's own keyboard: a
+/// USB keyboard's `[` is still `[`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn sym_char(code: u16) -> Option<char> {
+    Some(match code {
+        // The number row: Sym + 1 … 0.
+        26 => '!',
+        27 => '@',
+        39 => '#',
+        40 => '$',
+        41 => '%',
+        43 => '^',
+        51 => '&',
+        52 => '*',
+        53 => '(',
+        94 => ')',
+        // Q … P.
+        55 => '~',
+        69 => '`',
+        70 => '_',
+        71 => '-',
+        72 => '+',
+        73 => '=',
+        74 => '[',
+        75 => ']',
+        76 => '{',
+        77 => '}',
+        // A … L (F has nothing on Sym).
+        79 => ';',
+        80 => ':',
+        81 => '\'',
+        82 => '"',
+        83 => '<',
+        85 => '>',
+        86 => '\\',
+        89 => '|',
+        // V … M.
+        90 => ',',
+        91 => '.',
+        92 => '/',
+        93 => '?',
+        _ => return None,
+    })
+}
+
+/// The keys of the Fn layer the shell has a use for, by key code: Delete,
+/// Home and End, F1 to F12, and the brightness keys. (The arrows and Page Up
+/// and Down are ordinary key codes, read with the rest.)
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn fn_key(code: u16) -> Option<Key> {
+    Some(match code {
+        111 => Key::Delete,
+        102 => Key::Home,
+        107 => Key::End,
+        59..=68 => Key::F((code - 58) as u8),
+        87 => Key::F(11),
+        88 => Key::F(12),
+        224 => Key::BrightnessDown,
+        225 => Key::BrightnessUp,
+        _ => return None,
+    })
 }
 
 /// How long Esc is held before it means [`Key::Leave`].
@@ -87,7 +165,10 @@ impl<Id> Default for Repeat<Id> {
 impl<Id: PartialEq + Copy> Repeat<Id> {
     /// A key went down, meaning `key`.
     pub fn press(&mut self, id: Id, key: Key, now: std::time::Instant) {
-        let repeats = matches!(key, Key::Up | Key::Down | Key::Left | Key::Right | Key::PageUp | Key::PageDown | Key::Backspace | Key::Char(_));
+        let repeats = matches!(
+            key,
+            Key::Up | Key::Down | Key::Left | Key::Right | Key::PageUp | Key::PageDown | Key::Backspace | Key::Delete | Key::BrightnessDown | Key::BrightnessUp | Key::Char(_)
+        );
         self.held = repeats.then_some((id, key, now + REPEAT_AFTER));
     }
 
@@ -186,8 +267,9 @@ pub mod device {
         height: usize,
         stride: usize,
         bytes_per_pixel: usize,
-        /// Every keyboard, by its name under `/dev/input`.
-        inputs: Vec<(String, File)>,
+        /// Every keyboard, by its name under `/dev/input`, and whether it is
+        /// the handheld's own (whose Sym layer sends codes of its own).
+        inputs: Vec<(String, File, bool)>,
         /// Tells when a keyboard is plugged in or pulled out.
         watch: Option<File>,
         shift: bool,
@@ -277,13 +359,15 @@ pub mod device {
                 .map(|e| e.file_name().to_string_lossy().into_owned())
                 .filter(|name| name.starts_with("event"))
                 .collect();
-            self.inputs.retain(|(name, _)| present.contains(name));
+            self.inputs.retain(|(name, ..)| present.contains(name));
             for name in present {
-                if self.inputs.iter().any(|(open, _)| *open == name) {
+                if self.inputs.iter().any(|(open, ..)| *open == name) {
                     continue;
                 }
                 if let Ok(f) = OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(format!("/dev/input/{name}")) {
-                    self.inputs.push((name, f));
+                    // The handheld's keyboard, as its driver names it (`tca8418c`).
+                    let own = std::fs::read_to_string(format!("/sys/class/input/{name}/device/name")).is_ok_and(|n| n.contains("tca8418"));
+                    self.inputs.push((name, f, own));
                 }
             }
         }
@@ -326,7 +410,10 @@ pub mod device {
             Ok(device)
         }
 
-        fn translate(&mut self, code: u16, value: i32) -> Option<Key> {
+        /// What a key code means. `own`: it came from the handheld's
+        /// keyboard, whose Sym layer reuses codes other keyboards give
+        /// other keys (see [`sym_char`]).
+        fn translate(&mut self, code: u16, value: i32, own: bool) -> Option<Key> {
             const ROWS: [(u16, &str, &str); 4] = [
                 (2, "1234567890-=", "!@#$%^&*()_+"),
                 (16, "qwertyuiop[]", "QWERTYUIOP{}"),
@@ -356,6 +443,14 @@ pub mod device {
             if code == 125 || code == 126 || (code == 57 && self.ctrl) {
                 return (value == 1).then_some(Key::Ctrl(' '));
             }
+            if own {
+                if let Some(ch) = sym_char(code) {
+                    return Some(Key::Char(ch));
+                }
+            }
+            if let Some(key) = fn_key(code) {
+                return Some(key);
+            }
             Some(match code {
                 1 => Key::Back,
                 14 => Key::Backspace,
@@ -383,7 +478,7 @@ pub mod device {
     impl Platform for Device {
         fn poll(&mut self, timeout: Duration) -> Option<Vec<Key>> {
             let mut fds: Vec<libc::pollfd> =
-                self.inputs.iter().map(|(_, f)| libc::pollfd { fd: f.as_raw_fd(), events: libc::POLLIN, revents: 0 }).collect();
+                self.inputs.iter().map(|(_, f, _)| libc::pollfd { fd: f.as_raw_fd(), events: libc::POLLIN, revents: 0 }).collect();
             if let Some(watch) = &self.watch {
                 fds.push(libc::pollfd { fd: watch.as_raw_fd(), events: libc::POLLIN, revents: 0 });
             }
@@ -411,6 +506,7 @@ pub mod device {
                 }
                 // struct input_event on 64-bit: 16 bytes of time, type, code, value.
                 let mut buf = [0u8; 24 * 16];
+                let own = self.inputs[i].2;
                 while let Ok(n) = self.inputs[i].1.read(&mut buf) {
                     if n < 24 {
                         break;
@@ -418,21 +514,21 @@ pub mod device {
                     for ev in buf[..n].chunks_exact(24) {
                         let kind = u16::from_ne_bytes([ev[16], ev[17]]);
                         if kind == 1 {
-                            events.push((u16::from_ne_bytes([ev[18], ev[19]]), i32::from_ne_bytes(ev[20..24].try_into().unwrap())));
+                            events.push((u16::from_ne_bytes([ev[18], ev[19]]), i32::from_ne_bytes(ev[20..24].try_into().unwrap()), own));
                         }
                     }
                 }
             }
             let now = std::time::Instant::now();
-            for (code, value) in events {
+            for (code, value, own) in events {
                 match value {
                     // Released: modifiers and Esc note it, and a held key stops repeating.
                     0 => {
-                        self.translate(code, 0);
+                        self.translate(code, 0, own);
                         self.repeat.release(code);
                     }
                     1 => {
-                        if let Some(key) = self.translate(code, 1) {
+                        if let Some(key) = self.translate(code, 1, own) {
                             self.repeat.press(code, key, now);
                             keys.push(key);
                         }
@@ -603,6 +699,21 @@ pub mod sim {
                 K::Tab => Key::Tab,
                 K::PageUp => Key::PageUp,
                 K::PageDown => Key::PageDown,
+                K::Delete => Key::Delete,
+                K::Home => Key::Home,
+                K::End => Key::End,
+                K::F1 => Key::F(1),
+                K::F2 => Key::F(2),
+                K::F3 => Key::F(3),
+                K::F4 => Key::F(4),
+                K::F5 => Key::F(5),
+                K::F6 => Key::F(6),
+                K::F7 => Key::F(7),
+                K::F8 => Key::F(8),
+                K::F9 => Key::F(9),
+                K::F10 => Key::F(10),
+                K::F11 => Key::F(11),
+                K::F12 => Key::F(12),
                 K::Space if ctrl => Key::Ctrl(' '),
                 K::Space => Key::Char(' '),
                 K::Period => Key::Char('.'),
@@ -734,6 +845,34 @@ pub mod sim {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn the_sym_layer_types_what_its_keys_say() {
+        // Sym + 1 … 0 along the number row, as printed.
+        let row: String = [26, 27, 39, 40, 41, 43, 51, 52, 53, 94].iter().map(|c| sym_char(*c).unwrap()).collect();
+        assert_eq!(row, "!@#$%^&*()");
+        assert_eq!(sym_char(71), Some('-'), "Sym + R");
+        assert_eq!(sym_char(93), Some('?'), "Sym + M");
+        // Every symbol on the layer is a different one.
+        let all: Vec<char> = (0..300).filter_map(sym_char).collect();
+        let mut unique = all.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!((all.len(), unique.len()), (32, 32));
+        // The base layer's own codes are left alone: letters, digits, Space, Enter.
+        for code in (2..=11).chain(16..=25).chain(30..=38).chain(44..=50).chain([14, 15, 28, 57]) {
+            assert_eq!(sym_char(code), None, "code {code}");
+        }
+    }
+
+    #[test]
+    fn the_fn_layer_gives_delete_home_end_and_f_keys() {
+        assert_eq!(fn_key(111), Some(Key::Delete));
+        assert_eq!((fn_key(102), fn_key(107)), (Some(Key::Home), Some(Key::End)));
+        assert_eq!((fn_key(59), fn_key(68), fn_key(88)), (Some(Key::F(1)), Some(Key::F(10)), Some(Key::F(12))));
+        assert_eq!(fn_key(225), Some(Key::BrightnessUp));
+        assert_eq!(fn_key(103), None, "the arrows are read with the rest");
+    }
 
     #[test]
     fn a_held_key_repeats_on_the_shells_own_clock() {

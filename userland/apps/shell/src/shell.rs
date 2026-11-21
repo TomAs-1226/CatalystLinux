@@ -569,6 +569,12 @@ fn key_name(key: Key) -> String {
         Key::Tab => "tab".into(),
         Key::PageUp => "pg up".into(),
         Key::PageDown => "pg dn".into(),
+        Key::Delete => "del".into(),
+        Key::Home => "home".into(),
+        Key::End => "end".into(),
+        Key::F(n) => format!("f{n}"),
+        Key::BrightnessDown => "bright −".into(),
+        Key::BrightnessUp => "bright +".into(),
         Key::Char(' ') => "space".into(),
         Key::Char(c) => c.to_string(),
         Key::Ctrl(' ') => "ctrl space".into(),
@@ -855,6 +861,17 @@ impl Shell {
         // program in a terminal can be sent Ctrl-Tab, so it takes nothing.
         if key == Key::Ctrl('\t') {
             return self.open_recents(None);
+        }
+        // Fn + U and Fn + I: the backlight, over any screen.
+        if matches!(key, Key::BrightnessDown | Key::BrightnessUp) {
+            let step: i32 = if key == Key::BrightnessUp { 10 } else { -10 };
+            let said = match crate::sys::brightness() {
+                Some(now) if crate::sys::set_brightness((now as i32 + step).clamp(10, 100) as u32) => {
+                    format!("brightness {}%", crate::sys::brightness().unwrap_or(now))
+                }
+                _ => "the backlight is on the handheld".to_owned(),
+            };
+            return self.say(said);
         }
         // Whoever is pressing keys is busy: a robot that arrived a moment
         // ago does not take the screen from under them.
@@ -2682,7 +2699,9 @@ pub(crate) mod tests {
         assert!(shell.robot.is_demo());
         shell.start_setup();
         frames(&mut shell, 30, FRAME);
+        // Set up here; past the keyboard lesson; the team.
         shell.key(Key::Enter);
+        shell.key(Key::Tab);
         for c in "5805".chars() {
             shell.key(Key::Char(c));
         }
@@ -2701,12 +2720,15 @@ pub(crate) mod tests {
         assert_eq!(title(&shell), "Setup");
         let light = shell.settings.light;
         let accent = shell.settings.accent;
-        // Set up here; team 5805; no Wi-Fi now; keys skipped; choices: the first off.
+        // Set up here; the keyboard lesson skipped; team 5805; the name and
+        // time zone as they are; no Wi-Fi now; keys skipped; choices: the first off.
         shell.key(Key::Enter);
+        shell.key(Key::Tab);
         for c in "5805".chars() {
             shell.key(Key::Char(c));
         }
         shell.key(Key::Enter);
+        shell.key(Key::Tab);
         shell.key(Key::Down);
         shell.key(Key::Enter);
         shell.key(Key::Tab);

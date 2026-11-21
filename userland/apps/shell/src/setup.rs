@@ -1,13 +1,16 @@
 //! First start: setting the handheld up, the way a computer's own setup
 //! does it. The start animation gives way to a welcome; then, a page at a
-//! time, the team, Wi-Fi, keys for online services, a page of choices, and
-//! the look; then "just a moment" while it all takes effect, and Home.
+//! time, the pages of `FLOW`: how the keyboard works, the team, the
+//! handheld's name and time zone, Wi-Fi, keys for online services, a page of
+//! choices, and the look; then "just a moment" while it all takes effect,
+//! and Home.
 //!
 //! Setup owns the whole panel (no island, no status), sits on the brand's
 //! ground, and every page arrives the same way: its title, its words and
 //! its rows rise into place one after another on `release`, from the side
 //! the page came from. Esc goes back a page, Tab skips one, and anything
-//! skipped can be set later in Settings, or from a computer.
+//! skipped can be set later in Settings, or from a computer. The keyboard
+//! lesson is also offered on its own, from Settings › Help.
 
 use bezel::{Accent, Color, Rect, TextStyle, Tokens, Tone};
 use detent::role;
@@ -24,7 +27,11 @@ enum Page {
     Welcome,
     /// Setting up from a computer: the address to open and the code to give.
     Computer,
+    /// How the keyboard works: Shift, Fn and Sym, the arrows, a little practice.
+    Lesson,
     Team,
+    /// The handheld's name, and its time zone.
+    Place,
     Wifi,
     Keys,
     Choices,
@@ -32,13 +39,17 @@ enum Page {
     Finishing,
 }
 
-/// The steps the progress marks count.
-const STEPS: [Page; 5] = [Page::Team, Page::Wifi, Page::Keys, Page::Choices, Page::Look];
+/// Setup's pages after the welcome, in order: Next goes one along, Esc one
+/// back, and the progress marks count them. A page added here is in the
+/// flow everywhere; it needs only its rows, its keys and its drawing.
+const FLOW: [Page; 7] = [Page::Lesson, Page::Team, Page::Place, Page::Wifi, Page::Keys, Page::Choices, Page::Look];
 
 const SURFACE: Color = Color::hex(0x1c1d23);
 const SURFACE_FOCUSED: Color = Color::hex(0x272830);
 const TRACK: Color = Color::hex(0x2b2d35);
 const RING: Color = Color::hex(0xe9e9ee);
+/// A keyboard light, lit.
+const LIT: Color = Color::hex(0xffc46b);
 
 const LEFT: f32 = 16.0;
 const TITLE_CY: f32 = 34.0;
@@ -51,6 +62,7 @@ const BAR_CY: f32 = 157.0;
 const WORDS_WELCOME: &str = "Let's get this handheld ready for your robot.";
 const WORDS_COMPUTER: &str = "On a computer on the same network, open:";
 const WORDS_TEAM: &str = "The robot's address follows from it: 10.TE.AM.2";
+const WORDS_PLACE: &str = "Its name on the network, and the time it keeps.";
 const WORDS_WIFI: &str = "For updates and the event schedule.";
 const WORDS_KEYS: &str = "For the event schedule and log analysis.";
 const WORDS_TYPING: &str = "Enter keeps it; esc leaves it as it was.";
@@ -66,17 +78,224 @@ const CHOICES: [(&str, &str); 4] = [
 const WORKING: f32 = 1.5;
 const ALL_SET: f32 = 2.6;
 
+// ------------------------------------------------------------------ lesson ---
+
+/// The keyboard lesson's cards, in order.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Card {
+    /// Shift, Fn and Sym: tapped, tapped twice, held.
+    Modifiers,
+    /// F X Z C as the arrows, and a ring to move with them.
+    Moving,
+    /// A capital with Shift, a symbol with Sym.
+    Capitals,
+    /// In a text field the letters type; with Fn they are arrows.
+    TextArrows,
+    /// What else Fn gives.
+    FnKeys,
+}
+
+const CARDS: [Card; 5] = [Card::Modifiers, Card::Moving, Card::Capitals, Card::TextArrows, Card::FnKeys];
+
+/// Each card's title and the line under it, in the order of `CARDS`.
+const CARD_WORDS: [(&str, &str); 5] = [
+    ("Shift, Fn and Sym", "Each works three ways; its light says which."),
+    ("Moving around", "F X Z C are the arrows, outside typing."),
+    ("Capitals and symbols", "Tap Shift, then a letter. Sym types what keys show."),
+    ("Arrows while typing", "Here F X Z C type. With Fn they move the cursor."),
+    ("More with Fn", "Fn's other keys. Try any of them."),
+];
+
+/// The three ways Shift, Fn and Sym work, as the keyboard's driver has
+/// them: what to do, what it does, and how the key's light shows it.
+const MODIFIER_WAYS: [(&str, &str, Blink); 3] = [
+    ("Tap", "for the next key only", Blink::Slow),
+    ("Tap twice", "locked on, until tapped again", Blink::Fast),
+    ("Hold", "while it is held down", Blink::Steady),
+];
+
+/// How a keyboard light shows a modifier: a slow blink, a quick one, or on.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Blink {
+    Slow,
+    Fast,
+    Steady,
+}
+
+/// The Fn layer's other keys worth knowing: the keys, what they are, and
+/// the key that arrives when they are pressed (none: the shell takes it).
+const FN_KEYS: [(&str, &str, Option<Key>); 6] = [
+    ("fn bksp", "delete", Some(Key::Delete)),
+    ("fn k · n", "home, end", Some(Key::Home)),
+    ("fn l · m", "pages", Some(Key::PageUp)),
+    ("fn 1 – 0", "F1 – F10", Some(Key::F(1))),
+    ("fn u · i", "brightness", None),
+    ("sym", "! @ # and more", None),
+];
+
+/// The practice on the capitals card and the typing-arrows card.
+const TASK_CAPITAL: &str = "a capital, with shift";
+const TASK_SYMBOL: &str = "a symbol, with sym";
+const TASK_CURSOR: &str = "the cursor moved, with fn and z or c";
+
+/// What the practice field holds at most.
+const PRACTICE_MOST: usize = 18;
+
+/// The keyboard lesson: which card it is on, and how the practice has gone.
+#[derive(Default)]
+struct Lesson {
+    card: usize,
+    /// Which arrows have arrived on the moving card: up, down, left, right.
+    moved: [bool; 4],
+    /// The ring on the moving card's little grid, three across and two down.
+    at: (usize, usize),
+    /// When each of F X Z C last arrived, for its cap to light up.
+    pressed: [f32; 4],
+    capital: bool,
+    symbol: bool,
+    /// The practice field, and its cursor (in characters).
+    text: String,
+    cursor: usize,
+    steered: bool,
+    /// The Fn keys tried on the last card.
+    tried: [bool; 6],
+}
+
+impl Lesson {
+    fn card(&self) -> Card {
+        CARDS[self.card]
+    }
+
+    /// Whether the card's practice is a text field (the letters type).
+    fn typing(&self) -> bool {
+        matches!(self.card(), Card::Capitals | Card::TextArrows)
+    }
+
+    /// The card's practice done.
+    fn done(&self) -> bool {
+        match self.card() {
+            Card::Modifiers | Card::FnKeys => true,
+            Card::Moving => self.moved.iter().all(|m| *m),
+            Card::Capitals => self.capital && self.symbol,
+            Card::TextArrows => self.steered,
+        }
+    }
+
+    /// Arrive at card `i`: its practice field set for it.
+    fn arrive(&mut self, i: usize) {
+        self.card = i;
+        match self.card() {
+            Card::Capitals => {
+                self.text.clear();
+                self.cursor = 0;
+            }
+            Card::TextArrows => {
+                self.text = "catalyst".into();
+                self.cursor = self.text.chars().count();
+            }
+            _ => {}
+        }
+    }
+
+    fn insert(&mut self, c: char) {
+        if self.text.chars().count() >= PRACTICE_MOST {
+            return;
+        }
+        let at = self.text.char_indices().nth(self.cursor).map_or(self.text.len(), |(b, _)| b);
+        self.text.insert(at, c);
+        self.cursor += 1;
+    }
+
+    fn delete_back(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        if let Some((b, _)) = self.text.char_indices().nth(self.cursor - 1) {
+            self.text.remove(b);
+            self.cursor -= 1;
+        }
+    }
+
+    /// A key on the card's practice; true if it was the card's to take.
+    fn practise(&mut self, key: Key, now: f32) -> bool {
+        match self.card() {
+            Card::Moving => {
+                let (dir, (x, y)) = match key {
+                    Key::Up => (0, (self.at.0, 0)),
+                    Key::Down => (1, (self.at.0, 1)),
+                    Key::Left => (2, (self.at.0.saturating_sub(1), self.at.1)),
+                    Key::Right => (3, ((self.at.0 + 1).min(2), self.at.1)),
+                    _ => return false,
+                };
+                self.moved[dir] = true;
+                self.pressed[dir] = now;
+                self.at = (x, y);
+                true
+            }
+            Card::Capitals | Card::TextArrows => {
+                match key {
+                    Key::Char(c) if !c.is_control() => {
+                        self.insert(c);
+                        self.capital |= c.is_uppercase();
+                        self.symbol |= c.is_ascii_punctuation();
+                    }
+                    Key::Backspace => self.delete_back(),
+                    Key::Delete if self.cursor < self.text.chars().count() => {
+                        self.cursor += 1;
+                        self.delete_back();
+                    }
+                    Key::Left | Key::Right | Key::Home | Key::End => {
+                        let len = self.text.chars().count();
+                        self.cursor = match key {
+                            Key::Left => self.cursor.saturating_sub(1),
+                            Key::Right => (self.cursor + 1).min(len),
+                            Key::Home => 0,
+                            _ => len,
+                        };
+                        self.steered |= self.card() == Card::TextArrows;
+                    }
+                    _ => return false,
+                }
+                true
+            }
+            Card::FnKeys => {
+                let found = FN_KEYS.iter().position(|(_, _, k)| match (k, key) {
+                    (Some(Key::F(_)), Key::F(_)) => true,
+                    (Some(Key::Home), Key::End) | (Some(Key::PageUp), Key::PageDown) => true,
+                    (Some(k), key) => *k == key,
+                    (None, _) => false,
+                });
+                match found {
+                    Some(i) => {
+                        self.tried[i] = true;
+                        true
+                    }
+                    None => false,
+                }
+            }
+            Card::Modifiers => false,
+        }
+    }
+}
+
+// ------------------------------------------------------------------- setup ---
+
 pub struct Setup {
     page: Page,
     focus: usize,
     /// Seconds since the page arrived, for its elements rising in.
     entered: f32,
+    /// Seconds since setup opened, for the keyboard lights' blinking.
+    clock: f32,
     /// +1 when the page came from the right (forward), −1 from the left.
     from: f32,
     team: String,
+    /// The handheld's name as typed on its page.
+    name: String,
     keys: Keys,
     /// A key being typed: which service, and what has been typed.
     typing: Option<(usize, String)>,
+    lesson: Lesson,
     ground: Vec<u32>,
     wifi: Option<crate::wifi::Wifi>,
     /// The Wi-Fi state's generation when last drawn.
@@ -85,8 +304,8 @@ pub struct Setup {
     note: Option<String>,
     /// The address and one-time code a computer uses, while it is offered.
     pub remote: Option<crate::remote::Remote>,
-    /// Opened from Settings rather than on first start: only the computer
-    /// page, and back to Settings when done.
+    /// Opened from Settings rather than on first start: one page alone (the
+    /// computer page, or the keyboard lesson), and back to Settings when done.
     from_settings: bool,
 }
 
@@ -96,10 +315,13 @@ impl Setup {
             page: Page::Welcome,
             focus: 0,
             entered: 0.0,
+            clock: 0.0,
             from: 1.0,
             team: String::new(),
+            name: String::new(),
             keys: Keys::load(),
             typing: None,
+            lesson: Lesson::default(),
             ground: brand::ground(),
             wifi: None,
             wifi_seen: u64::MAX,
@@ -115,6 +337,13 @@ impl Setup {
         let mut setup = Setup { from_settings: true, ..Self::new() };
         setup.go(Page::Computer, true);
         setup.remote = crate::remote::Remote::start();
+        setup
+    }
+
+    /// Settings › Help › Keyboard lesson: the lesson on its own.
+    pub fn lesson() -> Self {
+        let mut setup = Setup { from_settings: true, ..Self::new() };
+        setup.go(Page::Lesson, true);
         setup
     }
 
@@ -157,46 +386,73 @@ impl Setup {
         if page != Page::Computer {
             self.remote = None;
         }
+        match page {
+            Page::Lesson => self.lesson.arrive(if forward { 0 } else { CARDS.len() - 1 }),
+            Page::Place => self.name = crate::device::suggested_name(&self.team),
+            _ => {}
+        }
     }
 
-    fn next(&mut self, cx: &mut Cx) {
-        let page = match self.page {
-            Page::Welcome | Page::Computer => Page::Team,
-            Page::Team => {
-                self.save_team(cx);
-                Page::Wifi
-            }
-            Page::Wifi => Page::Keys,
+    /// Keep what the page being left holds: the team, the keys, the name.
+    fn keep(&mut self, cx: &mut Cx) {
+        match self.page {
+            Page::Team => self.save_team(cx),
             Page::Keys => {
                 self.keys.save().ok();
-                Page::Choices
             }
-            Page::Choices => Page::Look,
-            Page::Look | Page::Finishing => {
-                // Everything chosen is kept, and setup is not shown again.
-                crate::save_settings(cx.settings);
-                crate::mark_setup_done();
-                Page::Finishing
+            // A name cleared away leaves the one there was.
+            Page::Place => {
+                let name = crate::device::clean_name(&self.name);
+                if !name.is_empty() && name != crate::device::name() {
+                    if let Err(why) = crate::device::set_name(&name) {
+                        *cx.say = Some(why);
+                    }
+                }
             }
-        };
-        self.go(page, true);
+            _ => {}
+        }
     }
 
-    fn back(&mut self) {
-        if self.from_settings {
-            return;
+    fn next(&mut self, cx: &mut Cx) -> Nav {
+        self.keep(cx);
+        // The lesson on its own: done, back to Settings.
+        if self.from_settings && self.page == Page::Lesson {
+            *cx.say = Some("that's the keyboard".into());
+            return Nav::Pop;
         }
         let page = match self.page {
-            Page::Welcome | Page::Computer | Page::Team => Page::Welcome,
-            Page::Wifi => Page::Team,
-            Page::Keys => Page::Wifi,
-            Page::Choices => Page::Keys,
-            Page::Look => Page::Choices,
-            Page::Finishing => return,
+            Page::Welcome | Page::Computer => FLOW[0],
+            Page::Finishing => Page::Finishing,
+            page => match FLOW.iter().position(|p| *p == page) {
+                Some(i) if i + 1 < FLOW.len() => FLOW[i + 1],
+                // The last page: everything chosen is kept, and setup is not shown again.
+                _ => {
+                    crate::save_settings(cx.settings);
+                    crate::mark_setup_done();
+                    Page::Finishing
+                }
+            },
+        };
+        self.go(page, true);
+        Nav::Stay
+    }
+
+    fn back(&mut self) -> Nav {
+        if self.from_settings {
+            return if self.page == Page::Lesson { Nav::Pop } else { Nav::Stay };
+        }
+        let page = match self.page {
+            Page::Welcome | Page::Computer => Page::Welcome,
+            Page::Finishing => return Nav::Stay,
+            page => match FLOW.iter().position(|p| *p == page) {
+                Some(i) if i > 0 => FLOW[i - 1],
+                _ => Page::Welcome,
+            },
         };
         if page != self.page {
             self.go(page, false);
         }
+        Nav::Stay
     }
 
     fn save_team(&mut self, cx: &mut Cx) {
@@ -215,19 +471,19 @@ impl Setup {
     fn rows(&self) -> usize {
         match self.page {
             Page::Welcome => 3,
-            Page::Computer => 0,
+            Page::Computer | Page::Lesson | Page::Finishing => 0,
             Page::Team => 1,
+            Page::Place => 2,
             Page::Wifi => 2,
             Page::Keys => SERVICES.len(),
             Page::Choices => 4,
             Page::Look => 4,
-            Page::Finishing => 0,
         }
     }
 
     /// Whether the page has a Next button below its rows.
     fn has_next(&self) -> bool {
-        matches!(self.page, Page::Team | Page::Wifi | Page::Keys | Page::Choices | Page::Look)
+        matches!(self.page, Page::Team | Page::Place | Page::Wifi | Page::Keys | Page::Choices | Page::Look)
     }
 
     /// The `k`th element of the page rising into place: its opacity and how
@@ -270,18 +526,47 @@ impl Setup {
         }
     }
 
+    /// The lesson's keys: Enter on, Esc back, Tab past the lesson; the rest
+    /// are the card's practice.
+    fn lesson_key(&mut self, key: Key, cx: &mut Cx) -> Nav {
+        match key {
+            Key::Tab => return self.next(cx),
+            Key::Enter => {
+                if self.lesson.card + 1 < CARDS.len() {
+                    self.lesson.arrive(self.lesson.card + 1);
+                    (self.entered, self.from) = (0.0, 1.0);
+                } else {
+                    return self.next(cx);
+                }
+            }
+            Key::Back => {
+                if self.lesson.card > 0 {
+                    self.lesson.arrive(self.lesson.card - 1);
+                    (self.entered, self.from) = (0.0, -1.0);
+                } else {
+                    return self.back();
+                }
+            }
+            key => {
+                self.lesson.practise(key, self.clock);
+            }
+        }
+        Nav::Stay
+    }
+
     // ---- drawing ----
 
     fn header(&self, g: &mut Gfx) {
         brand::mark(g, LEFT + 4.0, 13.0, 12.0, CRIMSON, 1.0);
         // The steps: those done, the one under way in crimson, those to come.
-        let at = STEPS.iter().position(|p| *p == self.page);
-        if at.is_none() && self.page != Page::Finishing {
+        // (Not for a page opened alone from Settings.)
+        let at = FLOW.iter().position(|p| *p == self.page);
+        if self.from_settings || (at.is_none() && self.page != Page::Finishing) {
             return;
         }
         let (w, gap) = (14.0, 4.0);
-        let x0 = W - LEFT - STEPS.len() as f32 * (w + gap) + gap;
-        for i in 0..STEPS.len() {
+        let x0 = W - LEFT - FLOW.len() as f32 * (w + gap) + gap;
+        for i in 0..FLOW.len() {
             let color = match at {
                 Some(at) if i == at => CRIMSON,
                 Some(at) if i < at => INK_THIN,
@@ -302,6 +587,7 @@ impl Setup {
     }
 
     /// A row: a label at the left and a value at the right, `h` tall.
+    #[allow(clippy::too_many_arguments)]
     fn row(&self, g: &mut Gfx, i: usize, y: f32, w: f32, h: f32, label: &str, value: &str, on: bool) -> Rect {
         let (a, dx, dy) = self.reveal(2 + i);
         let r = Rect::new(LEFT + dx, y + dy, w, h);
@@ -330,7 +616,7 @@ impl Setup {
         if !self.has_next() {
             return;
         }
-        let label = if self.page == Page::Look { "Finish" } else { "Next" };
+        let label = if self.page == *FLOW.last().expect("setup has pages") { "Finish" } else { "Next" };
         let style = TextStyle::sans(11.0, 600.0);
         let bw = g.measure(label, style) + 28.0;
         let r = Rect::new(W - LEFT - bw, BAR_CY - 9.0, bw, 18.0);
@@ -376,6 +662,188 @@ impl Setup {
             }
         }
     }
+
+    /// A key as it is printed on the keyboard: a small cap with its legend,
+    /// lit when `lit` (0 to 1) says it was just pressed.
+    fn keycap(&self, g: &mut Gfx, r: Rect, legend: &str, lit: f32, a: f32) {
+        g.canvas.rrect(r, 4.0, SURFACE_FOCUSED, a);
+        if lit > 0.0 {
+            g.canvas.rrect(r, 4.0, RING, a * lit * 0.22);
+        }
+        g.canvas.rrect(Rect::new(r.x + 2.0, r.bottom() - 1.0, r.w - 4.0, 1.0), 0.5, Color::BLACK, a * 0.35);
+        let style = TextStyle::code(9.5);
+        let lw = g.measure(legend, style);
+        g.text_alpha(r.cx() - lw * 0.5, r.cy() - 0.5, legend, style, INK_STRONG, a);
+    }
+
+    /// A practice task: done, or still to do.
+    fn task(&self, g: &mut Gfx, x: f32, cy: f32, label: &str, done: bool, a: f32) -> f32 {
+        let style = TextStyle::sans(10.5, if done { 600.0 } else { 500.0 });
+        let w = g.measure(label, style) + 30.0;
+        let r = Rect::new(x, cy - 9.0, w, 18.0);
+        g.canvas.rrect(r, 9.0, if done { SURFACE_FOCUSED } else { SURFACE }, a);
+        if done {
+            // A tick, drawn: in a filled disc, as a check box ticked.
+            let x = r.x + 10.0;
+            g.canvas.circle(x, cy, 5.5, INK_STRONG, a);
+            g.canvas.polyline(&[(x - 2.6, cy + 0.2), (x - 0.8, cy + 2.1), (x + 2.8, cy - 2.0)], 1.5, Color::hex(0x101116), a);
+        } else {
+            g.canvas.stroke_rrect(Rect::new(r.x + 5.0, cy - 5.0, 10.0, 10.0), 5.0, 1.2, INK_FAINT, a);
+        }
+        g.text_alpha(r.x + 20.0, cy, label, style, if done { INK_STRONG } else { INK_THIN }, a);
+        w
+    }
+
+    /// The practice field: what has been typed, and the cursor in it.
+    fn practice_field(&self, g: &mut Gfx, y: f32, placeholder: &str) {
+        let (a, dx, dy) = self.reveal(2);
+        let field = Rect::new(LEFT + dx, y + dy, W - 2.0 * LEFT, 28.0);
+        g.canvas.rrect(field, 10.0, SURFACE_FOCUSED, a);
+        g.canvas.stroke_rrect(field.inset(-2.0), 12.0, 1.5, RING, 0.9 * a);
+        let style = TextStyle::sans(14.0, 500.0);
+        let l = &self.lesson;
+        if l.text.is_empty() {
+            g.text_alpha(field.x + 12.0, field.cy(), placeholder, style, INK_FAINT, a);
+        } else {
+            g.text_alpha(field.x + 12.0, field.cy(), &l.text, style, INK_STRONG, a);
+        }
+        let before: String = l.text.chars().take(l.cursor).collect();
+        let cx = field.x + 12.0 + if before.is_empty() { 0.0 } else { g.measure(&before, style) };
+        g.canvas.rrect(Rect::new(cx, field.cy() - 8.0, 1.5, 16.0), 0.75, CRIMSON, a);
+    }
+
+    /// A keyboard light as it shows a modifier, at this moment.
+    fn light(&self, g: &mut Gfx, cx: f32, cy: f32, blink: Blink, calm: bool, a: f32) {
+        let on = match blink {
+            // Calm: no blinking; slow and quick are shown half and three-quarters lit.
+            _ if calm => match blink {
+                Blink::Slow => 0.45,
+                Blink::Fast => 0.75,
+                Blink::Steady => 1.0,
+            },
+            Blink::Slow => ((self.clock * std::f32::consts::TAU * 0.8).sin() * 0.5 + 0.5).powf(0.6),
+            Blink::Fast => {
+                if (self.clock * 6.0).fract() < 0.5 {
+                    1.0
+                } else {
+                    0.15
+                }
+            }
+            Blink::Steady => 1.0,
+        };
+        g.canvas.circle(cx, cy, 4.5, TRACK, a);
+        g.canvas.circle(cx, cy, 4.5, LIT, a * on);
+        if on > 0.5 && !calm {
+            g.canvas.glow(cx, cy, 10.0, LIT, 0.25 * a * on);
+        }
+    }
+
+    fn draw_lesson(&self, g: &mut Gfx) {
+        let l = &self.lesson;
+        let calm = g.calm;
+        let (title, words) = CARD_WORDS[l.card];
+        self.heading(g, title, words);
+        match l.card() {
+            Card::Modifiers => {
+                for (i, (how, what, blink)) in MODIFIER_WAYS.iter().enumerate() {
+                    let (a, dx, dy) = self.reveal(2 + i);
+                    let y = ROWS_TOP + 8.0 + i as f32 * 24.0 + dy;
+                    let r = Rect::new(LEFT + dx, y, W - 2.0 * LEFT, 20.0);
+                    g.canvas.rrect(r, 10.0, SURFACE, a);
+                    self.light(g, r.x + 13.0, r.cy(), *blink, calm, a);
+                    g.text_alpha(r.x + 26.0, r.cy(), how, TextStyle::sans(11.5, 600.0), INK_STRONG, a);
+                    g.text_alpha(r.x + 92.0, r.cy(), what, TextStyle::sans(10.5, 400.0), INK_THIN, a);
+                }
+            }
+            Card::Moving => {
+                let (a, dx, dy) = self.reveal(2);
+                // The four keys as they sit: F above X, Z and C either side.
+                let (cw, ch, gap) = (30.0, 22.0, 3.0);
+                let (x0, y0) = (LEFT + 4.0 + dx, ROWS_TOP + 6.0 + dy);
+                let caps = [("F ↑", x0 + cw + gap, y0), ("X ↓", x0 + cw + gap, y0 + ch + gap), ("Z ←", x0, y0 + ch + gap), ("C →", x0 + 2.0 * (cw + gap), y0 + ch + gap)];
+                for (dir, (legend, x, y)) in caps.iter().enumerate() {
+                    let since = self.clock - l.pressed[dir];
+                    let lit = if l.moved[dir] && since < 0.35 { 1.0 - since / 0.35 } else { 0.0 };
+                    self.keycap(g, Rect::new(*x, *y, cw, ch), legend, lit, a);
+                }
+                // A little grid of tiles, and the ring the keys move.
+                let (a, dx, dy) = self.reveal(3);
+                let (tw, th, tg) = (40.0, 22.0, 5.0);
+                let gx = W - LEFT - 3.0 * tw - 2.0 * tg + dx;
+                for row in 0..2 {
+                    for col in 0..3 {
+                        let r = Rect::new(gx + col as f32 * (tw + tg), ROWS_TOP + 6.0 + row as f32 * (th + tg) + dy, tw, th);
+                        let here = (col, row) == l.at;
+                        g.canvas.rrect(r, 6.0, if here { SURFACE_FOCUSED } else { SURFACE }, a);
+                        if here {
+                            g.canvas.stroke_rrect(r.inset(-2.0), 8.0, 1.5, RING, 0.9 * a);
+                        }
+                    }
+                }
+                let (a, ..) = self.reveal(4);
+                let mut x = LEFT;
+                for (i, name) in ["up", "down", "left", "right"].iter().enumerate() {
+                    x += self.task(g, x, 134.0, name, l.moved[i], a) + 5.0;
+                }
+            }
+            Card::Capitals => {
+                self.practice_field(g, ROWS_TOP + 6.0, "type here");
+                let (a, ..) = self.reveal(3);
+                let w = self.task(g, LEFT, 116.0, TASK_CAPITAL, l.capital, a);
+                self.task(g, LEFT + w + 6.0, 116.0, TASK_SYMBOL, l.symbol, a);
+            }
+            Card::TextArrows => {
+                self.practice_field(g, ROWS_TOP + 6.0, "");
+                let (a, ..) = self.reveal(3);
+                self.task(g, LEFT, 116.0, TASK_CURSOR, l.steered, a);
+            }
+            Card::FnKeys => {
+                let col_w = (W - 2.0 * LEFT - 6.0) * 0.5;
+                for (i, (keys, what, _)) in FN_KEYS.iter().enumerate() {
+                    let (a, dx, dy) = self.reveal(2 + i / 2);
+                    let x = LEFT + (i % 2) as f32 * (col_w + 6.0) + dx;
+                    let y = ROWS_TOP + 4.0 + (i / 2) as f32 * 25.0 + dy;
+                    let r = Rect::new(x, y, col_w, 21.0);
+                    g.canvas.rrect(r, 10.5, if l.tried[i] { SURFACE_FOCUSED } else { SURFACE }, a);
+                    let style = TextStyle::code(9.0);
+                    let kw = g.measure(keys, style) + 12.0;
+                    let cap = Rect::new(r.x + 4.0, r.y + 3.0, kw, r.h - 6.0);
+                    g.canvas.rrect(cap, 4.0, TRACK, a);
+                    g.text_alpha(cap.x + 6.0, cap.cy(), keys, style, INK_STRONG, a);
+                    g.text_alpha(cap.right() + 7.0, r.cy(), what, TextStyle::sans(10.5, if l.tried[i] { 600.0 } else { 400.0 }), if l.tried[i] { INK_STRONG } else { INK_THIN }, a);
+                }
+            }
+        }
+        // The cards: where the lesson is, beside what the keys do.
+        let (a, ..) = self.reveal(7);
+        for i in 0..CARDS.len() {
+            let x = W - LEFT - (CARDS.len() - 1 - i) as f32 * 10.0 - 3.0;
+            let (radius, ink) = if i == l.card { (3.0, CRIMSON) } else { (2.0, if i < l.card { INK_THIN } else { TRACK }) };
+            g.canvas.circle(x, BAR_CY, radius, ink, a);
+        }
+        let last = l.card + 1 == CARDS.len();
+        let hint = match (last, self.from_settings) {
+            (true, true) => "enter: done · esc: back",
+            (true, false) => "enter: on to setup · esc: back",
+            (false, _) if l.done() => "enter: next · esc: back · tab: skip",
+            (false, _) => "enter: next · tab: skip the lesson",
+        };
+        g.text_alpha(LEFT, BAR_CY, hint, TextStyle::code(9.0), INK_FAINT, a);
+    }
+
+    fn draw_place(&self, g: &mut Gfx) {
+        self.heading(g, "Name and time zone", WORDS_PLACE);
+        let row_w = W - 2.0 * LEFT;
+        let shown = if self.focus == 0 { format!("{}▏", self.name) } else { self.name.clone() };
+        self.row(g, 0, ROWS_TOP + 6.0, row_w, 21.0, "Name", &shown, true);
+        let value = crate::device::zone_label(&crate::device::zone());
+        self.row(g, 1, ROWS_TOP + 30.0, row_w, 21.0, "Time zone", &value, true);
+        let (a, dx, dy) = self.reveal(4);
+        let now = chrono::Local::now().format(if g.clock.0 { "%H:%M" } else { "%-I:%M %p" }).to_string().to_lowercase();
+        let line = format!("now {now} · clock: {}", crate::device::clock_note());
+        g.text_alpha(LEFT + 11.0 + dx, ROWS_TOP + 64.0 + dy, &line, TextStyle::code(9.5), INK_THIN, a);
+        self.bar(g, "esc back · tab skip");
+    }
 }
 
 impl Default for Setup {
@@ -386,7 +854,11 @@ impl Default for Setup {
 
 impl Screen for Setup {
     fn title(&self) -> &str {
-        "Setup"
+        if self.from_settings && self.page == Page::Lesson {
+            "Keyboard lesson"
+        } else {
+            "Setup"
+        }
     }
 
     fn full_screen(&self) -> bool {
@@ -394,7 +866,14 @@ impl Screen for Setup {
     }
 
     fn wants_text(&self) -> bool {
-        (self.page == Page::Team && self.focus == 0) || self.typing.is_some()
+        (self.page == Page::Team && self.focus == 0)
+            || (self.page == Page::Place && self.focus == 0)
+            || (self.page == Page::Lesson && self.lesson.typing())
+            || self.typing.is_some()
+    }
+
+    fn keep_in_recents(&self) -> bool {
+        false
     }
 
     fn appear(&mut self) {
@@ -402,7 +881,7 @@ impl Screen for Setup {
     }
 
     fn resume(&mut self) {
-        // Back from choosing a network: say how it went.
+        // Back from choosing a network or a time zone: say how it went.
         self.entered = 0.0;
     }
 
@@ -424,23 +903,32 @@ impl Screen for Setup {
             }
             return Nav::Stay;
         }
+        if self.page == Page::Lesson {
+            return self.lesson_key(key, cx);
+        }
         let (rows, last) = (self.rows(), self.rows() + self.has_next() as usize);
         match key {
             // From Settings, Esc goes back there, and the page stops being offered.
             Key::Back if self.from_settings && self.page == Page::Computer => return Nav::Pop,
-            Key::Back if self.page != Page::Welcome => self.back(),
-            Key::Tab if self.has_next() => self.next(cx),
+            Key::Back if self.page != Page::Welcome => return self.back(),
+            Key::Tab if self.has_next() => return self.next(cx),
             Key::Up => self.focus = self.focus.saturating_sub(1),
             Key::Down if self.focus + 1 < last => self.focus += 1,
             // The Next button.
-            Key::Enter if self.has_next() && self.focus == rows => self.next(cx),
+            Key::Enter if self.has_next() && self.focus == rows => return self.next(cx),
             Key::Char(c) if self.page == Page::Team && self.focus == 0 && c.is_ascii_digit() && self.team.len() < 5 => self.team.push(c),
             Key::Backspace if self.page == Page::Team => {
                 self.team.pop();
             }
-            Key::Enter if self.page == Page::Team => self.next(cx),
+            Key::Enter if self.page == Page::Team => return self.next(cx),
+            // The name: typed as a network will take it (lower case, a hyphen
+            // for a space); Enter goes on to the time zone.
+            Key::Char(c) if self.page == Page::Place && self.focus == 0 => crate::device::type_name(&mut self.name, c),
+            Key::Backspace if self.page == Page::Place && self.focus == 0 => {
+                self.name.pop();
+            }
             Key::Enter => match (self.page, self.focus) {
-                (Page::Welcome, 0) => self.next(cx),
+                (Page::Welcome, 0) => return self.next(cx),
                 (Page::Welcome, 1) => {
                     self.go(Page::Computer, true);
                     self.remote = crate::remote::Remote::start();
@@ -449,13 +937,15 @@ impl Screen for Setup {
                     crate::mark_setup_done();
                     return Nav::Done;
                 }
+                (Page::Place, 0) => self.focus = 1,
+                (Page::Place, _) => return Nav::Push(Box::new(crate::device::ZonePicker::new())),
                 (Page::Wifi, 0) => {
                     if !crate::wifi::switched_on() {
                         crate::wifi::switch(true);
                     }
                     return Nav::Push(Box::new(crate::screens::WifiScreen::new()));
                 }
-                (Page::Wifi, _) => self.next(cx),
+                (Page::Wifi, _) => return self.next(cx),
                 (Page::Keys, row) => self.typing = Some((row, String::new())),
                 (Page::Choices, row) => self.toggle_choice(row, cx),
                 (Page::Look, row) => self.change_look(row, 1, cx),
@@ -482,11 +972,16 @@ impl Screen for Setup {
 
     fn tick(&mut self, dt: f32) -> bool {
         self.entered += dt;
+        self.clock += dt;
         // A page's elements have all arrived within about half a second, and
         // the last page runs on its own; otherwise it is drawn again only
         // when what it shows has changed: the computer page's status, the
-        // Wi-Fi page's connection.
+        // Wi-Fi page's connection. The lesson's first card blinks its
+        // lights, and a key just pressed on the second fades.
         let mut changed = self.entered < 0.8 || self.page == Page::Finishing;
+        if self.page == Page::Lesson {
+            changed |= self.lesson.card() == Card::Modifiers || self.lesson.pressed.iter().any(|p| self.clock - p < 0.4);
+        }
         if let Some(remote) = &mut self.remote {
             changed |= remote.tick();
         }
@@ -498,7 +993,7 @@ impl Screen for Setup {
     }
 
     fn busy(&self) -> bool {
-        self.page == Page::Finishing
+        self.page == Page::Finishing || (self.page == Page::Lesson && self.lesson.card() == Card::Modifiers)
     }
 
     fn finished(&self) -> bool {
@@ -541,6 +1036,7 @@ impl Screen for Setup {
                     }
                 }
             }
+            Page::Lesson => self.draw_lesson(g),
             Page::Team => {
                 self.heading(g, "Which team is it for?", WORDS_TEAM);
                 let (a, dx, dy) = self.reveal(2);
@@ -560,6 +1056,7 @@ impl Screen for Setup {
                 }
                 self.bar(g, "esc back · tab skip");
             }
+            Page::Place => self.draw_place(g),
             Page::Wifi => {
                 let status = self.wifi.as_ref().map(|w| w.state().status).unwrap_or_default();
                 let words = if crate::wifi::switched_on() { format!("Wi-Fi: {status}") } else { WORDS_WIFI.into() };
@@ -652,7 +1149,7 @@ mod tests {
     fn every_line_of_setup_fits_the_panel_whole() {
         let mut g = Gfx::new(Tokens::dark());
         let words = TextStyle::sans(11.0, 400.0);
-        let lines = [WORDS_WELCOME, WORDS_COMPUTER, WORDS_TEAM, WORDS_WIFI, WORDS_KEYS, WORDS_TYPING, WORDS_LOOK];
+        let lines = [WORDS_WELCOME, WORDS_COMPUTER, WORDS_TEAM, WORDS_PLACE, WORDS_WIFI, WORDS_KEYS, WORDS_TYPING, WORDS_LOOK];
         for line in lines.iter().chain(CHOICES.iter().map(|c| &c.1)) {
             let w = g.measure(line, words);
             assert!(w <= W - 2.0 * LEFT, "{line:?} is {w:.0} px, wider than {}", W - 2.0 * LEFT);
@@ -662,6 +1159,170 @@ mod tests {
         for (name, _) in CHOICES {
             let w = g.measure(name, label) + 22.0 + g.measure("off", TextStyle::code(9.5)) + 11.0;
             assert!(w <= W - 2.0 * LEFT, "{name:?} crowds its row: {w:.0} px");
+        }
+    }
+
+    /// Setup in a sandbox, past the welcome and onto the lesson's first card.
+    fn on_the_lesson() -> (Setup, crate::shell::Settings, Robot) {
+        crate::shell::tests::sandbox();
+        let mut setup = Setup::new();
+        setup.go(Page::Lesson, true);
+        (setup, crate::shell::Settings::default(), Robot::none())
+    }
+
+    fn press(setup: &mut Setup, settings: &mut crate::shell::Settings, robot: &mut Robot, key: Key) -> Nav {
+        let mut say = None;
+        let mut cx = Cx { robot, settings, say: &mut say, at_rest: true };
+        setup.key(key, &mut cx)
+    }
+
+    #[test]
+    fn setup_goes_through_its_pages_in_order_and_back() {
+        let (mut setup, mut settings, mut robot) = on_the_lesson();
+        setup.go(Page::Welcome, true);
+        let mut seen = Vec::new();
+        press(&mut setup, &mut settings, &mut robot, Key::Enter);
+        for _ in 0..FLOW.len() {
+            seen.push(setup.page);
+            // Tab skips each page, the lesson whole.
+            press(&mut setup, &mut settings, &mut robot, Key::Tab);
+        }
+        assert_eq!(seen, FLOW.to_vec());
+        assert_eq!(setup.page, Page::Finishing, "the last page finishes");
+        // And back, a page at a time, from the end to the welcome.
+        let mut setup = Setup::new();
+        setup.go(*FLOW.last().unwrap(), true);
+        for want in FLOW.iter().rev().skip(1) {
+            press(&mut setup, &mut settings, &mut robot, Key::Back);
+            assert_eq!(setup.page, *want);
+        }
+        // The lesson, arrived at from behind, is on its last card; back through it to the welcome.
+        for _ in 0..CARDS.len() {
+            press(&mut setup, &mut settings, &mut robot, Key::Back);
+        }
+        assert_eq!(setup.page, Page::Welcome);
+    }
+
+    #[test]
+    fn the_lesson_never_holds_anyone_up() {
+        let (mut setup, mut settings, mut robot) = on_the_lesson();
+        // Enter goes on through every card, practised or not, and on to the team.
+        for card in CARDS {
+            assert_eq!(setup.lesson.card(), card);
+            press(&mut setup, &mut settings, &mut robot, Key::Enter);
+        }
+        assert_eq!(setup.page, Page::Team);
+    }
+
+    #[test]
+    fn the_lesson_ticks_off_what_arrives() {
+        let (mut setup, mut settings, mut robot) = on_the_lesson();
+        press(&mut setup, &mut settings, &mut robot, Key::Enter);
+        // Moving: the arrows (F X Z C off the handheld's keys, or a computer's arrows).
+        assert!(!setup.wants_text(), "outside typing, so F X Z C arrive as arrows");
+        for key in [Key::Up, Key::Down, Key::Left] {
+            press(&mut setup, &mut settings, &mut robot, key);
+        }
+        assert!(!setup.lesson.done());
+        press(&mut setup, &mut settings, &mut robot, Key::Right);
+        assert!(setup.lesson.done());
+        assert_eq!(setup.lesson.at, (1, 1), "the ring went down, left, then right");
+        // Capitals: a capital and a symbol, typed.
+        press(&mut setup, &mut settings, &mut robot, Key::Enter);
+        assert!(setup.wants_text(), "a text field: the letters type");
+        for key in [Key::Char('g'), Key::Char('O')] {
+            press(&mut setup, &mut settings, &mut robot, key);
+        }
+        assert!(setup.lesson.capital && !setup.lesson.symbol);
+        press(&mut setup, &mut settings, &mut robot, Key::Char('!'));
+        assert!(setup.lesson.done());
+        assert_eq!(setup.lesson.text, "gO!");
+        // Arrows while typing: an F types an f; an arrow moves the cursor.
+        press(&mut setup, &mut settings, &mut robot, Key::Enter);
+        assert_eq!(setup.lesson.text, "catalyst");
+        press(&mut setup, &mut settings, &mut robot, Key::Char('f'));
+        assert!(!setup.lesson.done(), "a letter typed is not the cursor moving");
+        press(&mut setup, &mut settings, &mut robot, Key::Left);
+        press(&mut setup, &mut settings, &mut robot, Key::Char('x'));
+        assert_eq!(setup.lesson.text, "catalystxf");
+        assert!(setup.lesson.done());
+        // Fn's keys, lit as they are tried.
+        press(&mut setup, &mut settings, &mut robot, Key::Enter);
+        press(&mut setup, &mut settings, &mut robot, Key::F(10));
+        press(&mut setup, &mut settings, &mut robot, Key::End);
+        assert_eq!(setup.lesson.tried, [false, true, false, true, false, false]);
+    }
+
+    #[test]
+    fn the_lesson_from_settings_comes_back_to_settings() {
+        crate::shell::tests::sandbox();
+        let (mut settings, mut robot) = (crate::shell::Settings::default(), Robot::none());
+        let mut lesson = Setup::lesson();
+        assert_eq!(lesson.title(), "Keyboard lesson");
+        assert!(matches!(press(&mut lesson, &mut settings, &mut robot, Key::Back), Nav::Pop), "esc on the first card");
+        let mut lesson = Setup::lesson();
+        assert!(matches!(press(&mut lesson, &mut settings, &mut robot, Key::Tab), Nav::Pop), "tab skips it");
+        let mut lesson = Setup::lesson();
+        let mut nav = Nav::Stay;
+        for _ in 0..CARDS.len() {
+            nav = press(&mut lesson, &mut settings, &mut robot, Key::Enter);
+        }
+        assert!(matches!(nav, Nav::Pop), "enter on the last card is done");
+    }
+
+    #[test]
+    fn the_name_is_typed_as_a_network_takes_it() {
+        let (mut setup, mut settings, mut robot) = on_the_lesson();
+        setup.go(Page::Place, true);
+        setup.name.clear();
+        assert!(setup.wants_text());
+        for c in " Pit Crew!".chars() {
+            press(&mut setup, &mut settings, &mut robot, Key::Char(c));
+        }
+        assert_eq!(setup.name, "pit-crew", "lower case, a hyphen for the space, nothing leading");
+        // Enter goes on to the time zone, where the letters move again.
+        press(&mut setup, &mut settings, &mut robot, Key::Enter);
+        assert_eq!(setup.focus, 1);
+        assert!(!setup.wants_text());
+        assert!(matches!(press(&mut setup, &mut settings, &mut robot, Key::Enter), Nav::Push(_)), "the time zones");
+    }
+
+    #[test]
+    fn every_lesson_card_fits_the_panel_whole() {
+        let mut g = Gfx::new(Tokens::dark());
+        let mut setup = Setup::lesson();
+        let words = TextStyle::sans(11.0, 400.0);
+        for i in 0..CARDS.len() {
+            setup.lesson.arrive(i);
+            setup.draw(&mut g, &Robot::none());
+        }
+        for (title, line) in CARD_WORDS {
+            let w = g.measure(line, words);
+            assert!(w <= W - 2.0 * LEFT, "{line:?} is {w:.0} px");
+            assert!(g.measure(title, TextStyle::sans(18.0, 600.0)) <= W - 2.0 * LEFT, "{title:?}");
+        }
+        // The ways of a modifier beside their light and name.
+        for (how, what, _) in MODIFIER_WAYS {
+            assert!(g.measure(how, TextStyle::sans(11.5, 600.0)) <= 92.0 - 26.0 - 4.0, "{how}");
+            assert!(92.0 + g.measure(what, TextStyle::sans(10.5, 400.0)) <= W - 2.0 * LEFT - 8.0, "{what}");
+        }
+        // Fn's keys in two columns.
+        let col_w = (W - 2.0 * LEFT - 6.0) * 0.5;
+        for (keys, what, _) in FN_KEYS {
+            let w = 4.0 + g.measure(keys, TextStyle::code(9.0)) + 12.0 + 7.0 + g.measure(what, TextStyle::sans(10.5, 600.0)) + 6.0;
+            assert!(w <= col_w, "{keys} {what}: {w:.0} of {col_w:.0}");
+        }
+        // The practice tasks on one line, with room to spare.
+        let task = |g: &mut Gfx, s: &str| g.measure(s, TextStyle::sans(10.5, 600.0)) + 30.0;
+        let capitals = task(&mut g, TASK_CAPITAL) + 6.0 + task(&mut g, TASK_SYMBOL);
+        assert!(capitals <= W - 2.0 * LEFT, "capitals' tasks: {capitals:.0}");
+        let moving: f32 = ["up", "down", "left", "right"].iter().map(|s| task(&mut g, s) + 5.0).sum();
+        assert!(moving <= W - 2.0 * LEFT, "moving's tasks: {moving:.0}");
+        assert!(task(&mut g, TASK_CURSOR) <= W - 2.0 * LEFT);
+        // The hints along the bottom, before the lesson's dots.
+        for hint in ["enter: on to setup · esc: back", "enter: next · esc: back · tab: skip", "enter: next · tab: skip the lesson"] {
+            let w = g.measure(hint, TextStyle::code(9.0));
+            assert!(LEFT + w + 8.0 <= W - LEFT - (CARDS.len() as f32 - 1.0) * 10.0 - 6.0, "{hint:?}: {w:.0}");
         }
     }
 }

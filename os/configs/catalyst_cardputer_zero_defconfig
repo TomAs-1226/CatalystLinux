@@ -6,6 +6,12 @@ BR2_TOOLCHAIN_EXTERNAL_BOOTLIN=y
 BR2_TOOLCHAIN_EXTERNAL_BOOTLIN_AARCH64_MUSL_STABLE=y
 BR2_TARGET_GENERIC_HOSTNAME="catalyst"
 BR2_TARGET_GENERIC_ISSUE="Catalyst Linux"
+# Every time zone's rules (/usr/share/zoneinfo), for the zone chosen in setup
+# or Settings. No default zone here: /etc/localtime is a link to the choice on
+# /data (post-build.sh makes it), and with none chosen the time is UTC.
+BR2_TARGET_TZ_INFO=y
+BR2_TARGET_TZ_ZONELIST="default"
+BR2_TARGET_LOCALTIME=""
 BR2_INIT_OPENRC=y
 # mdev (part of BusyBox) loads drivers by modalias at boot and on hotplug:
 # the I2C and SPI controllers, USB Ethernet, anything plugged into the hub.

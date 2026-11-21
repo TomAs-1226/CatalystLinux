@@ -1,0 +1,11 @@
+#!/bin/sh
+# Run by udhcpc's script after each DHCP event. With an address and a router
+# to go through, set the clock from the network, in the background: DHCP does
+# not wait for it, and a network with no way out just never answers.
+case "${1:-}" in
+bound | renew) ;;
+*) exit 0 ;;
+esac
+[ -n "${router:-}" ] || exit 0
+/usr/sbin/catalyst-time sync </dev/null >/dev/null 2>&1 &
+exit 0
