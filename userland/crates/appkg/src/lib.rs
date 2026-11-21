@@ -62,7 +62,7 @@ impl Permission {
     /// What it means, in a few plain words.
     pub fn means(self) -> &'static str {
         match self {
-            Permission::Network => "reaches the internet and the local network",
+            Permission::Network => "reaches the network and internet",
             Permission::Files => "reads and writes your files in /data",
             Permission::Camera => "takes pictures with the camera",
             Permission::Microphone => "listens through the microphone",

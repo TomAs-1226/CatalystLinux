@@ -72,11 +72,13 @@ impl Typist {
     }
 }
 
-/// The gallery: the start page with the pit's words chosen, a word half
-/// typed, a wrong key, the round under way, its results, and the best kept.
+/// The gallery: the start page with the pit's words chosen; a sprint waiting
+/// for its first key, a word half typed, a wrong key, the round under way,
+/// its results, and the best kept; then the ten-word round at its last word.
 fn gallery_scenes() -> Vec<(&'static str, Vec<Key>)> {
-    let mut typist = Typist::new(Round::Sprint30, Pack::Pit, &mut Rng::new(GALLERY_SEED));
-    let mut half = vec![Key::Enter];
+    let mut rng = Rng::new(GALLERY_SEED);
+    let mut typist = Typist::new(Round::Sprint30, Pack::Pit, &mut rng);
+    let mut half = Vec::new();
     let n = typist.model.word().len().div_ceil(2);
     typist.letters(n, &mut half);
     let mut wrong = Vec::new();
@@ -94,13 +96,22 @@ fn gallery_scenes() -> Vec<(&'static str, Vec<Key>)> {
         typist.letters(1, &mut results);
     }
     results.extend([Key::Tab, Key::Tab]);
+    // Ten words: nine done and the last begun.
+    let mut ten = Typist::new(Round::Words10, Pack::Pit, &mut rng);
+    let mut last_word = vec![Key::Down, Key::Down, Key::Enter];
+    for _ in 0..model::PRACTICE_WORDS - 1 {
+        ten.rest_of_word(&mut last_word);
+    }
+    ten.letters(2, &mut last_word);
     vec![
         ("1-start", vec![Key::Right, Key::Right]),
-        ("2-half-a-word", half),
-        ("3-wrong-key", wrong),
-        ("4-under-way", under_way),
-        ("5-results", results),
-        ("6-best-kept", vec![Key::Back]),
+        ("2-ready", vec![Key::Enter]),
+        ("3-half-a-word", half),
+        ("4-wrong-key", wrong),
+        ("5-under-way", under_way),
+        ("6-results", results),
+        ("7-best-kept", vec![Key::Back]),
+        ("8-ten-words", last_word),
     ]
 }
 
@@ -227,7 +238,7 @@ mod tests {
             std::fs::remove_dir_all(&dir).ok();
             let mut app = Runner::new(Box::new(Start::at(&dir, Rng::new(GALLERY_SEED))), look);
             frames(&mut app, 90);
-            let titles = ["Typing", "30 s sprint", "30 s sprint", "30 s sprint", "Results", "Typing"];
+            let titles = ["Typing", "30 s sprint", "30 s sprint", "30 s sprint", "30 s sprint", "Results", "Typing", "10 words"];
             for ((name, keys), title) in gallery_scenes().iter().zip(titles) {
                 for key in keys {
                     app.key(*key);

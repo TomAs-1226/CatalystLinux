@@ -36,6 +36,16 @@ const SHAKE_KICK: f32 = 170.0;
 /// before (the kit's own rise, 10 px a block, a touch deeper here).
 const RISE: f32 = 12.0;
 const STAGGER: f32 = 0.1;
+/// The round fades as the results start in: gone a third of the way, and
+/// the results' first block starting at this much, so they barely overlap.
+const FADE: f32 = 3.0;
+const HANDOFF: f32 = 0.15;
+/// A new word rises from this far toward the next word's line (of the way
+/// between them); a finished one lifts this many px as it goes, flicked
+/// away at this speed (of its travel a second) so it clears at once.
+const ARRIVE_FROM: f32 = 0.45;
+const LEAVE_LIFT: f32 = 14.0;
+const LEAVE_FLICK: f32 = -3.0;
 /// The word's size in the display voice (the text size scales it).
 pub(crate) const WORD_SIZE: f32 = 34.0;
 /// The speed's size on the results, before it is fitted to its tile.
@@ -139,6 +149,7 @@ impl Play {
                     // The finished word leaves from wherever it was, at its own speed.
                     self.leave = self.arrive;
                     self.leave.set_with(-1.0, role::smooth());
+                    self.leave.nudge(LEAVE_FLICK);
                     self.arrive = Animated::new(1.0, role::release()).with_rest(0.002);
                     self.arrive.set(0.0);
                 }
@@ -243,18 +254,25 @@ impl Play {
         let next_cy = y0 + big.size * 0.98 + 8.5 + lab.size * 0.5;
         let travel = next_cy - word_cy;
 
-        // The word just finished, lifting away.
+        // The word just finished, lifting away and gone by half way.
         let gone = self.leave.value();
         if gone > -0.999 && !self.left.is_empty() {
-            let a = alpha * (1.0 + gone * 1.4).clamp(0.0, 1.0);
-            let w = ui.measure(self.left, big);
-            ui.text_alpha(((W - w) * 0.5).round(), word_cy + gone * travel * 0.7, self.left, big, t.ink, a);
+            // (Finished while still arriving, it starts as faint as it was.)
+            let shown = if gone >= 0.0 { 1.0 - gone * 1.2 } else { 1.0 + gone * 2.2 };
+            let a = alpha * shown.clamp(0.0, 1.0);
+            if a > 0.0 {
+                let w = ui.measure(self.left, big);
+                let dy = if gone >= 0.0 { gone * travel * ARRIVE_FROM } else { gone * LEAVE_LIFT };
+                ui.text_alpha(((W - w) * 0.5).round(), word_cy + dy, self.left, big, t.ink, a);
+            }
         }
 
         // The word: typed in ink, the letter wanted next marked, the rest quiet.
+        // It rises the first part of the way from the next word's line, so
+        // it is readable at once and never crosses the line it came from.
         let rise = self.arrive.value();
-        let wa = alpha * (1.0 - rise * 1.25).clamp(0.0, 1.0);
-        let wy = word_cy + rise * travel;
+        let wa = alpha * (1.0 - rise * 1.2).clamp(0.0, 1.0);
+        let wy = word_cy + rise * travel * ARRIVE_FROM;
         let word = m.word();
         let typed = m.typed().min(word.len());
         let end = (typed + 1).min(word.len());
@@ -267,9 +285,9 @@ impl Play {
         let fault = ui.fault();
         let flash = self.flash.value();
         if flash > 0.01 && !cur.is_empty() {
-            let r = Rect::new(x0 + head_w - 3.0, wy - big.size * 0.44, cur_w + 6.0, big.size * 0.9);
-            let radius = ui.radius(6.0);
-            fill(ui, r, radius, fault, 0.3 * flash * wa);
+            // A soft glow of the fault behind the letter, not a box round it.
+            let (gx, gy) = (x0 + head_w + cur_w * 0.5 + ui.ox, wy - big.size * 0.04);
+            ui.canvas.glow(gx, gy, big.size * 0.62, fault, 0.5 * flash * wa);
         }
         ui.text_alpha(x0, wy, head, big, t.ink, wa);
         ui.text_alpha(x0 + head_w, wy, cur, big, if wrong { fault } else { t.dim }, wa);
@@ -277,7 +295,10 @@ impl Play {
 
         // The caret, under the letter wanted next, gliding along the word.
         if !cur.is_empty() && self.stage == Stage::Typing {
-            let (cx, cw) = (head_w, cur_w);
+            // Under the letter's middle three quarters (its advance has room
+            // either side), never shorter than a third of the type's size.
+            let cw = (cur_w * 0.76).max(big.size * 0.32);
+            let cx = head_w + (cur_w - cw) * 0.5;
             if !self.caret_placed || self.calm {
                 self.caret_x.jump(cx);
                 self.caret_w.jump(cw);
@@ -290,11 +311,13 @@ impl Play {
             let y = baseline(wy, big.size) + (big.size * 0.24).round();
             let r = Rect::new(x0 + self.caret_x.value(), y, self.caret_w.value().max(2.0), 2.5);
             let ink = if wrong { fault } else { ui.ring_color() };
-            fill(ui, r, 1.25, ink, wa);
+            // It comes with the word, once the word is most of the way in.
+            fill(ui, r, 1.25, ink, alpha * (1.0 - rise * 2.0).clamp(0.0, 1.0));
         }
 
-        // The next word, quietly, where it waits to rise.
-        let pa = alpha * (1.0 - rise).clamp(0.0, 1.0);
+        // The next word, quietly, where it waits to rise: the one after
+        // shows once the word before it is on its way up.
+        let pa = alpha * (1.0 - rise * 2.0).clamp(0.0, 1.0);
         let last = m.round() == Round::Words10 && m.words_done() + 1 >= PRACTICE_WORDS;
         let (tag, next) = if last { ("last word", "") } else { ("next", m.next()) };
         let (tw, nw) = (ui.measure(tag, cap), if next.is_empty() { 0.0 } else { ui.measure(next, lab) + 6.0 });
@@ -339,8 +362,11 @@ impl Play {
         let (t, ty) = (ui.tokens, ui.ty);
         let (lab, cap) = (ty.label, ty.caption);
         let (top, bottom) = (ui.top(), ui.bottom());
+        // Each block has its own stretch of the way in; past the end, all of
+        // them follow the spring's overshoot together.
         let reveal = |i: usize| {
-            let q = ((p - i as f32 * STAGGER) / (1.0 - 3.0 * STAGGER)).max(0.0);
+            let from = HANDOFF + i as f32 * STAGGER;
+            let q = ((p - from) / (1.0 - HANDOFF - 3.0 * STAGGER)).clamp(0.0, 1.0) + (p - 1.0).max(0.0);
             ((1.0 - q) * RISE, q.min(1.0))
         };
         let tile_w = ((W - 2.0 * PAD - GAP) * 0.5).floor();
@@ -467,8 +493,9 @@ impl Page for Play {
     fn draw(&mut self, ui: &mut Ui) {
         self.calm = ui.calm();
         let p = self.view.value();
-        if p < 0.999 {
-            self.draw_typing(ui, (1.0 - p * 1.6).clamp(0.0, 1.0), p.max(0.0) * 10.0);
+        let fade = (1.0 - p * FADE).clamp(0.0, 1.0);
+        if fade > 0.0 {
+            self.draw_typing(ui, fade, p.max(0.0) * 10.0);
         }
         if p > 0.001 {
             self.draw_results(ui, p);

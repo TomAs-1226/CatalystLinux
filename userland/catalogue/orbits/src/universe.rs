@@ -35,7 +35,7 @@ impl Universe {
     pub fn about(self) -> &'static str {
         match self {
             Universe::SolarSystem => "the sun and its eight planets",
-            Universe::FigureEight => "three stars on one figure of eight",
+            Universe::FigureEight => "three stars on a figure of eight",
             Universe::ThreeBody => "a close pair and a distant third",
             Universe::MilkyWay => "sixty-three stars round a core",
         }
@@ -51,6 +51,7 @@ impl Universe {
     }
 
     /// How many bodies it starts with.
+    #[cfg(test)]
     pub fn bodies(self) -> usize {
         match self {
             Universe::SolarSystem => 9,
@@ -66,8 +67,8 @@ impl Universe {
         match self {
             Universe::SolarSystem => (1.75, 1.75),
             Universe::FigureEight => (1.15, 0.42),
-            Universe::ThreeBody => (5.2, 5.0),
-            Universe::MilkyWay => (118.0, 78.0),
+            Universe::ThreeBody => (5.2, 4.7),
+            Universe::MilkyWay => (118.0, 70.0),
         }
     }
 
@@ -176,9 +177,10 @@ fn milky_way() -> Sim {
         step: 1.0 / 180.0,
         max_steps: 48,
         // AstroBox samples every 24 steps. At the whole-galaxy view that
-        // leaves trails two or three pixels long, so Orbits samples six
-        // times as seldom: the same 48 points reach six times as far back.
-        trail_every: 144,
+        // leaves trails a pixel or two long (the galaxy's heart turns once
+        // in five minutes), so Orbits samples every six seconds of its time:
+        // 64 points reach back six and a half minutes, a sweep of arc.
+        trail_every: 1080,
         ..Config::default()
     });
     let g = sim.config.gravity;
@@ -238,6 +240,60 @@ mod tests {
         }
         let (cx, cy) = Universe::SolarSystem.load().centre_of_mass();
         assert!(cx.abs() < 1e-12 && cy.abs() < 1e-12, "the solar system is centred on its barycentre");
+    }
+
+    #[test]
+    fn the_figure_of_eight_keeps_its_energy() {
+        let mut sim = Universe::FigureEight.load();
+        let start = sim.energy();
+        let mut worst = 0.0f64;
+        for _ in 0..4000 {
+            sim.step();
+            worst = worst.max(((sim.energy() - start) / start).abs());
+        }
+        assert_eq!(sim.len(), 3);
+        // Verlet's energy wobbles a little through each close pass and comes back.
+        assert!(worst < 1e-4, "relative energy error reached {worst:e}");
+        let end = ((sim.energy() - start) / start).abs();
+        assert!(end < 2e-5, "relative energy drift {end:e} after 4000 steps");
+    }
+
+    #[test]
+    fn the_figure_of_eight_comes_back_after_one_period() {
+        const PERIOD: f64 = 6.3259;
+        let mut sim = Universe::FigureEight.load();
+        let start: Vec<(f64, f64)> = (0..3).map(|i| sim.pos(i)).collect();
+        let steps = (PERIOD / sim.config.step).round() as usize;
+        // Halfway round, everyone is far from where they began.
+        for _ in 0..steps / 2 {
+            sim.step();
+        }
+        let away = (0..3).map(|i| (sim.pos(i).0 - start[i].0).hypot(sim.pos(i).1 - start[i].1)).fold(0.0, f64::max);
+        assert!(away > 0.5, "halfway, {away} from the start");
+        for _ in steps / 2..steps {
+            sim.step();
+        }
+        for (i, (x0, y0)) in start.iter().enumerate() {
+            let (x, y) = sim.pos(i);
+            let off = (x - x0).hypot(y - y0);
+            assert!(off < 0.01, "{} is {off} from where it began", sim.body(i).name);
+        }
+    }
+
+    #[test]
+    fn the_solar_system_keeps_its_planets_in_their_orbits() {
+        let mut sim = Universe::SolarSystem.load();
+        // Twenty seconds of its time: Mercury round four times.
+        for _ in 0..(20.0 / sim.config.step) as usize {
+            sim.step();
+        }
+        assert_eq!(sim.len(), 9, "nothing collided");
+        let (sx, sy) = sim.pos(0);
+        for (i, orbit) in [(1, 0.39), (3, 1.0), (8, 30.05)] {
+            let (x, y) = sim.pos(i);
+            let r = (x - sx).hypot(y - sy);
+            assert!((r - orbit).abs() < orbit * 0.02, "{} at {r}", sim.body(i).name);
+        }
     }
 
     #[test]

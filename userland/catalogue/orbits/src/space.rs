@@ -30,6 +30,8 @@ const ZOOM_OUT: f32 = -10.0;
 const ZOOM_IN: f32 = 8.0;
 /// How long the island's words stay: the kit's.
 const MESSAGE_SECONDS: f32 = 2.4;
+/// How far a trail may turn before it is let go: 300°.
+const TRAIL_TURN: f32 = 300.0 * std::f32::consts::PI / 180.0;
 
 /// Names for bodies set loose: minor planets, in order of discovery or near it.
 const NAMES: [&str; 16] = ["Ceres", "Vesta", "Pallas", "Juno", "Hygiea", "Eris", "Sedna", "Haumea", "Makemake", "Quaoar", "Orcus", "Varuna", "Ixion", "Chaos", "Salacia", "Gonggong"];
@@ -105,10 +107,6 @@ impl Space {
             ink: Ink::new(),
             edges: Vec::with_capacity((W * 60.0) as usize),
         }
-    }
-
-    pub fn sim(&self) -> &Sim {
-        &self.sim
     }
 
     pub fn followed(&self) -> Option<usize> {
@@ -321,9 +319,10 @@ impl Space {
     fn fade_edges(&self, ui: &mut Ui, top: usize, bottom: usize) {
         let w = W as usize;
         let h = H as usize;
+        // Wholly gone behind the words themselves, so no star sits among letters.
         let ease = |f: f32| {
             let f = f.clamp(0.0, 1.0);
-            0.92 * f * f * (3.0 - 2.0 * f)
+            f * f * (3.0 - 2.0 * f)
         };
         let px = &mut ui.canvas.px;
         for y in 0..top {
@@ -352,36 +351,95 @@ impl Space {
         let followed = self.followed();
         let phase = self.sim.trail_phase();
         // Trails first, under every body.
+        let mut path = [(0.0f32, 0.0f32, 0.0f32); TRAIL + 2];
         for i in 0..self.sim.len() {
             let color = body_color(self.sim.body(i).hue, tone);
             let chosen = followed == Some(i);
             let head = if chosen { 0.75 } else if dark { 0.5 } else { 0.55 };
             let half = if chosen { 0.85 } else { 0.62 };
-            let alpha = |age: f32| head * (1.0 - age / TRAIL as f32).max(0.0).powf(1.3);
+            // The path back from the body, as (x, y, age in trail points).
+            // Points closer than a pixel and a half to the last one kept are
+            // passed over (the last of them is kept, so the trail still
+            // reaches its end).
             let (x, y) = self.sim.pos(i);
-            let mut last = (to_screen(x, y), 0.0f32);
+            let at = to_screen(x, y);
+            path[0] = (at.0, at.1, 0.0);
+            let mut n = 1;
             let mut skipped = None;
-            self.ink.begin();
             for (k, p) in self.sim.trail(i).enumerate() {
                 let at = to_screen(p[0] as f64, p[1] as f64);
                 let age = k as f32 + phase;
-                // Points closer than a pixel and a half are passed over: the
-                // line goes to the next one that is not.
-                if (at.0 - last.0 .0).hypot(at.1 - last.0 .1) < 1.5 {
-                    skipped = Some((at, age));
+                let last = path[n - 1];
+                if (at.0 - last.0).hypot(at.1 - last.1) < 1.5 {
+                    skipped = Some((at.0, at.1, age));
                     continue;
                 }
-                self.ink.segment(last.0, at, alpha(last.1), alpha(age), half);
-                last = (at, age);
+                path[n] = (at.0, at.1, age);
+                n += 1;
                 skipped = None;
             }
-            if let Some((at, age)) = skipped {
-                self.ink.segment(last.0, at, alpha(last.1), alpha(age), half);
+            if let Some(p) = skipped {
+                path[n] = p;
+                n += 1;
+            }
+            // A trail stops before it closes on itself: once the path has
+            // turned most of a full turn, the rest is let go (so Mercury
+            // wears an arc, not a ring, and the figure of eight's three
+            // stars each draw their own part of the eight).
+            let mut end = (n - 1, path[n - 1].2);
+            let mut turned = 0.0f32;
+            for j in 1..n.saturating_sub(1) {
+                let (a, b, c) = (path[j - 1], path[j], path[j + 1]);
+                let (ux, uy, vx, vy) = (b.0 - a.0, b.1 - a.1, c.0 - b.0, c.1 - b.1);
+                let turn = (ux * vy - uy * vx).atan2(ux * vx + uy * vy).abs();
+                if turned + turn > TRAIL_TURN {
+                    // Cut partway along the next segment, so the end moves smoothly.
+                    let f = ((TRAIL_TURN - turned) / turn.max(1e-6)).clamp(0.0, 1.0);
+                    path[j + 1] = (b.0 + (c.0 - b.0) * f, b.1 + (c.1 - b.1) * f, b.2 + (c.2 - b.2) * f);
+                    end = (j + 1, path[j + 1].2);
+                    break;
+                }
+                turned += turn;
+            }
+            // Fading to nothing at its end: the oldest point, or where it was cut.
+            let span = end.1.min(TRAIL as f32).max(1e-3);
+            let alpha = |age: f32| head * (1.0 - age / span).max(0.0).powf(1.3);
+            // Through the points on a Catmull-Rom curve, in pieces of a few
+            // pixels, so a trail far apart in its points (zoomed in, or fast)
+            // is still a curve.
+            self.ink.begin();
+            for j in 0..end.0 {
+                let (p0, p1, p2) = (path[j.saturating_sub(1)], path[j], path[j + 1]);
+                let p3 = if j + 1 < end.0 { path[j + 2] } else { p2 };
+                let pieces = ((p2.0 - p1.0).hypot(p2.1 - p1.1) / 4.0).ceil().clamp(1.0, 16.0) as usize;
+                let mut from = (p1.0, p1.1, p1.2);
+                for m in 1..=pieces {
+                    let t = m as f32 / pieces as f32;
+                    let curve = |a: f32, b: f32, c: f32, d: f32| {
+                        let (t2, t3) = (t * t, t * t * t);
+                        0.5 * (2.0 * b + (c - a) * t + (2.0 * a - 5.0 * b + 4.0 * c - d) * t2 + (3.0 * b - a - 3.0 * c + d) * t3)
+                    };
+                    let to = (curve(p0.0, p1.0, p2.0, p3.0), curve(p0.1, p1.1, p2.1, p3.1), p1.2 + (p2.2 - p1.2) * t);
+                    self.ink.segment((from.0, from.1), (to.0, to.1), alpha(from.2), alpha(to.2), half);
+                    from = to;
+                }
             }
             self.ink.flush(&mut ui.canvas.px, color);
         }
-        // Then the bodies, lightest last so small ones are never hidden.
+        // Then the bodies. Big ones (the Sun, a galaxy's core) are noted, so
+        // a small body over one steps back, as if behind it: zoomed out, the
+        // inner planets go into the Sun's light instead of speckling it.
         let fresh = self.fresh.as_ref().map(|(id, grow)| (*id, grow.value()));
+        let mut big = [(0.0f32, 0.0f32, 0.0f32); 4];
+        let mut bigs = 0;
+        for i in 0..self.sim.len() {
+            let r = dot_radius(self.sim.mass(i), s);
+            if r >= 3.0 && bigs < big.len() {
+                let (x, y) = to_screen(self.sim.pos(i).0, self.sim.pos(i).1);
+                big[bigs] = (x, y, r);
+                bigs += 1;
+            }
+        }
         for i in 0..self.sim.len() {
             let body = self.sim.body(i);
             let (x, y) = to_screen(self.sim.pos(i).0, self.sim.pos(i).1);
@@ -394,17 +452,25 @@ impl Space {
             if x < -reach || x > W + reach || y < -reach || y > H + reach || r <= 0.05 {
                 continue;
             }
+            let behind = big[..bigs]
+                .iter()
+                .filter(|(_, _, br)| *br > r + 0.5)
+                .map(|(bx, by, br)| ((br + r - (x - bx).hypot(y - by)) / (2.0 * r)).clamp(0.0, 1.0))
+                .fold(0.0f32, f32::max);
+            let shown = 1.0 - 0.85 * behind;
             let color = body_color(body.hue, tone);
             let canvas = &mut ui.canvas;
+            // Small bodies glow less, so a crowd of stars stays a crowd of points.
+            let glow = ((r - 1.0) / 3.0).clamp(0.3, 1.0) * shown;
             if dark {
-                canvas.glow(x, y, r * 3.2 + 2.0, color, if body.star { 0.42 } else { 0.24 });
+                canvas.glow(x, y, r * 3.2 + 2.0, color, glow * if body.star { 0.42 } else { 0.26 });
             } else {
-                canvas.glow(x, y, r * 2.6 + 2.0, color, 0.16);
+                canvas.glow(x, y, r * 2.6 + 2.0, color, glow * 0.18);
             }
-            canvas.circle(x, y, r, color, 1.0);
+            canvas.circle(x, y, r, color, shown);
             if dark && body.star && r >= 2.5 {
                 // A star is hotter at its heart.
-                canvas.circle(x, y, r * 0.55, color.mix(Color::WHITE, 0.7), 0.9);
+                canvas.circle(x, y, r * 0.55, color.mix(Color::WHITE, 0.7), 0.9 * shown);
             }
         }
         // The ring round the body followed: it closes in when the camera
@@ -474,16 +540,25 @@ impl Space {
     }
 
     fn draw_hint(&self, ui: &mut Ui) {
-        let pause = if self.paused { "space: play" } else { "space: pause" };
-        let lines = [
-            format!("{pause} · ←→: time · ↑↓: zoom · tab: follow · h: keys"),
-            "←→: time · ↑↓: zoom · tab: follow · h: keys".to_owned(),
-            format!("{pause} · tab: follow · h: keys"),
-            "tab: follow · h: keys".to_owned(),
-            "h: keys".to_owned(),
-        ];
-        let choices: Vec<&str> = lines.iter().map(String::as_str).collect();
-        ui.hint_any(&choices);
+        // Longest first; paused, the way to play again leads.
+        let choices: &[&str] = if self.paused {
+            &[
+                "space: play · ←→: time · ↑↓: zoom · tab: follow · h: keys",
+                "space: play · ←→: time · ↑↓: zoom · h: keys",
+                "space: play · tab: follow · h: keys",
+                "space: play · h: keys",
+                "space: play",
+            ]
+        } else {
+            &[
+                "space: pause · ←→: time · ↑↓: zoom · tab: follow · h: keys",
+                "←→: time · ↑↓: zoom · tab: follow · h: keys",
+                "space: pause · tab: follow · h: keys",
+                "tab: follow · h: keys",
+                "h: keys",
+            ]
+        };
+        ui.hint_any(choices);
     }
 }
 

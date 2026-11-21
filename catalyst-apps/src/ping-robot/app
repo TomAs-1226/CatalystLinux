@@ -1,6 +1,12 @@
+id = ping-robot
 name = Ping the robot
 icon = link
 about = is it there, and how fast
+description = Pings the robot and its radio at the team's addresses and says how long each answer takes, in the terminal.
 version = 1.0.0
 run = sh ./run.sh
 screen = terminal
+permissions = network
+credit = Catalyst Linux
+licence = MIT
+source = https://github.com/TomAs-1226/CatalystLinux/tree/main/catalyst-apps/src/ping-robot

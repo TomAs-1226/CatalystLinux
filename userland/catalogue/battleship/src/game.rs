@@ -276,11 +276,6 @@ impl Board {
         self.hits
     }
 
-    /// Ships of this fleet gone down.
-    pub fn sunk_count(&self) -> usize {
-        self.ships.iter().filter(|s| self.is_sunk(**s)).count()
-    }
-
     /// All that the other player may know of these waters.
     pub fn sight(&self) -> Sight {
         let mut marks = [Mark::Unknown; N * N];
@@ -330,14 +325,6 @@ mod tests {
         ships.len() == FLEET.len()
             && ships.iter().zip(FLEET).all(|(s, kind)| s.kind == kind && s.on_board())
             && ships.iter().enumerate().all(|(i, a)| ships[i + 1..].iter().all(|b| !a.overlaps(*b)))
-    }
-
-    #[test]
-    fn zz_print_gallery_fleet() {
-        let board = Board::random(&mut Rng::new(5805));
-        for s in board.ships() {
-            eprintln!("{:?}", s);
-        }
     }
 
     #[test]

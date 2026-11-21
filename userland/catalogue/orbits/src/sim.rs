@@ -10,7 +10,7 @@
 //! stepping never allocates and the inner loop reads straight down memory.
 
 /// How many points of its path each body remembers, for its trail.
-pub const TRAIL: usize = 48;
+pub const TRAIL: usize = 64;
 /// The most bodies a universe holds: the Milky Way's 64, and room for
 /// sixteen more set loose.
 pub const MAX_BODIES: usize = 80;
@@ -138,7 +138,6 @@ pub struct Sim {
     r: Vec<f64>,
     trails: Vec<Trail>,
     accumulator: f64,
-    time: f64,
     steps: u64,
     merges: u32,
     /// (absorbed, survivor) ids, the latest at `merges % MERGE_LOG`.
@@ -164,7 +163,6 @@ impl Sim {
             r: column(),
             trails: Vec::with_capacity(MAX_BODIES),
             accumulator: 0.0,
-            time: 0.0,
             steps: 0,
             merges: 0,
             merge_log: [(u32::MAX, u32::MAX); MERGE_LOG],
@@ -259,6 +257,7 @@ impl Sim {
         (sx / total, sy / total)
     }
 
+    #[cfg(test)]
     pub fn momentum(&self) -> (f64, f64) {
         let px: f64 = self.vx.iter().zip(&self.m).map(|(v, m)| v * m).sum();
         let py: f64 = self.vy.iter().zip(&self.m).map(|(v, m)| v * m).sum();
@@ -266,6 +265,7 @@ impl Sim {
     }
 
     /// Kinetic plus (softened) potential energy, as AstroBox counts it.
+    #[cfg(test)]
     pub fn energy(&self) -> f64 {
         let n = self.len();
         let e2 = self.config.softening * self.config.softening;
@@ -280,15 +280,7 @@ impl Sim {
         energy
     }
 
-    /// The universe's own clock.
-    pub fn time(&self) -> f64 {
-        self.time
-    }
-
-    pub fn steps(&self) -> u64 {
-        self.steps
-    }
-
+    #[cfg(test)]
     pub fn merges(&self) -> u32 {
         self.merges
     }
@@ -352,7 +344,6 @@ impl Sim {
             self.vx[i] += self.ax[i] * half;
             self.vy[i] += self.ay[i] * half;
         }
-        self.time += dt;
         self.steps += 1;
         let every = self.config.trail_every as u64;
         if every > 0 && self.steps % every == 0 {
@@ -520,8 +511,8 @@ mod tests {
     fn the_accumulator_drops_a_backlog_it_cannot_take() {
         let mut sim = Sim::new(Config::default());
         sim.add("a", (0.0, 0.0), (0.0, 0.0), 1.0, Hue::White, true);
-        // A quarter second is 60 steps at 1/240: within the 64 allowed.
-        assert_eq!(sim.advance(0.2501), 60);
+        // A tenth of a second is 24 steps at 1/240 (and a little left over).
+        assert_eq!(sim.advance(0.102), 24);
         // Ten seconds asked: held to a quarter, and at most the steps allowed.
         sim.config.max_steps = 32;
         assert_eq!(sim.advance(10.0), 32);

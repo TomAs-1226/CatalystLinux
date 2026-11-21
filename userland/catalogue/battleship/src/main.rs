@@ -30,6 +30,10 @@ struct Start {
     words: [String; 3],
     /// The line about the level in focus, fading in when it changes.
     about: Animated,
+    /// That line wrapped to the page, and the level and type size it was
+    /// wrapped for.
+    about_lines: Vec<String>,
+    wrapped_for: Option<(usize, u32)>,
 }
 
 impl Start {
@@ -38,7 +42,7 @@ impl Start {
         let mut list = List::default();
         list.focus = record.last_level().index();
         let words = Level::ALL.map(|l| record.words(l));
-        Start { list, record, words, about: Animated::new(1.0, role::effect()).with_rest(0.01) }
+        Start { list, record, words, about: Animated::new(1.0, role::effect()).with_rest(0.01), about_lines: Vec::new(), wrapped_for: None }
     }
 
     fn level(&self) -> Level {
@@ -47,8 +51,11 @@ impl Start {
 }
 
 impl Page for Start {
+    /// Not the app's name: the island already carries that, and beside it
+    /// "Battleship" is cut short at the large text size. (The end of a game
+    /// offers "esc: levels", back to here.)
     fn title(&self) -> &str {
-        "Battleship"
+        "Levels"
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Flow {
@@ -96,10 +103,14 @@ impl Page for Start {
         let style = ty.caption;
         let y = top + count as f32 * (h + gap) + 3.0;
         let pitch = (style.size * 1.32).round();
-        let lines = ui.wrap(self.level().about(), style, W - 2.0 * PAD - 4.0);
-        if y + pitch * lines.len() as f32 <= bottom + 2.0 {
+        let wrap_key = (self.list.focus, style.size.to_bits());
+        if self.wrapped_for != Some(wrap_key) {
+            self.about_lines = ui.wrap(self.level().about(), style, W - 2.0 * PAD - 4.0);
+            self.wrapped_for = Some(wrap_key);
+        }
+        if y + pitch * self.about_lines.len() as f32 <= bottom + 2.0 {
             let alpha = self.about.value().clamp(0.0, 1.0);
-            for (i, line) in lines.iter().enumerate() {
+            for (i, line) in self.about_lines.iter().enumerate() {
                 ui.text_alpha(PAD + 2.0, y + pitch * (i as f32 + 0.5), line, style, t.dim, alpha);
             }
         }
@@ -123,13 +134,17 @@ fn gallery_record() {
 }
 
 fn main() {
+    // The island names the app, as it does when the shell starts it.
+    if std::env::var_os("CATALYST_APP_NAME").is_none() {
+        std::env::set_var("CATALYST_APP_NAME", "Battleship");
+    }
     if std::env::args().any(|a| a == "--shots") {
         gallery_record();
     }
     // The gallery's deal (CATALYST_SEED 5805) hides the handheld's fleet so:
     // carrier down from (6, 5), battleship across from (2, 0), cruiser down
     // from (3, 4), submarine across from (3, 9), destroyer down from (9, 8).
-    // The aim starts at (4, 4).
+    // The aim starts at (4, 4). The handheld's 17th shot finds your carrier.
     use Key::*;
     catalyst_kit::launch(
         Start::new,
@@ -138,21 +153,110 @@ fn main() {
             // The carrier put down; the battleship in hand, turned.
             ("2-placing", &[Enter, Down, Down, Right, Enter, Down, Down, Right, Right, Right, Char('r')]),
             ("3-placed", &[Char('a')]),
-            // A miss, the cruiser found and sunk, two hits on the carrier, misses.
+            // Fourteen shots: the cruiser found and sunk, two hits on the
+            // carrier, misses about the board.
             (
                 "4-battle",
-                &[Enter, Enter, Left, Enter, Down, Enter, Down, Enter, Right, Right, Right, Enter, Up, Enter, Up, Enter, Up, Up, Enter, Left, Left, Left, Left, Enter],
+                &[
+                    Enter, Enter, Left, Enter, Down, Enter, Down, Enter, Right, Right, Right, Enter, Up, Enter, Up, Enter, Up, Up, Enter, Left, Left, Left, Left, Enter, Down, Down,
+                    Down, Down, Down, Enter, Right, Right, Right, Right, Right, Right, Enter, Up, Up, Up, Enter, Up, Up, Enter, Up, Up, Enter,
+                ],
             ),
-            // A hit on the battleship, and the handheld's answer.
-            ("5-reply", &[Up, Up, Enter]),
+            // Three hits on the battleship; the handheld's answer hits your carrier.
+            ("5-reply", &[Left, Left, Left, Left, Left, Left, Enter, Right, Enter, Right, Enter]),
             // Every ship found.
             (
                 "6-end",
                 &[
-                    Right, Enter, Right, Enter, Right, Enter, Right, Down, Down, Down, Down, Down, Down, Down, Enter, Down, Enter, Down, Enter, Left, Enter, Left, Enter, Left, Enter, Right, Right,
+                    Right, Enter, Right, Down, Down, Down, Down, Down, Down, Down, Enter, Down, Enter, Down, Enter, Left, Enter, Left, Enter, Left, Enter, Right, Right,
                     Right, Right, Right, Right, Enter, Up, Enter,
                 ],
             ),
         ],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use catalyst_kit::{Look, Runner};
+
+    fn frames(app: &mut Runner, n: usize) {
+        for _ in 0..n {
+            if app.tick(1.0 / 60.0) {
+                app.draw();
+            }
+        }
+    }
+
+    #[test]
+    fn a_whole_game_plays_to_the_end_by_keys() {
+        let dir = std::env::temp_dir().join(format!("battleship-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("CATALYST_APP_DATA", &dir);
+        let mut app = Runner::new(Box::new(Start::new()), Look::default());
+        frames(&mut app, 60);
+        assert_eq!(app.top_title(), "Levels");
+        // Normal is in focus at first; Enter starts placing.
+        app.key(Key::Enter);
+        frames(&mut app, 60);
+        assert_eq!(app.top_title(), "Battleship");
+        // The carrier turned and put down, taken back with Backspace, put
+        // down again; then the rest at random.
+        app.key(Key::Char('r'));
+        app.key(Key::Enter);
+        app.key(Key::Backspace);
+        frames(&mut app, 30);
+        assert_eq!(app.top_title(), "Battleship", "Backspace takes the carrier back; it does not leave");
+        app.key(Key::Enter);
+        app.key(Key::Char('a'));
+        frames(&mut app, 60);
+        app.key(Key::Enter);
+        frames(&mut app, 60);
+        // Esc once in battle only asks; another key carries on.
+        app.key(Key::Back);
+        frames(&mut app, 10);
+        assert_eq!(app.top_title(), "Battleship");
+        // Sweep every square from the top left, row by row, waiting out the
+        // handheld's reply after each shot, until one fleet is gone.
+        for _ in 0..9 {
+            app.key(Key::Up);
+            app.key(Key::Left);
+        }
+        frames(&mut app, 30);
+        let games = || {
+            let (won, lost) = Record::open().of(Level::Normal);
+            won + lost
+        };
+        let mut shots = 0;
+        'sweep: for y in 0..10 {
+            for x in 0..10 {
+                app.key(Key::Enter);
+                shots += 1;
+                frames(&mut app, 45);
+                if games() == 1 {
+                    break 'sweep;
+                }
+                if x < 9 {
+                    app.key(if y % 2 == 0 { Key::Right } else { Key::Left });
+                } else {
+                    app.key(Key::Down);
+                }
+            }
+        }
+        assert_eq!(games(), 1, "the game ended after {shots} shots, and was kept");
+        assert!(shots >= 17, "no fleet goes down in fewer than 17 shots");
+        // The result comes in; Enter plays again, Esc goes back to the levels.
+        frames(&mut app, 120);
+        assert!(app.ui.missing_icons().is_empty(), "{:?}", app.ui.missing_icons());
+        app.key(Key::Enter);
+        frames(&mut app, 60);
+        assert_eq!(app.top_title(), "Battleship");
+        app.key(Key::Back);
+        frames(&mut app, 60);
+        assert_eq!(app.top_title(), "Levels");
+        app.key(Key::Back);
+        assert!(app.done(), "Esc on the levels leaves");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

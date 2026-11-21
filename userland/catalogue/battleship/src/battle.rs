@@ -345,7 +345,7 @@ impl Battle {
         let (w, l) = record.of(self.level);
         let shots = self.theirs.shots();
         let accuracy = if shots == 0 { 0 } else { (self.theirs.hits() * 100 + shots / 2) / shots };
-        self.result = [format!("{} · won {w} · lost {l}", self.level.key()), format!("won {w} · lost {l}"), shots.to_string(), format!("{accuracy}%")];
+        self.result = [format!("{}: won {w}, lost {l}", self.level.key()), format!("won {w} · lost {l}"), shots.to_string(), format!("{accuracy}%")];
     }
 
     fn show_result(&mut self) {
@@ -376,6 +376,9 @@ impl Battle {
         let r = g.span(x, y, w, h).offset(ui.ox, 0.0);
         let color = if self.mine.clash(self.hand).is_none() { ui.ring_color() } else { ui.fault() };
         let radius = capsule(r);
+        // A solid ghost: the water's squares do not show through it.
+        let under = ui.tokens.surface1;
+        ui.canvas.rrect(r, radius, under, alpha);
         ui.canvas.rrect(r, radius, color, 0.3 * alpha);
         ui.canvas.stroke_rrect(r.inset(-1.0), radius + 1.0, 1.5, color, alpha);
     }
@@ -384,12 +387,13 @@ impl Battle {
         if alpha <= 0.0 {
             return;
         }
-        let r = g.span(self.aim_x.value(), self.aim_y.value(), 1.0, 1.0).inset(-2.0);
+        // Clear of the square by a gap, so it reads around a hit as well.
+        let r = g.span(self.aim_x.value(), self.aim_y.value(), 1.0, 1.0).inset(-3.0);
         let r = if self.calm { r } else { stretched(r, self.aim_x.velocity() * g.pitch, self.aim_y.velocity() * g.pitch) };
         // Dimmed while the handheld takes its turn.
         let a = alpha * (1.0 - 0.6 * self.turn.value().clamp(0.0, 1.0));
         let color = ui.ring_color();
-        ui.canvas.stroke_rrect(r.offset(ui.ox, 0.0), g.radius + 2.0, 1.5, color, a);
+        ui.canvas.stroke_rrect(r.offset(ui.ox, 0.0), g.radius + 3.0, 1.5, color, a);
     }
 
     /// While placing: the fleet, one ship a row, the one in hand lifted.
@@ -428,7 +432,8 @@ impl Battle {
                 ui.canvas.rrect(pip, capsule(pip), ring, 0.3 * alpha);
                 ui.canvas.stroke_rrect(pip.inset(-0.5), capsule(pip) + 0.5, 1.0, ring, alpha);
             } else {
-                ui.canvas.rrect(pip, capsule(pip), t.surface3, alpha);
+                // Still to come: outlined, as their ships still afloat are.
+                ui.canvas.stroke_rrect(pip, capsule(pip), 1.0, t.dim, alpha);
             }
         }
     }
@@ -462,7 +467,12 @@ impl Battle {
         // Whose turn, and the last shots.
         let top = small.tile().bottom() + 6.0;
         let head_cy = top + ty.name.size * 0.5 + 2.0;
-        let head = if self.their_turn.is_some() { "its turn" } else { "your turn" };
+        let head = match self.over() {
+            Some(true) => "you won",
+            Some(false) => "you lost",
+            None if self.their_turn.is_some() => "its turn",
+            None => "your turn",
+        };
         words_at(ui, panel.x + 2.0, head_cy, Align::Left, head, ty.name, t.ink, alpha);
         let style = ty.body;
         let pitch = (style.size * 1.45).round();
@@ -523,9 +533,9 @@ impl Battle {
     fn draw_hint(&self, ui: &mut Ui) {
         let placed = self.mine.ships().len();
         let choices: &[&str] = match self.phase {
-            Phase::Placing if self.mine.complete() => &["enter: start the battle · bksp: undo · esc: back", "enter: start · bksp: undo", "enter: start"],
-            Phase::Placing if placed == 0 => &["enter: place · r: rotate · a: at random · esc: back", "enter: place · r: rotate · a: random", "enter · r: rotate · a: random"],
-            Phase::Placing => &["enter: place · r: rotate · a: random · bksp: undo", "enter: place · r: rotate · bksp: undo", "enter · r: rotate · bksp: undo"],
+            Phase::Placing if self.mine.complete() => &["enter: start the battle · bksp: undo · esc: back", "enter: start the battle · bksp: undo", "enter: start · bksp: undo", "enter: start"],
+            Phase::Placing if placed == 0 => &["enter: place · r: rotate · a: at random · esc: back", "enter: place · r: rotate · a: at random", "enter: place · r: rotate · a: random", "enter · r: rotate · a: random"],
+            Phase::Placing => &["enter: place · r: rotate · a: random · bksp: undo", "enter · r: rotate · a: random · bksp: undo", "enter · r: turn · a: random · bksp: undo", "enter · r: rotate · a: random"],
             Phase::Playing if self.leave > 0.0 => &["esc again: leave this game · enter: stay", "esc again: leave · enter: stay", "esc again: leave"],
             Phase::Playing => &["enter: fire · arrows: aim · esc: leave", "enter: fire · esc: leave", "enter: fire"],
             Phase::Over { .. } if self.finale > 0.0 => &["enter: the result · esc: levels", "enter · esc: levels"],
@@ -657,18 +667,23 @@ impl Page for Battle {
             sea::draw(ui, &big, &waters);
             self.draw_aim(ui, &big, theirs_alpha * (1.0 - e));
         }
-        // Your waters: the large grid while placing, the small one in battle.
+        // The panel: the fleet's list gives way to the battle's state, which
+        // comes in as your waters land beside it.
+        self.draw_fleet(ui, panel, shown * (1.0 - 2.0 * m).clamp(0.0, 1.0));
+        // As a game ends, the battle's panel goes first and the result rises
+        // in after it, never the two over each other.
+        let (going, coming) = ((1.0 - 2.0 * e).clamp(0.0, 1.0), ((e - 0.45) / 0.55).clamp(0.0, 1.0));
+        self.draw_status(ui, panel, &small, shown * ((m - 0.6) / 0.4).clamp(0.0, 1.0) * going);
+        // Your waters: the large grid while placing, the small one in battle,
+        // flying over the panel between the two.
         let yours = big.lerp(&small, m);
-        let waters = Waters { board: &self.mine, own: true, alpha: shown * (1.0 - e), reveal: 0.0, splash: self.splash_mine.as_ref(), placed: Some(&self.placed_age), last: self.incoming };
+        let waters = Waters { board: &self.mine, own: true, alpha: shown * going, reveal: 0.0, splash: self.splash_mine.as_ref(), placed: Some(&self.placed_age), last: self.incoming };
         sea::draw(ui, &yours, &waters);
         if self.phase == Phase::Placing && !self.mine.complete() {
             self.draw_hand(ui, &yours, shown);
         }
-        // The panel: the fleet's list gives way to the battle's state.
-        self.draw_fleet(ui, panel, shown * (1.0 - 2.0 * m).clamp(0.0, 1.0));
-        self.draw_status(ui, panel, &small, shown * (2.0 * m - 1.0).clamp(0.0, 1.0) * (1.0 - e));
         if let Some(won) = self.over() {
-            self.draw_result(ui, panel, won, e);
+            self.draw_result(ui, panel, won, coming);
         }
         self.draw_hint(ui);
     }

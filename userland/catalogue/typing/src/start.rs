@@ -154,6 +154,11 @@ impl Page for Start {
         let focused = self.focus == LIST_ROW;
         let press = if focused { ui.press() } else { 0.0 };
         let place = Rect::new(PAD, bottom - h, W - 2.0 * PAD, h);
+        // Named, where the text size leaves room between the rounds and them.
+        let rounds_end = top + 3.0 * (h + gap) - gap;
+        if place.y - rounds_end >= ty.caption.size + 10.0 {
+            ui.text_at(PAD + 10.0, ((rounds_end + place.y) * 0.5).round(), Align::Left, "word list", ty.caption, t.dim);
+        }
         let track = place.inset(1.5 * press);
         let radius = track.h * 0.5;
         ui.surface(track, radius, if focused { t.surface2 } else { t.surface1 });

@@ -206,9 +206,6 @@ impl Model {
     pub fn round(&self) -> Round {
         self.round
     }
-    pub fn pack(&self) -> Pack {
-        self.pack
-    }
     pub fn phase(&self) -> Phase {
         self.phase
     }
@@ -231,6 +228,7 @@ impl Model {
     pub fn words_done(&self) -> u32 {
         self.words
     }
+    #[cfg(test)]
     pub fn attempts(&self) -> u32 {
         self.attempts
     }

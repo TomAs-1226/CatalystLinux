@@ -122,7 +122,7 @@ pub fn proposals(sight: &Sight) -> [bool; N * N] {
     let mut any_hit = false;
     let unknown = |x: isize, y: isize| (0..N as isize).contains(&x) && (0..N as isize).contains(&y) && sight.mark(x as usize, y as usize) == Mark::Unknown;
     let hit = |x: isize, y: isize| (0..N as isize).contains(&x) && (0..N as isize).contains(&y) && sight.mark(x as usize, y as usize) == Mark::Hit;
-    let mut propose = |x: isize, y: isize, proposed: &mut [bool; N * N]| {
+    let propose = |x: isize, y: isize, proposed: &mut [bool; N * N]| {
         if unknown(x, y) {
             proposed[y as usize * N + x as usize] = true;
         }
