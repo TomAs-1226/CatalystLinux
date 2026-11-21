@@ -8,8 +8,9 @@
 //!
 //! It answers with the service the Assistant app uses (Settings › Keys:
 //! OpenAI's GPT-6.2 Sol or Claude Opus 5.5, at the effort chosen there), or
-//! with the on-device model when asked to or when no key is set. Keys reach
-//! curl through a file only this user can read, never on its command line.
+//! with the on-device model when asked to or when no key is set (not for
+//! `ai cmd`: see NO_LOCAL_COMMANDS). Keys reach curl through a file only this
+//! user can read, never on its command line.
 //! Nothing is ever run without a "y" typed at the question (and "yes" for a
 //! command that could delete or change things).
 
@@ -36,13 +37,16 @@ const EXPLAIN_RULES: &str = "Explain what the output below means and, if somethi
 
 const HELP: &str = "ai: the assistant, in the terminal
 
-  ai <question>             an answer in plain words
-  ai cmd <what you want>    one command proposed; runs only on a yes
+  ai <question>
+      an answer in plain words
+  ai cmd <what you want>
+      one command, run on your yes (needs a key)
   <command> 2>&1 | ai explain [question]
-                            what some output or an error means
+      what some output or an error means
 
-  --local    the on-device model (Settings > On-device model)
-  --cloud    the service with a key, even if the model is here
+  --local   the on-device model
+            (Settings > On-device model)
+  --cloud   use a key even with the model here
 
 examples
   ai what does a brownout do to the robot
@@ -291,10 +295,20 @@ fn ask(service: Service, key: Option<&str>, system: &str, user: &str, effort: &s
     }
 }
 
+fn ask_local(system: &str, user: &str, tokens: u32) -> Result<String, String> {
+    ask_local_body(&lm::chat_body(system, &[("user", user)], tokens))
+}
+
+/// Why `ai cmd` does not use the on-device model. Tried end to end with the
+/// 135M held to a JSON shape: the shape came back every time, the commands
+/// were made up ("print_current_date", "busybox --free"). Proposing commands
+/// that cannot work is worse than saying so.
+const NO_LOCAL_COMMANDS: &str = "the on-device model is too small to write commands you can trust: ai cmd needs an OpenAI or Claude key (Settings > Keys)";
+
 /// The on-device model: the one already running (the shell's), else one
 /// started for this question and stopped after it.
-fn ask_local(system: &str, user: &str, tokens: u32) -> Result<String, String> {
-    let body = lm::chat_body(system, &[("user", user)], tokens);
+fn ask_local_body(body: &Value) -> Result<String, String> {
+    let body = body.clone();
     if lm::healthy() {
         return lm::ask(&body, Duration::from_secs(300)).map(|(a, _)| a);
     }
@@ -505,11 +519,13 @@ fn run() -> Result<i32, String> {
             if want.trim().is_empty() {
                 return Err("say what the command should do: ai cmd find the biggest files in /data".into());
             }
-            let reply = {
+            if service == Service::Local {
+                return Err(NO_LOCAL_COMMANDS.into());
+            }
+            let (command, why) = {
                 let _w = Waiting::new(&format!("thinking · {who}…"));
-                ask(service, key.as_deref(), &format!("{ABOUT}\n\n{CMD_RULES}"), &want, effort, 80)?
+                proposal(&ask(service, key.as_deref(), &format!("{ABOUT}\n\n{CMD_RULES}"), &want, effort, 80)?)?
             };
-            let (command, why) = proposal(&reply)?;
             println!("  $ {command}");
             if !why.is_empty() {
                 println!("{}", wrap(&format!("  {why}"), width));
@@ -534,7 +550,7 @@ fn main() {
     match run() {
         Ok(code) => std::process::exit(code),
         Err(why) => {
-            eprintln!("ai: {why}");
+            eprintln!("{}", wrap(&format!("ai: {why}"), columns()));
             std::process::exit(1);
         }
     }
@@ -600,6 +616,14 @@ mod tests {
         assert_eq!(proposal("Here:\n```sh\nuptime\n```").unwrap().0, "uptime");
         assert_eq!(proposal("COMMAND: none\nWHY: that needs two steps").unwrap_err(), "that needs two steps");
         assert!(proposal("I would rather not.").is_err());
+        assert!(NO_LOCAL_COMMANDS.contains("Settings > Keys"));
+    }
+
+    #[test]
+    fn help_fits_the_handheld_terminal() {
+        for line in HELP.lines() {
+            assert!(line.chars().count() < 53, "wraps at 53 columns: {line:?}");
+        }
     }
 
     #[test]

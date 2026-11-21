@@ -214,13 +214,32 @@ pub fn chat_body(system: &str, turns: &[(&str, &str)], max_tokens: u32) -> Value
     json!({"messages": messages, "max_tokens": max_tokens, "temperature": 0.3, "stream": false})
 }
 
-/// The answer from a chat reply, or why there is none.
+/// The answer from a chat reply, or why there is none. An answer the token
+/// limit cut off ends at its last whole sentence rather than mid-word.
 pub fn chat_answer(v: &Value) -> Result<String, String> {
     if let Some(message) = v["error"]["message"].as_str() {
         return Err(message.to_owned());
     }
-    let text = v["choices"][0]["message"]["content"].as_str().ok_or("the model gave no answer")?;
-    Ok(text.trim().to_owned())
+    let text = v["choices"][0]["message"]["content"].as_str().ok_or("the model gave no answer")?.trim();
+    if v["choices"][0]["finish_reason"] == "length" {
+        return Ok(whole_sentences(text).to_owned());
+    }
+    Ok(text.to_owned())
+}
+
+/// Text up to the end of its last whole sentence (all of it, if that would
+/// leave less than a third); a list cut off just after its next number
+/// ("3.") loses the number.
+fn whole_sentences(text: &str) -> &str {
+    let end = text.char_indices().filter(|(_, c)| matches!(c, '.' | '!' | '?')).map(|(i, c)| i + c.len_utf8()).last();
+    let kept = match end {
+        Some(at) if at * 3 >= text.len() => text[..at].trim_end(),
+        _ => text,
+    };
+    match kept.rsplit_once('\n') {
+        Some((before, last)) if last.trim().trim_end_matches('.').chars().all(|c| c.is_ascii_digit()) && !last.trim().is_empty() => before.trim_end(),
+        _ => kept,
+    }
 }
 
 /// The tokens a reply made per second of generating, when llama-server says.
@@ -444,6 +463,13 @@ mod tests {
         assert_eq!(chat_answer(&reply).unwrap(), "Hello!");
         assert_eq!(speed(&reply), Some(9.5));
         assert!(chat_answer(&json!({"error": {"message": "context full"}})).is_err());
+        // Cut off by the token limit: back to the last whole sentence.
+        let cut = json!({"choices": [{"message": {"content": "It sags. Then the controller cuts the motors. And then the"}, "finish_reason": "length"}]});
+        assert_eq!(chat_answer(&cut).unwrap(), "It sags. Then the controller cuts the motors.");
+        let short_cut = json!({"choices": [{"message": {"content": "Yes. but the rest of this went on and on without stopping anywhere"}, "finish_reason": "length"}]});
+        assert!(chat_answer(&short_cut).unwrap().ends_with("anywhere"), "too little would be left: all of it");
+        let list = json!({"choices": [{"message": {"content": "Try these:\n1. Check the cable.\n2. Check the port.\n3."}, "finish_reason": "length"}]});
+        assert_eq!(chat_answer(&list).unwrap(), "Try these:\n1. Check the cable.\n2. Check the port.");
     }
 
     #[test]

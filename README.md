@@ -1311,8 +1311,8 @@ services from this repository's tests or from a CardputerZero.
 ## On-device model
 
 A small language model that runs on the handheld itself, with no network
-and no key: the assistant's "On this handheld", and `ai --local` in the
-Terminal. Settings › On-device model chooses one, downloads it, tries it
+and no key: for the Assistant app when it is chosen there, and for `ai` in
+the Terminal. Settings › On-device model chooses one, downloads it, tries it
 with one question, and removes it.
 
 | Model | File | In use while answering | Like |
@@ -1368,7 +1368,9 @@ dmesg | tail -n 30 | ai explain
   does, and runs it only after a `y`; one that could delete or change things
   (rm, dd, mkfs, a redirect into a file, kill, reboot, git push, `sed -i`,
   `find -delete`…) needs `yes` typed out. The answer is read from the
-  terminal itself, so piping into `ai` cannot answer for you.
+  terminal itself, so piping into `ai` cannot answer for you. It needs a key:
+  held to a strict answer shape, the on-device model still made commands up
+  (`print_current_date`), so it is not asked for them.
 - `… | ai explain [question]` explains output or an error (its last 12,000
   characters).
 
