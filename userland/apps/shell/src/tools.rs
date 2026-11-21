@@ -48,9 +48,21 @@ impl Field {
 
     /// The field at the top of the page, ringed, with the keys along the bottom.
     pub fn draw(&self, g: &mut Gfx, hint: &str) {
+        self.draw_at(g, true);
+        g.hint(hint);
+    }
+
+    /// How tall the field is at the text size in use.
+    pub fn height(g: &Gfx) -> f32 {
+        g.ty.caption.size + g.ty.label.size + 20.0
+    }
+
+    /// The field at the top of the page; with the focus elsewhere (a list
+    /// under it), without its ring and cursor.
+    pub fn draw_at(&self, g: &mut Gfx, focused: bool) {
         let t = g.tokens;
         let ty = g.ty;
-        let field = Rect::new(PAD, g.top(), W - 2.0 * PAD, ty.caption.size + ty.label.size + 20.0);
+        let field = Rect::new(PAD, g.top(), W - 2.0 * PAD, Self::height(g));
         g.surface(field, 14.0, t.surface2);
         g.text_at(field.x + 10.0, field.y + 7.0 + ty.caption.size * 0.5, Align::Left, self.label, ty.caption, t.dim);
         let cy = field.bottom() - 8.0 - ty.label.size * 0.5;
@@ -63,9 +75,10 @@ impl Field {
             shown = chars.as_str();
         }
         let w = g.text_at(field.x + 10.0, cy, Align::Left, shown, ty.label, t.ink);
-        g.surface(Rect::new(field.x + 11.0 + w, cy - ty.label.size * 0.5, 1.5, ty.label.size), 0.5, t.signal);
-        g.focus_ring(field, 14.0);
-        g.hint(hint);
+        if focused {
+            g.surface(Rect::new(field.x + 11.0 + w, cy - ty.label.size * 0.5, 1.5, ty.label.size), 0.5, t.signal);
+            g.focus_ring(field, 14.0);
+        }
     }
 }
 

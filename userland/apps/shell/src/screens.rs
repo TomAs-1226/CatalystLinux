@@ -52,7 +52,7 @@ struct App {
     open: fn(&Robot) -> Box<dyn Screen>,
 }
 
-const APPS: [App; 23] = [
+const APPS: [App; 24] = [
     App { icon: "smart_toy", name: "Robot", open: |_| Box::new(RobotScreen::default()) },
     App { icon: "monitor_heart", name: "Health", open: |_| Box::new(Health::default()) },
     App { icon: "description", name: "Logs", open: |_| Box::new(LogsScreen::default()) },
@@ -75,6 +75,7 @@ const APPS: [App; 23] = [
     App { icon: "settings_remote", name: "Remote", open: |_| Box::new(crate::irremote::Remotes::new()) },
     App { icon: "straighten", name: "Level", open: |_| Box::new(crate::level::Level::new()) },
     App { icon: "explore", name: "Compass", open: |_| Box::new(crate::level::Compass::new()) },
+    App { icon: "sunny", name: "Weather", open: |_| Box::new(crate::weather::Weather::new()) },
     App { icon: "settings", name: "Settings", open: |_| Box::new(SettingsApp::new()) },
 ];
 
@@ -437,6 +438,7 @@ impl Home {
             "Actions" => ("one key".into(), None),
             "Level" => ("pitch · roll".into(), None),
             "Compass" => ("heading".into(), None),
+            "Weather" => crate::weather::tile(),
             "Logs" => {
                 let rows = robot.logs.list();
                 let worst = rows.iter().filter_map(|r| r.digest.as_ref()).map(|d| d.headline().0).min();
@@ -3169,7 +3171,7 @@ mod tests {
         pretend(Some(Found::Nothing));
         let shown = builtin(&Home::new());
         assert!(!shown.iter().any(|n| n == "Level" || n == "Compass"), "{shown:?}");
-        assert_eq!(shown.len(), 21, "the twenty-one the emulator's run counts on (Remote is on every unit)");
+        assert_eq!(shown.len(), 22, "the twenty-two the emulator's run counts on (Remote and Weather are on every unit)");
         assert_eq!(shown.last().map(String::as_str), Some("Settings"), "Settings stays last");
         assert_eq!(builtin_apps().position(|(_, _, n)| n == "Terminal"), Some(8), "Terminal where it was");
         assert!(!builtin_apps().any(|(_, _, n)| n == "Level"), "nor in search");

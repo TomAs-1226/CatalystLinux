@@ -284,7 +284,10 @@ pub fn zone_offset(id: &str) -> Option<String> {
 /// Use `id` from now on: kept for the next start, and on the handheld the
 /// system's local time at once (this program's clocks, and what it starts).
 pub fn set_zone(id: &str) -> Result<(), String> {
-    write_zone(&crate::config_dir(), id)
+    write_zone(&crate::config_dir(), id)?;
+    // Weather's tile follows the zone (its units, its city).
+    crate::weather::tile_changed();
+    Ok(())
 }
 
 fn write_zone(dir: &Path, id: &str) -> Result<(), String> {
