@@ -510,8 +510,10 @@ impl Spotlight {
     pub fn glass(&self, g: &Gfx, island: Rect) -> GlassShape {
         let t = self.grow.value();
         let rest = rest_rect(g, self.rows.value().max(0.0));
-        // Past its rest (the spring runs a little over), it grows a little more.
-        let rect = Rect::new(lerp(island.x, rest.x, t), lerp(island.y, rest.y, t), lerp(island.w, rest.w, t), lerp(island.h, rest.h, t).max(1.0));
+        // Past its rest (the spring runs a little over), it grows a little
+        // more, never past the panel's edges.
+        let (x, y) = (lerp(island.x, rest.x, t).max(1.0), lerp(island.y, rest.y, t).max(1.0));
+        let rect = Rect::new(x, y, lerp(island.w, rest.w, t).min(W - 1.0 - x), lerp(island.h, rest.h, t).clamp(1.0, H - 2.0 - y));
         let radius = lerp(island.h * 0.5, g.radius(RADIUS), t.clamp(0.0, 1.0)).min(rect.h * 0.5).min(rect.w * 0.5);
         GlassShape { rect, radius, group: 0, strength: self.glass.value().clamp(0.0, 1.0), tint: None, clear: false }
     }
