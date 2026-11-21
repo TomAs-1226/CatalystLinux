@@ -2717,54 +2717,54 @@ fn sound_shots(shell: &mut Shell, press: &dyn Fn(&mut Shell, &[Key], usize), sav
     press(shell, &[Ctrl(' ')], 90);
     press(shell, &[Right, Down, Down], 30);
     press(shell, &[Right], 60);
-    save(shell, "121-control-centre-volume");
+    save(shell, "140-control-centre-volume");
     // The volume keys over Home: the island says it.
     press(shell, &[Back], 90);
     press(shell, &[Media(platform::Media::VolumeDown)], 20);
-    save(shell, "121b-volume-key");
+    save(shell, "140b-volume-key");
     settle(shell, 200);
     // Settings › Sound.
     press(shell, &vec![Right; steps_to("Settings")], 12);
     press(shell, &[Enter], 90);
     press(shell, &vec![Down; screens::settings_row("Sound")], 20);
-    save(shell, "122-settings-sound-row");
+    save(shell, "141-settings-sound-row");
     press(shell, &[Enter], 90);
     real_time(shell, 0.4);
     settle(shell, 40);
-    save(shell, "122b-sound");
+    save(shell, "141b-sound");
     // Down to the microphone: its level, live.
     press(shell, &[Down, Down, Down, Down], 20);
     real_time(shell, 0.6);
-    save(shell, "122c-sound-microphone");
+    save(shell, "141c-sound-microphone");
     // Bluetooth: off, then on (it asks for a restart), then the simulator's
     // "restart", the room found, and headphones paired and playing.
     press(shell, &[End], 20);
     press(shell, &[Enter], 90);
     real_time(shell, 0.4);
     settle(shell, 40);
-    save(shell, "123-bluetooth-off");
+    save(shell, "142-bluetooth-off");
     press(shell, &[Enter], 20);
     real_time(shell, 0.9);
     settle(shell, 40);
-    save(shell, "123b-bluetooth-restart");
+    save(shell, "142b-bluetooth-restart");
     press(shell, &[Down, Enter, Enter], 20);
     real_time(shell, 0.8);
     real_time(shell, 2.6);
     settle(shell, 60);
-    save(shell, "123c-bluetooth-found");
+    save(shell, "142c-bluetooth-found");
     press(shell, &[Down, Down, Down], 20);
     press(shell, &[Enter], 20);
     real_time(shell, 0.3);
-    save(shell, "123d-bluetooth-pairing");
+    save(shell, "142d-bluetooth-pairing");
     real_time(shell, 2.2);
     settle(shell, 60);
-    save(shell, "123e-bluetooth-playing");
+    save(shell, "142e-bluetooth-playing");
     // Back on Sound: playing on the speaker just paired.
     press(shell, &[Back], 90);
     real_time(shell, 0.4);
     settle(shell, 40);
     press(shell, &[Home], 20);
-    save(shell, "122d-sound-bluetooth");
+    save(shell, "141d-sound-bluetooth");
     // Light, large text: the same page must still fit.
     let mut light = Shell::new(Robot::demo());
     (light.settings.theme, light.settings.light, light.settings.text) = (look::Theme::Bezel, true, gfx::TextSize::Large);
@@ -2773,11 +2773,11 @@ fn sound_shots(shell: &mut Shell, press: &dyn Fn(&mut Shell, &[Key], usize), sav
     light.show(Box::new(bluetooth::BluetoothScreen::new()));
     real_time(&mut light, 2.6);
     settle(&mut light, 60);
-    save(&mut light, "123f-bluetooth-bezel-light-large");
+    save(&mut light, "142f-bluetooth-bezel-light-large");
     light.show(Box::new(sound::SoundScreen::new()));
     real_time(&mut light, 0.5);
     settle(&mut light, 60);
-    save(&mut light, "122e-sound-bezel-light-large");
+    save(&mut light, "141e-sound-bezel-light-large");
     bluetooth::demo_reset();
     let missing = light.gfx.missing_icons();
     if !missing.is_empty() {
@@ -2804,43 +2804,43 @@ fn music_shots(shell: &mut Shell, press: &dyn Fn(&mut Shell, &[Key], usize), sav
     settle(shell, 100);
     press(shell, &vec![Right; steps_to("Music")], 12);
     settle(shell, 60);
-    save(shell, "124-home-music");
+    save(shell, "143-home-music");
     press(shell, &[Enter], 30);
     real_time(shell, 0.9);
     settle(shell, 60);
-    save(shell, "124b-music-start");
+    save(shell, "143b-music-start");
     // Typing searches.
     for c in "juniper".chars() {
         shell.key(Char(c));
     }
     settle(shell, 30);
-    save(shell, "124c-music-search-typing");
+    save(shell, "143c-music-search-typing");
     press(shell, &[Enter], 20);
     real_time(shell, 1.1);
     settle(shell, 60);
-    save(shell, "124d-music-search-found");
+    save(shell, "143d-music-search-found");
     // Played: the song and its radio after it.
     press(shell, &[Enter], 30);
     real_time(shell, 0.2);
-    save(shell, "124e-music-loading");
+    save(shell, "143e-music-loading");
     real_time(shell, 3.2);
     settle(shell, 30);
-    save(shell, "124f-music-playing");
+    save(shell, "143f-music-playing");
     press(shell, &[Down], 60);
-    save(shell, "124g-music-up-next");
+    save(shell, "143g-music-up-next");
     // Over Home: the tile says what plays, and Fn + Q pauses it.
     press(shell, &[Back, Back], 60);
     press(shell, &[Media(platform::Media::PlayPause)], 20);
-    save(shell, "124h-music-paused-from-home");
+    save(shell, "143h-music-paused-from-home");
     settle(shell, 200);
     press(shell, &[Enter], 60);
     press(shell, &[Up], 60);
-    save(shell, "124i-music-start-playing");
+    save(shell, "143i-music-start-playing");
     press(shell, &[End], 30);
     press(shell, &[Enter], 60);
     real_time(shell, 0.6);
     settle(shell, 30);
-    save(shell, "124j-music-account");
+    save(shell, "143j-music-account");
     // Light, large text: the now-playing page must still fit.
     let mut light = Shell::new(Robot::demo());
     (light.settings.theme, light.settings.light, light.settings.text) = (look::Theme::Bezel, true, gfx::TextSize::Large);
@@ -2849,12 +2849,12 @@ fn music_shots(shell: &mut Shell, press: &dyn Fn(&mut Shell, &[Key], usize), sav
     light.show(Box::new(music::MusicScreen::new()));
     real_time(&mut light, 0.5);
     settle(&mut light, 60);
-    save(&mut light, "124k-music-paused-bezel-light-large");
+    save(&mut light, "143k-music-paused-bezel-light-large");
     // Its account page: the warning always whole.
     press(&mut light, &[Up, End, Enter], 40);
     real_time(&mut light, 0.4);
     settle(&mut light, 40);
-    save(&mut light, "124l-music-account-bezel-light-large");
+    save(&mut light, "143l-music-account-bezel-light-large");
     for missing in [light.gfx.missing_icons(), shell.gfx.missing_icons()] {
         if !missing.is_empty() {
             eprintln!("icons asked for that are not built in: {}", missing.iter().cloned().collect::<Vec<_>>().join(", "));
