@@ -40,8 +40,17 @@ enum Page {
     /// The screen going off, the battery saver, Wi-Fi in standby, lift to wake.
     Power,
     Look,
+    /// What a computer sent, arriving a row at a time as it is put in place.
+    Receiving,
     Finishing,
 }
+
+/// The receiving page: when its first row arrives, how far apart they come,
+/// how many show at once, and how long the full list stays before "all set".
+const RECEIVE_FIRST: f32 = 0.45;
+const RECEIVE_STEP: f32 = 0.42;
+const RECEIVE_ROWS: usize = 4;
+const RECEIVE_HOLD: f32 = 1.3;
 
 /// Setup's pages after the welcome, in order: Next goes one along, Esc one
 /// back, and the progress marks count them. A page added here is in the
@@ -336,6 +345,10 @@ pub struct Setup {
     /// while the page is read); switched off again if it is passed by
     /// without joining anything.
     wifi_by_setup: bool,
+    /// What a computer sent, a row each, for the receiving page; and that
+    /// page's list scrolling as it fills.
+    received: Vec<(String, String)>,
+    received_scroll: detent::Animated,
 }
 
 impl Setup {
@@ -360,6 +373,8 @@ impl Setup {
             hardware: None,
             looked_for_network: 0.0,
             wifi_by_setup: false,
+            received: Vec::new(),
+            received_scroll: detent::Animated::new(0.0, role::release()).with_rest(0.01),
         }
     }
 
@@ -369,6 +384,15 @@ impl Setup {
         let mut setup = Setup { from_settings: true, ..Self::new() };
         setup.go(Page::Computer, true);
         setup.remote = crate::remote::Remote::start();
+        setup
+    }
+
+    /// The receiving page with what a computer sent, for the gallery.
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn showing_received(answers: &crate::remote::Answers) -> Self {
+        let mut setup = Setup { from_settings: true, ..Self::new() };
+        setup.received = crate::remote::received(answers);
+        setup.go(Page::Receiving, true);
         setup
     }
 
@@ -568,7 +592,7 @@ impl Setup {
     fn rows(&self) -> usize {
         match self.page {
             Page::Welcome => 3,
-            Page::Computer | Page::Lesson | Page::Finishing => 0,
+            Page::Computer | Page::Lesson | Page::Receiving | Page::Finishing => 0,
             Page::Team => 1,
             Page::Place => 2,
             Page::Wifi => 2,
@@ -979,6 +1003,56 @@ impl Setup {
         self.bar(g, "arrows move · enter on keys · tab skip");
     }
 
+    /// How many of what was received have arrived on the page so far.
+    fn received_shown(&self) -> usize {
+        if self.entered < RECEIVE_FIRST {
+            return 0;
+        }
+        (((self.entered - RECEIVE_FIRST) / RECEIVE_STEP) as usize + 1).min(self.received.len())
+    }
+
+    /// Receiving: what the computer sent, a row at a time, each rising in
+    /// with a tick as it is put in place; the newest kept in view.
+    fn draw_receiving(&self, g: &mut Gfx) {
+        let shown = self.received_shown();
+        let all = shown == self.received.len();
+        self.heading(g, "Receiving", if all { "All in place." } else { "From the computer, putting each in place." });
+        let step = 21.0;
+        let scroll = self.received_scroll.value();
+        let area = Rect::new(0.0, ROWS_TOP, W, RECEIVE_ROWS as f32 * step);
+        g.canvas.set_clip(area);
+        for (k, (name, value)) in self.received.iter().enumerate().take(shown) {
+            // Each row rises in on `release` from just below where it lands.
+            let since = self.entered - (RECEIVE_FIRST + k as f32 * RECEIVE_STEP);
+            let left = if g.calm { 0.0 } else { role::release().solve(1.0, 0.0, since.max(0.0)).0 };
+            let a = ((1.0 - left) * 1.5).clamp(0.0, 1.0);
+            let y = ROWS_TOP + 1.0 + (k as f32 - scroll) * step + left * 8.0;
+            if y + step < ROWS_TOP || y > area.bottom() {
+                continue;
+            }
+            let r = Rect::new(LEFT, y, W - 2.0 * LEFT, 18.0);
+            g.canvas.rrect(r, 9.0, SURFACE, a);
+            // The tick, in a disc, as a task done.
+            let (mx, my) = (r.x + 10.0, r.cy());
+            g.canvas.circle(mx, my, 5.0, INK_STRONG, a);
+            g.canvas.polyline(&[(mx - 2.4, my + 0.2), (mx - 0.7, my + 1.9), (mx + 2.5, my - 1.8)], 1.4, Color::hex(0x101116), a);
+            let label = TextStyle::sans(11.0, 600.0);
+            g.text_alpha(r.x + 21.0, r.cy(), name, label, INK_STRONG, a);
+            if !value.is_empty() {
+                let style = TextStyle::code(9.5);
+                let room = r.w - 32.0 - g.measure(name, label) - 12.0;
+                let fitted = g.text.fit(value, &style, room.max(20.0));
+                let vw = g.measure(&fitted, style);
+                g.text_alpha(r.right() - 11.0 - vw, r.cy(), &fitted, style, INK_THIN, a);
+            }
+        }
+        g.canvas.clear_clip();
+        // The subtitle already says "All in place." once everything has
+        // landed, so the footer keeps counting rather than repeating it.
+        let count = format!("{shown} of {} received", self.received.len());
+        g.text_alpha(LEFT, BAR_CY, &count, TextStyle::code(9.0), INK_FAINT, 1.0);
+    }
+
     fn draw_place(&self, g: &mut Gfx) {
         self.heading(g, "Name and time zone", WORDS_PLACE);
         let row_w = W - 2.0 * LEFT;
@@ -1063,6 +1137,10 @@ impl Screen for Setup {
         if self.page == Page::Lesson {
             return self.lesson_key(key, cx);
         }
+        // Receiving runs by itself to "all set".
+        if self.page == Page::Receiving {
+            return Nav::Stay;
+        }
         if self.page == Page::Hardware {
             return self.hardware_key(key, cx);
         }
@@ -1133,11 +1211,14 @@ impl Screen for Setup {
 
     fn update(&mut self, cx: &mut Cx) -> Nav {
         let Some(answers) = self.remote.as_mut().and_then(|r| r.take()) else { return Nav::Stay };
+        // What arrived, to show it coming in, row by row; then in place.
+        self.received = crate::remote::received(&answers);
         self.apply(answers, cx);
         if !self.from_settings {
             crate::mark_setup_done();
         }
-        self.go(Page::Finishing, true);
+        self.received_scroll.jump(0.0);
+        self.go(Page::Receiving, true);
         Nav::Stay
     }
 
@@ -1169,6 +1250,20 @@ impl Screen for Setup {
             let seen = wifi.generation();
             changed |= std::mem::replace(&mut self.wifi_seen, seen) != seen;
         }
+        // What a computer sent, arriving: the list scrolls to keep the
+        // newest row in view; once all are in and have shown, all set.
+        if self.page == Page::Receiving {
+            let shown = self.received_shown();
+            let target = shown.saturating_sub(RECEIVE_ROWS) as f32;
+            if self.received_scroll.target() != target {
+                self.received_scroll.set(target);
+            }
+            self.received_scroll.tick(dt);
+            if self.entered >= RECEIVE_FIRST + self.received.len() as f32 * RECEIVE_STEP + RECEIVE_HOLD {
+                self.go(Page::Finishing, true);
+            }
+            changed = true;
+        }
         // The parts looked for again now and then (the motion sensor starts a
         // moment after the shell; the Ethernet adapter follows the USB switch).
         if self.page == Page::Hardware {
@@ -1180,7 +1275,7 @@ impl Screen for Setup {
     }
 
     fn busy(&self) -> bool {
-        self.page == Page::Finishing || (self.page == Page::Lesson && self.lesson.card() == Card::Modifiers)
+        matches!(self.page, Page::Finishing | Page::Receiving) || (self.page == Page::Lesson && self.lesson.card() == Card::Modifiers)
     }
 
     fn finished(&self) -> bool {
@@ -1279,6 +1374,7 @@ impl Screen for Setup {
                 self.bar(g, "enter switches · esc back");
             }
             Page::Hardware => self.draw_hardware(g),
+            Page::Receiving => self.draw_receiving(g),
             Page::Power => {
                 let words = POWER.get(self.focus).map_or(WORDS_LOOK, |p| p.1);
                 self.heading(g, "Battery and power", words);
@@ -1410,6 +1506,33 @@ mod tests {
         let mut say = None;
         let mut cx = Cx { robot, settings, say: &mut say, at_rest: true };
         setup.key(key, &mut cx)
+    }
+
+    #[test]
+    fn what_a_computer_sent_arrives_row_by_row_then_all_is_set() {
+        let sent = crate::remote::answers(&crate::remote::parse_form("team=5805&ssid1=Workshop&psk1=hunter22&tba=abcdefgh12345678&accent=rose&mode=light&choices=1&open_robot=on"));
+        let mut setup = Setup::showing_received(&sent);
+        let names: Vec<&str> = setup.received.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["Team", "Wi-Fi network", "The Blue Alliance key", "Look", "Choices"]);
+        assert_eq!(setup.received[3].1, "rose · light");
+        assert!(!setup.received[2].1.contains("abcdefgh"), "a key shows only its end: {}", setup.received[2].1);
+        assert_eq!(setup.received_shown(), 0);
+        setup.tick(RECEIVE_FIRST + RECEIVE_STEP * 1.5);
+        assert_eq!(setup.received_shown(), 2, "a row at a time");
+        let mut waited = 0.0;
+        while setup.page == Page::Receiving && waited < 10.0 {
+            setup.tick(0.1);
+            waited += 0.1;
+        }
+        assert_eq!(setup.page, Page::Finishing, "then all set, by itself");
+        // Nothing filled in is said so.
+        assert_eq!(crate::remote::received(&crate::remote::Answers::default()), [("Nothing to change".to_owned(), String::new())]);
+        // Every row fits beside its value.
+        let mut g = Gfx::new(Tokens::dark());
+        let full = crate::remote::answers(&crate::remote::parse_form("team=99999&ssid1=A%20rather%20long%20network%20name&tba=x123456789&nexus=y123456789&ai=z123456789&ssh_key=ssh-ed25519%20AAA&accent=rose&mode=light&text=large&home=carousel&choices=1"));
+        for (name, _) in crate::remote::received(&full) {
+            assert!(g.measure(&name, TextStyle::sans(11.0, 600.0)) + 32.0 + 60.0 <= W - 2.0 * LEFT, "{name}");
+        }
     }
 
     #[test]

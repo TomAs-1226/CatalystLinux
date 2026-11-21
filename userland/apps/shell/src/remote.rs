@@ -11,7 +11,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -25,6 +25,15 @@ use crate::shell::HomeStyle;
 const OPEN_FOR: Duration = Duration::from_secs(600);
 /// Wrong codes before it stops listening.
 const TRIES: u32 = 5;
+/// Connections looked after at once. A browser opens a spare connection or
+/// two beside the one it uses, to have one ready for its next request.
+const AT_ONCE: usize = 8;
+/// How long a connection may wait before its request starts: a browser
+/// sends the form down the spare connection it opened when the page came,
+/// however long the form took to fill in.
+const IDLE_FOR: Duration = Duration::from_secs(300);
+/// And how long a request may take once it has started.
+const REQUEST_IN: Duration = Duration::from_secs(10);
 
 /// What a computer sent. Anything left empty on the page is `None`: left as
 /// it is on the handheld.
@@ -50,6 +59,9 @@ struct Shared {
     answers: Mutex<Option<Answers>>,
     stop: AtomicBool,
     changed: AtomicBool,
+    /// Wrong codes so far, and connections open now.
+    wrong: AtomicU32,
+    open: AtomicUsize,
 }
 
 pub struct Remote {
@@ -77,7 +89,7 @@ impl Remote {
         std::thread::Builder::new()
             .name("setup page".into())
             .stack_size(256 * 1024)
-            .spawn(move || serve(listener, &thread_shared, &thread_code))
+            .spawn(move || serve(listener, thread_shared, thread_code))
             .ok()?;
         Some(Remote { shared, url, code, qr })
     }
@@ -156,68 +168,119 @@ fn one_time_code() -> String {
     format!("{:06}", h.finish() % 1_000_000)
 }
 
-fn serve(listener: TcpListener, shared: &Shared, code: &str) {
+fn set_status(shared: &Shared, text: &str) {
+    *shared.status.lock().unwrap() = text.to_owned();
+    shared.changed.store(true, Ordering::Relaxed);
+}
+
+/// Take connections while the page is offered, each looked after on a
+/// thread of its own: a browser's spare connection waiting quietly for the
+/// form never holds up the one the page or the form arrives on.
+fn serve(listener: TcpListener, shared: Arc<Shared>, code: String) {
     let started = Instant::now();
-    let mut wrong = 0;
-    let set = |text: &str| {
-        *shared.status.lock().unwrap() = text.to_owned();
-        shared.changed.store(true, Ordering::Relaxed);
-    };
     while !shared.stop.load(Ordering::Relaxed) {
         if started.elapsed() > OPEN_FOR {
-            set("the page has closed: start it again from Settings");
+            set_status(&shared, "the page has closed: start it again from Settings");
+            shared.stop.store(true, Ordering::Relaxed);
             return;
         }
         let Ok((stream, _)) = listener.accept() else {
             std::thread::sleep(Duration::from_millis(60));
             continue;
         };
-        let Some((method, path, body)) = read_request(&stream) else { continue };
-        let reply = match (method.as_str(), path.as_str()) {
-            ("GET", "/") => {
-                set("a computer has the page open");
-                page(None)
-            }
-            ("POST", "/") => {
-                let form = parse_form(&body);
-                let given = form.iter().find(|(k, _)| k == "code").map(|(_, v)| v.trim().to_owned()).unwrap_or_default();
-                if given == code {
-                    *shared.answers.lock().unwrap() = Some(answers(&form));
-                    set("received: putting it in place");
-                    shared.stop.store(true, Ordering::Relaxed);
-                    done_page()
-                } else {
-                    wrong += 1;
-                    if wrong >= TRIES {
-                        set("too many wrong codes: the page has closed");
-                        shared.stop.store(true, Ordering::Relaxed);
-                        page(Some("Too many wrong codes. Start setup from a computer again on the handheld."))
-                    } else {
-                        set("a wrong code was given");
-                        page(Some("That code is not the one on the handheld's screen."))
-                    }
-                }
-            }
-            _ => ("404 Not Found", "text/plain", "not here".to_owned()),
-        };
-        respond(stream, reply);
+        if shared.open.load(Ordering::Relaxed) >= AT_ONCE {
+            continue; // dropped: a browser opens another
+        }
+        shared.open.fetch_add(1, Ordering::Relaxed);
+        let (shared, code) = (shared.clone(), code.clone());
+        let spawned = std::thread::Builder::new().name("setup request".into()).stack_size(128 * 1024).spawn(move || {
+            answer(stream, &shared, &code);
+            shared.open.fetch_sub(1, Ordering::Relaxed);
+        });
+        if spawned.is_err() {
+            std::thread::sleep(Duration::from_millis(60));
+        }
     }
 }
 
-/// One request: method, path, and body, read with a size limit and a time
-/// limit for the whole of it, so a client sending a byte now and then cannot
-/// hold the page (or keep it listening past its ten minutes).
-fn read_request(mut stream: &TcpStream) -> Option<(String, String, String)> {
-    let deadline = Instant::now() + Duration::from_secs(6);
+/// One connection: its request, and the reply.
+fn answer(stream: TcpStream, shared: &Shared, code: &str) {
+    let Some((method, path, body)) = read_request(&stream, &shared.stop) else { return };
+    let reply = match (method.as_str(), path.as_str()) {
+        // Sent already: a second press of the button is told so, not refused.
+        ("POST", "/") if shared.answers.lock().unwrap().is_some() => done_page(),
+        _ if shared.stop.load(Ordering::Relaxed) && shared.answers.lock().unwrap().is_none() => {
+            page(Some("The page has closed. Start setup from a computer again on the handheld."))
+        }
+        ("GET", "/") => {
+            set_status(shared, "a computer has the page open");
+            page(None)
+        }
+        ("POST", "/") => {
+            let form = parse_form(&body);
+            let given = form.iter().find(|(k, _)| k == "code").map(|(_, v)| v.trim().to_owned()).unwrap_or_default();
+            if given == code {
+                *shared.answers.lock().unwrap() = Some(answers(&form));
+                set_status(shared, "received: putting it in place");
+                shared.stop.store(true, Ordering::Relaxed);
+                done_page()
+            } else {
+                let wrong = shared.wrong.fetch_add(1, Ordering::Relaxed) + 1;
+                if wrong >= TRIES {
+                    set_status(shared, "too many wrong codes: the page has closed");
+                    shared.stop.store(true, Ordering::Relaxed);
+                    page(Some("Too many wrong codes. Start setup from a computer again on the handheld."))
+                } else {
+                    set_status(shared, "a wrong code was given");
+                    page(Some("That code is not the one on the handheld's screen."))
+                }
+            }
+        }
+        _ => ("404 Not Found", "text/plain", "not here".to_owned()),
+    };
+    respond(stream, reply);
+}
+
+/// One request: method, path, and body, read with a size limit. A
+/// connection may wait quietly for a while before its request starts (a
+/// browser's spare one), checking now and then that the page is still
+/// offered; once a request has started it must arrive whole in a few
+/// seconds, so a client sending a byte now and then cannot hold a thread.
+fn read_request(mut stream: &TcpStream, stop: &AtomicBool) -> Option<(String, String, String)> {
     stream.set_nonblocking(false).ok();
     let mut data = Vec::new();
     let mut buf = [0u8; 4096];
+    // The first byte: up to IDLE_FOR, a second at a time.
+    let idle_until = Instant::now() + IDLE_FOR;
+    stream.set_read_timeout(Some(Duration::from_secs(1))).ok();
+    let first = loop {
+        match stream.read(&mut buf) {
+            Ok(0) => return None,
+            Ok(n) => break n,
+            // Nothing yet: wait on, unless the page has closed (or the form
+            // came on another connection) or it has waited long enough.
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+                if Instant::now() > idle_until || stop.load(Ordering::Relaxed) {
+                    return None;
+                }
+            }
+            Err(_) => return None,
+        }
+    };
+    data.extend_from_slice(&buf[..first]);
+    let deadline = Instant::now() + REQUEST_IN;
     let read = |stream: &mut &TcpStream, buf: &mut [u8]| -> Option<usize> {
         let left = deadline.checked_duration_since(Instant::now())?;
         stream.set_read_timeout(Some(left.max(Duration::from_millis(1)))).ok();
         stream.read(buf).ok()
     };
     let head_end = loop {
+        if let Some(at) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+            break at + 4;
+        }
+        if data.len() > 16 * 1024 {
+            return None;
+        }
         let n = read(&mut stream, &mut buf)?;
         if n == 0 {
             return None;
@@ -316,6 +379,47 @@ pub fn answers(form: &[(String, String)]) -> Answers {
         a.calm = checked("calm");
     }
     a
+}
+
+/// What arrived, a row each, as the handheld shows it being put in place:
+/// a name and a short value (keys shown only by their last characters).
+pub fn received(a: &Answers) -> Vec<(String, String)> {
+    let mut rows = Vec::new();
+    if let Some(team) = &a.team {
+        rows.push(("Team".to_owned(), team.clone()));
+    }
+    for (ssid, password) in &a.wifi {
+        rows.push(("Wi-Fi network".to_owned(), format!("{ssid}{}", if password.is_some() { "" } else { " · open" })));
+    }
+    for (name, label) in SERVICES {
+        if a.keys.get(name).is_some() {
+            rows.push((format!("{label} key"), a.keys.shown(name)));
+        }
+    }
+    if let Some(key) = &a.ssh_key {
+        let kind = key.split_whitespace().next().unwrap_or("").trim_start_matches("ssh-");
+        rows.push(("SSH key".to_owned(), kind.to_owned()));
+    }
+    let look: Vec<String> = [
+        a.accent.map(|v| v.name().to_lowercase()),
+        a.light.map(|l| (if l { "light" } else { "dark" }).to_owned()),
+        a.text.map(|t| t.name().to_owned()),
+        a.home.map(|h| h.name().to_owned()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !look.is_empty() {
+        rows.push(("Look".to_owned(), look.join(" · ")));
+    }
+    if a.open_robot.is_some() {
+        let on = [a.open_robot, a.match_report, a.ssh, a.calm].iter().filter(|v| **v == Some(true)).count();
+        rows.push(("Choices".to_owned(), format!("{on} of 4 on")));
+    }
+    if rows.is_empty() {
+        rows.push(("Nothing to change".to_owned(), String::new()));
+    }
+    rows
 }
 
 fn done_page() -> (&'static str, &'static str, String) {
@@ -456,5 +560,34 @@ mod tests {
         let code = remote.code().to_owned();
         assert!(send(post(&code)).contains("That's everything"));
         assert_eq!(remote.take().and_then(|a| a.team).as_deref(), Some("254"));
+    }
+
+    #[test]
+    fn a_browsers_spare_connection_carries_the_form_however_long_it_waited() {
+        let Some(mut remote) = Remote::start() else { return }; // no network here
+        let port = remote.url().rsplit(':').next().and_then(|p| p.parse::<u16>().ok()).unwrap_or(80);
+        // As a browser does: the page on one connection, and a spare opened
+        // beside it that sits quiet while the form is filled in.
+        let mut spare = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let mut page = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        page.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        let mut out = String::new();
+        page.read_to_string(&mut out).ok();
+        assert!(out.contains("Set up Catalyst Linux"), "the page comes while the spare waits");
+        // Longer than the old six-second limit, which closed the spare.
+        std::thread::sleep(Duration::from_secs(7));
+        let body = format!("code={}&team=5805&ssid1=Workshop&psk1=hunter22", remote.code());
+        let request = format!("POST / HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+        // Sent in two parts, as the head and the body often go.
+        let (head, rest) = request.split_at(request.len() - body.len());
+        spare.write_all(head.as_bytes()).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        spare.write_all(rest.as_bytes()).unwrap();
+        let mut out = String::new();
+        spare.read_to_string(&mut out).ok();
+        assert!(out.contains("That's everything"), "the form's reply: {}", &out[..out.len().min(120)]);
+        let got = remote.take().unwrap();
+        assert_eq!(got.team.as_deref(), Some("5805"));
+        assert_eq!(got.wifi, vec![("Workshop".to_owned(), Some("hunter22".to_owned()))]);
     }
 }

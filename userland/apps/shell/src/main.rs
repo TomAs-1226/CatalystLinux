@@ -1352,6 +1352,18 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     shell.show(Box::new(setup::Setup::without_network()));
     settle(&mut shell, 100);
     save(&mut shell, "24b-setup-computer-no-network");
+    // And what a computer sent, arriving a row at a time, then all in place.
+    let sent = remote::answers(&remote::parse_form(
+        "team=5805&ssid1=Workshop&psk1=hunter22&ssid2=5805_Robot&psk2=robotpass&tba=abcdefgh12345678wxyz&nexus=nexus-key-9f2a&ssh_key=ssh-ed25519%20AAAAC3Nza%20me%40laptop&accent=rose&mode=dark&text=standard&home=grid&choices=1&open_robot=on&match_report=on",
+    ));
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    shell.show(Box::new(setup::Setup::showing_received(&sent)));
+    settle(&mut shell, 110);
+    save(&mut shell, "24c-setup-receiving");
+    settle(&mut shell, 150);
+    save(&mut shell, "24d-setup-received");
     // The start the tear-free panel is tried in: keep it? (Counting down,
     // a few seconds in.)
     let mut shell = Shell::new(Robot::demo());

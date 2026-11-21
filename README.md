@@ -181,7 +181,11 @@ page came from. "Hi." offers three ways on:
   unencrypted: use it on the robot's cable or a network you trust. Settings ›
   Set up from a computer offers it again later. With no network yet, the
   page offers to join Wi-Fi there (or take a cable), and opens by itself
-  once there is an address.
+  once there is an address. When the browser sends the form, the handheld
+  shows each item arriving (team, networks, keys shown only by their last
+  four characters, look, choices), then "Just a moment…". Each browser
+  connection gets its own thread, so a spare connection the browser opened
+  early and left idle cannot hold up the one carrying the form.
 - **Set up later**: straight to Home; everything is in Settings.
 
 `/data/catalyst/setup-done` marks setup as done.
