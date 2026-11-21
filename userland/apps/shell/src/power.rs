@@ -1239,6 +1239,12 @@ impl Screen for BatteryPage {
     }
 }
 
+/// The gauge now (the demo battery on a computer), for a page that shows
+/// the charge without the shell's own readings (StandBy's preview).
+pub fn reading_now() -> Option<Reading> {
+    Source::find().read()
+}
+
 /// "76% · 4 h 38 m left": Settings' summary of the battery.
 pub fn summary() -> String {
     match Source::find().read() {

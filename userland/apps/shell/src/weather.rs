@@ -697,6 +697,57 @@ fn tile_text(r: &Reading, units: Units) -> String {
     format!("{} {}", units.temp(r.temp), word(r.code, r.day))
 }
 
+/// The weather at a glance, for StandBy: now, today's range and the next
+/// hours, from the forecast kept (the simulator's own on a computer). Read
+/// from the file each time: StandBy asks once a minute at most.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Glance {
+    pub place: String,
+    pub temp: String,
+    pub condition: &'static str,
+    pub icon: &'static str,
+    /// "h 27° · l 18°".
+    pub range: Option<String>,
+    /// The next hours: "15", its icon, its temperature.
+    pub hours: Vec<(String, &'static str, String)>,
+    /// The chance of rain in the hour, when it is worth saying.
+    pub rain: Option<u32>,
+}
+
+pub fn glance(h24: bool) -> Option<Glance> {
+    let prefs = Prefs::load();
+    let zone = crate::device::zone();
+    let (forecast, place, at) = if demo() {
+        let forecast = demo_forecast();
+        let at = forecast.current.time;
+        (forecast, demo_place(), at)
+    } else {
+        let kept = kept()?;
+        let place = prefs.place_for(&zone).filter(|p| kept.place.same(p))?.clone();
+        let at = kept.forecast.local_time(now());
+        (kept.forecast, place, at)
+    };
+    let units = prefs.units(&zone);
+    let r = forecast.at(at)?;
+    let range = forecast.days_from(at).first().map(|d| format!("h {} · l {}", units.temp(d.high), units.temp(d.low)));
+    let hours = forecast
+        .hours_from(at)
+        .iter()
+        .skip(1)
+        .take(4)
+        .map(|h| (if h24 { h.time.format("%H").to_string() } else { h.time.format("%-I%P").to_string() }, icon(h.code, h.day), units.temp(h.temp)))
+        .collect();
+    Some(Glance {
+        place: place.name,
+        temp: units.temp(r.temp),
+        condition: condition(r.code, r.day),
+        icon: icon(r.code, r.day),
+        range,
+        hours,
+        rain: r.rain.filter(|p| *p >= 20.0).map(|p| p.round() as u32),
+    })
+}
+
 // ---------------------------------------------------------------- layout ---
 
 /// The big temperature.

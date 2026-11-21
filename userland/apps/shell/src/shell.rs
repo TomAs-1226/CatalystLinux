@@ -79,6 +79,9 @@ pub struct Settings {
     /// handheld is picked up, and goes off when it is put face down.
     pub lift_wake: bool,
     pub face_down: bool,
+    /// Settings › Lock screen and StandBy: the lock screen's look, and
+    /// StandBy on the charger (the passcode itself is kept apart, passcode.rs).
+    pub lock: crate::lock::Choices,
 }
 
 /// The animation scales developer options offer.
@@ -195,6 +198,7 @@ impl Default for Settings {
             brightness: 70,
             lift_wake: true,
             face_down: true,
+            lock: crate::lock::Choices::default(),
         }
     }
 }
@@ -389,6 +393,11 @@ pub trait Screen {
     /// A lock screen: nothing that reaches past it opens over it while it
     /// is anywhere on the stack (Spotlight; see `Shell::locked`).
     fn locks(&self) -> bool {
+        false
+    }
+    /// What is typed here is secret (a passcode): Show key presses leaves
+    /// its keys out.
+    fn secret(&self) -> bool {
         false
     }
 }
@@ -763,6 +772,20 @@ pub struct Shell {
     reminders: crate::reminders::Watch,
     /// Deep standby woke for one of those: nobody was looking.
     woke_for_alert: bool,
+    /// StandBy, over everything on the charger where the screen would have
+    /// gone off; and the lock screen (a passcode set), over everything once
+    /// it has. See faces.rs and lock.rs, and `Shell::key` for the order.
+    faces: crate::faces::Faces,
+    lock: crate::lock::Lock,
+    /// What the lock screen shows besides the time, and when it was read.
+    lock_info: Option<(crate::lock::Info, std::time::Instant)>,
+    lock_scratch: Vec<u32>,
+    /// What the island says once it is unlocked (the deep sleep's figures).
+    after_unlock: Option<String>,
+    /// The galleries' and tests' charger: plugged in or not, whatever the
+    /// gauge says; and whether it was on the charger at the last tick.
+    charger: Option<bool>,
+    charger_was: bool,
 }
 
 /// How long the island holds a reminder coming due (a message holds 2.4 s).
@@ -937,6 +960,13 @@ impl Shell {
             queue_due: None,
             reminders: crate::reminders::Watch::new(),
             woke_for_alert: false,
+            faces: crate::faces::Faces::new(),
+            lock: crate::lock::Lock::new(),
+            lock_info: None,
+            lock_scratch: Vec::new(),
+            after_unlock: None,
+            charger: None,
+            charger_was: false,
         }
     }
 
@@ -1031,7 +1061,13 @@ impl Shell {
     }
 
     pub fn say(&mut self, text: impl Into<String>) {
-        self.message = Some((text.into(), MESSAGE_SECONDS));
+        let text = text.into();
+        // Said while it is locked or StandBy shows: kept for the lock
+        // screen, and said again once it is unlocked (or StandBy is left).
+        if self.lock.engaged() || self.faces.showing() {
+            self.lock.note(&text);
+        }
+        self.message = Some((text, MESSAGE_SECONDS));
         self.dirty = true;
         // Said with the screen off: the Fn light blinks until it wakes.
         if self.standby.state() == crate::standby::State::Off {
@@ -1107,7 +1143,9 @@ impl Shell {
 
     /// Good morning, in the island, as Home appears (when the greeting is on).
     fn greet(&mut self) {
-        if self.settings.greeting {
+        // Locked at start, Home is not what appears: no greeting, and none
+        // kept as a notice either.
+        if self.settings.greeting && !self.lock.engaged() {
             use chrono::Timelike;
             let team = crate::schedule::team_of(&self.robot.address);
             self.say(greeting(chrono::Local::now().hour(), team));
@@ -1132,13 +1170,29 @@ impl Shell {
             self.woke_by = Some((key, self.clock));
             return;
         }
+        // StandBy: the arrows turn its faces; any other key leaves it below,
+        // as a key wakes the screen from off.
+        if self.standby_state() == crate::standby::State::Faces {
+            let before = self.settings.lock;
+            if self.faces.key(key, &mut self.settings.lock, self.settings.calm) {
+                if self.settings.lock != before {
+                    crate::save_settings(&self.settings);
+                    self.gfx.lock = self.settings.lock;
+                }
+                self.moving = true;
+                return;
+            }
+        }
         // A key while the screen is dimmed or off wakes it, and is spent doing so.
         if self.standby.key() {
+            self.leave_faces();
             self.moving = true;
             return;
         }
-        // Developer options › Show key presses: every key, as it lands.
-        if self.settings.developer && self.settings.show_keys {
+        // Developer options › Show key presses: every key, as it lands (but
+        // never a passcode's, on the lock screen).
+        let secret = self.lock.engaged() || self.stack.last().is_some_and(|(s, _)| s.secret());
+        if self.settings.developer && self.settings.show_keys && !secret {
             self.echo.push((key_name(key), 0.0));
             if self.echo.len() > 4 {
                 self.echo.remove(0);
@@ -1152,6 +1206,14 @@ impl Shell {
                 return self.end_intro();
             }
             self.intro = None;
+        }
+        // Locked: the lock screen takes every key. Nothing below this line
+        // (the tour, the recent apps, the control centre, Spotlight, `?`, any
+        // shortcut, the screen in front) is reached until the passcode is.
+        if self.lock.engaged() {
+            self.lock.key(key);
+            self.moving = true;
+            return;
         }
         // The tour takes every key while it shows.
         if let Some(tour) = &mut self.tour {
@@ -1345,6 +1407,7 @@ impl Shell {
         // The battery saver has the processor climb slowly, whatever is chosen.
         self.standby.set_power(if self.settings.battery.saver { crate::standby::Power::Saving } else { self.settings.power });
         (self.gfx.lift_wake, self.gfx.face_down) = (self.settings.lift_wake, self.settings.face_down);
+        self.gfx.lock = self.settings.lock;
         self.gfx.want_gpu(self.settings.gpu);
         let s = &self.settings;
         let look = crate::look::Look { theme: s.theme, wallpaper: s.wallpaper, corners: s.corners, letters: s.letters, width: s.width };
@@ -1561,7 +1624,11 @@ impl Shell {
             && self.tour.is_none()
             && self.intro.is_none()
             && self.curtain.is_none()
-            && self.standby.state() == crate::standby::State::Awake;
+            && self.standby.state() == crate::standby::State::Awake
+            // Never while locked (or StandBy shows): an app handed the panel
+            // would take the keys from under the lock.
+            && !self.lock.engaged()
+            && !self.faces.visible();
         if !alone {
             return None;
         }
@@ -1783,7 +1850,7 @@ impl Shell {
         // The tour: offered a moment after setup, once Home has arrived.
         if let Some(left) = &mut self.tour_after {
             *left -= dt;
-            if *left <= 0.0 && self.transition.is_none() && self.curtain.is_none() && self.stack.len() == 1 && self.intro.is_none() {
+            if *left <= 0.0 && self.transition.is_none() && self.curtain.is_none() && self.stack.len() == 1 && self.intro.is_none() && !self.lock.visible() && !self.faces.visible() {
                 self.start_tour();
             }
         }
@@ -2023,6 +2090,35 @@ impl Shell {
     }
 
     fn draw_under_intro(&mut self) {
+        // StandBy or the lock screen over the whole panel: nothing beneath
+        // them is drawn.
+        let covered = self.faces.covers() || (self.lock.covers() && !self.faces.visible());
+        if !covered {
+            self.draw_shell();
+        }
+        self.draw_lock_and_faces();
+    }
+
+    /// The lock screen and StandBy, over whatever is beneath them.
+    fn draw_lock_and_faces(&mut self) {
+        if self.lock.visible() && !self.faces.covers() {
+            let info = self.lock_info();
+            let Shell { gfx, lock, settings, lock_scratch, .. } = self;
+            lock.draw(gfx, &settings.lock, &info, lock_scratch);
+            // The field widening to say something.
+            if self.gfx.take_motion_started() {
+                self.moving = true;
+            }
+        }
+        if self.faces.visible() {
+            let reading = self.shown_reading();
+            let feed = crate::faces::Feed { reading: reading.as_ref(), h24: self.settings.clock24, notices: self.lock.notices(), generation: self.robot.schedule.generation() };
+            let Shell { gfx, faces, robot, settings, .. } = self;
+            faces.draw(gfx, robot, &feed, &settings.lock);
+        }
+    }
+
+    fn draw_shell(&mut self) {
         // The recent apps, over the wallpaper alone (no screen's words show
         // through between the cards): the screen in front fades into it as
         // they come, and back as they go. Both are held still while nothing
@@ -2881,8 +2977,166 @@ impl Shell {
         }
         moving |= self.lift_and_lay_down();
         let keep = self.stack.last().is_some_and(|(s, _)| s.keeps_awake()) || self.saving.is_some();
+        self.standby.set_faces(self.faces_wanted());
+        moving |= self.watch_charger();
         moving |= self.standby.tick(dt, self.settings.screen_off, keep, self.settings.calm);
+        moving |= self.tick_lock_and_faces(dt, motion_dt);
         moving
+    }
+
+    // ------------------------------------------------ StandBy and the lock ---
+
+    /// On the charger (as the gauge says, or the galleries pretend).
+    fn on_charger(&self) -> bool {
+        self.charger.unwrap_or_else(|| self.care.reading.as_ref().is_some_and(|r| matches!(r.flow, crate::power::Flow::Charging | crate::power::Flow::Full | crate::power::Flow::Holding)))
+    }
+
+    /// Whether StandBy may come where the screen would go off, and how lit:
+    /// on the charger with StandBy on, once the handheld is set up.
+    fn faces_wanted(&self) -> Option<f32> {
+        let set_up = !self.stack.iter().any(|(s, _)| s.title() == "Setup");
+        (self.settings.lock.standby && self.on_charger() && set_up).then(|| crate::faces::Faces::light_level(&self.settings.lock))
+    }
+
+    /// The galleries' and tests' charger.
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn pretend_charger(&mut self, on: Option<bool>) {
+        self.charger = on;
+    }
+
+    /// Set down on the charger with the screen dimmed or off (or in deep
+    /// standby): StandBy comes up at once, as a phone's does. True if it did.
+    fn watch_charger(&mut self) -> bool {
+        let on = self.on_charger();
+        let plugged = on && !self.charger_was;
+        self.charger_was = on;
+        if plugged && self.faces_wanted().is_some() && self.standby.to_faces() {
+            self.dirty = true;
+            return true;
+        }
+        false
+    }
+
+    /// The gauge's reading as StandBy and the lock screen show it: on the
+    /// galleries' pretend charger, the demo battery charging.
+    fn shown_reading(&self) -> Option<crate::power::Reading> {
+        let reading = self.care.reading.clone();
+        match (self.charger, reading) {
+            (Some(true), Some(r)) if r.flow.on_battery() => Some(crate::power::Reading { flow: crate::power::Flow::Charging, milliamps: Some(-820.0), minutes_left: None, minutes_to_full: Some(42), ..r }),
+            (_, reading) => reading,
+        }
+    }
+
+    /// StandBy is showing.
+    #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+    pub fn faces_showing(&self) -> bool {
+        self.faces.showing()
+    }
+
+
+    /// A passcode typed is being checked (for the galleries).
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn checking_passcode(&self) -> bool {
+        self.lock.checking()
+    }
+
+    /// Locked now (the screen gone off, or StandBy come, a passcode set):
+    /// whatever was over the screen in front is put away, so the lock is
+    /// what a wake comes back to.
+    fn lock_now(&mut self) {
+        self.lock.engage();
+        if self.control.is_open() || self.control.visible() {
+            self.control.set_open(false, &self.settings);
+            self.control.shown.jump(0.0);
+            self.control_under = None;
+            self.control_glass = None;
+        }
+        self.switcher = None;
+        self.switcher_under = None;
+        self.help_hold = None;
+        self.message = None;
+        self.dirty = true;
+    }
+
+    /// StandBy gives way (a key, the charger gone): to the lock screen if it
+    /// is locked; otherwise what was said meanwhile is said now.
+    fn leave_faces(&mut self) {
+        if !self.faces.showing() {
+            return;
+        }
+        self.faces.hide(self.settings.calm);
+        if !self.lock.engaged() {
+            self.say_kept();
+        }
+        self.moving = true;
+        self.dirty = true;
+    }
+
+    /// The notices kept while it was locked (or StandBy showed), said in
+    /// the island: the newest, with how many there were.
+    fn say_kept(&mut self) {
+        let kept = self.lock.take_notices();
+        let after = self.after_unlock.take();
+        let newest = kept.last().map(|(text, _)| text.clone());
+        let words = match (newest, kept.len()) {
+            (Some(text), 1) => Some(text),
+            (Some(text), n) => Some(format!("{n} notices · {text}")),
+            (None, _) => after,
+        };
+        if let Some(words) = words {
+            // Said as the island says anything, but not kept again.
+            self.message = Some((words, MESSAGE_SECONDS));
+        }
+    }
+
+    /// Time for StandBy and the lock: each follows where standby stands.
+    fn tick_lock_and_faces(&mut self, dt: f32, motion_dt: f32) -> bool {
+        use crate::standby::State;
+        let calm = self.settings.calm;
+        let state = self.standby.state();
+        // The screen has gone off, or StandBy has come: locked, if a passcode is set.
+        if matches!(state, State::Off | State::Faces) && !self.lock.engaged() && self.lock.armed() {
+            self.lock_now();
+        }
+        if state == State::Faces && !self.faces.showing() {
+            self.faces.show(&self.settings.lock, calm);
+            self.moving = true;
+        } else if state != State::Faces && self.faces.showing() {
+            self.leave_faces();
+        }
+        let reading = self.shown_reading();
+        let feed = crate::faces::Feed { reading: reading.as_ref(), h24: self.settings.clock24, notices: self.lock.notices(), generation: self.robot.schedule.generation() };
+        let (faces_moving, faces_changed) = self.faces.tick(dt, motion_dt, &feed, &self.settings.lock, calm);
+        let (lock_moving, lock_changed, unlocked) = self.lock.tick(dt, motion_dt, calm, self.settings.clock24);
+        if unlocked {
+            self.say_kept();
+            self.status.age = f32::MAX;
+        }
+        if !self.lock.visible() && !self.lock_scratch.is_empty() {
+            self.lock_scratch = Vec::new();
+        }
+        if faces_changed || lock_changed {
+            self.dirty = true;
+        }
+        faces_moving || lock_moving
+    }
+
+    /// What the lock screen shows besides the time, read every 20 s at most.
+    fn lock_info(&mut self) -> crate::lock::Info {
+        if self.lock_info.as_ref().is_none_or(|(_, at)| at.elapsed().as_secs() >= 20) {
+            let info = crate::lockpages::info_now(&self.robot, self.settings.clock24, self.shown_reading());
+            self.lock_info = Some((info, std::time::Instant::now()));
+        }
+        let mut info = self.lock_info.as_ref().map(|(i, _)| i.clone()).unwrap_or_default();
+        info.notices = self.lock.notices();
+        info.newest = self.lock.newest();
+        info
+    }
+
+    /// Frames no faster than this (milliseconds), if anything holds them back:
+    /// the battery saver, or StandBy (30 a second, on the charger).
+    pub fn frame_floor(&self) -> Option<f32> {
+        (self.settings.battery.saver || self.faces.showing()).then_some(crate::power::SAVER_FRAME_MS)
     }
 
     /// Lift to wake, and face down to sleep: the motion sensor watches at
@@ -2955,6 +3209,10 @@ impl Shell {
                 self.standby.wake_now();
                 // Over everything: Spotlight gives way at once.
                 self.spotlight.gone_now();
+                // Locked, the card is beneath the lock: the lock screen says it.
+                if self.lock.engaged() {
+                    self.lock.alert("battery empty · turning off");
+                }
                 let card = crate::power::Empty::new(self.settings.calm);
                 let card = if crate::power::postponed_floor(&self.care) { card.at_floor() } else { card };
                 self.open(Box::new(card), Path::Slide);
@@ -3024,6 +3282,10 @@ impl Shell {
             self.queue_age = 5.0;
             self.woke_for_alert = true;
         }
+        // Set on the charger: StandBy (and out of deep standby, which the
+        // shell notices as the screen being lit).
+        self.standby.set_faces(self.faces_wanted());
+        self.watch_charger();
     }
 
     /// The main loop's wait for a key in deep standby: a minute, or less
@@ -3066,7 +3328,13 @@ impl Shell {
                 }
             }
         }
-        self.message = Some((crate::reminders::island(&rang), REMINDER_SECONDS));
+        let said = crate::reminders::island(&rang);
+        // Locked (or StandBy shows): kept for the lock screen as a notice,
+        // and said again once it is unlocked, as anything else said is.
+        if self.lock.engaged() || self.faces.showing() {
+            self.lock.note(&said);
+        }
+        self.message = Some((said, REMINDER_SECONDS));
         self.lights.warning();
         crate::reminders::chime(&rang);
         self.dirty = true;
@@ -3087,8 +3355,13 @@ impl Shell {
             self.deep_step(step, false);
         }
         self.finish_waking();
-        // How long, and what it drew (the charge is at the top right).
-        self.say(slept.island());
+        // How long, and what it drew (the charge is at the top right); once
+        // unlocked, if it is locked (it is no notice for the lock screen).
+        if self.lock.engaged() {
+            self.after_unlock = Some(slept.island());
+        } else {
+            self.say(slept.island());
+        }
         // The clock and the battery at the top, read afresh for the first frame.
         self.status.age = f32::MAX;
         self.dirty = true;
@@ -3195,11 +3468,6 @@ impl Shell {
         self.standby.asleep()
     }
 
-    /// The battery saver is on: frames come at 30 a second.
-    pub fn saving(&self) -> bool {
-        self.settings.battery.saver
-    }
-
     /// Drawn over everything: a screenshot's flash, and (where there is no
     /// backlight to dim, as in the simulator) standby's dimming.
     fn draw_flash_and_standby(&mut self) {
@@ -3222,11 +3490,12 @@ impl Shell {
 // -------------------------------------------------------------- spotlight ---
 
 impl Shell {
-    /// Whether the handheld is locked: a lock screen anywhere on the stack,
-    /// or a lock drawn over the screens (`spotlight::set_locked`). Nothing
-    /// that reaches past it (Spotlight) opens while it is.
+    /// Whether the handheld is locked: the lock screen over everything (a
+    /// passcode set), a lock screen anywhere on the stack, or a lock drawn
+    /// over the screens (`spotlight::set_locked`). Nothing that reaches past
+    /// it (Spotlight) opens while it is.
     pub fn locked(&self) -> bool {
-        crate::spotlight::lock_held() || self.stack.iter().any(|(s, _)| s.locks())
+        self.lock.engaged() || crate::spotlight::lock_held() || self.stack.iter().any(|(s, _)| s.locks())
     }
 
     /// Bring Spotlight up over whatever is showing: not over a lock, nor a
@@ -4335,6 +4604,277 @@ pub(crate) mod tests {
             }
         }
         None
+    }
+
+    // ----------------------------------------------- StandBy and the lock ---
+
+    /// A shell with `code` as its passcode (kept for this test alone).
+    fn with_passcode(code: &str) -> Shell {
+        crate::passcode::test_store();
+        let (phc, _, _) = crate::passcode::make(code).unwrap();
+        crate::passcode::keep(&phc).unwrap();
+        shell()
+    }
+
+    /// Type a passcode and Enter, and wait for it to be checked.
+    fn type_code(shell: &mut Shell, code: &str) {
+        for c in code.chars() {
+            shell.key(Key::Char(c));
+        }
+        shell.key(Key::Enter);
+        // Up to 10 s: the check runs on its own thread, which a computer
+        // busy with other builds can be slow to get to.
+        for _ in 0..2000 {
+            frames(shell, 1, FRAME);
+            if !shell.lock.checking() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        frames(shell, 40, FRAME);
+    }
+
+    /// Seconds of ticks, one a second, until the screen is off and dark.
+    fn until_off(shell: &mut Shell, most: u32) -> Option<u32> {
+        (1..=most).find(|_| {
+            shell.tick(1.0);
+            shell.draw();
+            shell.panel_off()
+        })
+    }
+
+    #[test]
+    fn on_the_charger_standby_comes_where_the_screen_would_go_off_and_deep_standby_never_begins() {
+        use crate::standby::State;
+        let mut shell = shell();
+        shell.settings.screen_off = 30;
+        shell.settings.battery.deep_after = 10;
+        shell.pretend_charger(Some(true));
+        // All night on the charger: StandBy, never dark, never deep.
+        assert_eq!(until_deep(&mut shell, 8 * 3600), None, "deep standby never begins on the charger");
+        assert_eq!(shell.standby_state(), State::Faces);
+        assert!(shell.faces_showing() && !shell.panel_off());
+        assert!(!shell.locked(), "no passcode: no lock");
+        // At rest it keeps no frame beat: a face is drawn when it changes.
+        frames(&mut shell, 4, 0.25);
+        assert!(!shell.animating(), "nothing moving at rest");
+        // ↓ turns to the next face (and is kept); it stays StandBy.
+        shell.key(Key::Down);
+        assert_eq!(shell.settings.lock.face, crate::lock::Face::Charge);
+        assert!(shell.animating(), "the page turn runs on the frame beat");
+        assert_eq!(shell.frame_floor(), Some(crate::power::SAVER_FRAME_MS), "at most 30 frames a second");
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(shell.standby_state(), State::Faces);
+        // Any other key leaves it, and is spent doing so: Home, as it was.
+        shell.key(Key::Enter);
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(shell.standby_state(), State::Awake);
+        assert!(!shell.faces_showing());
+        assert_eq!(shell.stack.len(), 1, "the Enter that left StandBy opened nothing");
+        // StandBy switched off: the screen goes off on the charger as ever.
+        shell.settings.lock.standby = false;
+        assert!(until_off(&mut shell, 60).is_some());
+        assert!(!shell.faces_showing());
+    }
+
+    #[test]
+    fn off_the_charger_standby_goes_dark_and_deep_standby_keeps_its_wait() {
+        use crate::standby::State;
+        let mut shell = shell();
+        shell.settings.screen_off = 30;
+        shell.settings.battery.deep_after = 10;
+        shell.pretend_charger(Some(true));
+        for _ in 0..3 * 3600 {
+            shell.tick(1.0);
+        }
+        assert_eq!(shell.standby_state(), State::Faces);
+        // Off the charger: dark, as the screen would have gone without it.
+        shell.pretend_charger(Some(false));
+        frames(&mut shell, 8, 0.25);
+        assert_eq!(shell.standby_state(), State::Off);
+        assert!(!shell.faces_showing());
+        // Deep standby follows its own wait from there, not from the last
+        // key hours ago: ten minutes less the half minute the screen took.
+        let at = until_deep(&mut shell, 900).expect("deep standby");
+        assert!((560..=585).contains(&at), "deep {at} s after leaving the charger");
+    }
+
+    #[test]
+    fn set_down_on_the_charger_with_the_screen_off_standby_comes_at_once() {
+        use crate::standby::State;
+        let mut shell = shell();
+        shell.settings.screen_off = 30;
+        shell.pretend_charger(Some(false));
+        until_off(&mut shell, 60).expect("the screen goes off on battery");
+        frames(&mut shell, 4, 0.25);
+        shell.pretend_charger(Some(true));
+        frames(&mut shell, 2, 0.25);
+        assert_eq!(shell.standby_state(), State::Faces, "on the charger: StandBy, lit");
+        assert!(shell.faces_showing() && !shell.panel_off());
+        // In use, the charger changes nothing until it is left alone.
+        shell.key(Key::Enter);
+        frames(&mut shell, 20, FRAME);
+        shell.pretend_charger(Some(false));
+        frames(&mut shell, 2, 0.25);
+        shell.pretend_charger(Some(true));
+        frames(&mut shell, 8, 0.25);
+        assert_eq!(shell.standby_state(), State::Awake);
+        // From deep standby, at its next look (a minute at most).
+        shell.pretend_charger(Some(false));
+        shell.settings.battery.deep_after = 10;
+        until_deep(&mut shell, 700).expect("deep standby");
+        shell.pretend_charger(Some(true));
+        shell.tick(60.0);
+        assert!(!shell.deep_asleep(), "out of deep standby");
+        frames(&mut shell, 4, 0.25);
+        assert_eq!(shell.standby_state(), State::Faces);
+    }
+
+    #[test]
+    fn with_no_passcode_a_key_wakes_it_straight_to_where_it_was() {
+        let mut shell = shell();
+        shell.settings.screen_off = 30;
+        open_app(&mut shell, "Robot", "Settings");
+        let depth = shell.stack.len();
+        until_off(&mut shell, 60).expect("the screen goes off");
+        assert!(!shell.locked() && !shell.lock.visible());
+        shell.key(Key::Char(' '));
+        frames(&mut shell, 30, FRAME);
+        assert_eq!((shell.stack.len(), shell.top_title()), (depth, "Settings"), "straight back, no lock screen");
+    }
+
+    #[test]
+    fn with_a_passcode_it_starts_locked_and_locks_when_the_screen_goes_off() {
+        let mut shell = with_passcode("2468");
+        assert!(shell.locked(), "a restart is no way in");
+        // The wrong one: still locked, the field shaken and emptied.
+        type_code(&mut shell, "1357");
+        assert!(shell.locked());
+        assert!(shell.lock.field.is_empty());
+        // The right one: open, at Home as it was.
+        type_code(&mut shell, "2468");
+        assert!(!shell.locked());
+        frames(&mut shell, 60, FRAME);
+        assert!(!shell.lock.visible(), "the lock screen has gone");
+        open_app(&mut shell, "Robot", "Settings");
+        // The screen dims first: a key then is only a key.
+        shell.settings.screen_off = 30;
+        for _ in 0..24 {
+            shell.tick(1.0);
+        }
+        assert_eq!(shell.standby_state(), crate::standby::State::Dim);
+        assert!(!shell.locked(), "dimmed is not off");
+        shell.key(Key::Char(' '));
+        frames(&mut shell, 20, FRAME);
+        assert!(!shell.locked());
+        // Off: locked. The waking key is spent; the next ones are the passcode's.
+        until_off(&mut shell, 60).expect("the screen goes off");
+        assert!(shell.locked());
+        shell.key(Key::Enter);
+        frames(&mut shell, 20, FRAME);
+        assert!(shell.lock.covers(), "the lock screen, over everything");
+        assert_eq!(shell.top_title(), "Settings", "where it was, beneath");
+        type_code(&mut shell, "2468");
+        assert!(!shell.locked());
+        assert_eq!(shell.top_title(), "Settings");
+    }
+
+    #[test]
+    fn the_lock_cannot_be_got_round_from_any_key() {
+        let mut shell = with_passcode("hunter2");
+        type_code(&mut shell, "hunter2");
+        open_app(&mut shell, "Robot", "Settings");
+        shell.settings.developer = true;
+        shell.settings.show_keys = true;
+        shell.settings.screen_off = 30;
+        until_off(&mut shell, 60).expect("the screen goes off");
+        shell.key(Key::Char(' '));
+        let depth = shell.stack.len();
+        let mut keys = vec![
+            Key::Ctrl('\t'), Key::Ctrl(' '), Key::Ctrl('q'), Key::Ctrl('c'), Key::Ctrl('k'), Key::Ctrl('f'),
+            Key::Leave, Key::Back, Key::Tab, Key::Home, Key::End, Key::PageUp, Key::PageDown, Key::Delete,
+            Key::Up, Key::Down, Key::Left, Key::Right, Key::BrightnessUp, Key::BrightnessDown,
+            Key::Char('/'), Key::Char('?'), Key::Char('`'), Key::Enter, Key::Ctrl('\n'),
+        ];
+        keys.extend((1..=12).map(Key::F));
+        for key in keys {
+            shell.key(key);
+            frames(&mut shell, 3, FRAME);
+            assert!(shell.locked(), "{key:?} got round the lock");
+            assert!(!shell.recents_open() && !shell.control_open(), "{key:?} opened something over the lock");
+            assert!(!shell.spotlight_open() && !shell.spotlight.visible(), "{key:?} brought Spotlight up over the lock");
+            assert!(shell.tour.is_none() && shell.echo.is_empty(), "{key:?}");
+            assert_eq!(shell.stack.len(), depth, "{key:?} reached the screen beneath");
+            assert!(shell.take_launch().is_none());
+        }
+        // `?` held five seconds (the shortcut list) is only typing.
+        for _ in 0..60 {
+            shell.key(Key::Char('?'));
+            frames(&mut shell, 6, FRAME);
+        }
+        assert!(shell.locked() && shell.stack.len() == depth);
+        // A robot linking, a match to queue for, the battery: still locked.
+        shell.say("time to queue for Q31");
+        frames(&mut shell, 10, 0.25);
+        assert!(shell.locked());
+        assert_eq!(shell.lock.notices(), 1, "kept for the lock screen");
+        // Typing it, with every wrong key first cleared by Esc: open.
+        shell.key(Key::Back);
+        type_code(&mut shell, "hunter2");
+        assert!(!shell.locked());
+        assert_eq!(shell.message.as_ref().map(|(m, _)| m.as_str()), Some("time to queue for Q31"), "said once unlocked");
+        assert_eq!(shell.lock.notices(), 0);
+    }
+
+    #[test]
+    fn wrong_tries_bring_a_wait_that_even_the_right_one_cannot_skip() {
+        let mut shell = with_passcode("2468");
+        for wrong in ["0000", "1111", "2222", "3333"] {
+            type_code(&mut shell, wrong);
+            assert_eq!(shell.lock.wait(), 0, "{wrong}: no wait yet");
+        }
+        type_code(&mut shell, "4444");
+        assert_eq!(shell.lock.wait(), 30, "the fifth wrong one: half a minute");
+        // During the wait no try is taken, the right one included.
+        type_code(&mut shell, "2468");
+        assert!(shell.locked() && !shell.lock.checking());
+        // A restart keeps the wait.
+        let again = Shell::new(Robot::demo());
+        assert!(again.locked() && again.lock.wait() > 25);
+    }
+
+    #[test]
+    fn standby_with_a_passcode_leaves_to_the_lock_screen() {
+        let mut shell = with_passcode("2468");
+        type_code(&mut shell, "2468");
+        shell.settings.screen_off = 30;
+        shell.pretend_charger(Some(true));
+        for _ in 0..120 {
+            shell.tick(1.0);
+            shell.draw();
+        }
+        assert!(shell.faces_showing());
+        assert!(shell.locked(), "StandBy stands in for the screen going off");
+        // The arrows turn faces; nothing else is reached.
+        shell.key(Key::Down);
+        assert!(shell.faces_showing() && shell.locked());
+        // Leaving StandBy: the lock screen, not the screen it was on.
+        shell.key(Key::Enter);
+        frames(&mut shell, 60, FRAME);
+        assert!(!shell.faces_showing() && shell.lock.covers());
+        type_code(&mut shell, "2468");
+        assert!(!shell.locked());
+    }
+
+    #[test]
+    fn a_passcode_taken_off_over_ssh_leaves_no_lock_with_no_way_in() {
+        let mut shell = with_passcode("2468");
+        assert!(shell.locked());
+        std::fs::remove_file(crate::passcode::file()).unwrap();
+        shell.key(Key::Char('1'));
+        shell.key(Key::Enter);
+        frames(&mut shell, 20, FRAME);
+        assert!(!shell.locked());
     }
 
     #[test]

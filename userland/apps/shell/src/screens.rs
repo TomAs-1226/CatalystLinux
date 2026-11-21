@@ -2017,6 +2017,10 @@ enum Item {
     TearFree,
     /// Settings › Battery: a page of its own (power.rs).
     BatterySection,
+    /// Settings › Lock screen and Settings › StandBy: pages of their own
+    /// (lockpages.rs).
+    LockSection,
+    StandBySection,
     /// Settings › On-device model: a page of its own (local.rs).
     OnDeviceModel,
     /// Setup's page offered to a computer, outside first start.
@@ -2148,7 +2152,7 @@ fn glance_items(order: &[Widget]) -> Vec<Item> {
 
 /// Where everything in Settings is, for search: what it is called, the
 /// section it is in, and its place there (none: the section itself).
-const SETTING_PLACES: [(&str, Item, Option<usize>); 63] = [
+const SETTING_PLACES: [(&str, Item, Option<usize>); 69] = [
     ("Robot settings", Item::RobotSection, None),
     ("Open Robot on link", Item::RobotSection, Some(0)),
     ("Match report after a match", Item::RobotSection, Some(1)),
@@ -2186,6 +2190,12 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 63] = [
     ("Red light", Item::BatterySection, Some(crate::power::DEEP_ROW + 1)),
     ("Lift to wake", Item::Display, Some(4)),
     ("Face down to sleep", Item::Display, Some(5)),
+    ("Lock screen", Item::LockSection, None),
+    ("Passcode", Item::LockSection, Some(0)),
+    ("Customise lock screen", Item::LockSection, Some(1)),
+    ("StandBy", Item::StandBySection, None),
+    ("StandBy on the charger", Item::StandBySection, Some(0)),
+    ("Night mode for StandBy", Item::StandBySection, Some(1)),
     ("Network", Item::Network, None),
     ("Wi-Fi networks", Item::Network, Some(0)),
     ("Tailscale", Item::Network, Some(1)),
@@ -2253,6 +2263,12 @@ pub fn open_setting(index: usize) -> Box<dyn Screen> {
     if section == Item::BatterySection {
         return Box::new(crate::power::BatteryPage::new().at(place.unwrap_or(0)));
     }
+    if section == Item::LockSection {
+        return Box::new(crate::lockpages::LockPage::new().at_place(place.unwrap_or(0)));
+    }
+    if section == Item::StandBySection {
+        return Box::new(crate::lockpages::StandByPage::new().at(place.unwrap_or(0)));
+    }
     if section == Item::OnDeviceModel {
         return Box::new(crate::local::ModelPage::new());
     }
@@ -2277,7 +2293,10 @@ fn keys_file() -> std::path::PathBuf {
 impl SettingsApp {
     pub fn new() -> Self {
         use Item::*;
-        Self::page("Settings", vec![RobotSection, Appearance, TextSection, HomeSection, Display, BatterySection, Network, NameSection, UsbSection, KeysSection, OnDeviceModel, Access, UpdateSection, Help, About, FromComputer])
+        Self::page(
+            "Settings",
+            vec![RobotSection, Appearance, TextSection, HomeSection, Display, LockSection, StandBySection, BatterySection, Network, NameSection, UsbSection, KeysSection, OnDeviceModel, Access, UpdateSection, Help, About, FromComputer],
+        )
     }
 
     /// Settings › Keys on its own, for the assistant to send someone to.
@@ -2436,6 +2455,8 @@ impl SettingsApp {
             }
             Undervolt => ("Lower voltage".into(), crate::power::undervolt_line(), crate::power::undervolt().on()),
             BatterySection => section("Battery", crate::power::summary()),
+            LockSection => section("Lock screen", (if crate::passcode::file().exists() { "passcode" } else { "no passcode" }).to_owned()),
+            StandBySection => section("StandBy", (if g.lock.standby { "on the charger" } else { "off" }).to_owned()),
             OnDeviceModel => section("On-device model", crate::local::summary()),
             Mode => ("Mode".into(), (if g.tokens.tone == bezel::Tone::Light { "light" } else { "dark" }).into(), true),
             AccentColor => ("Accent".into(), g.accent.name().into(), true),
@@ -2779,6 +2800,8 @@ impl Screen for SettingsApp {
             Key::Enter | Key::Right if item == Item::TakeTour => return Nav::Tour,
             Key::Enter | Key::Right if item == Item::KeyboardShortcuts => return Nav::Push(Box::new(crate::help::Shortcuts::new())),
             Key::Enter | Key::Right if item == Item::BatterySection => return Nav::Push(Box::new(crate::power::BatteryPage::new())),
+            Key::Enter | Key::Right if item == Item::LockSection => return Nav::Push(Box::new(crate::lockpages::LockPage::new())),
+            Key::Enter | Key::Right if item == Item::StandBySection => return Nav::Push(Box::new(crate::lockpages::StandByPage::new())),
             Key::Enter | Key::Right if item == Item::OnDeviceModel => return Nav::Push(Box::new(crate::local::ModelPage::new())),
             // Lower voltage, switched on: what it does, and a restart to try it.
             Key::Enter | Key::Right if item == Item::Undervolt && crate::power::undervolt().asks_to_try() => return Nav::Push(Box::new(crate::power::TryUndervolt::new())),

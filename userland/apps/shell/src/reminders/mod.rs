@@ -842,6 +842,12 @@ pub struct Upcoming {
     pub note: Option<String>,
 }
 
+/// StandBy's and the lock screen's slot (`upnext::set_reminders`): the
+/// reminder due, else the next with a time.
+pub fn next_for_upnext(_now: i64) -> Option<crate::upnext::Reminder> {
+    upcoming(1).into_iter().next().map(|u| crate::upnext::Reminder { title: u.text, due: u.at })
+}
+
 /// For the lock screen and StandBy: the next `limit` reminders not done
 /// that have a time, what is due first, then the soonest.
 #[allow(dead_code)]
