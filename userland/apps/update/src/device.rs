@@ -221,6 +221,20 @@ mod tests {
     }
 
     #[test]
+    fn the_developer_trials_lines_stay_through_an_update() {
+        // catalyst-power puts its blocks just above the system block, at run
+        // time on the handheld: an update moving between slots keeps them.
+        let board = "kernel=Image\ndtoverlay=cardputerzero-v5-overlay\n\n# catalyst-power: lower voltage (Settings > Developer options)\nover_voltage=-1\nover_voltage_min=-2\n# catalyst-power: end\n\n# catalyst-power: tear-free panel (Settings > Developer options)\ndtoverlay=cardputerzero-portrait\n# catalyst-power: end\n";
+        let first = set_slots(board, 0, 1);
+        let swapped = set_slots(&first, 1, 0);
+        for line in ["over_voltage=-1", "over_voltage_min=-2", "dtoverlay=cardputerzero-portrait"] {
+            assert_eq!(swapped.matches(line).count(), 1, "{line}");
+            // Above the slot block, so in force whichever system starts.
+            assert!(swapped.find(line) < swapped.find(SLOT_BLOCK), "{line}");
+        }
+    }
+
+    #[test]
     fn a_try_is_read_from_the_device_tree() {
         let dir = std::env::temp_dir().join(format!("catalyst-update-tryboot-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("proc")).unwrap();

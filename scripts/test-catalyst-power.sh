@@ -8,11 +8,21 @@ set -eu
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/boot" "$T/data"
+mkdir -p "$T/boot" "$T/data" "$T/bin"
+
+# The watchdog stood in for: a device file, and a "watchdog" that only waits.
+touch "$T/watchdog"
+printf '#!/bin/sh\nexec sleep 60\n' >"$T/bin/watchdog"
+chmod +x "$T/bin/watchdog"
+PATH="$T/bin:$PATH"
+export PATH
 
 # The script, pointed at the scratch folder, with mount and reboot stood in for.
 sed -e "s|^MNT=.*|MNT=$T/boot|" \
 	-e "s|/data/catalyst|$T/data|g" \
+	-e "s|^WATCHDOG_DEV=.*|WATCHDOG_DEV=$T/watchdog|" \
+	-e "s|^WATCHDOG_PID=.*|WATCHDOG_PID=$T/watchdog.pid|" \
+	-e "s|^TRYBOOT=.*|TRYBOOT=$T/tryboot|" \
 	-e 's|mount -t vfat -o rw "$BOOT_DEV" "$MNT" \|\| return 1|:|' \
 	-e 's|^\tumount "$MNT"|\t:|' \
 	-e 's|busybox reboot -f|echo REBOOT|' \
@@ -78,6 +88,39 @@ $P boot >/dev/null
 out=$($P panel revert)
 check "revert restarts" "$out" "REBOOT"
 check "revert takes the overlay out" "$(cmp -s "$T/boot/config.txt" "$T/original.txt" && echo same)" "same"
+
+echo "== lower voltage: tried at once, watched while tried"
+out=$($P undervolt try)
+check "try sets it and restarts" "$out:$(cat "$T/data/undervolt")" "REBOOT:trying 0"
+check "its lines are in" "$(grep -c '^over_voltage=-1$' "$T/boot/config.txt"):$(grep -c '^over_voltage_min=-2$' "$T/boot/config.txt")" "1:1"
+$P boot >/dev/null
+check "the start it is tried in" "$(cat "$T/data/undervolt")" "trying 1"
+dog=$(cat "$T/watchdog.pid" 2>/dev/null || true)
+check "the watchdog is fed while it is tried" "$([ -n "$dog" ] && kill -0 "$dog" 2>/dev/null && echo fed)" "fed"
+$P undervolt confirm
+check "kept after five minutes" "$(cat "$T/data/undervolt")" "on"
+check "and the watchdog stood down" "$([ -n "$dog" ] && kill -0 "$dog" 2>/dev/null && echo fed || echo down):$([ -e "$T/watchdog.pid" ] && echo left || echo gone)" "down:gone"
+$P undervolt off
+check "off: config.txt as it was" "$(cmp -s "$T/boot/config.txt" "$T/original.txt" && echo same)" "same"
+
+echo "== lower voltage that hangs: the next start undoes it"
+$P undervolt on
+$P boot >/dev/null
+out=$($P boot 2>/dev/null)
+check "a start finding it tried and never kept restarts" "$out" "REBOOT"
+check "without it" "$(cmp -s "$T/boot/config.txt" "$T/original.txt" && echo same):$(cat "$T/data/undervolt")" "same:failed"
+[ -s "$T/watchdog.pid" ] && kill "$(cat "$T/watchdog.pid")" 2>/dev/null
+rm -f "$T/data/undervolt" "$T/watchdog.pid"
+
+echo "== lower voltage tried on a start that is also an update's try"
+$P undervolt on
+printf '\000\000\000\001' >"$T/tryboot"
+$P boot >/dev/null
+check "tried all the same" "$(cat "$T/data/undervolt")" "trying 1"
+check "the watchdog is left to catalyst-update" "$([ -e "$T/watchdog.pid" ] && echo taken || echo left)" "left"
+printf '\000\000\000\000' >"$T/tryboot"
+$P undervolt off
+rm -f "$T/tryboot"
 
 echo "== both trials at once"
 $P panel on

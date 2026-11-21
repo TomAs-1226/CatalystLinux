@@ -1,26 +1,55 @@
 From: Catalyst Linux
-Subject: [PATCH] panel-mipi-dbi-m: the tearing-effect line, where the Device Tree gives one
+Subject: [PATCH] panel-mipi-dbi-m: flushes timed by the tearing-effect line, where the Device Tree gives one
 
 M5Stack's driver kept its TE code but compiled none of it. Switched on, and
-used only when the panel's node has `te-gpios`: SET_TEAR_ON (vertical blank
-only) as the panel is set up, and each flush waits for the line's rising
-edge (at most 50 ms) while the pipe is on. Without `te-gpios` nothing
-changes. Catalyst Linux's portrait overlay gives it, with an init sequence
-that drives the panel in its own scan direction: written from the top as
-the scan restarts, and faster than it, a frame never tears.
+used only when the panel's node has `te-gpios` (Catalyst Linux's portrait
+overlay, which also has the panel take rows in the order it scans them):
 
---- a/modules/st7789v-1.0/panel-mipi-dbi-m.c	2026-11-20 18:01:54.512106452 -0800
-+++ b/modules/st7789v-1.0/panel-mipi-dbi-m.c	2026-11-20 18:01:54.512106452 -0800
-@@ -9,6 +9,8 @@
+- SET_TEAR_ON (vertical blank) as the panel is set up, and the interrupt on
+  while the panel is on. Each rising edge only notes its time, which gives
+  the scan's phase and, between two, its speed.
+- Each flush starts where the scan will not cross its band of rows: just
+  behind the scan when writing is slower than it (this panel's case), ahead
+  of it when faster. How long a row takes to write is measured on the
+  flushes themselves.
+- The interrupt is disabled for real (IRQ_DISABLE_UNLAZY): the BCM2835 GPIO
+  chip has no irq_disable, so a lazy disable kept the edges that came while
+  "disabled" and replayed one the moment it was enabled again. That is why
+  the first version, which enabled the interrupt to wait for one edge per
+  flush, returned at once and still tore.
+- A line that never moves (three flushes with no edge) is given up on until
+  the panel is next switched on; flushes then go out as before.
+- /sys/.../tearing_effect says how it is doing, for the shell.
+
+Without `te-gpios` nothing changes.
+
+--- a/modules/st7789v-1.0/panel-mipi-dbi-m.c	2026-11-20 19:34:47.928251300 -0800
++++ b/modules/st7789v-1.0/panel-mipi-dbi-m.c	2026-11-20 19:34:47.935759500 -0800
+@@ -9,16 +9,23 @@
  #include <linux/delay.h>
  #include <linux/firmware.h>
  #include <linux/gpio/consumer.h>
 +#include <linux/interrupt.h>
-+#include <linux/completion.h>
++#include <linux/irq.h>
++#include <linux/ktime.h>
++#include <linux/math64.h>
  #include <linux/module.h>
  #include <linux/of.h>
  #include <linux/property.h>
-@@ -30,15 +32,13 @@
+ #include <linux/regulator/consumer.h>
+ #include <linux/spi/spi.h>
++#include <linux/wait.h>
+ 
+ #include <drm/clients/drm_client_setup.h>
+ #include <drm/drm_atomic_helper.h>
++#include <drm/drm_damage_helper.h>
+ #include <drm/drm_drv.h>
+ #include <drm/drm_fbdev_dma.h>
++#include <drm/drm_framebuffer.h>
+ #include <drm/drm_gem_atomic_helper.h>
+ #include <drm/drm_gem_dma_helper.h>
+ #include <drm/drm_managed.h>
+@@ -30,15 +37,50 @@
  
  
  /*
@@ -28,7 +57,36 @@ the scan restarts, and faster than it, a frame never tears.
 - * so TE can be enabled again when the panel wiring and timing are verified.
 + * Catalyst Linux: the tearing-effect line, used where the Device Tree gives
 + * `te-gpios` (and not otherwise, so the driver is as it was without it).
-+ * SET_TEAR_ON's parameter 0: the line is high in the vertical blank only.
++ * Only Catalyst Linux's portrait overlay gives it, with an init sequence
++ * that has the panel take rows in the order it scans them (MADCTL 0x00).
++ *
++ * SET_TEAR_ON's parameter 0: the line rises as the scan leaves the last row
++ * and stays high through the vertical blank (the porches), after which the
++ * scan starts again at row 0. Its rising edges give the scan's phase, and the
++ * time between them its speed. The interrupt is on while the panel is, and
++ * each edge only notes the time.
++ *
++ * A band of rows written in the scan's direction cannot tear unless the scan
++ * crosses it while it is being written. So each flush is started where it
++ * will not be crossed:
++ *
++ * - Writing slower than the scan (this panel: SPI at about 42 to 50 MHz is
++ *   54 to 65 us a row, the scan 49 us a row at 60 Hz), the band follows the
++ *   scan: it starts just after the scan has passed its first row. This
++ *   refresh shows the old rows, the next the new ones whole, provided the
++ *   band is done before the scan comes round again behind it: (rows x the
++ *   difference in row time) under a period, at most 5 ms of 16.7 here, so
++ *   most of the time a flush can go at once.
++ * - Writing faster than the scan, it leads: it starts while the scan is above
++ *   the band, or once the scan has gone past it.
++ *
++ * How long a row takes to write is measured on the flushes themselves.
++ *
++ * (Before, each flush enabled the interrupt, waited for an edge, and
++ * disabled it again. The BCM2835's GPIO interrupts have no disable of their
++ * own, so the kernel disabled them lazily: an edge while "disabled" was kept
++ * pending and replayed as soon as the interrupt was enabled. The wait
++ * returned at once, at any point in the scan, and frames still tore.)
   */
 -#if 0
 -#ifndef MIPI_DCS_SET_TEAR_ON
@@ -37,12 +95,20 @@ the scan restarts, and faster than it, a frame never tears.
 -#define MIPI_DCS_TEAR_MODE_VBLANK	0x00
 -#endif
 +#define CATALYST_TEAR_MODE_VBLANK	0x00
-+/* How long a flush waits for the panel's blank before going ahead anyway. */
++/* Rows the panel scans in each refresh besides the picture's: PORCTRL's 5 + 5. */
++#define CATALYST_PORCH_ROWS		10
++/* Rows kept between a band and the scan: the interrupt's and the commands' lateness. */
++#define CATALYST_MARGIN_ROWS		6
++/* How long a flush waits for an edge to time itself from before going anyway. */
 +#define CATALYST_TE_WAIT_MS		50
++/* Flushes in a row that saw no edge before the line is taken to be silent. */
++#define CATALYST_TE_GIVE_UP		3
++/* Bands smaller than this are mostly the commands' own time: not measured. */
++#define CATALYST_MEASURE_PIXELS		4096
  
  
  struct panel_mipi_dbi_format {
-@@ -57,11 +57,14 @@
+@@ -57,11 +99,21 @@
      struct mipi_dbi_dev dbidev;
  
      /*
@@ -51,17 +117,24 @@ the scan restarts, and faster than it, a frame never tears.
 -     * int te_irq;
 -     * struct completion te_completion;
 +     * Catalyst Linux: the panel's tearing-effect line, when the Device Tree
-+     * gives one. Each flush waits for its vertical blank, so a frame is
-+     * written from the top as the panel's scan starts again there, and (in
-+     * the scan's own direction, faster than the scan) stays ahead of it.
++     * gives one (see above).
       */
 +    struct gpio_desc *te;
 +    int te_irq;
-+    struct completion te_completion;
++    bool te_on;			/* its interrupt is on (the panel is on) */
++    bool te_silent;		/* no edges came: flushes no longer wait */
++    unsigned int te_missed;	/* flushes in a row that saw no edge */
++    wait_queue_head_t te_wait;
++    spinlock_t te_lock;		/* the three below, written by the interrupt */
++    u64 te_edges;		/* rising edges seen since the interrupt went on */
++    ktime_t te_last;		/* the latest */
++    s64 te_period_ns;		/* time between two, smoothed; 0 until known */
++    u64 write_ps;		/* time a flush takes a pixel, smoothed; 0 until known */
++    unsigned int te_followed, te_led, te_unsynced;	/* flushes, by how they went */
      struct mutex display_lock;		/* Serialize reset and display transfers */
  };
  
-@@ -277,12 +280,10 @@
+@@ -277,12 +329,10 @@
  
      panel_mipi_dbi_commands_execute(dbi, dbidev->driver_private);
  
@@ -76,7 +149,58 @@ the scan restarts, and faster than it, a frame never tears.
  
      if (dbidev->regulator)
          regulator_disable(dbidev->regulator);
-@@ -337,11 +338,6 @@
+@@ -328,8 +378,50 @@
+ 
+ static DEVICE_ATTR(reset, 0200, NULL, panel_mipi_dbi_reset_store);
+ 
++/*
++ * Catalyst Linux: how the tearing-effect line is doing, for the shell
++ * (Settings > Developer options > Tear-free panel):
++ * "state=none|off|starting|in-step|silent period_ns=... write_ps=...
++ * followed=... led=... unsynced=...".
++ */
++static ssize_t tearing_effect_show(struct device *dev,
++                   struct device_attribute *attr, char *buf)
++{
++    struct drm_device *drm = spi_get_drvdata(to_spi_device(dev));
++    struct panel_mipi_dbi_device *panel;
++    const char *state;
++    unsigned long flags;
++    s64 period;
++
++    if (!drm)
++        return -ENODEV;
++    panel = to_panel_mipi_dbi_device(drm_to_mipi_dbi_dev(drm));
++    if (!panel->te)
++        return sysfs_emit(buf, "state=none\n");
++
++    spin_lock_irqsave(&panel->te_lock, flags);
++    period = panel->te_period_ns;
++    spin_unlock_irqrestore(&panel->te_lock, flags);
++
++    if (panel->te_silent)
++        state = "silent";
++    else if (!panel->te_on)
++        state = "off";
++    else if (!period)
++        state = "starting";
++    else
++        state = "in-step";
++
++    return sysfs_emit(buf, "state=%s period_ns=%lld write_ps=%llu followed=%u led=%u unsynced=%u\n",
++              state, period, panel->write_ps, panel->te_followed,
++              panel->te_led, panel->te_unsynced);
++}
++
++static DEVICE_ATTR_RO(tearing_effect);
++
+ static struct attribute *panel_mipi_dbi_attrs[] = {
+     &dev_attr_reset.attr,
++    &dev_attr_tearing_effect.attr,
+     NULL,
+ };
+ 
+@@ -337,40 +429,147 @@
      .attrs = panel_mipi_dbi_attrs,
  };
  
@@ -85,50 +209,215 @@ the scan restarts, and faster than it, a frame never tears.
 - * logic here for possible later re-enablement when TE timing is verified.
 - */
 -#if 0
- /* TE interrupt handler: wake waiters when a TE signal arrives */
+-/* TE interrupt handler: wake waiters when a TE signal arrives */
++/* Catalyst Linux: a rising edge of the tearing-effect line. Its time is noted. */
  static irqreturn_t panel_mipi_dbi_te_isr(int irq, void *data)
  {
-@@ -364,13 +360,12 @@
-     enable_irq(panel->te_irq);
+     struct panel_mipi_dbi_device *panel = data;
++    ktime_t now = ktime_get();
++    unsigned long flags;
  
-     if (!wait_for_completion_timeout(&panel->te_completion,
+-    complete(&panel->te_completion);
++    spin_lock_irqsave(&panel->te_lock, flags);
++    if (panel->te_edges) {
++        s64 period = ktime_to_ns(ktime_sub(now, panel->te_last));
++
++        /* 25 to 100 refreshes a second; anything else is an edge missed. */
++        if (period >= 10 * NSEC_PER_MSEC && period <= 40 * NSEC_PER_MSEC)
++            panel->te_period_ns = panel->te_period_ns ?
++                (panel->te_period_ns * 7 + period) / 8 : period;
++    }
++    panel->te_last = now;
++    panel->te_edges++;
++    spin_unlock_irqrestore(&panel->te_lock, flags);
++
++    wake_up_all(&panel->te_wait);
+ 
+     return IRQ_HANDLED;
+ }
+ 
+-/* Wait for the panel TE sync signal before flushing */
+-static void panel_mipi_dbi_wait_for_te(struct panel_mipi_dbi_device *panel)
++/*
++ * The interrupt on while the panel is on, off while it sleeps. Off is off at
++ * once (IRQ_DISABLE_UNLAZY, set at probe), so no stale edge is kept.
++ */
++static void panel_mipi_dbi_te_switch(struct panel_mipi_dbi_device *panel, bool on)
+ {
+-    if (!panel->te)
++    unsigned long flags;
++
++    if (!panel->te || panel->te_on == on)
++        return;
++
++    if (on) {
++        spin_lock_irqsave(&panel->te_lock, flags);
++        panel->te_edges = 0;	/* the period is kept: it is the panel's */
++        spin_unlock_irqrestore(&panel->te_lock, flags);
++        /* Woken again: a line silent before is given another chance. */
++        panel->te_silent = false;
++        panel->te_missed = 0;
++        enable_irq(panel->te_irq);
++    } else {
++        disable_irq(panel->te_irq);
++    }
++    panel->te_on = on;
++}
++
++/*
++ * Wait until rows y0..y1 (as wide as `width`) of a picture `rows` tall can
++ * be written without the scan crossing them (see the top of the file).
++ */
++static void panel_mipi_dbi_wait_for_te(struct panel_mipi_dbi_device *panel,
++                       const struct drm_rect *band, unsigned int rows)
++{
++    s64 y0 = band->y1, y1 = band->y2, period, scan, write, phase, wait = 0;
++    unsigned long flags;
++    ktime_t last, now;
++    u64 edges;
++    s32 rem;
++    int tries;
++
++    if (!panel->te || !panel->te_on || panel->te_silent)
+         return;
+ 
+-    reinit_completion(&panel->te_completion);
++    /* A recent edge to time from, and the time between two. */
++    for (tries = 0; ; tries++) {
++        spin_lock_irqsave(&panel->te_lock, flags);
++        edges = panel->te_edges;
++        last = panel->te_last;
++        period = panel->te_period_ns;
++        spin_unlock_irqrestore(&panel->te_lock, flags);
++        now = ktime_get();
++        if (edges && period && ktime_to_ns(ktime_sub(now, last)) < 2 * period)
++            break;
++        if (tries == 2) {
++            panel->te_unsynced++;
++            return;
++        }
++        if (!wait_event_timeout(panel->te_wait, READ_ONCE(panel->te_edges) != edges,
++                    msecs_to_jiffies(CATALYST_TE_WAIT_MS))) {
++            panel->te_unsynced++;
++            if (++panel->te_missed >= CATALYST_TE_GIVE_UP) {
++                panel->te_silent = true;
++                dev_warn(panel->dbidev.drm.dev,
++                     "no tearing-effect signal: flushes go out without waiting for it\n");
++            }
++            return;
++        }
++        panel->te_missed = 0;
++    }
++
++    scan = div_s64(period, rows + CATALYST_PORCH_ROWS);
++    write = div_u64((u64)drm_rect_width(band) * panel->write_ps, 1000);
++    div_s64_rem(ktime_to_ns(ktime_sub(now, last)), (s32)period, &rem);
++    phase = rem;	/* since the latest edge, in this refresh */
++
++    if (!write || write >= scan) {
++        /* Follow: start once the scan has passed the first row... */
++        s64 start = (CATALYST_PORCH_ROWS + y0 + CATALYST_MARGIN_ROWS) * scan;
++        /* ...and soon enough to be done before it comes round again. */
++        s64 slack = period - (y1 - y0) * (write > scan ? write - scan : 0)
++            - 2 * CATALYST_MARGIN_ROWS * scan;
++        s64 late = phase - start;
+ 
+-    /* Enable the IRQ only while waiting; keep it disabled otherwise to save power */
+-    enable_irq(panel->te_irq);
++        if (late < 0)
++            late += period;
++        if (late > max_t(s64, slack, 0))
++            wait = period - late;
++        panel->te_followed++;
++    } else {
++        /* Lead: start while the scan is above the band, or once it is past. */
++        s64 above = (CATALYST_PORCH_ROWS + y0 - CATALYST_MARGIN_ROWS) * scan;
++        s64 past = (CATALYST_PORCH_ROWS + y1 + CATALYST_MARGIN_ROWS) * scan;
+ 
+-    if (!wait_for_completion_timeout(&panel->te_completion,
 -                     msecs_to_jiffies(100)))
-+                     msecs_to_jiffies(CATALYST_TE_WAIT_MS)))
-         dev_warn_once(panel->dbidev.drm.dev,
-                   "Timeout waiting for TE signal\n");
+-        dev_warn_once(panel->dbidev.drm.dev,
+-                  "Timeout waiting for TE signal\n");
++        if (phase >= above && phase <= past)
++            wait = min(past, period) - phase;
++        panel->te_led++;
++    }
++
++    if (wait > 0) {
++        u64 us = div_u64(wait, NSEC_PER_USEC);
  
-     disable_irq(panel->te_irq);
+-    disable_irq(panel->te_irq);
++        usleep_range(us, us + 50);
++    }
++}
++
++/* Catalyst Linux: how long a flush took a pixel, for timing the next. */
++static void panel_mipi_dbi_note_write(struct panel_mipi_dbi_device *panel,
++                      const struct drm_rect *band, ktime_t took)
++{
++    u64 pixels = (u64)drm_rect_width(band) * drm_rect_height(band);
++    u64 ps;
++
++    if (pixels < CATALYST_MEASURE_PIXELS)
++        return;
++    ps = div64_u64((u64)ktime_to_ns(took) * 1000, pixels);
++    panel->write_ps = panel->write_ps ? (panel->write_ps * 3 + ps) / 4 : ps;
  }
 -#endif
  
  static void panel_mipi_dbi_enable(struct drm_simple_display_pipe *pipe,
                    struct drm_crtc_state *crtc_state,
-@@ -394,12 +389,10 @@
+@@ -394,12 +593,12 @@
      if (!ret)
          panel_mipi_dbi_commands_execute(dbi, dbidev->driver_private);
  
 -    /* TE support is intentionally disabled; re-enable this with TE support. */
 -    /*
+-    if (panel->te)
 +    /* Catalyst Linux: the tearing-effect line on, where there is one. */
-     if (panel->te)
++    if (panel->te) {
          mipi_dbi_command(dbi, MIPI_DCS_SET_TEAR_ON,
 -                 MIPI_DCS_TEAR_MODE_VBLANK);
 -    */
 +                 CATALYST_TEAR_MODE_VBLANK);
++        panel_mipi_dbi_te_switch(panel, true);
++    }
  
      mipi_dbi_enable_flush(dbidev, crtc_state, plane_state);
  out_exit:
-@@ -415,6 +408,9 @@
+@@ -413,9 +612,22 @@
+ {
+     struct mipi_dbi_dev *dbidev = drm_to_mipi_dbi_dev(pipe->crtc.dev);
      struct panel_mipi_dbi_device *panel = to_panel_mipi_dbi_device(dbidev);
++    struct drm_plane_state *state = pipe->plane.state;
++    struct drm_rect band;
++    bool timed = false;
++    ktime_t start;
  
      mutex_lock(&panel->display_lock);
-+    /* Catalyst Linux: in step with the panel's refresh, where it says when. */
-+    if (panel->te && pipe->crtc.state && pipe->crtc.state->active)
-+        panel_mipi_dbi_wait_for_te(panel);
++    /* Catalyst Linux: in step with the panel's scan, where it says where that is. */
++    if (panel->te && pipe->crtc.state && pipe->crtc.state->active && state->fb &&
++        drm_atomic_helper_damage_merged(old_state, state, &band)) {
++        panel_mipi_dbi_wait_for_te(panel, &band, state->fb->height);
++        timed = true;
++    }
++    start = ktime_get();
      mipi_dbi_pipe_update(pipe, old_state);
++    if (timed)
++        panel_mipi_dbi_note_write(panel, &band, ktime_sub(ktime_get(), start));
      mutex_unlock(&panel->display_lock);
  }
-@@ -553,11 +549,6 @@
+ 
+@@ -426,6 +638,8 @@
+ 
+     mutex_lock(&panel->display_lock);
+     mipi_dbi_pipe_disable(pipe);
++    /* Catalyst Linux: no tearing-effect interrupts while the panel sleeps. */
++    panel_mipi_dbi_te_switch(panel, false);
+     /*
+      * Catalyst Linux: blanked, the panel sleeps (microamps rather than
+      * milliamps). Enabling it again runs the whole init sequence, which
+@@ -553,18 +767,14 @@
      if (device_property_present(dev, "write-only"))
          dbi->read_commands = NULL;
  
@@ -140,7 +429,31 @@ the scan restarts, and faster than it, a frame never tears.
      /* Get the optional TE pin and request its IRQ */
      panel->te = devm_gpiod_get_optional(dev, "te", GPIOD_IN);
      if (IS_ERR(panel->te))
-@@ -581,7 +572,6 @@
+         return dev_err_probe(dev, PTR_ERR(panel->te), "Failed to get GPIO 'te'\n");
+ 
+     if (panel->te) {
+-        init_completion(&panel->te_completion);
++        init_waitqueue_head(&panel->te_wait);
++        spin_lock_init(&panel->te_lock);
+ 
+         panel->te_irq = gpiod_to_irq(panel->te);
+         if (panel->te_irq < 0)
+@@ -572,16 +782,19 @@
+                          "Failed to get TE irq\n");
+ 
+         /*
+-         * Use IRQF_NO_AUTOEN so the IRQ stays disabled after it is requested,
+-         * and enable it only when wait_for_te() needs it.
++         * Catalyst Linux: off until the panel is on (IRQF_NO_AUTOEN), and
++         * off for real when it is switched off. The BCM2835's GPIO
++         * interrupts have no disable of their own, so without
++         * IRQ_DISABLE_UNLAZY an edge while "disabled" is kept and replayed
++         * the moment the interrupt is enabled again.
+          */
++        irq_set_status_flags(panel->te_irq, IRQ_DISABLE_UNLAZY);
+         ret = devm_request_irq(dev, panel->te_irq, panel_mipi_dbi_te_isr,
+                        IRQF_TRIGGER_RISING | IRQF_NO_AUTOEN,
+                        dev_name(dev), panel);
          if (ret)
              return dev_err_probe(dev, ret, "Failed to request TE irq\n");
      }

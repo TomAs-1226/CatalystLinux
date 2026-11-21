@@ -404,7 +404,9 @@ pub enum Undervolt {
     /// Not on the handheld.
     Unavailable,
     Off,
-    /// Set; tried at the next start, kept once it holds.
+    /// Set, and not yet started with (a restart that did not happen).
+    Pending,
+    /// This start is the one it is tried in; kept once it has held.
     Trying,
     On,
     /// Tried, and the system did not stay up: taken out again.
@@ -415,7 +417,12 @@ pub fn undervolt() -> Undervolt {
     if !Path::new(SCRIPT).exists() {
         return Undervolt::Unavailable;
     }
-    match std::fs::read_to_string(UNDERVOLT_STATE).unwrap_or_default().trim() {
+    state_of(&std::fs::read_to_string(UNDERVOLT_STATE).unwrap_or_default())
+}
+
+fn state_of(text: &str) -> Undervolt {
+    match text.trim() {
+        "trying 0" => Undervolt::Pending,
         s if s.starts_with("trying") => Undervolt::Trying,
         "on" => Undervolt::On,
         "failed" => Undervolt::Failed,
@@ -424,18 +431,127 @@ pub fn undervolt() -> Undervolt {
 }
 
 impl Undervolt {
-    pub fn name(self) -> &'static str {
-        match self {
-            Undervolt::Unavailable => "on the handheld",
-            Undervolt::Off => "off",
-            Undervolt::Trying => "after a restart",
-            Undervolt::On => "on · −25 mV",
-            Undervolt::Failed => "did not hold",
+    /// Set, or on its way to being.
+    pub fn on(self) -> bool {
+        matches!(self, Undervolt::Pending | Undervolt::Trying | Undervolt::On)
+    }
+
+    /// Enter on it asks to restart and try it (rather than switching it off).
+    pub fn asks_to_try(self) -> bool {
+        matches!(self, Undervolt::Off | Undervolt::Failed | Undervolt::Pending)
+    }
+}
+
+/// The processor core's voltage as the firmware has it, in volts: its
+/// ceiling at full speed (what over_voltage sets), its floor when idle
+/// (over_voltage_min), and now.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct CoreVolts {
+    pub max: f32,
+    pub min: f32,
+    pub now: f32,
+}
+
+/// The ceiling the firmware gives the core without the lower voltage, as
+/// read on a start without it; kept to tell whether the lower one took.
+const STOCK_VOLTS: &str = "/data/catalyst/voltage-stock";
+/// The firmware's own ceiling where none was read: 1.2 V, over_voltage 0.
+const NOMINAL_VOLTS: f32 = 1.2;
+
+/// A voltage from the firmware's mailbox: microvolts from current firmware;
+/// older firmware gave steps of 25 mV from 1.2 V.
+#[cfg_attr(not(all(target_os = "linux", target_arch = "aarch64")), allow(dead_code))]
+fn mailbox_volts(raw: u32) -> Option<f32> {
+    match raw {
+        500_000..=2_000_000 => Some(raw as f32 / 1e6),
+        _ => {
+            let steps = raw as i32;
+            (-16..=16).contains(&steps).then(|| NOMINAL_VOLTS + 0.025 * steps as f32)
         }
     }
 }
 
-/// Switch the lower voltage on (tried at the next start) or off.
+/// Ask the firmware, through its mailbox (`/dev/vcio`, as vcgencmd does).
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+fn ask_firmware() -> Option<CoreVolts> {
+    use std::os::fd::AsRawFd;
+    const GET_VOLTAGE: u32 = 0x0003_0003;
+    const GET_MAX_VOLTAGE: u32 = 0x0003_0005;
+    const GET_MIN_VOLTAGE: u32 = 0x0003_0008;
+    const CORE: u32 = 1;
+    const REPLIED: u32 = 0x8000_0000;
+    // _IOWR(100, 0, char *) on a 64-bit kernel.
+    const IOCTL_MBOX_PROPERTY: libc::c_ulong = 0xC008_6400;
+    let vcio = std::fs::OpenOptions::new().read(true).write(true).open("/dev/vcio").ok()?;
+    // Size, request; three tags of (tag, value size, request, id, value); end.
+    let mut message = [0u32; 18];
+    message[0] = (message.len() * 4) as u32;
+    for (i, tag) in [GET_MAX_VOLTAGE, GET_MIN_VOLTAGE, GET_VOLTAGE].into_iter().enumerate() {
+        message[2 + i * 5..][..5].copy_from_slice(&[tag, 8, 0, CORE, 0]);
+    }
+    if unsafe { libc::ioctl(vcio.as_raw_fd(), IOCTL_MBOX_PROPERTY as _, message.as_mut_ptr()) } < 0 || message[1] != REPLIED {
+        return None;
+    }
+    Some(CoreVolts { max: mailbox_volts(message[6])?, min: mailbox_volts(message[11])?, now: mailbox_volts(message[16])? })
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "aarch64")))]
+fn ask_firmware() -> Option<CoreVolts> {
+    None
+}
+
+thread_local! {
+    /// The firmware's answer, asked again at most every five seconds.
+    static VOLTS: Cell<Option<(f64, Option<CoreVolts>)>> = const { Cell::new(None) };
+}
+
+/// The core's voltages now, if the firmware says (on the handheld).
+pub fn core_volts() -> Option<CoreVolts> {
+    let now = uptime();
+    VOLTS.with(|v| match v.get() {
+        Some((at, read)) if now - at < 5.0 => read,
+        _ => {
+            let read = ask_firmware();
+            v.set(Some((now, read)));
+            read
+        }
+    })
+}
+
+fn stock_ceiling() -> Option<f32> {
+    std::fs::read_to_string(STOCK_VOLTS).ok()?.trim().parse().ok()
+}
+
+/// Whether the lower voltage took: the firmware's ceiling at least 20 mV
+/// under its own (as read on a start without it, or else 1.2 V).
+pub fn lowered(read: CoreVolts, stock: Option<f32>) -> bool {
+    read.max <= stock.unwrap_or(NOMINAL_VOLTS) - 0.020
+}
+
+/// Developer options › Lower voltage, as the row says it: where it stands
+/// and, once started with, what the firmware actually gave the core.
+pub fn undervolt_line() -> String {
+    line_for(undervolt(), core_volts(), stock_ceiling())
+}
+
+fn line_for(state: Undervolt, read: Option<CoreVolts>, stock: Option<f32>) -> String {
+    let now = match state {
+        Undervolt::Unavailable => return "on the handheld".into(),
+        Undervolt::Off => return "off".into(),
+        Undervolt::Failed => return "did not hold".into(),
+        Undervolt::Pending => return "set · restart to try".into(),
+        Undervolt::Trying => "trying",
+        Undervolt::On => "on",
+    };
+    match read {
+        Some(v) if lowered(v, stock) => format!("{now} · {:.3} V", v.max),
+        Some(_) => format!("{now} · not taken"),
+        None => format!("{now} · −25 mV"),
+    }
+}
+
+/// Switch the lower voltage off (from the next start). Switching it on goes
+/// through [`TryUndervolt`], which restarts into it.
 pub fn set_undervolt(on: bool) -> Result<String, String> {
     if !Path::new(SCRIPT).exists() {
         return Err("the voltage is set on the handheld".into());
@@ -445,6 +561,78 @@ pub fn set_undervolt(on: bool) -> Result<String, String> {
         (true, true) => Ok("lower voltage · restart to try it".into()),
         (true, false) => Ok("lower voltage off · from the next start".into()),
         (false, _) => Err("could not change config.txt".into()),
+    }
+}
+
+/// Developer options › Lower voltage, switched on: what it does, and a
+/// restart into it at once (Esc: not now). That start tries it; it is kept
+/// once the system has run on it for five minutes, and otherwise goes by
+/// itself (a hang is caught by the watchdog, catalyst-power).
+pub struct TryUndervolt {
+    restarting: bool,
+}
+
+const TRY_WORDS: &str = "The core 25 mV lower at full speed, 50 mV when idle: a little less heat and power. It restarts to try it, and goes back by itself if it does not hold.";
+
+impl TryUndervolt {
+    pub fn new() -> Self {
+        TryUndervolt { restarting: false }
+    }
+}
+
+impl Default for TryUndervolt {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Its one row, at the foot above the keys.
+fn try_row(g: &Gfx) -> Rect {
+    let row_h = g.row_h();
+    Rect::new(PAD, H - PAD - g.hint_h() - row_h, W - 2.0 * PAD, row_h)
+}
+
+impl Screen for TryUndervolt {
+    fn title(&self) -> &str {
+        // "Lower voltage" does not fit beside the island at the title's size.
+        "Voltage"
+    }
+
+    fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
+        if self.restarting {
+            return Nav::Stay;
+        }
+        match key {
+            Key::Back => return Nav::Pop,
+            Key::Enter => {
+                if !Path::new(SCRIPT).exists() {
+                    *cx.say = Some("the voltage is set on the handheld".into());
+                    return Nav::Pop;
+                }
+                // It sets the lines, then restarts cleanly (the services stopped, the card synced).
+                run_script(&["undervolt", "try"]);
+                self.restarting = true;
+                *cx.say = Some("restarting to try the lower voltage".into());
+            }
+            _ => {}
+        }
+        Nav::Stay
+    }
+
+    fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
+        let t = g.tokens;
+        let ty = g.ty;
+        let top = g.top();
+        let row = try_row(g);
+        // What it does, above the one row at the foot.
+        let line_h = ty.caption.size + 4.0;
+        let lines = crate::help::wrap(g, TRY_WORDS, ty.caption, W - 2.0 * PAD);
+        let fit = (((row.y - 6.0 - top) / line_h).floor().max(0.0) as usize).min(lines.len());
+        for (i, line) in lines.iter().take(fit).enumerate() {
+            g.text_alpha(PAD, top + 2.0 + line_h * (i as f32 + 0.5), line, ty.caption, t.dim, 1.0);
+        }
+        g.row(row, if self.restarting { "Restarting…" } else { "Restart and try it" }, "›", t.ink, true);
+        g.hint(if self.restarting { "the handheld restarts" } else { "enter: restart · esc: not now" });
     }
 }
 
@@ -579,15 +767,22 @@ impl Care {
     }
 
     /// A lower voltage being tried is kept once the system has run on it
-    /// for five minutes; one that did not hold is said once.
+    /// for five minutes (and the island says what the firmware gave the
+    /// core); one that did not hold is said once. On a start without it, the
+    /// firmware's own ceiling is noted, to tell later whether it took.
     fn check_undervolt(&mut self, events: &mut Vec<Event>) {
         if self.undervolt_checked {
             return;
         }
-        match std::fs::read_to_string(UNDERVOLT_STATE).unwrap_or_default().trim() {
+        let state = std::fs::read_to_string(UNDERVOLT_STATE).unwrap_or_default();
+        match state.trim() {
             "trying 1" if uptime() >= CONFIRM_AFTER => {
                 run_script(&["undervolt", "confirm"]);
-                events.push(Event::Say("lower voltage held · kept".into()));
+                events.push(Event::Say(match core_volts() {
+                    Some(v) if lowered(v, stock_ceiling()) => format!("lower voltage held · core {:.3} V", v.max),
+                    Some(v) => format!("lower voltage not taken · core {:.3} V", v.max),
+                    None => "lower voltage held · kept".into(),
+                }));
                 self.undervolt_checked = true;
             }
             "trying 1" => {}
@@ -596,7 +791,14 @@ impl Care {
                 std::fs::write(UNDERVOLT_STATE, "off\n").ok();
                 self.undervolt_checked = true;
             }
-            _ => self.undervolt_checked = true,
+            other => {
+                if state_of(other) == Undervolt::Off {
+                    if let Some(v) = core_volts() {
+                        std::fs::write(STOCK_VOLTS, format!("{:.4}\n", v.max)).ok();
+                    }
+                }
+                self.undervolt_checked = true;
+            }
         }
     }
 
@@ -1224,6 +1426,76 @@ mod tests {
             for title in ["Battery empty", "Turning off", "Staying on", "Charging"] {
                 assert!(g.measure(title, ty.display(24.0)) <= W - 2.0 * PAD, "{title}");
             }
+        }
+    }
+
+    #[test]
+    fn the_firmwares_voltages_are_read_in_either_unit() {
+        let near = |raw: u32, want: f32| mailbox_volts(raw).is_some_and(|v| (v - want).abs() < 1e-4);
+        assert!(near(1_200_000, 1.2), "microvolts, as current firmware gives");
+        assert!(near(1_175_000, 1.175));
+        assert!(near((-1i32) as u32, 1.175), "a step of 25 mV below 1.2 V, as older firmware gave");
+        assert!(near(0, 1.2));
+        assert_eq!(mailbox_volts(77), None, "neither: not taken for a voltage");
+        assert_eq!(core_volts(), None, "off the handheld there is no firmware to ask");
+    }
+
+    #[test]
+    fn lower_voltage_says_whether_the_firmware_took_it() {
+        let read = |max: f32| Some(CoreVolts { max, min: max - 0.025, now: max - 0.025 });
+        assert!(lowered(read(1.175).unwrap(), None), "25 mV under the firmware's own 1.2 V");
+        assert!(!lowered(read(1.2).unwrap(), None));
+        assert!(lowered(read(1.2625).unwrap(), Some(1.2875)), "a board whose own ceiling is higher");
+        assert!(!lowered(read(1.2875).unwrap(), Some(1.2875)));
+        assert_eq!(line_for(Undervolt::On, read(1.175), None), "on · 1.175 V");
+        assert_eq!(line_for(Undervolt::Trying, read(1.175), Some(1.2)), "trying · 1.175 V");
+        assert_eq!(line_for(Undervolt::On, read(1.2), None), "on · not taken");
+        assert_eq!(line_for(Undervolt::On, None, None), "on · −25 mV", "no firmware to ask");
+        assert_eq!(line_for(Undervolt::Pending, None, None), "set · restart to try");
+        assert_eq!(line_for(Undervolt::Off, read(1.2), None), "off");
+        assert_eq!(line_for(Undervolt::Failed, None, None), "did not hold");
+        assert_eq!(undervolt_line(), "on the handheld");
+        crate::panel::row_fits(
+            "Lower voltage",
+            &[line_for(Undervolt::Trying, read(1.175), None), line_for(Undervolt::Trying, read(1.2), None), line_for(Undervolt::Pending, None, None), line_for(Undervolt::Failed, None, None)],
+        );
+    }
+
+    #[test]
+    fn lower_voltage_states_from_catalyst_power() {
+        assert_eq!(state_of("trying 0\n"), Undervolt::Pending);
+        assert_eq!(state_of("trying 1\n"), Undervolt::Trying);
+        assert_eq!(state_of("on\n"), Undervolt::On);
+        assert_eq!(state_of("failed\n"), Undervolt::Failed);
+        assert_eq!(state_of(""), Undervolt::Off);
+        // Enter asks to restart and try it unless it is already in.
+        assert!(Undervolt::Off.asks_to_try() && Undervolt::Failed.asks_to_try() && Undervolt::Pending.asks_to_try());
+        assert!(!Undervolt::On.asks_to_try() && !Undervolt::Trying.asks_to_try());
+        assert!(Undervolt::Pending.on() && Undervolt::Trying.on() && Undervolt::On.on() && !Undervolt::Off.on());
+    }
+
+    #[test]
+    fn trying_the_lower_voltage_asks_before_restarting() {
+        let mut ask = TryUndervolt::new();
+        let (mut robot, mut settings, mut say) = (Robot::none(), crate::shell::Settings::default(), None);
+        let mut press = |ask: &mut TryUndervolt, key: Key, say: &mut Option<String>| ask.key(key, &mut Cx { robot: &mut robot, settings: &mut settings, say, at_rest: true });
+        // Esc: not now, nothing changed; other keys do nothing.
+        assert!(matches!(press(&mut ask, Key::Down, &mut say), Nav::Stay));
+        assert!(matches!(press(&mut ask, Key::Back, &mut say), Nav::Pop));
+        assert_eq!(say, None);
+        // Enter restarts into it: off the handheld, it says where it is set.
+        assert!(matches!(press(&mut TryUndervolt::new(), Key::Enter, &mut say), Nav::Pop));
+        assert_eq!(say.as_deref(), Some("the voltage is set on the handheld"));
+    }
+
+    #[test]
+    fn what_trying_the_lower_voltage_says_fits_above_its_row() {
+        let mut g = Gfx::new(bezel::Tokens::dark());
+        for size in [crate::gfx::TextSize::Compact, crate::gfx::TextSize::Standard, crate::gfx::TextSize::Large] {
+            g.set_text_size(size);
+            let ty = g.ty;
+            let lines = crate::help::wrap(&mut g, TRY_WORDS, ty.caption, W - 2.0 * PAD).len() as f32;
+            assert!(g.top() + 2.0 + lines * (ty.caption.size + 4.0) <= try_row(&g).y - 6.0, "{lines} lines at {size:?}");
         }
     }
 }

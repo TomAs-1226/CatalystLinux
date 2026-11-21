@@ -125,6 +125,13 @@ fn team(robot: &Robot) -> Option<u32> {
     })
 }
 
+/// Where a row of the main page is, counted from the top (for the gallery,
+/// which walks to Build number).
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+pub fn row_of(name: &str) -> Option<usize> {
+    About::new(Kind::Main).rows.iter().position(|r| r.name == name)
+}
+
 impl About {
     pub fn new(kind: Kind) -> Self {
         let mut hero = Animated::new(1.0, role::page()).with_rest(0.004);

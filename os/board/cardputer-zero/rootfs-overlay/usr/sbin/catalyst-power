@@ -5,7 +5,7 @@
 #   catalyst-power wifi-sleep     Wi-Fi off while the screen is off (the
 #                                 choice to have Wi-Fi is kept)
 #   catalyst-power wifi-wake      and back, if it is switched on
-#   catalyst-power undervolt on|off|status|confirm
+#   catalyst-power undervolt try|on|off|status|confirm
 #   catalyst-power panel try|on|off|status|confirm|revert
 #   catalyst-power boot           at start: a trial that never held is undone
 #
@@ -14,11 +14,15 @@
 # them (lower voltage once it has run on it for five minutes; the tear-free
 # panel once Enter answers its question). A start that finds one tried but
 # never confirmed (that start crashed, hung, was cut off, or nobody could see
-# to answer) takes it out again and restarts.
+# to answer) takes it out again and restarts. `try` sets one and restarts
+# into it at once.
 #
 # Lower voltage: the processor's core a step lower than the firmware's own
 # (over_voltage -1, -25 mV at full speed; over_voltage_min -2, -50 mV when
-# idle, where there is the most to spare).
+# idle, where there is the most to spare). While it is being tried the
+# hardware watchdog is fed, so a processor that hangs on it is restarted
+# within 15 seconds, and that start takes it out again; once kept, the
+# watchdog is stood down.
 #
 # Tear-free panel: the cardputerzero-portrait overlay after M5Stack's, which
 # drives the panel in its own scan order and in step with its refresh.
@@ -27,6 +31,11 @@ BOOT_DEV=/dev/mmcblk0p1
 MNT=/run/catalyst-boot
 END="# catalyst-power: end"
 SLOTS="# Which system starts:"
+WATCHDOG_DEV=/dev/watchdog
+WATCHDOG_PID=/run/catalyst-power-watchdog.pid
+# Set by the firmware (4 bytes, big-endian 1) when this start is an update
+# being tried ("0 tryboot"): catalyst-update feeds the watchdog then.
+TRYBOOT=/proc/device-tree/chosen/bootloader/tryboot
 
 # Each trial: its marker line, its lines in config.txt, and its state file.
 begin_of() {
@@ -96,6 +105,29 @@ add_block() {
 	' "$MNT/config.txt" >"$MNT/config.new" && mv "$MNT/config.new" "$MNT/config.txt"
 }
 
+# The hardware watchdog fed while a lower voltage is tried (BusyBox's
+# watchdog: a 15 s timeout, the most the BCM2835's allows, fed every 5 s).
+# Stopping it writes the magic close, so it stands down rather than firing.
+# Not on a start that is an update being tried: catalyst-update holds the
+# watchdog then (only one can), and a hang there goes back to the system
+# before, whose next start takes the lower voltage out as well.
+watch_trial() {
+	[ -e "$WATCHDOG_DEV" ] || return 0
+	if [ "$(wc -c <"$TRYBOOT" 2>/dev/null)" = 4 ] && [ "$(tail -c 1 "$TRYBOOT")" = "$(printf '\001')" ]; then
+		return 0
+	fi
+	stop_watch
+	watchdog -F -T 15 -t 5 "$WATCHDOG_DEV" >/dev/null 2>&1 &
+	echo $! >"$WATCHDOG_PID"
+}
+
+stop_watch() {
+	if [ -s "$WATCHDOG_PID" ]; then
+		kill "$(cat "$WATCHDOG_PID")" 2>/dev/null
+	fi
+	rm -f "$WATCHDOG_PID"
+}
+
 # undervolt|panel on|off|confirm|status
 trial() {
 	name=$1
@@ -109,9 +141,17 @@ trial() {
 		with_boot strip_block "$name" || exit 1
 		rm -f "$(state_file "$name")"
 		sync
+		if [ "$name" = undervolt ]; then
+			stop_watch
+		fi
 		;;
 	confirm)
-		[ "$(state "$name")" = "trying 1" ] && set_state "$name" on
+		if [ "$(state "$name")" = "trying 1" ]; then
+			set_state "$name" on
+			if [ "$name" = undervolt ]; then
+				stop_watch
+			fi
+		fi
 		;;
 	status)
 		case "$(state "$name")" in
@@ -120,7 +160,7 @@ trial() {
 		esac
 		;;
 	*)
-		echo "usage: $0 $name on|off|status|confirm" >&2
+		echo "usage: $0 $name try|on|off|status|confirm" >&2
 		exit 2
 		;;
 	esac
@@ -133,6 +173,9 @@ boot_trial() {
 	case "$(state "$name")" in
 	"trying 0")
 		set_state "$name" "trying 1"
+		if [ "$name" = undervolt ]; then
+			watch_trial
+		fi
 		;;
 	"trying 1")
 		if with_boot strip_block "$name"; then
@@ -154,7 +197,16 @@ wifi-wake)
 	exit 0
 	;;
 undervolt)
-	trial undervolt "$2"
+	case "$2" in
+	# Set it and restart into it at once: that start tries it.
+	try)
+		trial undervolt on
+		reboot
+		;;
+	*)
+		trial undervolt "$2"
+		;;
+	esac
 	;;
 panel)
 	case "$2" in

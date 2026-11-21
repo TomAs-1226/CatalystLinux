@@ -632,7 +632,7 @@ impl Gfx {
             self.gpu = None;
             self.gpu_opening = None;
             self.gpu_awaiting_device = false;
-            crate::gpu::set_note("processor · chosen in settings");
+            crate::gpu::set_choice("processor · your choice", "processor · chosen in Settings › Display › Graphics");
             return;
         }
         self.try_gpu();
@@ -655,6 +655,7 @@ impl Gfx {
         if opening.is_ok() {
             self.gpu_opening = Some(receive);
             self.gpu_awaiting_device = false;
+            crate::gpu::set_choice("processor · trying gpu", "processor, while the gpu is tried");
         }
     }
 
@@ -678,16 +679,16 @@ impl Gfx {
                 }
                 if !gpu.worth_it() {
                     eprintln!("catalyst-shell: drawing with the processor, quicker than the gpu here ({})", gpu.jobs());
-                    crate::gpu::set_note("processor · quicker than the gpu");
+                    crate::gpu::set_choice("processor · faster here", format!("processor · faster than the {} here, reading back included: {}", gpu.renderer(), gpu.jobs()));
                     return;
                 }
                 eprintln!("catalyst-shell: drawing with the gpu ({}; {})", crate::gpu::note(), gpu.jobs());
-                crate::gpu::set_note(gpu.renderer().to_owned());
+                crate::gpu::set_choice("gpu", format!("{} · {}", gpu.renderer(), gpu.jobs()));
                 self.gpu = Some(gpu);
             }
             Err(why) => {
                 eprintln!("catalyst-shell: drawing with the processor: {why}");
-                crate::gpu::set_note("processor");
+                crate::gpu::set_choice(crate::gpu::why_not(&why), format!("processor · {why}"));
                 // The kernel's GPU driver may still be loading: try once more when its device appears.
                 self.gpu_awaiting_device = why == "no gpu device";
             }
@@ -697,7 +698,7 @@ impl Gfx {
     /// The GPU went wrong mid-frame: the processor draws from now on.
     pub fn gpu_failed(&mut self, why: String) {
         eprintln!("catalyst-shell: the gpu failed, drawing with the processor: {why}");
-        crate::gpu::set_note("processor · the gpu failed");
+        crate::gpu::set_choice("processor · gpu failed", format!("processor · the gpu failed while drawing: {why}"));
         self.gpu = None;
         self.gpu_awaiting_device = false;
     }

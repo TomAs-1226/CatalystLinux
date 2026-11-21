@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The CardputerZero panel's init sequence for the tear-free (portrait) mode,
 derived from M5Stack's own (`cardputerzero,st7789v_lcd.bin` in
-m5stack-linux-dtoverlays, modules/st7789v-1.0), with two changes:
+m5stack-linux-dtoverlays, modules/st7789v-1.0), with one change:
 
 - MADCTL (0x36) 0xA0 -> 0x00. M5Stack's 0xA0 is MY|MV: landscape by row/
   column exchange, so the ST7789 refreshes its gate lines across the
@@ -9,11 +9,16 @@ m5stack-linux-dtoverlays, modules/st7789v-1.0), with two changes:
   tears on a diagonal. 0x00 keeps the panel's own order: memory written from
   its first gate line onwards, the way it refreshes. The shell turns the
   picture a quarter turn as it sends it (platform.rs).
-- FRCTRL2 (0xC6) = 0x1E: 40 refreshes a second instead of 60. The SPI clock
-  is the core clock over an even divisor (about 42 to 50 MHz for the 60 MHz
-  asked), so a whole frame takes 17 to 21 ms to send; at 60 Hz (16.7 ms) the
-  panel's scan would catch it, at 40 Hz (25 ms) it never does. It is also
-  the shell's own beat: one frame a refresh.
+
+The refresh stays the panel's own 60 Hz. (The first version slowed it to
+40 Hz so that a whole frame, 17 to 21 ms over SPI at about 42 to 50 MHz,
+could always lead the scan from the blank. The driver now times each flush
+from the tearing-effect line and, writing slower than the scan as it does
+here, follows it instead: a band written just behind the scan is shown whole
+at the next refresh. 40 Hz bought nothing then and cost motion.)
+
+The driver (patch 0003) counts PORCTRL's porches, 5 + 5 rows, as part of
+each refresh: checked here.
 
 Usage: panel-portrait-blob.py <stock .bin> <out .bin>
 """
@@ -36,11 +41,9 @@ def portrait(stock: bytes) -> bytes:
             assert params == b"\xa0", f"M5Stack's MADCTL is 0xA0, not {params.hex()}"
             params = b"\x00"
             seen_madctl = True
-        if command == 0xC6:
-            raise SystemExit("the stock sequence sets FRCTRL2 itself: look again")
-        if command == 0x29:
-            # Display on comes last: the refresh rate is set before it.
-            out += bytes([0xC6, 1, 0x1E])
+        if command == 0xB2:
+            assert params[:2] == b"\x05\x05", f"PORCTRL's porches are 5 + 5, not {params[:2].hex()} (patch 0003 counts them)"
+        assert command != 0xC6, "the sequence sets FRCTRL2: the driver assumes the panel's own 60 Hz"
         out += bytes([command, count]) + params
     assert seen_madctl, "MADCTL was in the stock sequence"
     return bytes(stock[:16]) + bytes(out)

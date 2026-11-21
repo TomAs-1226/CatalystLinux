@@ -14,8 +14,10 @@
 
 use bezel::{Canvas, GlassShape, Rect, Tokens};
 
-/// Why the GPU is or is not drawing, for Settings › About.
+/// Why the GPU is or is not drawing, for Settings › About (in full) and
+/// Settings › Display › Graphics (in a few words).
 static NOTE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static SHORT: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
 pub fn note() -> String {
     NOTE.lock().map(|n| n.clone()).unwrap_or_default()
@@ -24,6 +26,46 @@ pub fn note() -> String {
 pub fn set_note(text: impl Into<String>) {
     if let Ok(mut n) = NOTE.lock() {
         *n = text.into();
+    }
+}
+
+/// What draws and why: in a few words for the Graphics row, and in full.
+pub fn set_choice(short: &str, full: impl Into<String>) {
+    if let Ok(mut s) = SHORT.lock() {
+        *s = short.to_owned();
+    }
+    set_note(full);
+}
+
+/// Settings › Display › Graphics: what is drawing, and why, in a few words.
+/// `wanted`: Graphics is on auto; `using`: the GPU that is drawing, if one is.
+pub fn plain(wanted: bool, using: Option<&Gpu>) -> String {
+    if !wanted {
+        return "processor · your choice".into();
+    }
+    if let Some(gpu) = using {
+        return match gpu.uses() {
+            (true, true) => "gpu · glass, windows",
+            (true, false) => "gpu · glass",
+            (false, true) => "gpu · windows",
+            (false, false) => "processor",
+        }
+        .into();
+    }
+    match SHORT.lock().map(|s| s.clone()).unwrap_or_default() {
+        s if s.is_empty() => "processor".into(),
+        s => s,
+    }
+}
+
+/// The short word for a GPU that would not open, from why.
+pub fn why_not(why: &str) -> &'static str {
+    match why {
+        "no gpu device" | "no gpu on this system" => "processor · no gpu found",
+        // Its test frame did not come out as the processor's.
+        w if w.starts_with("its glass is not") || w.starts_with("its windows are not") => "processor · gpu differs",
+        w if w.starts_with("only a software renderer") => "processor · no driver",
+        _ => "processor · gpu error",
     }
 }
 
@@ -52,6 +94,9 @@ mod stub {
         }
         pub fn worth_it(&self) -> bool {
             false
+        }
+        pub fn uses(&self) -> (bool, bool) {
+            (false, false)
         }
         pub fn use_everything(&mut self) {}
         pub fn release(&self) {}
@@ -655,12 +700,18 @@ void main() {
             self.use_glass || self.use_grow
         }
 
+        /// Which jobs it takes: (the glass, a window growing).
+        pub fn uses(&self) -> (bool, bool) {
+            (self.use_glass, self.use_grow)
+        }
+
         /// Every job, however long it takes (for testing the path).
         pub fn use_everything(&mut self) {
             (self.use_glass, self.use_grow) = (true, true);
         }
 
-        /// Which jobs it does, and the timings that decided it.
+        /// Which jobs it does, and the timings that decided it (the GPU's
+        /// with handing it the picture and reading the result back).
         pub fn jobs(&self) -> String {
             let job = |name: &str, used: bool, (gpu, cpu): (f32, f32)| format!("{name} {} ({gpu:.2} ms gpu, {cpu:.2} ms processor)", if used { "on the gpu" } else { "on the processor" });
             format!("{} · {}", job("glass", self.use_glass, self.glass_ms), job("windows", self.use_grow, self.grow_ms))
@@ -1210,5 +1261,35 @@ void main() {
             let d = Difference::of(&cpu.px, &on_gpu.px);
             assert!(d.close(), "handed over: {d}");
         }
+    }
+}
+
+#[cfg(test)]
+mod plain_tests {
+    use super::*;
+
+    #[test]
+    fn graphics_says_what_draws_and_why_in_a_few_words() {
+        assert_eq!(why_not("no gpu device"), "processor · no gpu found");
+        assert_eq!(why_not("no gpu on this system"), "processor · no gpu found");
+        assert_eq!(why_not("its glass is not the processor's (mean 9.1)"), "processor · gpu differs");
+        assert_eq!(why_not("its windows are not the processor's (mean 4.0)"), "processor · gpu differs");
+        assert_eq!(why_not("only a software renderer (softpipe)"), "processor · no driver");
+        assert_eq!(why_not("eglInitialize failed (egl 0x3001)"), "processor · gpu error");
+        assert_eq!(plain(false, None), "processor · your choice", "switched to the processor in Settings");
+        // Every way the row can read fits beside its name.
+        let all = [
+            "processor · your choice",
+            "processor · trying gpu",
+            "processor · faster here",
+            "processor · no gpu found",
+            "processor · gpu differs",
+            "processor · no driver",
+            "processor · gpu error",
+            "processor · gpu failed",
+            "gpu · glass, windows",
+        ]
+        .map(str::to_owned);
+        crate::panel::row_fits("Graphics", &all);
     }
 }

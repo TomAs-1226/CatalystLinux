@@ -53,8 +53,8 @@ define M5STACK_CARDPUTER_ZERO_INSTALL_IMAGES_CMDS
 endef
 
 # The panel driver loads its init sequence as firmware, named after the
-# panel's compatible: M5Stack's, and the tear-free mode's (MADCTL 0x00 and
-# 40 Hz; made from M5Stack's by scripts/panel-portrait-blob.py).
+# panel's compatible: M5Stack's, and the tear-free mode's (MADCTL 0x00; made
+# from M5Stack's by scripts/panel-portrait-blob.py).
 define M5STACK_CARDPUTER_ZERO_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0644 "$(@D)/modules/st7789v-1.0/cardputerzero,st7789v_lcd.bin" \
 		"$(TARGET_DIR)/lib/firmware/cardputerzero,st7789v_lcd.bin"
