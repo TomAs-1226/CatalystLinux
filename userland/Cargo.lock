@@ -107,6 +107,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "catalyst-ai"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "localmodel",
+ "serde_json",
+]
+
+[[package]]
 name = "catalyst-flasher"
 version = "0.1.0"
 dependencies = [
@@ -127,11 +136,13 @@ dependencies = [
  "chrono",
  "detent",
  "libc",
+ "localmodel",
  "minifb",
  "nt4",
  "png",
  "qrcodegen",
  "serde_json",
+ "sha2",
  "vte",
 ]
 
@@ -522,6 +533,14 @@ dependencies = [
  "libc",
  "plain",
  "redox_syscall",
+]
+
+[[package]]
+name = "localmodel"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
 ]
 
 [[package]]

@@ -17,7 +17,10 @@ bezel = { workspace = true }
 detent = { workspace = true }
 nt4 = { workspace = true }
 apriltag = { workspace = true }
+localmodel = { workspace = true }
 serde_json = "1"
+# Checking a downloaded on-device model against its pinned sum.
+sha2 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 vte = "0.15"
 # QR codes for the setup page's address (Project Nayuki's encoder; no dependencies).

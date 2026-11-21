@@ -1,0 +1,12 @@
+[package]
+name = "localmodel"
+description = "The on-device model: which ones the handheld runs, where they live, how llama-server is started for one, and the chat request it answers."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

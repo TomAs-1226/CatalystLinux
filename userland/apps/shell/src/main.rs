@@ -59,6 +59,7 @@ mod irremote;
 mod keys;
 mod lights;
 mod level;
+mod local;
 mod logs;
 mod look;
 mod monitor;
@@ -1894,6 +1895,36 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     std::fs::remove_dir_all(config_dir().join("assistant-chats")).ok();
     std::fs::remove_file(config_dir().join("commands")).ok();
     std::fs::remove_file(config_dir().join("commands-ask")).ok();
+
+    // Settings › On-device model: its row, the page with nothing downloaded,
+    // a download part way, and the model here with an answer it gave (a
+    // stand-in file of the model's size, accepted as checked).
+    let models = config_dir().join("models");
+    std::fs::remove_dir_all(&models).ok();
+    std::env::set_var("CATALYST_MODELS", &models);
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    press(&mut shell, &vec![Right; steps_to("Settings")], 20);
+    press(&mut shell, &[Enter], 90);
+    press(&mut shell, &vec![Down; screens::settings_row("On-device model")], 20);
+    save(&mut shell, "112-settings-on-device-model");
+    press(&mut shell, &[Enter], 90);
+    save(&mut shell, "112b-on-device-model");
+    shell.show(Box::new(local::ModelPage::showing_download(0.37)));
+    settle(&mut shell, 90);
+    save(&mut shell, "112c-on-device-model-downloading");
+    let model = &localmodel::MODELS[0];
+    std::fs::create_dir_all(&models).ok();
+    if let Ok(stand_in) = std::fs::File::create(localmodel::partial(&models, model)) {
+        stand_in.set_len(model.size).ok();
+    }
+    localmodel::accept(&models, model, model.sha256).ok();
+    shell.show(Box::new(local::ModelPage::showing_answer("A brownout is when the battery sags so low that the robot's controller cuts power to the motors to keep itself running.")));
+    settle(&mut shell, 90);
+    save(&mut shell, "112d-on-device-model-answer");
+    std::fs::remove_dir_all(&models).ok();
+    std::env::remove_var("CATALYST_MODELS");
     let written =std::fs::read_dir(dir).map_or(0, |d| d.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "png")).count());
     println!("{written} screens in {}, {frames} frames at {:.2} ms each", dir.display(), started.elapsed().as_secs_f64() * 1e3 / frames as f64);
     // An icon asked for and never built in draws as nothing: a blank where

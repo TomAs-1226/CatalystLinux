@@ -43,10 +43,10 @@ if rustc --print cfg --target "$TARGET" $CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL
 fi
 
 cd "$HERE/userland"
-# The shell, and the system updater it starts.
-cargo build --release --target "$TARGET" -p catalyst-shell -p catalyst-update
+# The shell, the system updater it starts, and `ai` for the Terminal.
+cargo build --release --target "$TARGET" -p catalyst-shell -p catalyst-update -p catalyst-ai
 mkdir -p "$BUILD/out"
-for bin in catalyst-shell catalyst-update; do
+for bin in catalyst-shell catalyst-update ai; do
 	cp "$CARGO_TARGET_DIR/$TARGET/release/$bin" "$BUILD/out/"
 	ls -l "$BUILD/out/$bin"
 	file "$BUILD/out/$bin"

@@ -5,13 +5,25 @@ set -eu
 BUILD="${CATALYST_BUILD:-$HOME/catalyst-linux-build}"
 SHELL_BIN="$BUILD/out/catalyst-shell"
 UPDATE_BIN="$BUILD/out/catalyst-update"
+AI_BIN="$BUILD/out/ai"
 
-if [ ! -x "$SHELL_BIN" ] || [ ! -x "$UPDATE_BIN" ]; then
+if [ ! -x "$SHELL_BIN" ] || [ ! -x "$UPDATE_BIN" ] || [ ! -x "$AI_BIN" ]; then
 	echo "catalyst-shell has not been built: run scripts/build-image.sh toolchain, then scripts/build-shell.sh" >&2
 	exit 1
 fi
 install -D -m 0755 "$SHELL_BIN" "$TARGET_DIR/usr/bin/catalyst-shell"
 install -D -m 0755 "$UPDATE_BIN" "$TARGET_DIR/usr/bin/catalyst-update"
+install -D -m 0755 "$AI_BIN" "$TARGET_DIR/usr/bin/ai"
+
+# llama.cpp's tools: only llama-server is used (the on-device model, 7 MB
+# with its libraries, libmtmd among them); the rest (cli, bench, quantize,
+# perplexity, tts…) would be another 41 MB of the image for nothing.
+for tool in "$TARGET_DIR"/usr/bin/llama-*; do
+	if [ -e "$tool" ] && [ "${tool##*/}" != llama-server ]; then
+		rm -f "$tool"
+	fi
+done
+rm -f "$TARGET_DIR"/usr/bin/convert_hf_to_gguf.py
 
 # Which version this is and when it was built, for updates to compare
 # against (scripts/release.sh sets both; a plain build is the base version,
