@@ -1,0 +1,70 @@
+#!/bin/sh
+# catalyst-tailscale on|off|login|logout|status
+#
+# Settings › Network › Tailscale runs this. "on" starts tailscaled and asks
+# it to connect; a first sign-in happens on a phone or computer, from the
+# link the page shows as a QR code. "off" stops it and keeps the sign-in for
+# next time; "logout" forgets the sign-in and asks for a new one; "login"
+# asks again when it is on but signed out.
+SOCKET=/run/tailscale/tailscaled.sock
+FLAG=/data/catalyst/tailscale-enabled
+UP_PID=/run/tailscale/up.pid
+
+ts() { /usr/bin/tailscale --socket="$SOCKET" "$@"; }
+
+# The `up` still waiting for a sign-in, if there is one.
+stop_up() {
+	pid=$(cat "$UP_PID" 2>/dev/null)
+	[ -n "$pid" ] && grep -q tailscale "/proc/$pid/cmdline" 2>/dev/null && kill "$pid"
+	rm -f "$UP_PID"
+}
+
+# Connect, as the handheld's name, with no firewall rules (the image has no
+# iptables) and its own DNS left alone. `up` waits for the sign-in, so it
+# waits in the background (the page reads the link from tailscaled); a
+# second one replaces the first.
+up() {
+	stop_up
+	ts up --reset --hostname="$(hostname)" --accept-dns=false --netfilter-mode=off </dev/null >/dev/null 2>&1 &
+	echo $! >"$UP_PID"
+}
+
+# tailscaled takes a moment to open its socket.
+daemon() {
+	i=0
+	while [ ! -S "$SOCKET" ]; do
+		i=$((i + 1))
+		[ "$i" -gt 15 ] && { echo "tailscaled did not start" >&2; return 1; }
+		sleep 1
+	done
+}
+
+case "$1" in
+on)
+	mkdir -p /data/catalyst
+	touch "$FLAG"
+	# restart, not start: the service counts as started even while off.
+	rc-service catalyst-tailscale restart >/dev/null 2>&1
+	daemon && up
+	;;
+off)
+	rm -f "$FLAG"
+	stop_up
+	rc-service catalyst-tailscale stop >/dev/null 2>&1
+	;;
+login)
+	[ -e "$FLAG" ] || { echo "tailscale is off" >&2; exit 1; }
+	daemon && up
+	;;
+logout)
+	ts logout >/dev/null 2>&1
+	[ -e "$FLAG" ] && daemon && up
+	;;
+status)
+	[ -e "$FLAG" ] && echo on || echo off
+	;;
+*)
+	echo "usage: $0 on|off|login|logout|status" >&2
+	exit 2
+	;;
+esac

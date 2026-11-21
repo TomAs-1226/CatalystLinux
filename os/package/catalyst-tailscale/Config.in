@@ -1,0 +1,13 @@
+config BR2_PACKAGE_CATALYST_TAILSCALE
+	bool "catalyst-tailscale"
+	depends on BR2_PACKAGE_HOST_GO_TARGET_ARCH_SUPPORTS
+	select BR2_PACKAGE_HOST_GO
+	help
+	  Tailscale for the handheld: one small tailscaled with the CLI
+	  built in (`tailscale` is a link to it), only the features a
+	  client on a kernel TUN needs (Tailscale's own extra-small
+	  build). Unlike Buildroot's tailscale package it leaves the
+	  kernel's configuration alone: it runs with netfilter off,
+	  so nftables, NAT and conntrack are not needed.
+
+	  https://github.com/tailscale/tailscale

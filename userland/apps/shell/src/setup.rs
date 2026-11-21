@@ -664,7 +664,7 @@ impl Setup {
             Page::Team => 1,
             Page::Place => 2,
             Page::Wifi => 2,
-            Page::Keys => SERVICES.len(),
+            Page::Keys => crate::keys::SETUP_SERVICES,
             Page::Choices => 4,
             Page::Hardware => self.hardware.as_ref().map_or(0, |h| h.states.len()),
             Page::Power => self.power_rows(),
@@ -1417,7 +1417,7 @@ impl Screen for Setup {
             Page::Keys => {
                 let words = if self.typing.is_some() { WORDS_TYPING } else { WORDS_KEYS };
                 self.heading(g, "Keys for online services", words);
-                for (i, (name, label)) in SERVICES.iter().enumerate() {
+                for (i, (name, label)) in SERVICES.iter().take(crate::keys::SETUP_SERVICES).enumerate() {
                     let value = match &self.typing {
                         Some((row, text)) if *row == i => format!("{}▏", text.chars().rev().take(18).collect::<Vec<_>>().into_iter().rev().collect::<String>()),
                         _ => self.keys.shown(name),

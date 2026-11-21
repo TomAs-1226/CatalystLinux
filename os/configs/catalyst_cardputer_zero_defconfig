@@ -122,6 +122,12 @@ BR2_PACKAGE_LIBCURL_OPENSSL=y
 BR2_PACKAGE_CA_CERTIFICATES=y
 # Git on the handheld: a repository's status, log and diffs, and pulling.
 BR2_PACKAGE_GIT=y
+# Tailscale, to reach the machines on your tailnet from anywhere:
+# our own slim build (one binary, the CLI inside), not Buildroot's package,
+# which would switch on nftables, NAT and conntrack in the kernel. Runs only
+# when switched on in Settings › Network › Tailscale (the kernel's TUN is a
+# module already). The Go toolchain is built for it on the build machine.
+BR2_PACKAGE_CATALYST_TAILSCALE=y
 # The GPU: Mesa's vc4 driver for the VideoCore IV (OpenGL ES 2.0 through
 # EGL), which the shell uses for glass, wallpapers and compositing when it
 # works, falling back to the processor when it does not. softpipe is Mesa's

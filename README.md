@@ -875,6 +875,44 @@ drives the system's `wpa_supplicant`; networks are kept in
 not loaded at all, and switching it off unloads it. On a PC a scripted set of
 networks stands in.
 
+## Tailscale
+
+Settings › Network › Tailscale puts the handheld on your tailnet: it reaches
+your other machines from anywhere (SSH to a laptop from Connect, a
+dashboard at home) and they reach it. It is off until switched on there,
+and while it is off nothing of it runs.
+
+- **Switching on** starts `tailscaled` (the `catalyst-tailscale` service)
+  and asks it to connect. The first time, the page shows a QR code: scan it
+  with a phone's camera and sign in to Tailscale there (or open the link
+  under it on any device). The sign-in and the machine's key are kept in
+  `/data/tailscale`, so it stays signed in across restarts and updates.
+- **Signed in**, the page shows this handheld's address on the tailnet, the
+  tailnet's name, its other machines (online ones with their addresses, the
+  others with when they were last seen), how much memory `tailscaled` is
+  using, and Sign out (pressed twice). Switching off keeps the sign-in.
+- It changes nothing else: no firewall rules (`--netfilter-mode=off`) and no
+  DNS (`--accept-dns=false`), and the handheld keeps its own name. Nothing
+  goes to Tailscale's log service.
+
+It is our own slim build (`os/package/catalyst-tailscale`): Tailscale
+1.102.3, the newest Buildroot's Go 1.27 builds, with only what a client on
+the kernel's TUN needs (the OS router, the CLI inside the daemon, the
+notification bus, health, port mapping, raw-socket NAT traversal, baked-in
+root certificates; Tailscale's own `featuretags --min`, as its
+`build_dist.sh --extra-small` does). One static, stripped 13.3 MB program is
+both `tailscaled` and `tailscale`. Buildroot's own `tailscale` package is not
+used: it switches on nftables, NAT and connection tracking in the kernel,
+which this client does without. The kernel's TUN is a module already, loaded
+when Tailscale starts.
+
+Memory: run under qemu on four cores, signed out and idle, it holds 5 to 8
+MB of its own plus about 13 MB of its program's pages (read from the card,
+shared with the `tailscale` command, given back under pressure), so about
+20 MB; signed in with a handful of machines, an estimated 25 to 30 MB. The
+page's Memory row reads the real figure on the handheld. On a PC, a made-up
+tailnet stands in and signs in by itself a few seconds after its code shows.
+
 ## Match logs
 
 The handheld pulls `.wpilog` files from the robot over the Ethernet cable,
@@ -971,12 +1009,47 @@ and tested against sample replies, not yet against the live service.
 
 ## Git and the robot's code
 
-The Git app lists the repositories under `/data/code` and clones another by
-its address. A repository's page says its branch and how far it is from its
-upstream, pulls (fast-forward only) with one key, and shows what has changed
-as a coloured diff and its history. Git runs in the background, so a slow
-card never holds a frame up. Credentials are not stored: public repositories
-clone and pull as they are.
+The Git app starts with the GitHub account, then your repositories on
+GitHub, then the ones under `/data/code`, and last a field that clones any
+repository by its HTTPS address. Git runs in the background, so a slow card
+never holds a frame up.
+
+- **Account.** Signing in needs a GitHub token with access to your
+  repositories (github.com › Settings › Developer settings; a fine-grained
+  token with Contents read and write is enough). It is typed in Settings ›
+  Keys, read from a file there, or sent from a computer on the "set up from
+  a computer" page, like the other keys. Git › Account then asks GitHub
+  whose it is (`/user`) and keeps the login, name and the address commits
+  carry (GitHub's private `…@users.noreply.github.com` one when the email is
+  hidden) in `/data/catalyst/github`. Sign out forgets that; the key itself
+  stays in Keys until it is cleared there.
+- **Your repositories** come from GitHub's `/user/repos` (yours, your
+  collaborators' and your organisations', newest first), each with whether
+  it is private and when it last changed. Enter clones one into
+  `/data/code`, with git's own progress on screen, or opens it when it is
+  already there; `r` asks GitHub again.
+- **A repository's page**: pull (fast-forward only), push (a new branch gets
+  one on `origin` to push to), commit everything with a message, the
+  changes as a coloured diff, the history and the branches.
+- **History** draws the branch graph beside the commits, each lane its own
+  colour, merges joining back in, with the branch and tag names on their
+  commits. Enter opens a commit: who, when, the message, the files it
+  touched and its diff.
+- **Branches**: the one checked out first, then the others, then the ones
+  only on the remote. Enter switches, tracking a remote one; uncommitted
+  changes come along.
+- **Deploy as an Action**, for a repository with `gradlew`: saves
+  `./gradlew deploy` in it as an Action (critical, so it asks before
+  running), for the robot on the Wi-Fi.
+
+The token never goes on a command line or into a repository's
+`.git/config`. Calls to GitHub's API hand it to curl in a header file only
+the shell can read, removed as soon as the call ends. Git reaches it
+through a credential helper (`/usr/libexec/catalyst/git-credential`, set in
+`/etc/gitconfig`) that answers only for `https://github.com`; any other
+server, or plain HTTP, gets nothing, and git's requests to store or erase
+are ignored. `scripts/test-git-credential.sh` checks that on a computer.
+Public repositories anywhere clone and pull over HTTPS with no account.
 
 One repository can be marked as the robot's code. FrcCatalyst publishes the
 commit a robot was built from (`Robot/Software/RobotCodeVersion`, from the

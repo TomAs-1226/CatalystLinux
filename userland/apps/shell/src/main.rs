@@ -47,6 +47,7 @@ mod device;
 mod files;
 mod gfx;
 mod git;
+mod github;
 mod glance;
 mod gpu;
 mod graphs;
@@ -81,6 +82,7 @@ mod setup;
 mod shell;
 mod standby;
 mod sys;
+mod tailscale;
 mod sysupdate;
 mod usb;
 mod term;
@@ -1220,6 +1222,147 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
         settle(&mut shell, 60);
     }
     save(&mut shell, "33-git");
+    // Signed in to GitHub (the simulator's made-up account): the account, its
+    // repositories, one cloned, its page, its history with the branches drawn,
+    // a commit, the branches, and a commit's message being typed. Then gone
+    // again, so the shots after see Git as before.
+    let mut held = keys::Keys::load();
+    held.set("github", "ghp_demo0000000000000000000000000000demo");
+    held.save().ok();
+    std::fs::remove_dir_all(git::code_dir().join("robot-2027")).ok();
+    let go = |shell: &mut Shell, keys: &[Key], frames: usize| {
+        for key in keys {
+            shell.key(*key);
+            settle(shell, frames);
+        }
+    };
+    go(&mut shell, &[Enter], 60);
+    go(&mut shell, &[Down, Enter], 30);
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        settle(&mut shell, 4);
+    }
+    settle(&mut shell, 40);
+    save(&mut shell, "33b-git-account");
+    go(&mut shell, &[Back, Down, Enter], 60);
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        settle(&mut shell, 4);
+    }
+    settle(&mut shell, 40);
+    save(&mut shell, "33c-git-your-repositories");
+    go(&mut shell, &[Enter], 4);
+    for _ in 0..12 {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        settle(&mut shell, 2);
+    }
+    save(&mut shell, "33d-git-cloning");
+    for _ in 0..80 {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        settle(&mut shell, 2);
+    }
+    settle(&mut shell, 60);
+    go(&mut shell, &[Enter], 60);
+    for _ in 0..10 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        settle(&mut shell, 4);
+    }
+    settle(&mut shell, 30);
+    save(&mut shell, "33e-git-repository");
+    go(&mut shell, &[Down, Down, Down, Down, Enter], 30);
+    for _ in 0..10 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        settle(&mut shell, 4);
+    }
+    settle(&mut shell, 40);
+    save(&mut shell, "33f-git-history");
+    go(&mut shell, &[Down, Down], 30);
+    settle(&mut shell, 40);
+    save(&mut shell, "33g-git-history-down");
+    go(&mut shell, &[Enter], 60);
+    for _ in 0..10 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        settle(&mut shell, 4);
+    }
+    settle(&mut shell, 30);
+    save(&mut shell, "33h-git-commit");
+    go(&mut shell, &[Back, Back, Down, Enter], 60);
+    for _ in 0..10 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        settle(&mut shell, 4);
+    }
+    settle(&mut shell, 30);
+    save(&mut shell, "33i-git-branches");
+    go(&mut shell, &[Back, Up, Up, Up, Enter], 60);
+    for c in "Shooter at 4300 rpm".chars() {
+        shell.key(Char(c));
+    }
+    settle(&mut shell, 30);
+    save(&mut shell, "33j-git-commit-message");
+    go(&mut shell, &[Back, Up, Up], 30);
+    save(&mut shell, "33k-git-repository-top");
+    let mut held = keys::Keys::load();
+    held.set("github", "");
+    held.save().ok();
+    crate::github::sign_out();
+    std::fs::remove_dir_all(git::code_dir().join("robot-2027")).ok();
+
+    // Tailscale, in Settings › Network (the simulator's made-up tailnet):
+    // off, switched on and showing its sign-in code, then signed in with the
+    // tailnet's machines; and the code again in Bezel's look, light, at the
+    // large text size. Off again after, for the shots that follow.
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    let keys = std::iter::repeat_n(Right, steps_to("Settings")).chain([Enter]).chain(std::iter::repeat_n(Down, screens::settings_row("Network"))).chain([Enter, Down]);
+    for key in keys {
+        shell.key(key);
+        settle(&mut shell, 30);
+    }
+    settle(&mut shell, 60);
+    save(&mut shell, "90-network");
+    let real_time = |shell: &mut Shell, seconds: f32| {
+        let until = Instant::now() + Duration::from_secs_f32(seconds);
+        while Instant::now() < until {
+            settle(shell, 6);
+            std::thread::sleep(Duration::from_millis(40));
+        }
+    };
+    shell.key(Enter);
+    real_time(&mut shell, 0.4);
+    settle(&mut shell, 60);
+    save(&mut shell, "90b-tailscale-off");
+    shell.key(Enter);
+    real_time(&mut shell, 2.6);
+    settle(&mut shell, 30);
+    save(&mut shell, "90c-tailscale-sign-in");
+    tailscale::demo_signed_in();
+    real_time(&mut shell, 2.4);
+    settle(&mut shell, 40);
+    save(&mut shell, "90d-tailscale-on");
+    for key in [Down, Down, Down] {
+        shell.key(key);
+        settle(&mut shell, 20);
+    }
+    settle(&mut shell, 40);
+    save(&mut shell, "90e-tailscale-machines");
+    shell.key(End);
+    settle(&mut shell, 30);
+    shell.key(Enter);
+    settle(&mut shell, 40);
+    save(&mut shell, "90f-tailscale-sign-out");
+    shell.key(Back);
+    tailscale::switch(false).ok();
+    let mut shell = Shell::new(Robot::demo());
+    (shell.settings.theme, shell.settings.light, shell.settings.text) = (look::Theme::Bezel, true, gfx::TextSize::Large);
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    tailscale::switch(true).ok();
+    shell.show(Box::new(tailscale::TailscaleScreen::new()));
+    real_time(&mut shell, 2.6);
+    settle(&mut shell, 40);
+    save(&mut shell, "90g-tailscale-sign-in-bezel-light-large");
+    tailscale::switch(false).ok();
 
     // About, laid out as Android's; seven presses on Build number make a
     // developer, and Developer options appear.

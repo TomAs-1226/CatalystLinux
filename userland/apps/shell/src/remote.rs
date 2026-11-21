@@ -119,17 +119,24 @@ impl Remote {
     /// The address as a QR code in `r`: dark squares on a white ground with
     /// the quiet margin a reader needs, each square a whole number of pixels.
     pub fn draw_qr(&self, g: &mut Gfx, r: Rect, alpha: f32) {
-        let n = self.qr.size();
-        let cell = (r.w.min(r.h) / (n + 4) as f32).floor().max(1.0);
-        let side = cell * (n + 4) as f32;
-        let (x0, y0) = ((r.right() - side).round(), (r.y + (r.h - side) * 0.5).round());
-        g.canvas.rrect(Rect::new(x0, y0, side, side), cell * 1.5, Color::WHITE, alpha);
-        for y in 0..n {
-            for x in 0..n {
-                if self.qr.get_module(x, y) {
-                    let at = Rect::new(x0 + (x + 2) as f32 * cell, y0 + (y + 2) as f32 * cell, cell, cell);
-                    g.canvas.fill_rect(at, Color::hex(0x0d0e12), alpha);
-                }
+        draw_code(g, &self.qr, r, alpha);
+    }
+}
+
+/// A QR code at the right of `r` (on the canvas, so with the page's slide
+/// already added), centred down it: dark squares on a white ground with the
+/// quiet margin a reader needs, each square a whole number of pixels.
+pub fn draw_code(g: &mut Gfx, qr: &qrcodegen::QrCode, r: Rect, alpha: f32) {
+    let n = qr.size();
+    let cell = (r.w.min(r.h) / (n + 4) as f32).floor().max(1.0);
+    let side = cell * (n + 4) as f32;
+    let (x0, y0) = ((r.right() - side).round(), (r.y + (r.h - side) * 0.5).round());
+    g.canvas.rrect(Rect::new(x0, y0, side, side), cell * 1.5, Color::WHITE, alpha);
+    for y in 0..n {
+        for x in 0..n {
+            if qr.get_module(x, y) {
+                let at = Rect::new(x0 + (x + 2) as f32 * cell, y0 + (y + 2) as f32 * cell, cell, cell);
+                g.canvas.fill_rect(at, Color::hex(0x0d0e12), alpha);
             }
         }
     }
@@ -463,6 +470,11 @@ const FORM: &str = r#"
     <p class="hint">The assistant answers questions about the robot with either service; one key is enough. Each is paid for by use on the account it comes from.</p>
     <label>OpenAI <small>GPT-6.2 Sol · a key from platform.openai.com, API keys</small><input name="openai" spellcheck="false"></label>
     <label>Claude <small>Claude Opus 5.5 · a key from platform.claude.com, API keys</small><input name="claude" spellcheck="false"></label>
+  </section>
+  <section>
+    <h2>Git</h2>
+    <p class="hint">For Git on the handheld: your repositories, their history, pulling and pushing.</p>
+    <label>GitHub <small>a token with repository access, from github.com, Settings, Developer settings</small><input name="github" spellcheck="false"></label>
   </section>
   <section>
     <h2>SSH</h2>
