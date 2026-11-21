@@ -76,25 +76,54 @@ pub const REPEAT_EVERY: Duration = Duration::from_millis(75);
 /// computer. `Id` is whatever names a physical key (a key code).
 pub struct Repeat<Id> {
     held: Option<(Id, Key, std::time::Instant)>,
+    /// The key that is Enter, while it is down.
+    enter: Option<Id>,
 }
 
 impl<Id> Default for Repeat<Id> {
     fn default() -> Self {
-        Repeat { held: None }
+        Repeat { held: None, enter: None }
     }
+}
+
+/// Enter repeats too while this is set: the screen in front sends a remote's
+/// button for as long as Enter is held ([`crate::shell::Screen::repeats_enter`]).
+pub static ENTER_REPEATS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// When Enter went down, while it is still down.
+static ENTER_DOWN: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// How long Enter has been held down, if it is: an Enter that has been down
+/// longer than [`REPEAT_AFTER`] is a repeat of a press, not a new one (a
+/// remote's button held, not pressed again).
+pub fn enter_held_for() -> Option<Duration> {
+    ENTER_DOWN.lock().ok()?.map(|at| at.elapsed())
 }
 
 impl<Id: PartialEq + Copy> Repeat<Id> {
     /// A key went down, meaning `key`.
     pub fn press(&mut self, id: Id, key: Key, now: std::time::Instant) {
-        let repeats = matches!(key, Key::Up | Key::Down | Key::Left | Key::Right | Key::PageUp | Key::PageDown | Key::Backspace | Key::Char(_));
+        let repeats = matches!(key, Key::Up | Key::Down | Key::Left | Key::Right | Key::PageUp | Key::PageDown | Key::Backspace | Key::Char(_))
+            || (key == Key::Enter && ENTER_REPEATS.load(std::sync::atomic::Ordering::Relaxed));
         self.held = repeats.then_some((id, key, now + REPEAT_AFTER));
+        if key == Key::Enter {
+            self.enter = Some(id);
+            if let Ok(mut down) = ENTER_DOWN.lock() {
+                *down = Some(now);
+            }
+        }
     }
 
     /// A key came up.
     pub fn release(&mut self, id: Id) {
         if self.held.is_some_and(|(held, ..)| held == id) {
             self.held = None;
+        }
+        if self.enter == Some(id) {
+            self.enter = None;
+            if let Ok(mut down) = ENTER_DOWN.lock() {
+                *down = None;
+            }
         }
     }
 

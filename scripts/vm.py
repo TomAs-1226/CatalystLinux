@@ -316,13 +316,14 @@ def main():
 
 
 # Home's built-in apps, and Terminal's place among them (screens.rs, APPS).
-BUILT_IN = 20
+BUILT_IN = 21
 TERMINAL = 8
 
 
 def tools(vm):
-    """What this image adds for a developer and for the AprilTag reader and
-    USB: each there and answering. Returns how many checks failed."""
+    """What this image adds for a developer and for the AprilTag reader, USB
+    and the Remote app: each there and answering. Returns how many checks
+    failed."""
     failed = 0
 
     def check(what, ok, detail=""):
@@ -356,6 +357,11 @@ def tools(vm):
     check("catalyst-usb says how it stands", out.startswith("off"), out)
     out = vm.run("busybox --list | grep -x udhcpd")
     check("BusyBox has its DHCP server for USB networking", out.strip() == "udhcpd", out)
+    # The emulator has no IR parts (no overlays), but the drivers can still be
+    # loaded and let go by name, as the Remote app does; at start, neither is in.
+    out = vm.run("lsmod | grep -c '^gpio_ir'; modprobe gpio_ir_tx; modprobe gpio_ir_recv; lsmod | grep -c '^gpio_ir'; "
+                 "modprobe -r gpio_ir_recv; modprobe -r gpio_ir_tx; lsmod | grep -c '^gpio_ir'", 60)
+    check("the IR drivers stay out until the Remote app loads them, and go again", out.split() == ["0", "2", "0"], " ".join(out.split()))
 
     print("== power")
     out = vm.run("catalyst-power undervolt status")

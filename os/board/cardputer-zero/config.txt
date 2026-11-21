@@ -40,3 +40,12 @@ gpio=24=op,dl
 # The board: I/O expander, panel, backlight, keyboard, fuel gauge.
 dtoverlay=cardputerzero-v5-overlay
 dtoverlay=bq27220_v5
+
+# Infrared, as M5Stack sets it up: the receiver on GPIO13 (pulled up; its
+# output is low while it sees light) and the LED on GPIO12, driven by the
+# kernel's software transmitter. Neither driver loads at start: the Remote
+# app loads the transmitter while it is open and the receiver only while a
+# button is learned (catalyst.conf in modprobe.d). The receiver gets the
+# empty key map, so no remote in the room is ever taken for a keyboard.
+dtoverlay=gpio-ir,gpio_pin=13,gpio_pull=up,rc-map-name=rc-empty
+dtoverlay=gpio-ir-tx,gpio_pin=12

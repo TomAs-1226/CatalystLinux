@@ -47,6 +47,8 @@ mod gpu;
 mod graphs;
 mod help;
 mod intro;
+mod ir;
+mod irremote;
 mod keys;
 mod lights;
 mod logs;
@@ -1126,6 +1128,44 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
         settle(&mut shell, 4);
         save(&mut shell, name);
     }
+
+    // Remote: the simulator's two remotes, the TV's buttons, one sent, then a
+    // button learned from the simulated remote (which waits a moment in real
+    // time before its button is pressed), named, and kept. Any remotes the
+    // simulator had kept are put back after.
+    let remotes_file = config_dir().join("remotes.json");
+    let remotes_before = std::fs::read(&remotes_file).ok();
+    std::fs::remove_file(&remotes_file).ok();
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    press(&mut shell, &vec![Right; steps_to("Remote")], 20);
+    press(&mut shell, &[Enter], 90);
+    save(&mut shell, "90-remote");
+    press(&mut shell, &[Enter], 90);
+    press(&mut shell, &[Down], 30);
+    save(&mut shell, "91-remote-buttons");
+    shell.key(Enter);
+    settle(&mut shell, 9);
+    save(&mut shell, "92-remote-sending");
+    press(&mut shell, &[Char('l')], 60);
+    save(&mut shell, "93-remote-listening");
+    std::thread::sleep(ir::SIMULATED_PRESS + Duration::from_millis(400));
+    settle(&mut shell, 60);
+    save(&mut shell, "94-remote-learned");
+    press(&mut shell, &[Enter], 20);
+    for c in "Netflix".chars() {
+        shell.key(Char(c));
+    }
+    settle(&mut shell, 20);
+    save(&mut shell, "94b-remote-naming");
+    press(&mut shell, &[Enter], 90);
+    settle(&mut shell, 30);
+    save(&mut shell, "94c-remote-kept");
+    match remotes_before {
+        Some(bytes) => std::fs::write(&remotes_file, bytes).ok(),
+        None => std::fs::remove_file(&remotes_file).ok(),
+    };
 
     // The tour, as it follows first-boot setup: its first steps.
     let mut shell = Shell::new(Robot::demo());

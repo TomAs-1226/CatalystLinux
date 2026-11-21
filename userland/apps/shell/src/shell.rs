@@ -368,6 +368,11 @@ pub trait Screen {
     fn keeps_awake(&self) -> bool {
         false
     }
+    /// Enter held down repeats, as a remote's button does when held (the
+    /// Remote app's buttons). Elsewhere Enter counts once a press.
+    fn repeats_enter(&self) -> bool {
+        false
+    }
 }
 
 const MESSAGE_SECONDS: f32 = 2.4;
@@ -1407,6 +1412,14 @@ impl Shell {
                 self.dirty = true;
             }
         }
+        // Enter held keeps sending a remote's button; anywhere else (the
+        // control centre or the recent apps over it included) it counts once.
+        let enter_repeats = self.transition.is_none()
+            && !self.control.is_open()
+            && self.switcher.is_none()
+            && self.tour.is_none()
+            && self.stack.last().is_some_and(|(s, _)| s.repeats_enter());
+        crate::platform::ENTER_REPEATS.store(enter_repeats, std::sync::atomic::Ordering::Relaxed);
         if let Some((_, left)) = &mut self.message {
             *left -= dt;
             if *left <= 0.0 {
