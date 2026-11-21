@@ -78,7 +78,7 @@ anyway*. From a terminal it takes the shell's own options: `--no-intro`,
 Arrow keys or `F` `X` `Z` `C` (the keys that carry the arrows on the
 Cardputer) move, Enter opens, Esc goes back. On Home, Left and Right go
 through the apps in order (on to the next row, and the next page), Up and
-Down within a page. Space on Home searches.
+Down within a page. Ctrl-Enter searches from any screen (Space on Home too).
 Ctrl-Space brings the control centre down over any screen, and Ctrl-Tab the
 recent apps; Left from Home's first tile is the glance page. `?` held for five seconds on any screen that
 is not taking text brings up the list of shortcuts (the island counts down
@@ -280,11 +280,51 @@ The start animation is personal too: once the team is known (from the robot's
 address) and a robot has linked, the line under the name reads
 `team 5805 · atlas` instead of the version.
 
-**Search**: Space (or /) on Home, then type. One list finds apps, everything
-in Settings, any value the robot publishes, and match logs, ranked by where
-the words are found (the start of a name, then the start of a word in it,
-then anywhere). Enter opens it; Esc clears, then leaves. The bare letters
-stay arrows on Home, so search has its own key.
+**Spotlight** is search from anywhere, as on a Mac. **Ctrl-Enter** brings
+it up over any screen, an app, a text field or the terminal included (no
+program in a terminal can tell Ctrl-Enter from Enter, so it takes nothing
+from one; the control centre gives way to it); Space or / on Home do too,
+as search's keys always have. It is a bar of glass that grows out of the
+island: the island stretches into it as its glass materializes (its
+refraction ramps up, never its opacity), and the screen behind is held
+still and dims a little.
+
+- **As you type**, from the first key, ranked: the apps (by other names too:
+  "math" finds Calculator), every page and switch in Settings (opened at
+  its row, a key said to be set or not), the Actions, notes (by what they
+  say, too), files under /data, photos, git repositories, the SSH hosts kept
+  in Connect, the robot's values (with the value), match logs, the event
+  schedule (a match number such as "q31" or "qm 31", a team number, or
+  "next"), sums ("12*7", "0x1f") and unit conversions ("3 in to mm", "12
+  ft·lb in nm", "5 lb") with the Calculator's and Units' own engines; then,
+  always last, search the web for it (in Web) and ask the assistant (which
+  sends it there).
+- **Ranked** the way a name is read: the whole name, its start, the start
+  of a word in it (a capital starts one: "volts" finds BatteryVolts), its
+  initials ("nt" is Net tools), anywhere in it, the other words it is known
+  by, and for apps, settings and actions a close misspelling ("termnal").
+  Then by kind (apps first, files last), then the shorter name. What was
+  picked lately (kept in `/data/catalyst/spotlight-picks`) comes first among
+  close matches, and with nothing typed the picks are offered.
+- **Keys**: Up and Down move through the results; Enter opens one, growing
+  out of its row, over the screen Spotlight came up on, so Esc from there
+  comes back to it; Tab or → shows a preview where there is one (a file's or
+  a note's first lines, a photo, a value as it is now, a match's alliances,
+  a sum in every base, an amount in every unit, what an Action runs), and ←
+  goes back; Fn-Backspace clears; Esc springs it back into the island. An
+  Action opens the confirm page with the command exactly as it will run,
+  and runs there, in place, on a yes.
+- **Never in the way**: the index is read on a thread of its own at a lower
+  priority, a provider at a time and again only when what it reads has
+  changed (a folder's change time; files a folder at a time), so a key never
+  waits on the storage. At its fullest (4,000 files, the most it holds, and
+  every other kind) it holds about a megabyte, and a search takes 0.1 to
+  0.3 ms on a desktop processor. It never opens over a lock screen, nor over
+  first-boot setup.
+- **Other apps add their own** results with `spotlight::register` and a
+  small `Provider` trait (`apps/shell/src/spotlight/index.rs`): items read
+  in the background, answers worked out from what is typed, how to open
+  one, and a preview.
 
 One step left of Home's first app is the **glance page** (负一屏): cards to be
 read without opening anything, two to a page, the pages running further left.
@@ -377,8 +417,9 @@ picture itself dims. Where there is a motion sensor, picking the handheld up
 wakes it for a look and laying it face down puts it out (see *Level, Compass
 and the motion sensor*).
 
-**Deep standby.** The CM0's chip has no suspend-to-RAM, so standby means
-switching off everything that can be. Once the screen is off and dark:
+**What standby switches off.** The CM0's chip has no suspend-to-RAM, so
+standby means switching off everything that can be. Once the screen is off
+and dark (and, half an hour on, deep standby goes further: see below):
 
 - the panel itself sleeps: the framebuffer is blanked, and a patch to
   M5Stack's panel driver sends the ST7789 display-off and sleep-in (enabling
@@ -395,6 +436,137 @@ wakes on a cable or a packet. ifplugd reads the link from the interface's
 own flags (`-m iff`), so it never wakes the chip to ask. The speaker
 amplifier is held off from the first instant (`gpio=24=op,dl`). Wi-Fi's
 own power save is on, which is brcmfmac's default.
+
+## Deep standby
+
+After half an hour with no key (Settings › Battery › Deep standby: 10
+minutes, 30, an hour, or never), with the screen already off, the handheld
+goes as near off as it can while a key can still wake it. It is not off:
+the CM0 has no suspend-to-RAM and its cores cannot be taken offline, the
+board has no power-management chip, the clock chip's alarm line is not
+wired, and only the slide switch cuts the power. So deep standby is
+everything a key does not need, switched off, in this order, each undone in
+the reverse order on waking (`deep.rs`, and `catalyst-power deep on|off`):
+
+1. **Polling stops.** The robot's link is let go (its client otherwise
+   tries ten times a second with no robot there), and every thread that
+   looks in on something (the robot's logs, the event schedule, an open
+   Wi-Fi, agent or setup page) waits on a condition variable, with no
+   wakeups at all. Update checks and the weather wait for the next look,
+   as nothing ticks.
+2. **The motion sensor stops watching**: no lift to wake. Its interrupt is
+   not usable here, and polling it would spend what deep standby saves.
+3. **The keyboard's three lights go out**, and come back as they were (a
+   modifier pressed meanwhile stands).
+4. **`catalyst-power deep on`**, on a thread of its own: Wi-Fi stopped and
+   its driver unloaded (if it was on), any other radio blocked (Bluetooth
+   is off from boot, `disable-bt`), the USB host stopped by unbinding dwc2
+   so the hub and the Ethernet chip go quiet (not while a USB mode has the
+   handheld as a computer's device), the Grove and HAT 5 V outputs off, and
+   the red light dark. What it switched off is noted in `/run/catalyst-deep`
+   and `deep off` brings back just that; a shell that starts and finds the
+   note (the last one stopped while deep) runs `deep off` itself.
+5. **The shell waits a minute at a time** for a key, with a second of timer
+   slack so the kernel can fold that wakeup in with another.
+
+Standby has already put the panel to sleep, the backlight out and the
+processor at its lowest speed (`powersave`).
+
+**Waking.** Any key on the handheld's keyboard wakes it, and is spent:
+neither it nor its repeats while held reach an app. The screen comes on at
+once; Wi-Fi comes back in the background over a few seconds. The island
+says how long it slept and what it drew on average ("slept 7 h 12 m · about
+0.68 W"), from the BQ27220's readings taken once a minute while it slept,
+weighted by time, or from the charge it lost when there were too few; on
+the charger it says so instead. Settings › Battery › Last sleep keeps the
+last one, and Settings › Battery › Deep standby (Enter) gives the measured
+draw in place of the estimate once there is one.
+
+What deep standby cannot do: wake by itself (for a robot, a message, or the
+time to queue for a match: the schedule is not watched meanwhile), or wake
+on a USB keyboard, a robot or computer plugged in, a lift, or a network
+packet: only the keyboard is watched. So it is not entered
+while a robot is linked, a computer has the handheld as its device, someone
+is logged in over SSH, an update is being checked, downloaded or installed,
+a Clock timer is running, or a screenshot is being saved; and anything that
+keeps the screen awake keeps it out too. Low-battery care still runs once a
+minute: at 5% the screen wakes to count down and turn off cleanly.
+Tailscale is left as it was set (with Wi-Fi off it has no network anyway).
+
+**The reminder.** Twelve hours in, or at 10%, on battery, the red light
+blinks once a minute for 150 ms: still on, slide the switch off. The
+kernel's LED timer trigger blinks it, so nothing wakes for it; at a few mA
+for a quarter of a percent of the time it costs well under 0.1 mW. On the
+estimates below a full battery lasts 6.5 to 11 hours in deep standby, so
+the 10% blink, with something like 40 to 60 minutes left, is the one most
+will see.
+
+**What it draws.** Estimates, apart from the first line, until deep
+standby is measured on the handheld (the island and the Battery page give
+the measured figure after the first one):
+
+| State | Draw | A full battery (about 6.5 Wh) |
+|---|---|---|
+| Awake, screen on, idle | about 2 W (measured) | about 3 h |
+| Standby, screen off | 0.8–1.2 W (estimate) | 5–8 h |
+| Deep standby | 0.6–1 W (estimate) | 6.5–11 h |
+| Turned off by software (halted) | 0.3–0.5 W (estimate) | 13–20 h, and it needs the switch to start again |
+| The switch off | 10–60 µA (estimate) | months |
+
+What deep standby still draws is mostly the processor idling (it has no
+suspend), its memory, and the 5 V boost converter feeding the board. For
+days, slide the switch off.
+
+## StandBy and the lock screen
+
+**StandBy.** On the charger and left alone, the screen dims as ever, and
+where it would go off a StandBy face comes up instead; set down on the
+charger with the screen off (or in deep standby, within the minute), it
+comes up at once. Six faces, designed for this panel in the spirit of
+Bezel's standby scapes (`faces.rs`): a large clock (digits, a Braun-style
+dial with a second hand stepping into each second, or a dot matrix), the
+time with the charge and when it will be full, the team's next match and
+those after it, the weather and the next hours, photos from the album, and
+a little of everything. ↑↓ turn the faces (the page spring, rubber-banding
+at either end, the page dots tucking away 2.5 s after the last key), ←→
+their style (or the photo); any other key leaves, and is spent doing so.
+Nothing blinks: the time's changed digits roll into place, the charge ring
+glides. From 10 pm to 7 am (by the clock: the board has no light sensor)
+every face turns a deep red monochrome and the backlight comes down to 40%
+of its brightness, over three seconds. Everything drifts a few pixels on a
+slow path against burn-in. While it shows, frames come at 30 a second at
+most and only while something moves, a face is drawn again only when what
+it shows changes, the processor is at its saving pace, and only the panel's
+changed rows are sent. Off the charger it goes dark as the screen would
+have, and deep standby's wait runs from then; on the charger the screen is
+never dark, so deep standby never begins. Settings › StandBy switches it
+off, or night, and shows it now (off the charger too).
+
+**The lock screen.** None by default: a key wakes the handheld straight to
+where it was. With a passcode (Settings › Lock screen: digits, or a word of
+up to 24 letters, digits and signs), the handheld starts locked, and locks
+whenever the screen has gone off or StandBy has come; the next wake shows
+the lock screen. It takes every key before anything else in the shell can
+(the recent apps, the control centre, Spotlight, every shortcut), nothing
+beneath it is drawn, no app is handed the panel, and Show key presses
+leaves passcodes out. A wrong passcode shakes the field; from the fifth in
+a row each try waits longer (30 s, 1 min, 5, 15, then an hour), across
+restarts too. Its look is the user's own: Settings › Lock screen ›
+Customise is the lock screen itself, live, with the clock (centre, stacked,
+dots), its colour, and what shows with it (the date, the charge, the next
+match, notices, the next reminder). Notices said while it is locked are
+kept: the lock screen says how many (their words only if Settings › Lock
+screen › Notices on it says so), and the island says them once it opens.
+
+The passcode is kept only as an Argon2id hash (19 MiB, two passes, a random
+salt) in `/data/catalyst/passcode`, readable by root alone. It is checked on
+a thread of its own; it is timed as it is made, and a handheld that took
+longer than 260 ms makes it again at the largest lower cost that fits, so
+unlocking stays under about 300 ms. It keeps out someone at
+the keys; it does not cover SSH, the setup page a computer opens, or the
+card itself. Forgotten, it comes off with `rm /data/catalyst/passcode` over
+SSH, or from the card on a Linux computer. `catalyst-shell --passcode-bench`
+says what a check takes on the handheld.
 
 ## Battery
 
@@ -422,6 +594,10 @@ Its choices:
   Plugging in keeps it on, and Esc puts it off until 2%. Slide the switch off
   afterwards: a software power-off leaves the switch to cut the power.
 - **Wi-Fi in standby**: off after ten minutes with the screen off, or left on.
+- **Deep standby**: after 10 minutes with no key, 30 (the default), an
+  hour, or never; ←→ choose, and Enter says what it does and what it draws
+  (see *Deep standby*). Beneath the battery's own figures, **Last sleep**
+  gives the last one's length and average draw.
 - **Red light**: quiet (dark, blinking only if the kernel panics) or card
   activity, as the CM0 does by default.
 

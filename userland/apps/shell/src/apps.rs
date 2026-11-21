@@ -150,28 +150,19 @@ impl App {
     pub fn open(&self) -> Box<dyn Screen> {
         match self.kind {
             Kind::Terminal => Box::new(crate::terminal::Terminal::running(&self.name, &self.run, self.dir.clone())),
-            Kind::Own => Box::new(Handover { app: self.clone(), state: State::Arriving }),
+            Kind::Own => Box::new(Handover { app: self.clone() }),
         }
     }
 }
 
 // -------------------------------------------------------------- handover ---
 
-#[derive(PartialEq)]
-enum State {
-    /// The page is still growing out of the tile.
-    Arriving,
-    /// The program has the panel.
-    Running,
-    Done,
-}
-
 /// The page behind an app that draws for itself: it grows out of the tile,
-/// the program is started on top of it, and it is what shows again when the
-/// program ends.
+/// and the program is started on top of it once it has landed. When the
+/// program ends the page closes, from the program's last picture, back into
+/// the tile.
 pub struct Handover {
     app: App,
-    state: State,
 }
 
 impl Screen for Handover {
@@ -184,19 +175,25 @@ impl Screen for Handover {
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
-        // Keys only arrive here before the program starts or after it ends.
-        if self.state == State::Done || key.leaves() || key == Key::Back {
-            self.state = State::Done;
+        // Keys only arrive here while the page grows (the program has every
+        // key once it starts): Esc turns it back.
+        if key.leaves() || key == Key::Back {
             return Nav::Pop;
         }
         Nav::Stay
     }
 
+    /// Each time the page lands and shows alone: opened again, or asked back
+    /// while it was closing, the program starts again. (The shell closes the
+    /// page once the program ends, so it is not asked twice in a landing.)
     fn launch(&mut self) -> Option<App> {
-        (self.state == State::Arriving).then(|| {
-            self.state = State::Running;
-            self.app.clone()
-        })
+        Some(self.app.clone())
+    }
+
+    /// The program ends when its page is left: nothing of it is kept to
+    /// come back to, so a page left over can never stand in for it.
+    fn keep_in_recents(&self) -> bool {
+        false
     }
 
     fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {

@@ -148,6 +148,8 @@ pub struct Gfx {
     /// Lift to wake and face down to sleep.
     pub lift_wake: bool,
     pub face_down: bool,
+    /// The lock screen's and StandBy's choices, for their Settings pages.
+    pub lock: crate::lock::Choices,
     /// The look chosen, its theme on its own for brevity, what every corner
     /// is multiplied by, and tiles across Home.
     pub look: crate::look::Look,
@@ -330,6 +332,7 @@ impl Gfx {
             battery: crate::power::Choices::default(),
             lift_wake: true,
             face_down: true,
+            lock: crate::lock::Choices::default(),
             look: crate::look::Look::default(),
             theme: crate::look::Theme::Catalyst,
             corner: 1.0,

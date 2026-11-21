@@ -203,6 +203,15 @@ impl Switcher {
         self.leaving && self.shown.value() <= 0.003
     }
 
+    /// Brought up again while `old` was on its way out: the cards rise
+    /// back from where those had sunk to, at their speed, not from nothing.
+    pub fn carry_on_from(&mut self, old: &Switcher) {
+        if old.leaving && !self.calm {
+            self.shown = old.shown;
+            self.shown.set_with(1.0, role::release());
+        }
+    }
+
     fn glide(&mut self) {
         if self.calm {
             self.scroll.jump(self.focus as f32);

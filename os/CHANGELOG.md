@@ -10,6 +10,50 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.5.4
+
+### StandBy and the lock screen
+- StandBy: on the charger and left alone, the handheld shows a clock, the charge, the next match, the weather, photos or a little of everything instead of going dark. ↑↓ change the face, ←→ its style. At night it turns red and dims.
+- Set it down on the charger with the screen off and StandBy comes up at once. Deep standby never starts on the charger.
+- Lock screen: set a passcode in Settings › Lock screen and the handheld asks for it once the screen has been off. No passcode is needed; without one, a key wakes it straight to where it was.
+- Customise the lock screen (its clock, its colour, and what shows with the time) with the lock screen itself as the preview.
+- A wrong passcode shakes the field; after five in a row, each try waits longer.
+- Notices and reminders that arrive while it's locked show as a count, and are said once it opens.
+
+### Spotlight
+- Search is now Spotlight: press Ctrl-Enter on any screen, even in the Terminal, and a glass search bar grows out of the island. Space and / on Home open it too.
+- Results appear from the first key: apps, any setting, Actions, notes, reminders, files, photos, repositories, SSH hosts, robot values, match logs and the schedule. Type a match or team number to jump to it.
+- Type a sum ("12*7") or a conversion ("3 in to mm") and the answer shows at once; the last rows search the web or ask the Assistant.
+- Enter opens a result where you are, and Esc brings you back; Tab shows a preview. What you pick often comes first.
+- Actions found in Spotlight still ask first, showing the exact command.
+
+### Reminders
+- Reminders: a new app with Today, Upcoming and Done. Type it the way you'd say it: "swap battery in 10 min", "tomorrow 8am check bumpers", "before Q42 charge spare".
+- Pit reminders follow the event schedule: before a match, at queueing, after each match, or between matches. When the event runs late, they move with it.
+- The pit routine (p) puts your usual after-match jobs on the list in one go.
+- Snooze with s (press again for longer), repeat with r, switch pit or personal with l.
+- In Notes, press r to be reminded of a note. A bell shows which notes have one, and the reminder opens the note.
+- A reminder that comes due wakes the screen, shows in the island and blinks the keyboard lights, in deep standby too.
+- The time-to-queue alert now arrives in deep standby too, and wakes the screen.
+
+## 0.5.3
+
+### Fixed
+- Opening and closing apps quickly no longer flashes an old screen, a blank frame or the wrong app: a window keeps moving from where it was, even when the next key comes first.
+- Apps that draw for themselves, like Paint, start every time they're opened, and close from their own last picture.
+- Recent apps (Ctrl Tab) opened during a zoom shows the app as it is, not jumped to full size.
+
+## 0.5.2
+
+### Battery
+- Deep standby: after 30 minutes with no key, Wi-Fi, USB, the 5 V outputs and every light go off, and the handheld stops checking for anything. Any key wakes it, and the island says how long it slept and what it drew.
+- Settings › Battery › Deep standby: after 10, 30 or 60 minutes, or never, with what it does and what it draws. Last sleep shows the last one's length and average draw.
+- After 12 hours in deep standby, or at 10%, on battery, the red light blinks once a minute to say the handheld is still on.
+- Deep standby waits while a robot is linked, a computer is connected, someone is signed in over SSH, an update is running or a timer is counting.
+
+### Fixed
+- The red light set to stay dark still lights up if the system crashes.
+
 ## 0.5.1
 
 ### Fixed

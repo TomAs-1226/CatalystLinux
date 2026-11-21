@@ -533,6 +533,15 @@ impl Calculator {
         Calculator { mode: Mode::Standard { degrees: true }, input: String::new(), answer: None, error: None, history: load_history(), recall: None, ans: None }
     }
 
+    /// Opened with an expression already typed (from search), in the mode
+    /// it is worked out in.
+    pub fn with_input(text: &str, mode: Mode) -> Self {
+        let mut calc = Self::new();
+        calc.input = text.chars().take(INPUT_LIMIT).collect();
+        calc.mode = mode;
+        calc
+    }
+
     /// What the expression comes to so far, if anything (shown faintly).
     fn preview(&self) -> Option<Value> {
         if self.input.trim().is_empty() {

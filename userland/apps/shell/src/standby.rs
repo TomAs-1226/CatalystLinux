@@ -13,6 +13,14 @@
 //! for a look (it goes off again soon unless a key follows), and putting it
 //! face down puts the screen out at once, whatever is showing, until a key
 //! or a lift.
+//!
+//! On the charger, with StandBy on (faces.rs), the screen does not go off:
+//! where it would, it goes to StandBy's faces instead (`State::Faces`), lit
+//! at the level the shell asks for (lower at night), with the processor at
+//! its saving pace. Taken off the charger there, it goes off as it would
+//! have, and the wait for deep standby runs from then; a key wakes it as
+//! from off. The screen is never dark while the faces show, so deep standby
+//! (which waits for a dark screen) cannot begin on the charger.
 
 use detent::{role, Animated};
 
@@ -92,6 +100,8 @@ pub enum State {
     Awake,
     Dim,
     Off,
+    /// On the charger, where it would have gone off: StandBy's faces show.
+    Faces,
 }
 
 pub struct Standby {
@@ -117,6 +127,12 @@ pub struct Standby {
     /// Put out by being laid face down: it stays out, even with something to
     /// watch, until a key or a lift.
     down: bool,
+    /// StandBy may show now (on the charger, switched on), at this level of
+    /// light; none: the screen goes off as ever.
+    faces: Option<f32>,
+    /// The wait last ticked with, in seconds: leaving the faces, the time is
+    /// counted from where the screen would have gone off.
+    off_at: f32,
 }
 
 impl Standby {
@@ -133,11 +149,59 @@ impl Standby {
             power_set: None,
             glance: false,
             down: false,
+            faces: None,
+            off_at: 60.0,
+        }
+    }
+
+    /// Whether StandBy may show where the screen would go off (on the
+    /// charger, switched on), and how lit: asked by the shell every tick.
+    pub fn set_faces(&mut self, level: Option<f32>) {
+        self.faces = level.map(|l| l.clamp(0.05, 1.0));
+    }
+
+    /// Put on the charger with the screen dimmed or off: StandBy comes up
+    /// at once (not face down: laid so, it stays out). True if it did.
+    pub fn to_faces(&mut self) -> bool {
+        let Some(level) = self.faces else { return false };
+        if !matches!(self.state, State::Dim | State::Off) || self.down {
+            return false;
+        }
+        if self.state == State::Awake || self.base.is_none() {
+            self.base = if self.backlight { crate::sys::brightness().filter(|b| *b > 0) } else { None };
+        }
+        if self.dark {
+            if self.backlight {
+                crate::sys::backlight_power(true);
+            }
+            self.dark = false;
+        }
+        self.state = State::Faces;
+        self.glance = false;
+        self.idle = self.idle.max(self.off_at);
+        self.apply_power(Power::Saving.governors());
+        self.level.set_with(level, role::smooth());
+        self.light();
+        true
+    }
+
+    /// Leaving the faces other than by a key: from now on it is as if the
+    /// screen had just gone off, so deep standby's wait starts now, not
+    /// when the last key was pressed (hours ago, on the charger overnight).
+    fn leave_faces(&mut self) {
+        if self.state == State::Faces {
+            self.idle = self.idle.min(self.off_at);
         }
     }
 
     pub fn state(&self) -> State {
         self.state
+    }
+
+    /// Seconds since the last key, or since something last needed the
+    /// screen: deep standby counts its wait from here.
+    pub fn idle(&self) -> f32 {
+        self.idle
     }
 
     /// A key came. True if it was spent waking the screen.
@@ -161,6 +225,7 @@ impl Standby {
             return;
         }
         let was_off = self.state == State::Off;
+        let was_faces = self.state == State::Faces;
         self.state = State::Awake;
         if self.dark {
             if self.backlight {
@@ -168,14 +233,14 @@ impl Standby {
             }
             self.dark = false;
         }
-        if was_off {
+        if was_off || was_faces {
             self.apply_power(self.power.governors());
         }
-        // Back at once from off; from dimmed, a quick rise.
+        // Back at once from off; from dimmed (or StandBy's night), a quick rise.
         if was_off {
             self.level.jump(1.0);
         } else {
-            self.level.set(1.0);
+            self.level.set_with(1.0, role::smooth());
         }
         self.light();
     }
@@ -191,6 +256,7 @@ impl Standby {
         if self.state == State::Awake {
             self.base = if self.backlight { crate::sys::brightness() } else { None };
         }
+        self.leave_faces();
         self.down = true;
         self.glance = false;
         if self.state != State::Off {
@@ -221,7 +287,7 @@ impl Standby {
     /// The processor speed chosen in Settings: set now unless the screen is off.
     pub fn set_power(&mut self, power: Power) {
         self.power = power;
-        if self.state != State::Off {
+        if !matches!(self.state, State::Off | State::Faces) {
             self.apply_power(power.governors());
         }
     }
@@ -245,11 +311,21 @@ impl Standby {
         }
         let off_at = screen_off as f32;
         let dim_at = (off_at - DIM_BEFORE).max(off_at * 0.5);
+        if screen_off > 0 {
+            self.off_at = off_at;
+        }
         match self.state {
             State::Awake if screen_off > 0 && self.idle >= dim_at => {
                 self.state = State::Dim;
                 self.base = if self.backlight { crate::sys::brightness() } else { None };
                 self.level.set_with(DIM_LEVEL, role::smooth());
+            }
+            // On the charger, StandBy: the faces come up where the screen
+            // would have gone off, the processor at its saving pace.
+            State::Dim if self.idle >= off_at && self.faces.is_some() => {
+                self.state = State::Faces;
+                self.level.set_with(self.faces.unwrap_or(1.0), role::smooth());
+                self.apply_power(Power::Saving.governors());
             }
             State::Dim if self.idle >= off_at => {
                 self.state = State::Off;
@@ -257,7 +333,24 @@ impl Standby {
             }
             // Something began to need watching while it was dimmed (but
             // not once it was laid face down).
-            State::Dim | State::Off if self.idle < dim_at && !self.down => self.wake_now(),
+            State::Dim | State::Off | State::Faces if self.idle < dim_at && !self.down => self.wake_now(),
+            // Off the charger (or StandBy switched off): out, as it would
+            // have gone without the charger, and the wait for deep standby
+            // starts now.
+            State::Faces if self.faces.is_none() => {
+                self.leave_faces();
+                self.state = State::Off;
+                self.level.set_with(0.0, role::smooth());
+            }
+            // Night coming or going: the light glides to its new level, slowly.
+            State::Faces => {
+                let want = self.faces.unwrap_or(1.0);
+                if (self.level.target() - want).abs() > 0.001 {
+                    // My own tuning: three seconds, no bounce, as a room's
+                    // light changes rather than a control's.
+                    self.level.set_with(want, detent::Spring::duration_bounce(3.0, 0.0));
+                }
+            }
             _ => {}
         }
         if calm {
@@ -397,6 +490,69 @@ mod tests {
         run(&mut s, 2.0, 60, false);
         s.lifted();
         assert_eq!(s.state(), State::Awake);
+    }
+
+    #[test]
+    fn on_the_charger_the_faces_come_where_it_would_go_off_and_a_key_wakes_it() {
+        let mut s = Standby::new();
+        s.backlight = false;
+        s.set_faces(Some(1.0));
+        run(&mut s, 53.0, 60, false);
+        assert_eq!(s.state(), State::Dim, "it dims first, as ever");
+        run(&mut s, 8.0, 60, false);
+        assert_eq!(s.state(), State::Faces, "and then StandBy, not dark");
+        assert!(!s.asleep(), "never dark: deep standby cannot begin");
+        run(&mut s, 8.0 * 3600.0, 60, false);
+        assert_eq!(s.state(), State::Faces, "all night");
+        assert!(s.shade() < 0.01, "lit");
+        // Night: the light glides down, slowly.
+        s.set_faces(Some(0.3));
+        run(&mut s, 0.5, 60, false);
+        assert!(s.shade() > 0.02 && s.shade() < 0.6, "on its way: {}", s.shade());
+        run(&mut s, 6.0, 60, false);
+        assert!((s.shade() - 0.7).abs() < 0.02, "night: {}", s.shade());
+        // A key wakes it, and is spent doing so.
+        assert!(s.key());
+        assert_eq!(s.state(), State::Awake);
+        run(&mut s, 1.0, 60, false);
+        assert!(s.shade() < 0.05);
+    }
+
+    #[test]
+    fn off_the_charger_the_faces_go_out_and_deep_standby_counts_from_then() {
+        let mut s = Standby::new();
+        s.backlight = false;
+        s.set_faces(Some(1.0));
+        run(&mut s, 3.0 * 3600.0, 60, false);
+        assert_eq!(s.state(), State::Faces);
+        // (Hours of twentieths of a second, added up in f32.)
+        assert!(s.idle() > 3.0 * 3600.0 - 120.0, "{}", s.idle());
+        // Unplugged: it goes off as it would have, and its idle time is as
+        // if the screen had only now gone off.
+        s.set_faces(None);
+        run(&mut s, 2.0, 60, false);
+        assert_eq!(s.state(), State::Off);
+        assert!(s.asleep());
+        assert!((61.0..63.0).contains(&s.idle()), "{}", s.idle());
+        // Laid face down on the charger: out, and counted from then too.
+        let mut s = Standby::new();
+        s.backlight = false;
+        s.set_faces(Some(1.0));
+        run(&mut s, 600.0, 60, false);
+        s.put_down();
+        run(&mut s, 2.0, 60, false);
+        assert_eq!(s.state(), State::Off);
+        assert!(s.idle() < 63.0, "{}", s.idle());
+        // StandBy switched off, or the screen never to go off: no faces.
+        let mut s = Standby::new();
+        s.backlight = false;
+        run(&mut s, 70.0, 60, false);
+        assert_eq!(s.state(), State::Off);
+        s.set_faces(Some(1.0));
+        let mut s = Standby::new();
+        s.set_faces(Some(1.0));
+        run(&mut s, 600.0, 0, false);
+        assert_eq!(s.state(), State::Awake, "never: on, not StandBy");
     }
 
     #[test]

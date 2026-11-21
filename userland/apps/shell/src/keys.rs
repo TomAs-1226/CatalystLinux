@@ -33,7 +33,9 @@ pub struct Keys {
     entries: Vec<(String, String)>,
 }
 
-fn path() -> PathBuf {
+/// The file the keys are kept in. Search watches it change, to say which
+/// keys are set; their values never leave this module.
+pub fn path() -> PathBuf {
     crate::config_dir().join("keys")
 }
 
