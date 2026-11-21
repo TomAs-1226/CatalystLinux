@@ -1233,8 +1233,9 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     press(&mut shell, &vec![Down; screens::settings_row("About this handheld")], 20);
     press(&mut shell, &[Enter], 90);
     save(&mut shell, "34-about");
-    // Build number, the last row.
-    press(&mut shell, &[Down; 7], 30);
+    // Down to Build number (past version, status, hardware check, licences…).
+    let build_number = crate::about::row_of("Build number").unwrap_or(5);
+    press(&mut shell, &vec![Down; build_number], 30);
     press(&mut shell, &[Enter; 4], 12);
     save(&mut shell, "35-build-number");
     press(&mut shell, &[Enter; 3], 12);
@@ -1466,6 +1467,13 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     shell.show(Box::new(panel::KeepPanel::new(false)));
     settle(&mut shell, 60 * 7 + 30);
     save(&mut shell, "84d-keep-the-tear-free-panel");
+    // Lower voltage, switched on: what it does, and a restart to try it.
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    shell.show(Box::new(power::TryUndervolt::new()));
+    settle(&mut shell, 90);
+    save(&mut shell, "84e-try-lower-voltage");
 
     // Update logs. What an update brings, before it installs (its notes
     // are the newest section of the changelog, as its manifest carries them),

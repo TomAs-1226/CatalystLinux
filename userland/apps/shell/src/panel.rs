@@ -6,9 +6,10 @@
 //! picture's columns while frames arrive row by row, and anything moving
 //! tears on a diagonal. The tear-free mode (the `cardputerzero-portrait`
 //! overlay, its init sequence and the driver's tearing-effect line, patch
-//! 0003) drives it upright, in its own order, at 40 refreshes a second, each
-//! frame sent as the panel's scan starts again; the shell turns the picture
-//! a quarter as it sends it (`platform::Turn`).
+//! 0003) drives it upright, in its own order, at its own 60 refreshes a
+//! second, each flush timed from the panel's scan so the scan never crosses
+//! the rows being written; the shell turns the picture a quarter as it sends
+//! it (`platform::Turn`), pixel for pixel.
 //!
 //! Tried before it is kept, by `catalyst-power`: switched on, the handheld
 //! restarts into it, and that start asks whether to keep it. Enter keeps it.
@@ -103,6 +104,65 @@ pub fn switch(on: bool) -> Result<String, String> {
     } else {
         let ok = std::process::Command::new(SCRIPT).args(["panel", "off"]).status().is_ok_and(|s| s.success());
         if ok { Ok("tear-free panel off · from the next start".into()) } else { Err("could not change config.txt".into()) }
+    }
+}
+
+/// How the panel's tearing-effect line is doing, as the driver says it
+/// (patch 0003: `tearing_effect` beside the panel's SPI device).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Sync {
+    /// No driver that says (the panel as M5Stack drives it, or off the handheld).
+    Unknown,
+    /// The panel is off.
+    Off,
+    /// On, and not yet timed.
+    Starting,
+    /// Each flush timed from the panel's scan, at this many refreshes a second.
+    InStep { hz: f32 },
+    /// The line never moved: flushes go out without it.
+    Silent,
+}
+
+/// What the driver says now.
+pub fn sync() -> Sync {
+    let found = std::fs::read_dir("/sys/bus/spi/devices")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .find_map(|e| std::fs::read_to_string(e.path().join("tearing_effect")).ok());
+    found.map_or(Sync::Unknown, |text| parse_sync(&text))
+}
+
+/// `state=in-step period_ns=16650000 write_ps=… followed=… led=… unsynced=…`
+pub fn parse_sync(text: &str) -> Sync {
+    let field = |name: &str| text.split_whitespace().find_map(|w| w.strip_prefix(name)?.strip_prefix('='));
+    let period = field("period_ns").and_then(|p| p.parse::<f64>().ok()).filter(|p| *p > 0.0);
+    match field("state") {
+        Some("in-step") => period.map_or(Sync::Starting, |p| Sync::InStep { hz: (1e9 / p) as f32 }),
+        Some("starting") => Sync::Starting,
+        Some("silent") => Sync::Silent,
+        Some("off") => Sync::Off,
+        _ => Sync::Unknown,
+    }
+}
+
+/// Developer options › Tear-free panel, as the row says it: where the trial
+/// stands and, once on, whether the panel is really in step.
+pub fn line() -> String {
+    line_for(trial(), sync())
+}
+
+fn line_for(trial: Trial, sync: Sync) -> String {
+    let now = match trial {
+        Trial::On => "on",
+        Trial::Trying => "trying",
+        other => return other.name().to_owned(),
+    };
+    match sync {
+        Sync::InStep { .. } => format!("{now} · in step"),
+        Sync::Silent => format!("{now} · no sync"),
+        Sync::Starting => format!("{now} · timing"),
+        Sync::Off | Sync::Unknown => trial.name().to_owned(),
     }
 }
 
@@ -246,9 +306,33 @@ impl Screen for KeepPanel {
     }
 }
 
+/// For tests: a settings row named `name` shows each of `values` whole
+/// beside its whole name, at every text size, in both themes (a settings
+/// row is the panel less its margins and the scrollbar; `Gfx::row` keeps
+/// 30 px for its insets and the gap).
+#[cfg(test)]
+pub fn row_fits(name: &str, values: &[String]) {
+    let width = W - 2.0 * PAD - 5.0;
+    let mut g = Gfx::new(bezel::Tokens::dark());
+    for theme in [crate::look::Theme::Catalyst, crate::look::Theme::Bezel] {
+        g.theme = theme;
+        for size in [crate::gfx::TextSize::Compact, crate::gfx::TextSize::Standard, crate::gfx::TextSize::Large] {
+            g.set_text_size(size);
+            let ty = g.ty;
+            let (name_w, value_style) = match theme {
+                crate::look::Theme::Bezel => (g.measure(&name.to_lowercase(), ty.label), ty.body),
+                _ => (g.measure(name, ty.body), ty.label),
+            };
+            for value in values {
+                assert!(name_w + g.measure(value, value_style) + 30.0 <= width, "{name}: {value} at {size:?} in {theme:?}");
+            }
+        }
+    }
+}
+
 /// What the question says, for the fit test.
 #[cfg(test)]
-const LINES: [&str; 4] = ["Enter keeps it.", "Turned or mirrored? Wait: back in 15 s.", "The panel stays as it is now.", "Restarting with the panel as it was."];
+const LINES: [&str; 4] =["Enter keeps it.", "Turned or mirrored? Wait: back in 15 s.", "The panel stays as it is now.", "Restarting with the panel as it was."];
 
 #[cfg(test)]
 mod tests {
@@ -307,6 +391,28 @@ mod tests {
         assert_eq!(trial(), Trial::Unavailable);
         assert!(switch(true).is_err());
         assert!(!Trial::Off.on() && Trial::Pending.on() && Trial::On.on());
+    }
+
+    #[test]
+    fn the_driver_says_whether_the_panel_is_in_step() {
+        assert_eq!(parse_sync("state=in-step period_ns=16650000 write_ps=384000 followed=12 led=0 unsynced=1\n"), Sync::InStep { hz: (1e9 / 16_650_000.0) as f32 });
+        assert_eq!(parse_sync("state=in-step period_ns=0 write_ps=0 followed=0 led=0 unsynced=0"), Sync::Starting, "no period yet");
+        assert_eq!(parse_sync("state=silent period_ns=0 write_ps=0 followed=0 led=0 unsynced=3"), Sync::Silent);
+        assert_eq!(parse_sync("state=off period_ns=16650000"), Sync::Off);
+        assert_eq!(parse_sync("state=none\n"), Sync::Unknown);
+        assert_eq!(parse_sync(""), Sync::Unknown);
+        assert_eq!(line_for(Trial::On, Sync::InStep { hz: 60.06 }), "on · in step");
+        assert_eq!(line_for(Trial::Trying, Sync::Silent), "trying · no sync");
+        assert_eq!(line_for(Trial::Trying, Sync::Unknown), "being tried");
+        assert_eq!(line_for(Trial::On, Sync::Unknown), "on");
+        assert_eq!(line_for(Trial::Off, Sync::InStep { hz: 60.0 }), "off", "the trial's word, whatever the driver");
+        assert_eq!(line(), "on the handheld", "off the handheld");
+    }
+
+    #[test]
+    fn the_rows_words_fit_beside_its_name() {
+        let values = [line_for(Trial::Trying, Sync::InStep { hz: 60.0 }), line_for(Trial::Trying, Sync::Silent), line_for(Trial::On, Sync::Starting)];
+        row_fits("Tear-free panel", &values);
     }
 
     #[test]

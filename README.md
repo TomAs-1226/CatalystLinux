@@ -411,12 +411,24 @@ Its choices:
 
 **Lower voltage** (Developer options) runs the processor's core a step
 lower: `over_voltage=-1` (−25 mV at full speed) and `over_voltage_min=-2`
-(−50 mV when idle, where there is the most to spare), in config.txt above
-the system block. It is tried before it is kept. The first start with it
-counts, and once the shell has run on it for five minutes `catalyst-power`
-confirms it. If a start finds it tried but never confirmed (that start
-crashed, hung or was switched off), it takes the lines out again and
-restarts, and the island says it did not hold.
+(−50 mV when idle, where there is the most to spare). The lines go into
+config.txt above the system block, so they hold whichever system starts and
+updates keep them. Enter on it says what it does and offers *Restart and try
+it*: `catalyst-power undervolt try` sets the lines and restarts cleanly.
+
+It is tried before it is kept. The first start with it counts. Once the shell
+has run on it for five minutes, `catalyst-power` confirms it. While it is
+tried, the hardware watchdog is fed, so a processor that hangs on the lower
+voltage is restarted within 15 seconds. (Not on a start that is an update
+being tried, where catalyst-update holds the watchdog.) If a start finds it
+tried but never confirmed (that start crashed, hung or was switched off), it
+takes the lines out again and restarts, and the island says it did not
+hold.
+
+The row then says what the firmware actually gave the core, as read from
+its mailbox (`/dev/vcio`, as vcgencmd does): *on · 1.175 V*, or *on · not
+taken* if the ceiling did not come down. It is judged against the ceiling
+read on a start without it, or 1.2 V. Kept, the island says the same.
 
 ## The keyboard's lights
 
@@ -447,23 +459,54 @@ Developer options › **Tear-free panel** drives it the panel's own way:
 - **Upright.** The `cardputerzero-portrait` overlay, applied after M5Stack's,
   gives the panel its own init sequence. That is
   `cardputerzero,st7789v_portrait.bin`, made from M5Stack's by
-  `scripts/panel-portrait-blob.py`, with MADCTL `0x00`. It also gives a
-  framebuffer of 170 × 320 on the 170 of the controller's 240 columns that
-  the glass shows. The shell turns its 320 × 170 picture a quarter as it
-  sends it, and sends only the columns that changed (now a run of the
-  panel's rows).
-- **In step.** The panel's tearing-effect line (GPIO5, wired by M5Stack, its
-  code in their driver but switched off) is switched on by patch 0003. Each
-  flush waits for the panel's vertical blank, at most 50 ms, so a frame is
-  written from the top as the scan starts again there.
-- **Ahead of the scan.** The SPI clock is the core clock over an even
-  divisor, so the 60 MHz asked for is about 42 to 50 MHz, and a whole frame
-  takes 17 to 21 ms. At 60 refreshes a second (16.7 ms) the scan would
-  catch it, so the mode refreshes at 40 (FRCTRL2 `0x1E`, 25 ms). That is
-  also the shell's own beat: a frame a refresh.
+  `scripts/panel-portrait-blob.py`, with MADCTL `0x00` and nothing else
+  changed. It also gives a framebuffer of 170 × 320 on the 170 of the
+  controller's 240 columns that the glass shows: the same pixels as
+  M5Stack's landscape mode, one for one. The shell turns its 320 × 170
+  picture a quarter as it sends it, and sends only the columns that changed
+  (now a run of the panel's rows).
+- **Timed from the scan.** The panel's tearing-effect line (GPIO5, wired by
+  M5Stack, its code in their driver but switched off) is switched on by
+  patch 0003. Its interrupt stays on while the panel is on, and each rising
+  edge (the scan leaving the last row) only notes the time: that gives the
+  scan's phase, and between two edges its speed (16.2 ms a refresh, 49 µs a
+  row over 320 rows and 10 of porch).
+- **Never crossed.** A frame is 108,800 bytes (320 × 170 at 16 bits). The SPI
+  clock is the core clock over an even divisor, so the 60 MHz asked for is
+  about 42 MHz (core at 250 MHz) to 50 MHz (400): 17 to 21 ms a frame, 54 to
+  65 µs a row. That is slower than the scan, so a band of rows follows it:
+  the driver starts it just after the scan has passed its first row. That
+  refresh shows the old rows, the next shows the new ones whole, provided
+  the band is done before the scan comes round behind it. The gap closes at
+  5 to 16 µs a row, at most 5.2 ms over the whole height against a 16.2 ms
+  period, so a flush can usually start at once and otherwise waits for the
+  scan. Were writing ever faster than the scan, the driver would lead it
+  instead (start while the scan is above the band, or once it is past). The
+  time a row takes to write is measured on the flushes themselves.
+
+The first version of this mode tore all the same and looked worse. Each
+flush enabled the interrupt, waited for one edge and disabled it again. The
+BCM2835's GPIO interrupts have no disable of their own, so the kernel
+disabled them lazily: an edge that came while "disabled" was kept, and
+replayed the moment the interrupt was enabled. The wait returned at once,
+anywhere in the scan. To lead the scan from the blank, it had also slowed
+the panel to 40 refreshes a second, which made motion look rougher. Now the
+interrupt is disabled for real (`IRQ_DISABLE_UNLAZY`) and the panel keeps
+its own 60.
+
+`/sys/bus/spi/devices/spi0.0/tearing_effect` says how it is doing:
+`state=in-step period_ns=… write_ps=… followed=… led=… unsynced=…`. The
+Tear-free panel row reads it: *on · in step*, *on · timing* while it times
+the first edges, or *on · no sync* if the line never moves. After three
+flushes with no edge, flushes go out as before until the panel is next
+switched on.
 
 Without the overlay, nothing changes: the driver uses the tearing-effect
-line only where the Device Tree gives `te-gpios`.
+line only where the Device Tree gives `te-gpios`. Everything this mode needs
+comes with an update (the overlay in the system's slot folder, the driver
+and the init sequence in its root filesystem). Only the trial's one
+`dtoverlay=` line goes into config.txt, written on the handheld above the
+system block, which updates keep as it is.
 
 It is tried before it is kept (`catalyst-power panel`). Switched on, the
 handheld restarts into it, and that start asks: *Keep the tear-free panel?*
@@ -685,6 +728,32 @@ It is automatic, and never a risk:
   About says which is drawing. `CATALYST_GPU=off` does the same from outside;
   `CATALYST_GPU=force` gives the GPU every job, quicker or not, and
   `CATALYST_GPU=software` allows Mesa's software renderer too, for testing.
+
+**Why the processor draws most of the time.** Settings › Display ›
+Graphics says what draws and why in a few words: *gpu · glass, windows*, or
+*processor* with the reason (*faster here*, *no gpu found*, *gpu differs*,
+*your choice*). Settings › About › version › Graphics has the timings that
+decided it. The reasons it is usually the processor on this handheld:
+
+- **The picture has to come back to the processor anyway.** The panel is on
+  SPI, so every frame is sent by the processor's SPI controller from
+  ordinary memory: 108,800 bytes at 16 bits, 17 to 21 ms of DMA per whole
+  frame, during which the processor is free. A GPU frame means handing the
+  GPU the 217,600-byte scene under the glass, waiting for it, and reading
+  the result back out of uncached memory, every frame. That copying is
+  processor time too. At this panel's size it is of the same order as the
+  glass itself (about 4 ms of the handheld's processor for a whole frame of
+  glass, estimated from the PC's timings), so the shell times both on a
+  test frame and uses the GPU only for what it wins.
+- **Nothing is drawn while nothing moves.** A still screen costs neither:
+  no frame is made, and the panel keeps its own picture. When something
+  moves, only the rows that changed are converted and sent.
+- **The GPU costs power to wake** (its core and clock) and memory (Mesa's
+  driver), so it is worth it only where it is clearly faster.
+
+What only the handheld can say is which way its timing goes, and the
+shell's memory with the VideoCore's driver loaded. `catalyst-shell --about`
+prints the choice and the timings.
 
 The boot configuration turns on the VideoCore's kernel driver
 (`vc4-kms-v3d`, without HDMI or audio) with 32 MB of contiguous memory for it.

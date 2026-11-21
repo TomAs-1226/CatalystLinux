@@ -2378,12 +2378,9 @@ impl SettingsApp {
             ShowKeys => ("Show key presses".into(), onoff(g.show_keys), g.show_keys),
             TearFree => {
                 let state = crate::panel::trial();
-                ("Tear-free panel".into(), state.name().into(), state.on())
+                ("Tear-free panel".into(), crate::panel::line(), state.on())
             }
-            Undervolt => {
-                let state = crate::power::undervolt();
-                ("Lower voltage".into(), state.name().into(), matches!(state, crate::power::Undervolt::On | crate::power::Undervolt::Trying))
-            }
+            Undervolt => ("Lower voltage".into(), crate::power::undervolt_line(), crate::power::undervolt().on()),
             BatterySection => section("Battery", crate::power::summary()),
             Mode => ("Mode".into(), (if g.tokens.tone == bezel::Tone::Light { "light" } else { "dark" }).into(), true),
             AccentColor => ("Accent".into(), g.accent.name().into(), true),
@@ -2442,16 +2439,8 @@ impl SettingsApp {
             TextScale => ("Text size".into(), g.text_size.name().into(), true),
             Calm => ("Calm version".into(), onoff(g.calm), g.calm),
             Brightness => ("Brightness".into(), dash(self.backlight.map(|b| format!("{b}%"))), true),
-            Graphics => (
-                "Graphics".into(),
-                match (g.gpu_wanted(), &g.gpu) {
-                    (true, Some(gpu)) if gpu.renderer().contains("VC4") => "videocore gpu".into(),
-                    (true, Some(_)) => "gpu".into(),
-                    (true, None) => "auto · processor".into(),
-                    (false, _) => "processor".into(),
-                },
-                g.gpu.is_some(),
-            ),
+            // What draws, and why (About has the timings that decided it).
+            Graphics => ("Graphics".into(), crate::gpu::plain(g.gpu_wanted(), g.gpu.as_ref()), g.gpu.is_some()),
             ScreenOff => ("Screen off after".into(), crate::standby::screen_off_name(g.screen_off), g.screen_off != 0),
             Processor => ("Processor".into(), g.power.name().into(), true),
             LiftWake => ("Lift to wake".into(), onoff(g.lift_wake), g.lift_wake),
@@ -2579,11 +2568,8 @@ impl SettingsApp {
                 cx.settings.motion_scale = all[(at + step).clamp(0, all.len() as i32 - 1) as usize];
             }
             ShowKeys => cx.settings.show_keys = !cx.settings.show_keys,
-            Undervolt => {
-                use crate::power::Undervolt as U;
-                let on = !matches!(crate::power::undervolt(), U::On | U::Trying);
-                *cx.say = Some(crate::power::set_undervolt(on).unwrap_or_else(|why| why));
-            }
+            // Switching it on asks first and restarts (the key handler); here, off.
+            Undervolt => *cx.say = Some(crate::power::set_undervolt(false).unwrap_or_else(|why| why)),
             // On: the handheld restarts into it and asks whether to keep it.
             TearFree => *cx.say = Some(crate::panel::switch(!crate::panel::trial().on()).unwrap_or_else(|why| why)),
             UsbMode => {
@@ -2736,6 +2722,8 @@ impl Screen for SettingsApp {
             Key::Enter | Key::Right if item == Item::TakeTour => return Nav::Tour,
             Key::Enter | Key::Right if item == Item::KeyboardShortcuts => return Nav::Push(Box::new(crate::help::Shortcuts::new())),
             Key::Enter | Key::Right if item == Item::BatterySection => return Nav::Push(Box::new(crate::power::BatteryPage::new())),
+            // Lower voltage, switched on: what it does, and a restart to try it.
+            Key::Enter | Key::Right if item == Item::Undervolt && crate::power::undervolt().asks_to_try() => return Nav::Push(Box::new(crate::power::TryUndervolt::new())),
             Key::Enter | Key::Right if item == Item::KeyboardLesson => return Nav::Push(Box::new(crate::setup::Setup::lesson())),
             Key::Enter | Key::Right if item == Item::TimeZone => return Nav::Push(Box::new(crate::device::ZonePicker::new())),
             Key::Enter if item == Item::DeviceName => self.naming = Some(crate::device::name()),

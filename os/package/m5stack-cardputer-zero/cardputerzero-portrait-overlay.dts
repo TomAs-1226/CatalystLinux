@@ -5,12 +5,13 @@
 //
 // - its own init sequence (cardputerzero,st7789v_portrait.bin): MADCTL 0x00,
 //   no row/column exchange, so memory is written from the first gate line
-//   on, the way the panel refreshes; and 40 refreshes a second, slower than
-//   a whole frame takes to send;
+//   on, the way the panel refreshes, at its own 60 refreshes a second;
 // - the framebuffer upright to the panel, 170 x 320, on the 170 of the
-//   controller's 240 columns that the glass shows (from the 36th);
-// - the tearing-effect line, GPIO5: each flush waits for the panel's
-//   vertical blank (the driver, with Catalyst Linux's patch 0003).
+//   controller's 240 columns that the glass shows (from the 36th): the same
+//   pixels as M5Stack's landscape mode, one for one;
+// - the tearing-effect line, GPIO5: each flush is timed from the panel's
+//   scan so the scan never crosses the rows being written (the driver, with
+//   Catalyst Linux's patch 0003).
 //
 // The shell turns its 320 x 170 picture a quarter turn as it sends it.
 // Settings > Developer options > Tear-free panel tries it (catalyst-power).
