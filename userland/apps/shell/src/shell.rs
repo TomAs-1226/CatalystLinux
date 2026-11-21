@@ -79,6 +79,9 @@ pub struct Settings {
     /// handheld is picked up, and goes off when it is put face down.
     pub lift_wake: bool,
     pub face_down: bool,
+    /// Settings › Lock screen and StandBy: the lock screen's look, and
+    /// StandBy on the charger (the passcode itself is kept apart, passcode.rs).
+    pub lock: crate::lock::Choices,
 }
 
 /// The animation scales developer options offer.
@@ -195,6 +198,7 @@ impl Default for Settings {
             brightness: 70,
             lift_wake: true,
             face_down: true,
+            lock: crate::lock::Choices::default(),
         }
     }
 }
@@ -300,6 +304,8 @@ pub enum Nav {
     Pop,
     /// Pull the control centre down.
     Control,
+    /// Bring Spotlight up over this screen (Space on Home).
+    Spotlight,
     /// Done: give way to the screen beneath, fading out over it as it appears.
     Done,
     /// Back to Home, and take the tour there.
@@ -382,6 +388,16 @@ pub trait Screen {
     /// Enter held down repeats, as a remote's button does when held (the
     /// Remote app's buttons). Elsewhere Enter counts once a press.
     fn repeats_enter(&self) -> bool {
+        false
+    }
+    /// A lock screen: nothing that reaches past it opens over it while it
+    /// is anywhere on the stack (Spotlight; see `Shell::locked`).
+    fn locks(&self) -> bool {
+        false
+    }
+    /// What is typed here is secret (a passcode): Show key presses leaves
+    /// its keys out.
+    fn secret(&self) -> bool {
         false
     }
 }
@@ -678,6 +694,13 @@ pub struct Shell {
     /// glass is worked out once and then moved as a picture.
     control_under: Option<Vec<u32>>,
     control_glass: Option<Vec<u32>>,
+    /// Spotlight, over whatever screen is showing; while it is out, the frame
+    /// it came up over (the screen and the status, not yet the island's
+    /// glass, which it grows out of) and the page dots that frame asked for.
+    spotlight: crate::spotlight::Spotlight,
+    spotlight_under: Option<(Vec<u32>, Option<(usize, usize, f32)>)>,
+    /// Spotlight's index has been set reading, ahead of its first search.
+    spotlight_warmed: bool,
     /// Whether the robot was linked at the last tick, and how long it has
     /// been gone, to tell a robot arriving from a link that blinked.
     was_linked: bool,
@@ -742,10 +765,57 @@ pub struct Shell {
     /// Matches already warned about for queueing: (match, 0 soon / 1 now).
     queue_warned: Vec<(String, u8)>,
     queue_age: f32,
+    /// When the queue alert would next speak, worked out ahead: deep
+    /// standby's minute tick looks only at this (the schedule is parked).
+    queue_due: Option<i64>,
+    /// Reminders: when the next is due, worked out ahead the same way.
+    reminders: crate::reminders::Watch,
+    /// Deep standby woke for one of those: nobody was looking.
+    woke_for_alert: bool,
+    /// StandBy, over everything on the charger where the screen would have
+    /// gone off; and the lock screen (a passcode set), over everything once
+    /// it has. See faces.rs and lock.rs, and `Shell::key` for the order.
+    faces: crate::faces::Faces,
+    lock: crate::lock::Lock,
+    /// What the lock screen shows besides the time, and when it was read.
+    lock_info: Option<(crate::lock::Info, std::time::Instant)>,
+    lock_scratch: Vec<u32>,
+    /// What the island says once it is unlocked (the deep sleep's figures).
+    after_unlock: Option<String>,
+    /// The galleries' and tests' charger: plugged in or not, whatever the
+    /// gauge says; and whether it was on the charger at the last tick.
+    charger: Option<bool>,
+    charger_was: bool,
 }
+
+/// How long the island holds a reminder coming due (a message holds 2.4 s).
+const REMINDER_SECONDS: f32 = 6.0;
 
 /// How long before the time to queue the island says it is coming.
 const QUEUE_AHEAD: i64 = 300;
+
+/// When `watch_queue` would next speak as things stand (from Nexus's queue
+/// times): worked out ahead for deep standby, where the schedule is parked
+/// and cannot change. The five-minute warning, then the time itself, for
+/// whichever match is the next one by then.
+fn queue_alert_at(view: &crate::schedule::View, now: i64, warned: &[(String, u8)]) -> Option<i64> {
+    view.matches
+        .iter()
+        .filter(|m| m.score.is_none())
+        .filter_map(|m| {
+            let at = m.queue_at?;
+            let said = |stage: u8| warned.iter().any(|(key, s)| *key == m.key && *s >= stage);
+            let when = if !said(0) && now < at {
+                (at - QUEUE_AHEAD).max(now)
+            } else if !said(1) && now <= at + 900 {
+                at.max(now)
+            } else {
+                return None;
+            };
+            (view.next(when).map(|n| n.key.as_str()) == Some(m.key.as_str())).then_some(when)
+        })
+        .min()
+}
 
 /// A Clock timer is running: deep standby waits for it to be said.
 #[cfg(not(test))]
@@ -805,6 +875,7 @@ fn key_name(key: Key) -> String {
         Key::Char(c) => c.to_string(),
         Key::Ctrl(' ') => "ctrl space".into(),
         Key::Ctrl('\t') => "ctrl tab".into(),
+        Key::Ctrl('\n') => "ctrl enter".into(),
         Key::Ctrl(c) => format!("ctrl {c}"),
         Key::Leave => "esc held".into(),
     }
@@ -864,6 +935,9 @@ impl Shell {
             control: Control::new(),
             control_under: None,
             control_glass: None,
+            spotlight: crate::spotlight::Spotlight::new(),
+            spotlight_under: None,
+            spotlight_warmed: false,
             spent: Default::default(),
             tour: None,
             tour_after: None,
@@ -883,6 +957,16 @@ impl Shell {
             woke_by: None,
             queue_warned: Vec::new(),
             queue_age: 0.0,
+            queue_due: None,
+            reminders: crate::reminders::Watch::new(),
+            woke_for_alert: false,
+            faces: crate::faces::Faces::new(),
+            lock: crate::lock::Lock::new(),
+            lock_info: None,
+            lock_scratch: Vec::new(),
+            after_unlock: None,
+            charger: None,
+            charger_was: false,
         }
     }
 
@@ -977,7 +1061,13 @@ impl Shell {
     }
 
     pub fn say(&mut self, text: impl Into<String>) {
-        self.message = Some((text.into(), MESSAGE_SECONDS));
+        let text = text.into();
+        // Said while it is locked or StandBy shows: kept for the lock
+        // screen, and said again once it is unlocked (or StandBy is left).
+        if self.lock.engaged() || self.faces.showing() {
+            self.lock.note(&text);
+        }
+        self.message = Some((text, MESSAGE_SECONDS));
         self.dirty = true;
         // Said with the screen off: the Fn light blinks until it wakes.
         if self.standby.state() == crate::standby::State::Off {
@@ -1053,7 +1143,9 @@ impl Shell {
 
     /// Good morning, in the island, as Home appears (when the greeting is on).
     fn greet(&mut self) {
-        if self.settings.greeting {
+        // Locked at start, Home is not what appears: no greeting, and none
+        // kept as a notice either.
+        if self.settings.greeting && !self.lock.engaged() {
             use chrono::Timelike;
             let team = crate::schedule::team_of(&self.robot.address);
             self.say(greeting(chrono::Local::now().hour(), team));
@@ -1078,13 +1170,29 @@ impl Shell {
             self.woke_by = Some((key, self.clock));
             return;
         }
+        // StandBy: the arrows turn its faces; any other key leaves it below,
+        // as a key wakes the screen from off.
+        if self.standby_state() == crate::standby::State::Faces {
+            let before = self.settings.lock;
+            if self.faces.key(key, &mut self.settings.lock, self.settings.calm) {
+                if self.settings.lock != before {
+                    crate::save_settings(&self.settings);
+                    self.gfx.lock = self.settings.lock;
+                }
+                self.moving = true;
+                return;
+            }
+        }
         // A key while the screen is dimmed or off wakes it, and is spent doing so.
         if self.standby.key() {
+            self.leave_faces();
             self.moving = true;
             return;
         }
-        // Developer options › Show key presses: every key, as it lands.
-        if self.settings.developer && self.settings.show_keys {
+        // Developer options › Show key presses: every key, as it lands (but
+        // never a passcode's, on the lock screen).
+        let secret = self.lock.engaged() || self.stack.last().is_some_and(|(s, _)| s.secret());
+        if self.settings.developer && self.settings.show_keys && !secret {
             self.echo.push((key_name(key), 0.0));
             if self.echo.len() > 4 {
                 self.echo.remove(0);
@@ -1099,6 +1207,14 @@ impl Shell {
             }
             self.intro = None;
         }
+        // Locked: the lock screen takes every key. Nothing below this line
+        // (the tour, the recent apps, the control centre, Spotlight, `?`, any
+        // shortcut, the screen in front) is reached until the passcode is.
+        if self.lock.engaged() {
+            self.lock.key(key);
+            self.moving = true;
+            return;
+        }
         // The tour takes every key while it shows.
         if let Some(tour) = &mut self.tour {
             tour.key(key);
@@ -1110,6 +1226,20 @@ impl Shell {
         // on that screen.
         if self.switcher.as_ref().is_some_and(|s| !s.leaving()) {
             return self.switcher_key(key);
+        }
+        // Spotlight on its way back into the island: Ctrl-Enter turns it
+        // round; any other key makes it go at once, and lands on the screen
+        // beneath, drawn live.
+        if !self.spotlight.is_open() && self.spotlight.visible() {
+            if key == Key::Ctrl('\n') {
+                return self.summon_spotlight();
+            }
+            self.spotlight.gone_now();
+            self.spotlight_under = None;
+        }
+        // Spotlight takes the keys while it is up (the backlight's aside).
+        if self.spotlight.is_open() && !matches!(key, Key::BrightnessDown | Key::BrightnessUp) {
+            return self.spotlight_key(key);
         }
         // Ctrl-Tab brings them up over any screen, a terminal included: no
         // program in a terminal can be sent Ctrl-Tab, so it takes nothing.
@@ -1146,6 +1276,12 @@ impl Shell {
             Key::Backspace => Key::Back,
             other => other,
         };
+        // Ctrl-Enter brings Spotlight up over any screen, a terminal included
+        // (no program can tell it from Enter), and over the control centre,
+        // which gives way to it.
+        if key == Key::Ctrl('\n') {
+            return self.summon_spotlight();
+        }
         // A key while the control centre is on its way out: it finishes going
         // at once, so the key lands on a screen that is drawn live, not on
         // the still picture held behind the sheet.
@@ -1237,6 +1373,7 @@ impl Shell {
             Nav::Open(screen, from) => self.open(screen, Path::Grow(from)),
             Nav::Pop => self.close(),
             Nav::Control => self.set_control(true),
+            Nav::Spotlight => self.summon_spotlight(),
             Nav::Done => self.finish_top(),
             Nav::Tour => self.tour_from_home(),
         }
@@ -1270,6 +1407,7 @@ impl Shell {
         // The battery saver has the processor climb slowly, whatever is chosen.
         self.standby.set_power(if self.settings.battery.saver { crate::standby::Power::Saving } else { self.settings.power });
         (self.gfx.lift_wake, self.gfx.face_down) = (self.settings.lift_wake, self.settings.face_down);
+        self.gfx.lock = self.settings.lock;
         self.gfx.want_gpu(self.settings.gpu);
         let s = &self.settings;
         let look = crate::look::Look { theme: s.theme, wallpaper: s.wallpaper, corners: s.corners, letters: s.letters, width: s.width };
@@ -1486,7 +1624,11 @@ impl Shell {
             && self.tour.is_none()
             && self.intro.is_none()
             && self.curtain.is_none()
-            && self.standby.state() == crate::standby::State::Awake;
+            && self.standby.state() == crate::standby::State::Awake
+            // Never while locked (or StandBy shows): an app handed the panel
+            // would take the keys from under the lock.
+            && !self.lock.engaged()
+            && !self.faces.visible();
         if !alone {
             return None;
         }
@@ -1546,7 +1688,7 @@ impl Shell {
             self.arrival = Some(waited + dt);
             return;
         }
-        let on_home = self.stack.len() == 1 && self.transition.is_none() && !self.control.visible();
+        let on_home = self.stack.len() == 1 && self.transition.is_none() && !self.control.visible() && !self.spotlight.visible();
         if self.settings.open_robot && on_home && patient {
             let calm = self.settings.calm;
             self.dirty = true;
@@ -1610,7 +1752,7 @@ impl Shell {
         // once, sliding in over Home when Home is at rest and in sight.
         if let Some(version) = crate::changelog::due_after_update(&self.update) {
             let at_rest = self.stack.len() == 1 && self.transition.is_none() && self.curtain.is_none() && self.intro.is_none();
-            let clear = self.tour.is_none() && self.tour_after.is_none() && self.switcher.is_none() && !self.control.is_open();
+            let clear = self.tour.is_none() && self.tour_after.is_none() && self.switcher.is_none() && !self.control.is_open() && !self.spotlight.visible();
             if at_rest && clear && !self.standby.asleep() && crate::setup_done() {
                 if let Some(page) = crate::changelog::WhatsNew::after_update(&version) {
                     self.open(Box::new(page), Path::Slide);
@@ -1654,7 +1796,7 @@ impl Shell {
         let rows = self.robot.logs.list();
         let Some(row) = rows.iter().find(|row| !watch.known.contains(&row.name)) else { return };
         let Some(detail) = crate::screens::LogDetail::of(row) else { return };
-        let busy = watch.touched || self.control.visible() || self.transition.is_some();
+        let busy = watch.touched || self.control.visible() || self.spotlight.visible() || self.transition.is_some();
         let over = match self.stack.len() {
             1 => true,
             2 => self.stack[1].0.title() == "Robot",
@@ -1708,7 +1850,7 @@ impl Shell {
         // The tour: offered a moment after setup, once Home has arrived.
         if let Some(left) = &mut self.tour_after {
             *left -= dt;
-            if *left <= 0.0 && self.transition.is_none() && self.curtain.is_none() && self.stack.len() == 1 && self.intro.is_none() {
+            if *left <= 0.0 && self.transition.is_none() && self.curtain.is_none() && self.stack.len() == 1 && self.intro.is_none() && !self.lock.visible() && !self.faces.visible() {
                 self.start_tour();
             }
         }
@@ -1800,6 +1942,7 @@ impl Shell {
             self.control_glass = None;
             self.dirty = true;
         }
+        moving |= self.tick_spotlight(motion_dt);
         if self.transition.is_none() {
             moving |= self.stack.last_mut().is_some_and(|(s, _)| s.tick(motion_dt));
             // Work that reached the screen from outside, and a screen that is done.
@@ -1832,6 +1975,7 @@ impl Shell {
         // control centre or the recent apps over it included) it counts once.
         let enter_repeats = self.transition.is_none()
             && !self.control.is_open()
+            && !self.spotlight.is_open()
             && self.switcher.is_none()
             && self.tour.is_none()
             && self.stack.last().is_some_and(|(s, _)| s.repeats_enter());
@@ -1946,6 +2090,35 @@ impl Shell {
     }
 
     fn draw_under_intro(&mut self) {
+        // StandBy or the lock screen over the whole panel: nothing beneath
+        // them is drawn.
+        let covered = self.faces.covers() || (self.lock.covers() && !self.faces.visible());
+        if !covered {
+            self.draw_shell();
+        }
+        self.draw_lock_and_faces();
+    }
+
+    /// The lock screen and StandBy, over whatever is beneath them.
+    fn draw_lock_and_faces(&mut self) {
+        if self.lock.visible() && !self.faces.covers() {
+            let info = self.lock_info();
+            let Shell { gfx, lock, settings, lock_scratch, .. } = self;
+            lock.draw(gfx, &settings.lock, &info, lock_scratch);
+            // The field widening to say something.
+            if self.gfx.take_motion_started() {
+                self.moving = true;
+            }
+        }
+        if self.faces.visible() {
+            let reading = self.shown_reading();
+            let feed = crate::faces::Feed { reading: reading.as_ref(), h24: self.settings.clock24, notices: self.lock.notices(), generation: self.robot.schedule.generation() };
+            let Shell { gfx, faces, robot, settings, .. } = self;
+            faces.draw(gfx, robot, &feed, &settings.lock);
+        }
+    }
+
+    fn draw_shell(&mut self) {
         // The recent apps, over the wallpaper alone (no screen's words show
         // through between the cards): the screen in front fades into it as
         // they come, and back as they go. Both are held still while nothing
@@ -1971,6 +2144,27 @@ impl Shell {
             return;
         }
         let over = self.control.visible();
+        // Spotlight is up: the screen behind is held as it was (drawn live
+        // only while a screen is still on its way), and the bar grows over it.
+        if self.spotlight.visible() && !over {
+            if self.transition.is_some() {
+                self.spotlight_under = None;
+            }
+            match &self.spotlight_under {
+                Some((under, pager)) => {
+                    self.gfx.canvas.px.copy_from_slice(under);
+                    self.gfx.pager = *pager;
+                }
+                None => {
+                    // Drawn without the island's glass: the bar is drawn with it.
+                    self.draw_frame();
+                    if self.transition.is_none() {
+                        self.spotlight_under = Some((self.gfx.canvas.px.clone(), self.gfx.pager));
+                    }
+                }
+            }
+            return self.draw_spotlight();
+        }
         match (&self.control_under, over) {
             // The control centre is out: the screen behind is held as it was.
             (Some(under), true) => self.gfx.canvas.px.copy_from_slice(under),
@@ -2206,7 +2400,33 @@ impl Shell {
                 x -= 17.0;
             }
         }
+        // With Spotlight up, the island and the page dots go through the
+        // glass pass with its bar, over this frame held still (`draw_spotlight`).
+        if self.spotlight.visible() {
+            if g.take_motion_started() {
+                self.moving = true;
+            }
+            return;
+        }
+        self.draw_chrome(began, None, 0.0);
+    }
 
+    /// Where the island is just now: as wide as its words, however far its
+    /// spring has taken it.
+    fn island_rect(&self) -> Rect {
+        let island_h = self.gfx.island_h();
+        let iw = self.island_w.value().max(island_h);
+        Rect::new((W - iw) * 0.5, 4.0, iw, island_h)
+    }
+
+    /// The glass over the screen: the island, the page dots' platter, and
+    /// Spotlight's bar when it is up (`bar`, in the island's group, so it
+    /// grows out of it). `hide`: how far Spotlight has come, as the island's
+    /// words and the page dots give way to it.
+    fn draw_chrome(&mut self, began: std::time::Instant, bar: Option<GlassShape>, hide: f32) {
+        let g = &mut self.gfx;
+        let t = g.tokens;
+        let shown = (1.0 - 2.0 * hide).clamp(0.0, 1.0);
         // The island: link status at rest, growing to carry a message.
         let linked = self.robot.linked();
         let (label, icon) = match (&self.message, self.settings.island) {
@@ -2238,14 +2458,20 @@ impl Shell {
         let iw = self.island_w.value().max(island_h);
         let island = Rect::new((W - iw) * 0.5, 4.0, iw, island_h);
         self.places.island = Some(island);
-        // Every glass shape goes through one pass; each family is its own group.
-        let mut shapes = vec![GlassShape::new(island, island_h * 0.5, 0)];
+        // Every glass shape goes through one pass; each family is its own
+        // group. Spotlight's bar goes first in the island's: where the two
+        // meet, it is the bar's; and the island's glass gives way as the
+        // bar's materializes, so at rest the bar is the island, grown.
+        let island_glass = bar.map_or(1.0, |b| 1.0 - b.strength);
+        let mut shapes: Vec<GlassShape> = bar.into_iter().collect();
+        shapes.push(GlassShape { strength: island_glass, ..GlassShape::new(island, island_h * 0.5, 0) });
         let pager = g.pager.map(|(pages, current, ox)| {
             let w = pages as f32 * 9.0 + 7.0;
             (Rect::new((W - w) * 0.5 + ox, H - 13.0, w, 10.0), pages, current)
         });
         if let Some((platter, ..)) = pager {
-            shapes.push(GlassShape::new(platter, 5.0, 1));
+            // Under Spotlight's bar the page dots dematerialize, as glass leaves.
+            shapes.push(GlassShape { strength: 1.0 - hide, ..GlassShape::new(platter, 5.0, 1) });
         }
         self.places.pager = pager.map(|(platter, ..)| platter);
         let before_glass = std::time::Instant::now();
@@ -2255,7 +2481,7 @@ impl Shell {
         if let Some((platter, pages, current)) = pager {
             for i in 0..pages {
                 let color = if i == current { t.ink } else { t.faint };
-                g.canvas.circle(platter.x + 8.0 + i as f32 * 9.0, platter.cy(), 2.0, color, 1.0);
+                g.canvas.circle(platter.x + 8.0 + i as f32 * 9.0, platter.cy(), 2.0, color, 1.0 - hide);
             }
         }
 
@@ -2266,8 +2492,8 @@ impl Shell {
         let words = ((grown - 0.55) / 0.45).clamp(0.0, 1.0);
         g.canvas.set_clip(island.inset(2.0));
         let dot = if icon { t.signal } else if linked { t.ice } else { t.faint };
-        g.canvas.circle(island.x + 12.0, island.cy(), 3.0, dot, 1.0);
-        g.text_alpha(island.x + 22.0, island.cy(), &label, caption, t.ink, words);
+        g.canvas.circle(island.x + 12.0, island.cy(), 3.0, dot, shown);
+        g.text_alpha(island.x + 22.0, island.cy(), &label, caption, t.ink, words * shown);
         g.canvas.clear_clip();
         if g.take_motion_started() {
             self.moving = true;
@@ -2751,8 +2977,166 @@ impl Shell {
         }
         moving |= self.lift_and_lay_down();
         let keep = self.stack.last().is_some_and(|(s, _)| s.keeps_awake()) || self.saving.is_some();
+        self.standby.set_faces(self.faces_wanted());
+        moving |= self.watch_charger();
         moving |= self.standby.tick(dt, self.settings.screen_off, keep, self.settings.calm);
+        moving |= self.tick_lock_and_faces(dt, motion_dt);
         moving
+    }
+
+    // ------------------------------------------------ StandBy and the lock ---
+
+    /// On the charger (as the gauge says, or the galleries pretend).
+    fn on_charger(&self) -> bool {
+        self.charger.unwrap_or_else(|| self.care.reading.as_ref().is_some_and(|r| matches!(r.flow, crate::power::Flow::Charging | crate::power::Flow::Full | crate::power::Flow::Holding)))
+    }
+
+    /// Whether StandBy may come where the screen would go off, and how lit:
+    /// on the charger with StandBy on, once the handheld is set up.
+    fn faces_wanted(&self) -> Option<f32> {
+        let set_up = !self.stack.iter().any(|(s, _)| s.title() == "Setup");
+        (self.settings.lock.standby && self.on_charger() && set_up).then(|| crate::faces::Faces::light_level(&self.settings.lock))
+    }
+
+    /// The galleries' and tests' charger.
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn pretend_charger(&mut self, on: Option<bool>) {
+        self.charger = on;
+    }
+
+    /// Set down on the charger with the screen dimmed or off (or in deep
+    /// standby): StandBy comes up at once, as a phone's does. True if it did.
+    fn watch_charger(&mut self) -> bool {
+        let on = self.on_charger();
+        let plugged = on && !self.charger_was;
+        self.charger_was = on;
+        if plugged && self.faces_wanted().is_some() && self.standby.to_faces() {
+            self.dirty = true;
+            return true;
+        }
+        false
+    }
+
+    /// The gauge's reading as StandBy and the lock screen show it: on the
+    /// galleries' pretend charger, the demo battery charging.
+    fn shown_reading(&self) -> Option<crate::power::Reading> {
+        let reading = self.care.reading.clone();
+        match (self.charger, reading) {
+            (Some(true), Some(r)) if r.flow.on_battery() => Some(crate::power::Reading { flow: crate::power::Flow::Charging, milliamps: Some(-820.0), minutes_left: None, minutes_to_full: Some(42), ..r }),
+            (_, reading) => reading,
+        }
+    }
+
+    /// StandBy is showing.
+    #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+    pub fn faces_showing(&self) -> bool {
+        self.faces.showing()
+    }
+
+
+    /// A passcode typed is being checked (for the galleries).
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn checking_passcode(&self) -> bool {
+        self.lock.checking()
+    }
+
+    /// Locked now (the screen gone off, or StandBy come, a passcode set):
+    /// whatever was over the screen in front is put away, so the lock is
+    /// what a wake comes back to.
+    fn lock_now(&mut self) {
+        self.lock.engage();
+        if self.control.is_open() || self.control.visible() {
+            self.control.set_open(false, &self.settings);
+            self.control.shown.jump(0.0);
+            self.control_under = None;
+            self.control_glass = None;
+        }
+        self.switcher = None;
+        self.switcher_under = None;
+        self.help_hold = None;
+        self.message = None;
+        self.dirty = true;
+    }
+
+    /// StandBy gives way (a key, the charger gone): to the lock screen if it
+    /// is locked; otherwise what was said meanwhile is said now.
+    fn leave_faces(&mut self) {
+        if !self.faces.showing() {
+            return;
+        }
+        self.faces.hide(self.settings.calm);
+        if !self.lock.engaged() {
+            self.say_kept();
+        }
+        self.moving = true;
+        self.dirty = true;
+    }
+
+    /// The notices kept while it was locked (or StandBy showed), said in
+    /// the island: the newest, with how many there were.
+    fn say_kept(&mut self) {
+        let kept = self.lock.take_notices();
+        let after = self.after_unlock.take();
+        let newest = kept.last().map(|(text, _)| text.clone());
+        let words = match (newest, kept.len()) {
+            (Some(text), 1) => Some(text),
+            (Some(text), n) => Some(format!("{n} notices · {text}")),
+            (None, _) => after,
+        };
+        if let Some(words) = words {
+            // Said as the island says anything, but not kept again.
+            self.message = Some((words, MESSAGE_SECONDS));
+        }
+    }
+
+    /// Time for StandBy and the lock: each follows where standby stands.
+    fn tick_lock_and_faces(&mut self, dt: f32, motion_dt: f32) -> bool {
+        use crate::standby::State;
+        let calm = self.settings.calm;
+        let state = self.standby.state();
+        // The screen has gone off, or StandBy has come: locked, if a passcode is set.
+        if matches!(state, State::Off | State::Faces) && !self.lock.engaged() && self.lock.armed() {
+            self.lock_now();
+        }
+        if state == State::Faces && !self.faces.showing() {
+            self.faces.show(&self.settings.lock, calm);
+            self.moving = true;
+        } else if state != State::Faces && self.faces.showing() {
+            self.leave_faces();
+        }
+        let reading = self.shown_reading();
+        let feed = crate::faces::Feed { reading: reading.as_ref(), h24: self.settings.clock24, notices: self.lock.notices(), generation: self.robot.schedule.generation() };
+        let (faces_moving, faces_changed) = self.faces.tick(dt, motion_dt, &feed, &self.settings.lock, calm);
+        let (lock_moving, lock_changed, unlocked) = self.lock.tick(dt, motion_dt, calm, self.settings.clock24);
+        if unlocked {
+            self.say_kept();
+            self.status.age = f32::MAX;
+        }
+        if !self.lock.visible() && !self.lock_scratch.is_empty() {
+            self.lock_scratch = Vec::new();
+        }
+        if faces_changed || lock_changed {
+            self.dirty = true;
+        }
+        faces_moving || lock_moving
+    }
+
+    /// What the lock screen shows besides the time, read every 20 s at most.
+    fn lock_info(&mut self) -> crate::lock::Info {
+        if self.lock_info.as_ref().is_none_or(|(_, at)| at.elapsed().as_secs() >= 20) {
+            let info = crate::lockpages::info_now(&self.robot, self.settings.clock24, self.shown_reading());
+            self.lock_info = Some((info, std::time::Instant::now()));
+        }
+        let mut info = self.lock_info.as_ref().map(|(i, _)| i.clone()).unwrap_or_default();
+        info.notices = self.lock.notices();
+        info.newest = self.lock.newest();
+        info
+    }
+
+    /// Frames no faster than this (milliseconds), if anything holds them back:
+    /// the battery saver, or StandBy (30 a second, on the charger).
+    pub fn frame_floor(&self) -> Option<f32> {
+        (self.settings.battery.saver || self.faces.showing()).then_some(crate::power::SAVER_FRAME_MS)
     }
 
     /// Lift to wake, and face down to sleep: the motion sensor watches at
@@ -2799,6 +3183,7 @@ impl Shell {
         }
         self.lights.tick(dt);
         self.watch_queue(dt);
+        self.watch_reminders(dt);
         // A Clock timer run out, wherever the handheld is: said, and the
         // keyboard's lights blink (with the screen off, Fn until it wakes).
         if let Some(said) = crate::clock::due() {
@@ -2822,6 +3207,12 @@ impl Shell {
             }
             Event::Empty => {
                 self.standby.wake_now();
+                // Over everything: Spotlight gives way at once.
+                self.spotlight.gone_now();
+                // Locked, the card is beneath the lock: the lock screen says it.
+                if self.lock.engaged() {
+                    self.lock.alert("battery empty · turning off");
+                }
                 let card = crate::power::Empty::new(self.settings.calm);
                 let card = if crate::power::postponed_floor(&self.care) { card.at_floor() } else { card };
                 self.open(Box::new(card), Path::Slide);
@@ -2883,6 +3274,71 @@ impl Shell {
         if let Some(on) = self.deep.reminder(reading.as_ref()) {
             crate::lights::red_reminder(on);
         }
+        // A reminder or the queue come due: awake, to say it. Only the times
+        // worked out before it went deep are looked at; nothing is polled.
+        let now = crate::reminders::now();
+        if [self.reminders.due(), self.queue_due].into_iter().flatten().any(|at| now >= at) {
+            self.standby.wake_now();
+            self.queue_age = 5.0;
+            self.woke_for_alert = true;
+        }
+        // Set on the charger: StandBy (and out of deep standby, which the
+        // shell notices as the screen being lit).
+        self.standby.set_faces(self.faces_wanted());
+        self.watch_charger();
+    }
+
+    /// The main loop's wait for a key in deep standby: a minute, or less
+    /// when a reminder or the queue alert comes first. That wait ends in
+    /// place of the minute's, so no wakeup is added.
+    pub fn deep_wait(&self) -> std::time::Duration {
+        let now = crate::reminders::now();
+        match [self.reminders.due(), self.queue_due].into_iter().flatten().min() {
+            Some(at) => crate::deep::WAIT.min(std::time::Duration::from_secs(at.saturating_sub(now).max(0) as u64)),
+            None => crate::deep::WAIT,
+        }
+    }
+
+    /// Reminders come due: the island holds what is due, the keyboard's
+    /// lights blink, and the chime plays (once there is a speaker). With
+    /// the screen off or dimmed it wakes, and Reminders opens on them; on a
+    /// screen in use, only the island and the lights say it.
+    fn watch_reminders(&mut self, dt: f32) {
+        // Not under the start animation: what came due while the handheld
+        // was off is said once Home is there to see it said.
+        if self.intro.is_some() {
+            return;
+        }
+        let woke_for_alert = std::mem::take(&mut self.woke_for_alert);
+        let rang = self.reminders.tick(dt, &self.robot.schedule, self.settings.clock24);
+        if rang.is_empty() {
+            return;
+        }
+        let woke = self.standby.state() != crate::standby::State::Awake || woke_for_alert;
+        self.standby.wake_now();
+        let top = self.stack.last().map(|(s, _)| (s.title() == "Reminders", s.full_screen()));
+        let free = self.transition.is_none() && self.intro.is_none() && self.tour.is_none() && self.switcher.is_none() && !self.control.is_open();
+        if woke && free && top == Some((false, false)) {
+            self.open(Box::new(crate::reminders::Reminders::new()), Path::Slide);
+            // One that opens something (its note, the checklist): that too,
+            // over Reminders, so leaving it lands on the reminder to tick off.
+            if let [one] = rang.as_slice() {
+                if let Ok(screen) = crate::reminders::opens(&one.link) {
+                    self.open(screen, Path::Slide);
+                }
+            }
+        }
+        let said = crate::reminders::island(&rang);
+        // Locked (or StandBy shows): kept for the lock screen as a notice,
+        // and said again once it is unlocked, as anything else said is.
+        if self.lock.engaged() || self.faces.showing() {
+            self.lock.note(&said);
+        }
+        self.message = Some((said, REMINDER_SECONDS));
+        self.lights.warning();
+        crate::reminders::chime(&rang);
+        self.dirty = true;
+        self.moving = true;
     }
 
     /// Woken from deep standby: its steps undone in the reverse order. The
@@ -2899,8 +3355,13 @@ impl Shell {
             self.deep_step(step, false);
         }
         self.finish_waking();
-        // How long, and what it drew (the charge is at the top right).
-        self.say(slept.island());
+        // How long, and what it drew (the charge is at the top right); once
+        // unlocked, if it is locked (it is no notice for the lock screen).
+        if self.lock.engaged() {
+            self.after_unlock = Some(slept.island());
+        } else {
+            self.say(slept.island());
+        }
         // The clock and the battery at the top, read afresh for the first frame.
         self.status.age = f32::MAX;
         self.dirty = true;
@@ -2944,8 +3405,12 @@ impl Shell {
             return;
         }
         self.queue_age = 0.0;
-        let Some(view) = self.robot.schedule.view() else { return };
+        let Some(view) = self.robot.schedule.view() else {
+            self.queue_due = None;
+            return;
+        };
         let now = chrono::Utc::now().timestamp();
+        self.queue_due = queue_alert_at(&view, now, &self.queue_warned);
         let Some(m) = view.next(now) else { return };
         let queuing = m.status.as_deref().is_some_and(|s| s.to_lowercase().contains("queu"));
         let stage = match (queuing, m.queue_at) {
@@ -2958,7 +3423,11 @@ impl Shell {
             return;
         }
         self.queue_warned.push((m.key.clone(), stage));
+        self.queue_due = queue_alert_at(&view, now, &self.queue_warned);
         let label = m.label.clone();
+        // With the screen off, it wakes to say it (deep standby's minute
+        // tick wakes it for this too).
+        self.standby.wake_now();
         self.lights.warning();
         self.say(if stage == 1 { format!("time to queue for {label}") } else { format!("queue for {label} in 5 min") });
     }
@@ -2999,11 +3468,6 @@ impl Shell {
         self.standby.asleep()
     }
 
-    /// The battery saver is on: frames come at 30 a second.
-    pub fn saving(&self) -> bool {
-        self.settings.battery.saver
-    }
-
     /// Drawn over everything: a screenshot's flash, and (where there is no
     /// backlight to dim, as in the simulator) standby's dimming.
     fn draw_flash_and_standby(&mut self) {
@@ -3019,6 +3483,173 @@ impl Shell {
         let shade = self.standby.shade();
         if shade > 0.0 {
             bezel::simd::mix_into(px, None, (shade.clamp(0.0, 1.0) * 256.0) as u32);
+        }
+    }
+}
+
+// -------------------------------------------------------------- spotlight ---
+
+impl Shell {
+    /// Whether the handheld is locked: the lock screen over everything (a
+    /// passcode set), a lock screen anywhere on the stack, or a lock drawn
+    /// over the screens (`spotlight::set_locked`). Nothing that reaches past
+    /// it (Spotlight) opens while it is.
+    pub fn locked(&self) -> bool {
+        self.lock.engaged() || crate::spotlight::lock_held() || self.stack.iter().any(|(s, _)| s.locks())
+    }
+
+    /// Bring Spotlight up over whatever is showing: not over a lock, nor a
+    /// screen that takes the whole panel (first-boot setup). The control
+    /// centre gives way to it at once.
+    fn summon_spotlight(&mut self) {
+        let whole_panel = self.stack.last().is_some_and(|(s, _)| s.full_screen());
+        if self.locked() || whole_panel || self.tour.is_some() {
+            return;
+        }
+        if self.control.visible() {
+            self.control.set_open(false, &self.settings);
+            self.control.shown.jump(0.0);
+            self.control_under = None;
+            self.control_glass = None;
+        }
+        if !self.spotlight.visible() {
+            self.spotlight_under = None;
+        }
+        self.spotlight.summon(self.settings.calm, &self.robot);
+        self.moving = true;
+        self.dirty = true;
+    }
+
+    /// Whether Spotlight is up (for the tests).
+    #[cfg(test)]
+    pub fn spotlight_open(&self) -> bool {
+        self.spotlight.is_open()
+    }
+
+    fn spotlight_key(&mut self, key: Key) {
+        use crate::spotlight::Outcome;
+        self.moving = true;
+        match key {
+            // The recent apps, or the control centre, in its place.
+            Key::Ctrl('\t') => {
+                self.spotlight.gone_now();
+                self.spotlight_under = None;
+                return self.open_recents(None);
+            }
+            Key::Ctrl(' ') => {
+                self.spotlight.gone_now();
+                self.spotlight_under = None;
+                return self.set_control(true);
+            }
+            _ => {}
+        }
+        match self.spotlight.key(key, &self.robot) {
+            Outcome::Stay => {}
+            Outcome::Close => self.spotlight.dismiss(),
+            Outcome::Open(hit, from) => self.open_from_spotlight(&hit, from),
+        }
+    }
+
+    /// A result picked: Spotlight goes, and what it opens grows out of the
+    /// row it was on, over the frame as it showed. Esc from there comes back
+    /// to the screen Spotlight came up over. What cannot open is said in the
+    /// island, as the bar springs back into it.
+    fn open_from_spotlight(&mut self, hit: &crate::spotlight::Hit, from: Rect) {
+        let backdrop = self.gfx.canvas.px.clone();
+        let mut say = None;
+        let at_rest = self.transition.is_none();
+        let opened = crate::spotlight::index().open(hit, &mut Cx { robot: &mut self.robot, settings: &mut self.settings, say: &mut say, at_rest });
+        if let Some(text) = say {
+            self.say(text);
+        }
+        let screen = match opened {
+            Ok(screen) => screen,
+            Err(why) => {
+                self.spotlight.dismiss();
+                return self.say(why);
+            }
+        };
+        self.spotlight.gone_now();
+        self.spotlight_under = None;
+        // A screen still on its way gives way first (one leaving goes among
+        // the recent apps): the new one grows over the still picture
+        // Spotlight came down over, so no motion goes on beneath it.
+        drop(self.interrupt());
+        let app = hit.item.weight == crate::spotlight::weight::APP;
+        self.open_over(screen, from, backdrop, app);
+        self.apply_settings();
+    }
+
+    /// Open `screen` out of `from` over `backdrop`, on top of whatever shows.
+    /// An app (`app`) opened over Home that was left a while ago comes back
+    /// as it was, as from its tile.
+    fn open_over(&mut self, screen: Box<dyn Screen>, from: Rect, backdrop: Vec<u32>, app: bool) {
+        self.gfx.focus_reset();
+        if let Some(words) = screen.greeting() {
+            self.say(words);
+        }
+        let path = Path::Grow(from);
+        if app && self.stack.len() == 1 {
+            if let Some(mut recent) = self.recents.find(screen.title()).and_then(|at| self.recents.take(at)) {
+                drop(screen);
+                recent.stack[0].1 = path;
+                return self.bring_back(recent, from, Some(backdrop));
+            }
+        }
+        // Where it arrives over: closed while still arriving, it turns round
+        // from there (see `close`) rather than leaving a motion with nothing
+        // to bring in.
+        let over = self.stack.len();
+        self.push(screen, path);
+        self.gfx.reveal_start();
+        self.moving = true;
+        self.dirty = true;
+        if self.settings.calm {
+            self.transition = None;
+            return;
+        }
+        let mut transition = Transition::new(path, 0.0, 1.0, None, Some(backdrop));
+        transition.over = over;
+        self.transition = Some(transition);
+    }
+
+    /// Spotlight in time: its springs and results; gone at once if the
+    /// handheld locks meanwhile; its held frame let go once it has gone; and
+    /// its index set reading a moment after start, ahead of the first search.
+    fn tick_spotlight(&mut self, motion_dt: f32) -> bool {
+        if !self.spotlight_warmed && self.clock > 2.0 {
+            self.spotlight_warmed = true;
+            crate::spotlight::warm();
+        }
+        let mut moving = false;
+        if self.spotlight.visible() {
+            if self.locked() {
+                self.spotlight.gone_now();
+            }
+            moving |= self.spotlight.tick(motion_dt, &self.robot);
+        }
+        if !self.spotlight.visible() && self.spotlight_under.is_some() {
+            self.spotlight_under = None;
+            self.dirty = true;
+        }
+        moving
+    }
+
+    /// Spotlight over the frame held behind it: the frame dims a little as
+    /// the bar comes, the bar's glass goes through one pass with the island
+    /// and the page dots, and what sits on it is drawn on top.
+    fn draw_spotlight(&mut self) {
+        let began = std::time::Instant::now();
+        let dim = (self.spotlight.dim().clamp(0.0, 1.0) * 256.0) as u32;
+        if dim > 0 {
+            bezel::simd::mix_into(&mut self.gfx.canvas.px, None, dim);
+        }
+        let island = self.island_rect();
+        let bar = self.spotlight.glass(&self.gfx, island);
+        self.draw_chrome(began, Some(bar), self.spotlight.shown());
+        self.spotlight.draw(&mut self.gfx, island);
+        if self.gfx.take_motion_started() {
+            self.moving = true;
         }
     }
 }
@@ -3637,7 +4268,7 @@ pub(crate) mod tests {
         let keys = [
             Key::Up, Key::Down, Key::Left, Key::Right, Key::Enter, Key::Back, Key::Backspace, Key::Tab, Key::PageUp, Key::PageDown,
             Key::Char('n'), Key::Char('d'), Key::Char('x'), Key::Char('é'), Key::Char(' '), Key::Char('a'), Key::Char('✓'),
-            Key::Ctrl('q'), Key::Ctrl(' '), Key::Ctrl('s'), Key::Ctrl('k'), Key::Leave,
+            Key::Ctrl('q'), Key::Ctrl(' '), Key::Ctrl('s'), Key::Ctrl('k'), Key::Leave, Key::Ctrl('\n'), Key::Char('/'),
         ];
         // A small, fixed generator: the same run every time, so a failure can be replayed.
         let mut seed = 0x2545_F491_4F6C_DD1Du64;
@@ -3975,6 +4606,277 @@ pub(crate) mod tests {
         None
     }
 
+    // ----------------------------------------------- StandBy and the lock ---
+
+    /// A shell with `code` as its passcode (kept for this test alone).
+    fn with_passcode(code: &str) -> Shell {
+        crate::passcode::test_store();
+        let (phc, _, _) = crate::passcode::make(code).unwrap();
+        crate::passcode::keep(&phc).unwrap();
+        shell()
+    }
+
+    /// Type a passcode and Enter, and wait for it to be checked.
+    fn type_code(shell: &mut Shell, code: &str) {
+        for c in code.chars() {
+            shell.key(Key::Char(c));
+        }
+        shell.key(Key::Enter);
+        // Up to 10 s: the check runs on its own thread, which a computer
+        // busy with other builds can be slow to get to.
+        for _ in 0..2000 {
+            frames(shell, 1, FRAME);
+            if !shell.lock.checking() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        frames(shell, 40, FRAME);
+    }
+
+    /// Seconds of ticks, one a second, until the screen is off and dark.
+    fn until_off(shell: &mut Shell, most: u32) -> Option<u32> {
+        (1..=most).find(|_| {
+            shell.tick(1.0);
+            shell.draw();
+            shell.panel_off()
+        })
+    }
+
+    #[test]
+    fn on_the_charger_standby_comes_where_the_screen_would_go_off_and_deep_standby_never_begins() {
+        use crate::standby::State;
+        let mut shell = shell();
+        shell.settings.screen_off = 30;
+        shell.settings.battery.deep_after = 10;
+        shell.pretend_charger(Some(true));
+        // All night on the charger: StandBy, never dark, never deep.
+        assert_eq!(until_deep(&mut shell, 8 * 3600), None, "deep standby never begins on the charger");
+        assert_eq!(shell.standby_state(), State::Faces);
+        assert!(shell.faces_showing() && !shell.panel_off());
+        assert!(!shell.locked(), "no passcode: no lock");
+        // At rest it keeps no frame beat: a face is drawn when it changes.
+        frames(&mut shell, 4, 0.25);
+        assert!(!shell.animating(), "nothing moving at rest");
+        // ↓ turns to the next face (and is kept); it stays StandBy.
+        shell.key(Key::Down);
+        assert_eq!(shell.settings.lock.face, crate::lock::Face::Charge);
+        assert!(shell.animating(), "the page turn runs on the frame beat");
+        assert_eq!(shell.frame_floor(), Some(crate::power::SAVER_FRAME_MS), "at most 30 frames a second");
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(shell.standby_state(), State::Faces);
+        // Any other key leaves it, and is spent doing so: Home, as it was.
+        shell.key(Key::Enter);
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(shell.standby_state(), State::Awake);
+        assert!(!shell.faces_showing());
+        assert_eq!(shell.stack.len(), 1, "the Enter that left StandBy opened nothing");
+        // StandBy switched off: the screen goes off on the charger as ever.
+        shell.settings.lock.standby = false;
+        assert!(until_off(&mut shell, 60).is_some());
+        assert!(!shell.faces_showing());
+    }
+
+    #[test]
+    fn off_the_charger_standby_goes_dark_and_deep_standby_keeps_its_wait() {
+        use crate::standby::State;
+        let mut shell = shell();
+        shell.settings.screen_off = 30;
+        shell.settings.battery.deep_after = 10;
+        shell.pretend_charger(Some(true));
+        for _ in 0..3 * 3600 {
+            shell.tick(1.0);
+        }
+        assert_eq!(shell.standby_state(), State::Faces);
+        // Off the charger: dark, as the screen would have gone without it.
+        shell.pretend_charger(Some(false));
+        frames(&mut shell, 8, 0.25);
+        assert_eq!(shell.standby_state(), State::Off);
+        assert!(!shell.faces_showing());
+        // Deep standby follows its own wait from there, not from the last
+        // key hours ago: ten minutes less the half minute the screen took.
+        let at = until_deep(&mut shell, 900).expect("deep standby");
+        assert!((560..=585).contains(&at), "deep {at} s after leaving the charger");
+    }
+
+    #[test]
+    fn set_down_on_the_charger_with_the_screen_off_standby_comes_at_once() {
+        use crate::standby::State;
+        let mut shell = shell();
+        shell.settings.screen_off = 30;
+        shell.pretend_charger(Some(false));
+        until_off(&mut shell, 60).expect("the screen goes off on battery");
+        frames(&mut shell, 4, 0.25);
+        shell.pretend_charger(Some(true));
+        frames(&mut shell, 2, 0.25);
+        assert_eq!(shell.standby_state(), State::Faces, "on the charger: StandBy, lit");
+        assert!(shell.faces_showing() && !shell.panel_off());
+        // In use, the charger changes nothing until it is left alone.
+        shell.key(Key::Enter);
+        frames(&mut shell, 20, FRAME);
+        shell.pretend_charger(Some(false));
+        frames(&mut shell, 2, 0.25);
+        shell.pretend_charger(Some(true));
+        frames(&mut shell, 8, 0.25);
+        assert_eq!(shell.standby_state(), State::Awake);
+        // From deep standby, at its next look (a minute at most).
+        shell.pretend_charger(Some(false));
+        shell.settings.battery.deep_after = 10;
+        until_deep(&mut shell, 700).expect("deep standby");
+        shell.pretend_charger(Some(true));
+        shell.tick(60.0);
+        assert!(!shell.deep_asleep(), "out of deep standby");
+        frames(&mut shell, 4, 0.25);
+        assert_eq!(shell.standby_state(), State::Faces);
+    }
+
+    #[test]
+    fn with_no_passcode_a_key_wakes_it_straight_to_where_it_was() {
+        let mut shell = shell();
+        shell.settings.screen_off = 30;
+        open_app(&mut shell, "Robot", "Settings");
+        let depth = shell.stack.len();
+        until_off(&mut shell, 60).expect("the screen goes off");
+        assert!(!shell.locked() && !shell.lock.visible());
+        shell.key(Key::Char(' '));
+        frames(&mut shell, 30, FRAME);
+        assert_eq!((shell.stack.len(), shell.top_title()), (depth, "Settings"), "straight back, no lock screen");
+    }
+
+    #[test]
+    fn with_a_passcode_it_starts_locked_and_locks_when_the_screen_goes_off() {
+        let mut shell = with_passcode("2468");
+        assert!(shell.locked(), "a restart is no way in");
+        // The wrong one: still locked, the field shaken and emptied.
+        type_code(&mut shell, "1357");
+        assert!(shell.locked());
+        assert!(shell.lock.field.is_empty());
+        // The right one: open, at Home as it was.
+        type_code(&mut shell, "2468");
+        assert!(!shell.locked());
+        frames(&mut shell, 60, FRAME);
+        assert!(!shell.lock.visible(), "the lock screen has gone");
+        open_app(&mut shell, "Robot", "Settings");
+        // The screen dims first: a key then is only a key.
+        shell.settings.screen_off = 30;
+        for _ in 0..24 {
+            shell.tick(1.0);
+        }
+        assert_eq!(shell.standby_state(), crate::standby::State::Dim);
+        assert!(!shell.locked(), "dimmed is not off");
+        shell.key(Key::Char(' '));
+        frames(&mut shell, 20, FRAME);
+        assert!(!shell.locked());
+        // Off: locked. The waking key is spent; the next ones are the passcode's.
+        until_off(&mut shell, 60).expect("the screen goes off");
+        assert!(shell.locked());
+        shell.key(Key::Enter);
+        frames(&mut shell, 20, FRAME);
+        assert!(shell.lock.covers(), "the lock screen, over everything");
+        assert_eq!(shell.top_title(), "Settings", "where it was, beneath");
+        type_code(&mut shell, "2468");
+        assert!(!shell.locked());
+        assert_eq!(shell.top_title(), "Settings");
+    }
+
+    #[test]
+    fn the_lock_cannot_be_got_round_from_any_key() {
+        let mut shell = with_passcode("hunter2");
+        type_code(&mut shell, "hunter2");
+        open_app(&mut shell, "Robot", "Settings");
+        shell.settings.developer = true;
+        shell.settings.show_keys = true;
+        shell.settings.screen_off = 30;
+        until_off(&mut shell, 60).expect("the screen goes off");
+        shell.key(Key::Char(' '));
+        let depth = shell.stack.len();
+        let mut keys = vec![
+            Key::Ctrl('\t'), Key::Ctrl(' '), Key::Ctrl('q'), Key::Ctrl('c'), Key::Ctrl('k'), Key::Ctrl('f'),
+            Key::Leave, Key::Back, Key::Tab, Key::Home, Key::End, Key::PageUp, Key::PageDown, Key::Delete,
+            Key::Up, Key::Down, Key::Left, Key::Right, Key::BrightnessUp, Key::BrightnessDown,
+            Key::Char('/'), Key::Char('?'), Key::Char('`'), Key::Enter, Key::Ctrl('\n'),
+        ];
+        keys.extend((1..=12).map(Key::F));
+        for key in keys {
+            shell.key(key);
+            frames(&mut shell, 3, FRAME);
+            assert!(shell.locked(), "{key:?} got round the lock");
+            assert!(!shell.recents_open() && !shell.control_open(), "{key:?} opened something over the lock");
+            assert!(!shell.spotlight_open() && !shell.spotlight.visible(), "{key:?} brought Spotlight up over the lock");
+            assert!(shell.tour.is_none() && shell.echo.is_empty(), "{key:?}");
+            assert_eq!(shell.stack.len(), depth, "{key:?} reached the screen beneath");
+            assert!(shell.take_launch().is_none());
+        }
+        // `?` held five seconds (the shortcut list) is only typing.
+        for _ in 0..60 {
+            shell.key(Key::Char('?'));
+            frames(&mut shell, 6, FRAME);
+        }
+        assert!(shell.locked() && shell.stack.len() == depth);
+        // A robot linking, a match to queue for, the battery: still locked.
+        shell.say("time to queue for Q31");
+        frames(&mut shell, 10, 0.25);
+        assert!(shell.locked());
+        assert_eq!(shell.lock.notices(), 1, "kept for the lock screen");
+        // Typing it, with every wrong key first cleared by Esc: open.
+        shell.key(Key::Back);
+        type_code(&mut shell, "hunter2");
+        assert!(!shell.locked());
+        assert_eq!(shell.message.as_ref().map(|(m, _)| m.as_str()), Some("time to queue for Q31"), "said once unlocked");
+        assert_eq!(shell.lock.notices(), 0);
+    }
+
+    #[test]
+    fn wrong_tries_bring_a_wait_that_even_the_right_one_cannot_skip() {
+        let mut shell = with_passcode("2468");
+        for wrong in ["0000", "1111", "2222", "3333"] {
+            type_code(&mut shell, wrong);
+            assert_eq!(shell.lock.wait(), 0, "{wrong}: no wait yet");
+        }
+        type_code(&mut shell, "4444");
+        assert_eq!(shell.lock.wait(), 30, "the fifth wrong one: half a minute");
+        // During the wait no try is taken, the right one included.
+        type_code(&mut shell, "2468");
+        assert!(shell.locked() && !shell.lock.checking());
+        // A restart keeps the wait.
+        let again = Shell::new(Robot::demo());
+        assert!(again.locked() && again.lock.wait() > 25);
+    }
+
+    #[test]
+    fn standby_with_a_passcode_leaves_to_the_lock_screen() {
+        let mut shell = with_passcode("2468");
+        type_code(&mut shell, "2468");
+        shell.settings.screen_off = 30;
+        shell.pretend_charger(Some(true));
+        for _ in 0..120 {
+            shell.tick(1.0);
+            shell.draw();
+        }
+        assert!(shell.faces_showing());
+        assert!(shell.locked(), "StandBy stands in for the screen going off");
+        // The arrows turn faces; nothing else is reached.
+        shell.key(Key::Down);
+        assert!(shell.faces_showing() && shell.locked());
+        // Leaving StandBy: the lock screen, not the screen it was on.
+        shell.key(Key::Enter);
+        frames(&mut shell, 60, FRAME);
+        assert!(!shell.faces_showing() && shell.lock.covers());
+        type_code(&mut shell, "2468");
+        assert!(!shell.locked());
+    }
+
+    #[test]
+    fn a_passcode_taken_off_over_ssh_leaves_no_lock_with_no_way_in() {
+        let mut shell = with_passcode("2468");
+        assert!(shell.locked());
+        std::fs::remove_file(crate::passcode::file()).unwrap();
+        shell.key(Key::Char('1'));
+        shell.key(Key::Enter);
+        frames(&mut shell, 20, FRAME);
+        assert!(!shell.locked());
+    }
+
     #[test]
     fn deep_standby_comes_after_the_wait_and_its_steps_are_undone_in_reverse() {
         use crate::deep::STEPS;
@@ -4068,6 +4970,128 @@ pub(crate) mod tests {
         assert_eq!(shell.message.as_ref().map(|(m, _)| m.as_str()), Some("slept 1 h 0 m · charging"));
     }
 
+    /// A shell with an empty book of reminders (each test's thread has its own).
+    fn reminding() -> Shell {
+        crate::reminders::with(|s| s.book = crate::reminders::Book::memory());
+        shell()
+    }
+
+    #[test]
+    fn a_reminder_due_with_the_screen_off_wakes_it_and_opens_reminders() {
+        use crate::lights::Mode;
+        let mut shell = reminding();
+        shell.settings.screen_off = 30;
+        crate::reminders::remind("swap battery in 1 min");
+        for _ in 0..40 {
+            shell.tick(1.0);
+        }
+        assert_eq!(shell.standby_state(), crate::standby::State::Off);
+        assert_eq!(shell.lights.showing(), [None; 3], "nothing yet");
+        crate::reminders::later(60);
+        shell.tick(0.25);
+        assert_eq!(shell.standby_state(), crate::standby::State::Awake);
+        assert_eq!(says(&shell), "swap battery");
+        assert_eq!(shell.lights.showing(), [Some(Mode::Fast); 3], "the keyboard's lights blink");
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(title(&shell), "Reminders", "opened on what is due");
+        assert!(shell.message.is_some(), "held longer than a message");
+    }
+
+    #[test]
+    fn a_note_coming_due_opens_the_note_over_reminders() {
+        use crate::reminders::{parse::Parsed, plan, Link, Repeat, When};
+        let mut shell = reminding();
+        shell.settings.screen_off = 30;
+        let file = "reminded-note.txt";
+        std::fs::create_dir_all(crate::notes::dir()).unwrap();
+        std::fs::write(crate::notes::dir().join(file), "Elevator belt\nretension the follower\n").unwrap();
+        crate::reminders::with(|s| {
+            let n = plan::Now { at: crate::reminders::now(), zone: &plan::Here, view: None };
+            s.book.add(Parsed { text: "Elevator belt".into(), when: When::In(n.at + 60), repeat: Repeat::Never, list: None, link: Link::Note(file.into()) }, &n);
+        });
+        for _ in 0..40 {
+            shell.tick(1.0);
+        }
+        crate::reminders::later(60);
+        frames(&mut shell, 90, FRAME);
+        let titles: Vec<String> = shell.stack.iter().map(|(s, _)| s.title().to_owned()).collect();
+        assert_eq!(titles.len(), 3, "Home, Reminders and the note: {titles:?}");
+        assert_eq!(titles[1], "Reminders");
+        // Out of the note (Ctrl-Q, as the editor is left): Reminders, on it, to tick it off.
+        shell.key(Key::Ctrl('q'));
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(title(&shell), "Reminders");
+    }
+
+    #[test]
+    fn on_a_screen_in_use_a_reminder_is_only_said() {
+        let mut shell = reminding();
+        crate::reminders::remind("check bumpers in 1 min");
+        frames(&mut shell, 10, FRAME);
+        crate::reminders::later(61);
+        shell.key(Key::Right);
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(says(&shell), "check bumpers");
+        assert_eq!(shell.stack.len(), 1, "Home stays: whoever is using it is not interrupted");
+    }
+
+    #[test]
+    fn in_deep_standby_a_reminder_wakes_it_on_time_with_no_wakeup_added() {
+        let mut shell = reminding();
+        shell.settings.screen_off = 30;
+        shell.settings.battery.deep_after = 10;
+        crate::reminders::remind("check bumpers in 20 min");
+        until_deep(&mut shell, 700).expect("deep standby");
+        let due = shell.reminders.due().expect("worked out before it went deep");
+        // The minute's wait as ever, until the reminder is less than a minute off.
+        assert_eq!(shell.deep_wait(), crate::deep::WAIT);
+        crate::reminders::later(due - crate::reminders::now() - 25);
+        let wait = shell.deep_wait().as_secs();
+        assert!((24..=25).contains(&wait), "the wait ends as it comes due: {wait} s");
+        // That wait's tick, a moment early: still deep.
+        assert!(!shell.tick(20.0));
+        assert!(shell.deep_asleep());
+        crate::reminders::later(25);
+        shell.tick(5.0);
+        assert!(!shell.deep_asleep(), "woken");
+        assert_eq!(says(&shell), "check bumpers", "the reminder, not how long it slept");
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(title(&shell), "Reminders");
+    }
+
+    #[test]
+    fn deep_standby_wakes_for_the_time_to_queue() {
+        let mut shell = reminding();
+        shell.settings.screen_off = 30;
+        shell.settings.battery.deep_after = 10;
+        until_deep(&mut shell, 700).expect("deep standby");
+        shell.queue_due = Some(crate::reminders::now() + 90);
+        assert!(shell.deep_wait() <= crate::deep::WAIT);
+        shell.tick(60.0);
+        assert!(shell.deep_asleep(), "not yet");
+        crate::reminders::later(90);
+        shell.tick(30.0);
+        assert!(!shell.deep_asleep());
+        assert_eq!(shell.standby_state(), crate::standby::State::Awake);
+    }
+
+    #[test]
+    fn the_queue_alert_is_worked_out_ahead_for_each_match() {
+        use crate::schedule::{Match, View};
+        let t = 1_800_000_000;
+        let m = |label: &str, at: i64| Match { key: label.to_lowercase(), label: label.into(), time: Some(at), queue_at: Some(at - 900), ..Match::default() };
+        let mut view = View { team: 5805, matches: vec![m("Q31", t), m("Q40", t + 3000)], ..View::default() };
+        let now = t - 2000;
+        assert_eq!(queue_alert_at(&view, now, &[]), Some(t - 900 - QUEUE_AHEAD), "five minutes before queueing for Q31");
+        assert_eq!(queue_alert_at(&view, now, &[("q31".into(), 0)]), Some(t - 900), "then the time itself");
+        // Both said for Q31: Q40's warning, once Q31 is no longer the next.
+        assert_eq!(queue_alert_at(&view, now, &[("q31".into(), 1)]), Some(t + 2100 - QUEUE_AHEAD));
+        // Already in its window: due now.
+        assert_eq!(queue_alert_at(&view, t - 1000, &[]), Some(t - 1000));
+        view.matches[1].queue_at = None;
+        assert_eq!(queue_alert_at(&view, now, &[("q31".into(), 1)]), None, "no queue time: nothing to work out");
+    }
+
     /// A plain page for pushing.
     struct Page(&'static str);
 
@@ -4129,5 +5153,320 @@ pub(crate) mod tests {
         // A page pushed from rest has nothing beneath it.
         shell.open(Box::new(Page("three")), Path::Slide);
         assert!(shell.transition.as_ref().unwrap().beneath.is_none());
+    }
+
+    // ----------------------------------------------------------- spotlight ---
+
+    /// Spotlight's index read in full now, rather than whenever its thread
+    /// gets there.
+    fn index_read() {
+        crate::spotlight::index().refresh(true);
+    }
+
+    fn type_in(shell: &mut Shell, text: &str) {
+        for c in text.chars() {
+            shell.key(Key::Char(c));
+            frames(shell, 1, FRAME);
+        }
+    }
+
+    /// The stack's titles, Home first.
+    fn titles_of(shell: &Shell) -> Vec<String> {
+        shell.stack.iter().map(|(s, _)| s.title().to_owned()).collect()
+    }
+
+    /// Ctrl-Enter, some typing, Esc: from wherever it was, back to there,
+    /// with nothing typed reaching the screen behind.
+    fn up_and_away(shell: &mut Shell, typed: &str) {
+        let before = titles_of(shell);
+        shell.key(Key::Ctrl('\n'));
+        assert!(shell.spotlight_open(), "over {before:?}");
+        type_in(shell, typed);
+        assert_eq!(shell.spotlight.query(), typed, "the keys went to Spotlight");
+        assert_eq!(titles_of(shell), before, "and nothing reached the screen behind");
+        shell.key(Key::Back);
+        assert!(!shell.spotlight_open());
+        frames(shell, 90, FRAME);
+        assert!(!shell.spotlight.visible() && shell.spotlight_under.is_none(), "gone, and its picture let go");
+        assert_eq!(titles_of(shell), before);
+    }
+
+    #[test]
+    fn ctrl_enter_brings_spotlight_up_over_any_screen_and_esc_goes_back_there() {
+        let mut shell = shell();
+        // Home, where the bare letters are arrows: here they type.
+        up_and_away(&mut shell, "fxzc");
+        // An app.
+        open_app(&mut shell, "Robot", "Logs");
+        up_and_away(&mut shell, "logs");
+        // A page deep in Settings, with the focus moved.
+        back_home(&mut shell);
+        open_app(&mut shell, "Robot", "Settings");
+        shell.key(Key::Down);
+        shell.key(Key::Enter);
+        frames(&mut shell, 60, FRAME);
+        up_and_away(&mut shell, "wi");
+        // The terminal, which takes every other key for its program.
+        back_home(&mut shell);
+        open_app(&mut shell, "Settings", "Terminal");
+        up_and_away(&mut shell, "ls");
+        // Over the control centre, which gives way to it.
+        shell.key(Key::Ctrl(' '));
+        frames(&mut shell, 30, FRAME);
+        shell.key(Key::Ctrl('\n'));
+        assert!(shell.spotlight_open() && !shell.control_open() && !shell.control.visible());
+        // Ctrl-Space from Spotlight: the control centre in its place.
+        shell.key(Key::Ctrl(' '));
+        assert!(!shell.spotlight.visible() && shell.control_open());
+        shell.key(Key::Back);
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(title(&shell), "Terminal");
+    }
+
+    #[test]
+    fn space_and_slash_on_home_still_search() {
+        let mut shell = shell();
+        shell.key(Key::Char(' '));
+        assert!(shell.spotlight_open(), "Space, as before");
+        assert_eq!(shell.spotlight.query(), "", "and is not typed");
+        shell.key(Key::Ctrl('q'));
+        assert!(!shell.spotlight_open(), "Ctrl-Q puts it away too");
+        frames(&mut shell, 90, FRAME);
+        shell.key(Key::Char('/'));
+        assert!(shell.spotlight_open());
+        // Ctrl-Enter again puts it away.
+        shell.key(Key::Ctrl('\n'));
+        assert!(!shell.spotlight_open());
+        assert_eq!(shell.stack.len(), 1);
+    }
+
+    #[test]
+    fn it_grows_out_of_the_island_its_glass_ramping_and_springs_back_into_it() {
+        let mut shell = shell();
+        let island = shell.island_rect();
+        shell.key(Key::Ctrl('\n'));
+        frames(&mut shell, 3, FRAME);
+        let bar = shell.spotlight.glass(&shell.gfx, island);
+        assert!(bar.strength > 0.0 && bar.strength < 1.0 || shell.spotlight.shown() < 0.6, "it materializes: {}", bar.strength);
+        assert!(bar.rect.w > island.w && bar.rect.w < W, "growing out of the island: {:?}", bar.rect);
+        assert!(shell.spotlight_under.is_some(), "the screen behind is held still");
+        frames(&mut shell, 60, FRAME);
+        let rest = shell.spotlight.glass(&shell.gfx, island);
+        assert!((rest.strength - 1.0).abs() < 0.01 && rest.rect.x <= island.x && rest.rect.y == island.y);
+        // Esc: it shrinks back into the island; its glass lingers a moment, then goes.
+        shell.key(Key::Back);
+        frames(&mut shell, 4, FRAME);
+        let shrinking = shell.spotlight.glass(&shell.gfx, island);
+        assert!(shrinking.rect.w < rest.rect.w && shrinking.strength > 0.99, "{shrinking:?}");
+        frames(&mut shell, 30, FRAME);
+        assert!(shell.spotlight.glass(&shell.gfx, island).strength < 0.5);
+        frames(&mut shell, 60, FRAME);
+        assert!(!shell.spotlight.visible());
+        assert!(!shell.moving(), "and everything comes to rest");
+    }
+
+    #[test]
+    fn turned_round_on_its_way_back_it_keeps_what_was_typed() {
+        let mut shell = shell();
+        shell.key(Key::Ctrl('\n'));
+        frames(&mut shell, 30, FRAME);
+        type_in(&mut shell, "git");
+        shell.key(Key::Back);
+        frames(&mut shell, 5, FRAME);
+        let part_way = shell.spotlight.shown();
+        assert!(part_way > 0.05 && part_way < 0.99, "{part_way}");
+        shell.key(Key::Ctrl('\n'));
+        frames(&mut shell, 1, FRAME);
+        assert!((shell.spotlight.shown() - part_way).abs() < 0.15, "no jump: {part_way} then {}", shell.spotlight.shown());
+        assert_eq!(shell.spotlight.query(), "git");
+        // Any other key while it goes: gone at once, and the key is the screen's.
+        shell.key(Key::Back);
+        frames(&mut shell, 3, FRAME);
+        shell.key(Key::Right);
+        assert!(!shell.spotlight.visible());
+    }
+
+    #[test]
+    fn a_result_closed_while_still_opening_turns_round_into_its_row() {
+        let mut shell = shell();
+        index_read();
+        shell.key(Key::Ctrl('\n'));
+        type_in(&mut shell, "calculatr");
+        frames(&mut shell, 30, FRAME);
+        shell.key(Key::Enter);
+        frames(&mut shell, 3, FRAME);
+        assert!(shell.transition.as_ref().is_some_and(|t| t.arriving()), "still growing out of its row");
+        // Closed before it has arrived: it turns round from where it is, and
+        // no motion is left over Home with nothing to bring in.
+        shell.key(Key::Back);
+        assert_eq!(shell.stack.len(), 1);
+        assert!(shell.transition.as_ref().is_none_or(|t| t.leaving.is_some()), "turned round, not left behind");
+        // A redraw from scratch (the text size changed) as it goes.
+        shell.settings.text = shell.settings.text.next();
+        shell.apply_settings();
+        frames(&mut shell, 90, FRAME);
+        assert_eq!(title(&shell), "Catalyst");
+    }
+
+    #[test]
+    fn enter_opens_a_result_out_of_its_row_and_esc_comes_back_to_where_it_was() {
+        let mut shell = shell();
+        index_read();
+        // From an app: a setting, deep-linked to its row.
+        open_app(&mut shell, "Robot", "Logs");
+        shell.key(Key::Ctrl('\n'));
+        frames(&mut shell, 30, FRAME);
+        type_in(&mut shell, "brightness");
+        frames(&mut shell, 30, FRAME);
+        assert_eq!(shell.spotlight.hits().first().map(|h| h.item.title.as_str()), Some("Brightness"));
+        shell.key(Key::Enter);
+        assert!(!shell.spotlight.visible(), "it becomes what it opens");
+        let Some(Transition { path: Path::Grow(from), .. }) = &shell.transition else { panic!("it grows out of its row") };
+        assert!(from.y > 20.0 && from.w > 200.0, "the row: {from:?}");
+        frames(&mut shell, 90, FRAME);
+        assert_eq!(titles_of(&shell), ["Catalyst", "Logs", "Display"]);
+        shell.key(Key::Back);
+        frames(&mut shell, 90, FRAME);
+        assert_eq!(titles_of(&shell), ["Catalyst", "Logs"], "back where Spotlight came up");
+        // From Home: an app, by a misspelling.
+        back_home(&mut shell);
+        shell.key(Key::Ctrl('\n'));
+        type_in(&mut shell, "calculatr");
+        frames(&mut shell, 30, FRAME);
+        shell.key(Key::Enter);
+        frames(&mut shell, 90, FRAME);
+        assert_eq!(title(&shell), "Calculator");
+        shell.key(Key::Back);
+        frames(&mut shell, 90, FRAME);
+        assert_eq!(title(&shell), "Catalyst");
+        // A sum: the calculator, the sum typed in it.
+        shell.key(Key::Ctrl('\n'));
+        type_in(&mut shell, "12*7");
+        assert_eq!(shell.spotlight.hits().first().map(|h| h.item.title.as_str()), Some("= 84"), "worked out at once");
+        shell.key(Key::Enter);
+        frames(&mut shell, 90, FRAME);
+        assert_eq!(title(&shell), "Calculator");
+        back_home(&mut shell);
+        // An Action: the confirm page first, never straight to running it.
+        shell.key(Key::Ctrl('\n'));
+        type_in(&mut shell, "disk space");
+        shell.key(Key::Enter);
+        frames(&mut shell, 90, FRAME);
+        assert_eq!(title(&shell), "Confirm");
+        shell.key(Key::Back);
+        frames(&mut shell, 90, FRAME);
+        assert_eq!(title(&shell), "Catalyst", "not run");
+        // Asked again, and Enter: it only looks, so "Run it" is first, and the
+        // page becomes the command's terminal in place.
+        shell.key(Key::Ctrl('\n'));
+        type_in(&mut shell, "disk space");
+        shell.key(Key::Enter);
+        frames(&mut shell, 90, FRAME);
+        shell.key(Key::Enter);
+        frames(&mut shell, 30, FRAME);
+        assert_eq!(titles_of(&shell), ["Catalyst", "Command"]);
+        assert!(shell.stack[1].0.wants_text(), "a terminal now");
+        shell.key(Key::Ctrl('q'));
+        frames(&mut shell, 90, FRAME);
+        assert_eq!(title(&shell), "Catalyst");
+    }
+
+    #[test]
+    fn the_arrows_move_through_the_results_and_tab_previews_one() {
+        let mut shell = shell();
+        index_read();
+        shell.key(Key::Ctrl('\n'));
+        frames(&mut shell, 30, FRAME);
+        type_in(&mut shell, "volts");
+        frames(&mut shell, 30, FRAME);
+        let hits: Vec<String> = shell.spotlight.hits().iter().map(|h| h.item.title.clone()).collect();
+        assert!(hits.len() >= 3, "{hits:?}");
+        assert_eq!(hits.last().map(String::as_str), Some("Ask the Assistant “volts”"), "the assistant last");
+        assert!(hits[hits.len() - 2].starts_with("Search the web"), "the web before it");
+        // Down and back up, and Tab: a value's preview, from memory at once.
+        shell.key(Key::Down);
+        shell.key(Key::Up);
+        let first = shell.spotlight.hits()[0].clone();
+        assert_eq!(first.item.weight, crate::spotlight::weight::VALUE, "{:?}", first.item.title);
+        shell.key(Key::Tab);
+        assert!(shell.spotlight.previewing());
+        frames(&mut shell, 30, FRAME);
+        assert!(shell.spotlight.previewing());
+        // Left back to the list; typing goes on from there.
+        shell.key(Key::Left);
+        assert!(!shell.spotlight.previewing());
+        shell.key(Key::Backspace);
+        assert_eq!(shell.spotlight.query(), "volt");
+        // Up past the top stays on the top.
+        for _ in 0..4 {
+            shell.key(Key::Up);
+        }
+        frames(&mut shell, 30, FRAME);
+        shell.key(Key::Back);
+        frames(&mut shell, 90, FRAME);
+        assert_eq!(shell.stack.len(), 1);
+    }
+
+    /// A screen that locks the handheld, as a lock screen would.
+    struct Lock;
+
+    impl Screen for Lock {
+        fn title(&self) -> &str {
+            "Locked"
+        }
+        fn key(&mut self, _key: Key, _cx: &mut Cx) -> Nav {
+            Nav::Stay
+        }
+        fn draw(&mut self, _g: &mut Gfx, _robot: &Robot) {}
+        fn locks(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn it_never_opens_over_a_lock_nor_over_setup() {
+        let mut shell = shell();
+        shell.key(Key::Ctrl('\n'));
+        assert!(shell.spotlight_open());
+        // Locked while it shows: it goes at once.
+        shell.stack.push((Box::new(Lock), Path::Slide));
+        frames(&mut shell, 1, FRAME);
+        assert!(!shell.spotlight.visible());
+        assert!(shell.locked());
+        shell.key(Key::Ctrl('\n'));
+        assert!(!shell.spotlight_open(), "not over the lock");
+        shell.stack.pop();
+        assert!(!shell.locked());
+        // First-boot setup takes the whole panel: not over it either.
+        shell.start_setup();
+        frames(&mut shell, 5, FRAME);
+        shell.key(Key::Ctrl('\n'));
+        assert!(!shell.spotlight_open());
+    }
+
+    #[test]
+    fn typing_fast_never_waits_for_the_results() {
+        let mut shell = shell();
+        index_read();
+        shell.key(Key::Ctrl('\n'));
+        frames(&mut shell, 30, FRAME);
+        let mut slowest = std::time::Duration::ZERO;
+        for c in "elevator current".chars() {
+            let began = std::time::Instant::now();
+            shell.key(Key::Char(c));
+            slowest = slowest.max(began.elapsed());
+            frames(&mut shell, 1, 0.025);
+            assert!(!shell.spotlight.hits().is_empty(), "results from the first key");
+        }
+        // A frame's beat on the handheld is 25 ms; a key here is a sliver of
+        // one even on a debug build of a slow computer.
+        assert!(slowest < std::time::Duration::from_millis(40), "slowest key {slowest:?}");
+        for _ in 0..16 {
+            let began = std::time::Instant::now();
+            shell.key(Key::Backspace);
+            slowest = slowest.max(began.elapsed());
+        }
+        assert_eq!(shell.spotlight.query(), "");
+        assert!(slowest < std::time::Duration::from_millis(40), "slowest key {slowest:?}");
     }
 }

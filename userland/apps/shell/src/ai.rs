@@ -1511,6 +1511,14 @@ static DECISION: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
 /// assistant is on top again.
 static OPEN_CHAT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
+/// A question sent from search, taken up by the assistant once it is on top:
+/// a new one, or one kept among the recent apps and brought back.
+static ASK_NEXT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn take_question() -> Option<String> {
+    ASK_NEXT.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
 fn take_open_chat() -> Option<String> {
     OPEN_CHAT.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
@@ -1569,6 +1577,12 @@ impl Assistant {
         let prefs = Prefs::load();
         let service = answering(&prefs, &Keys::load());
         Self::with(prefs, service)
+    }
+
+    /// The assistant, asked `question` (from search) once it is on top.
+    pub fn asking(question: &str) -> Self {
+        *ASK_NEXT.lock().unwrap_or_else(|e| e.into_inner()) = Some(question.chars().take(INPUT_LIMIT).collect());
+        Self::new()
     }
 
     fn with(prefs: Prefs, service: Option<(Service, String)>) -> Self {
@@ -2110,6 +2124,14 @@ impl Screen for Assistant {
     }
 
     fn update(&mut self, cx: &mut Cx) -> Nav {
+        // A question from search: sent as soon as nothing else is under way
+        // (with no service yet, it waits typed in the line).
+        if let Some(question) = take_question() {
+            self.input = question;
+            if self.idle() && self.service.is_some() {
+                self.send();
+            }
+        }
         // Back from the confirm page with an answer.
         if matches!(self.busy, Busy::Approving { .. }) {
             if let Some(yes) = DECISION.lock().unwrap_or_else(|e| e.into_inner()).take() {
@@ -2348,16 +2370,44 @@ pub struct Confirm {
     command: String,
     reason: String,
     list: ListState,
+    /// Asked about from search: on a yes the command runs here, in a
+    /// terminal that takes the page's place, rather than for the assistant.
+    run_here: bool,
+    critical: bool,
+    session: Option<crate::terminal::Terminal>,
+    /// The terminal has just taken the page's place: its rows rise in.
+    swapped: bool,
 }
 
 impl Confirm {
     fn new(name: &str, command: &str, reason: &str) -> Self {
         let mut list = ListState::default();
         list.focus = 1;
-        Confirm { name: name.to_owned(), command: command.to_owned(), reason: reason.to_owned(), list }
+        Confirm { name: name.to_owned(), command: command.to_owned(), reason: reason.to_owned(), list, run_here: false, critical: true, session: None, swapped: false }
     }
 
-    fn answer(&self, yes: bool) -> Nav {
+    /// An Action picked in search, asked about in full as the assistant's
+    /// critical ones are, and run here on a yes. One that only looks is
+    /// offered "Run it" first; one that could change something, not.
+    pub fn to_run(name: &str, command: &str, critical: bool) -> Self {
+        let mut page = Self::new(name, command, if critical { "it could change something" } else { "it only looks" });
+        (page.run_here, page.critical) = (true, critical);
+        if !critical {
+            page.list.focus = 0;
+        }
+        page
+    }
+
+    fn answer(&mut self, yes: bool) -> Nav {
+        if self.run_here {
+            if !yes {
+                return Nav::Pop;
+            }
+            let banner = format!("$ {}", self.command);
+            self.session = Some(crate::terminal::Terminal::running("Command", &self.command, crate::connect::session_dir()).with_banner(&banner));
+            self.swapped = true;
+            return Nav::Stay;
+        }
         *DECISION.lock().unwrap_or_else(|e| e.into_inner()) = Some(yes);
         Nav::Pop
     }
@@ -2384,19 +2434,59 @@ fn wrap_command(g: &mut Gfx, text: &str, style: bezel::TextStyle, width: f32) ->
 
 impl Screen for Confirm {
     fn title(&self) -> &str {
-        "Confirm"
+        self.session.as_ref().map_or("Confirm", |s| s.title())
     }
 
-    fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
+    // Once the command runs here, the page is its terminal.
+    fn wants_text(&self) -> bool {
+        self.session.as_ref().is_some_and(|s| s.wants_text())
+    }
+
+    fn busy(&self) -> bool {
+        self.session.as_ref().is_some_and(|s| s.busy())
+    }
+
+    fn keeps_awake(&self) -> bool {
+        self.session.as_ref().is_some_and(|s| s.keeps_awake())
+    }
+
+    /// A passing page; and a command in a terminal of its own ends when left.
+    fn keep_in_recents(&self) -> bool {
+        false
+    }
+
+    fn tick(&mut self, dt: f32) -> bool {
+        self.session.as_mut().is_some_and(|s| s.tick(dt))
+    }
+
+    fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
+        if let Some(session) = &mut self.session {
+            return session.key(key, cx);
+        }
         match key {
             Key::Back | Key::Leave => return self.answer(false),
-            Key::Enter => return self.answer(self.list.focus == 0),
+            Key::Enter => {
+                let yes = self.list.focus == 0;
+                let nav = self.answer(yes);
+                // Run here: the terminal says how to leave it, as one opened does.
+                if let Some(words) = self.session.as_ref().and_then(|s| s.greeting()) {
+                    *cx.say = Some(words.to_owned());
+                }
+                return nav;
+            }
             other => crate::screens::list_key(&mut self.list, other, 2),
         }
         Nav::Stay
     }
 
-    fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
+    fn draw(&mut self, g: &mut Gfx, robot: &Robot) {
+        if let Some(session) = &mut self.session {
+            if std::mem::take(&mut self.swapped) {
+                g.reveal_start();
+                g.started_moving();
+            }
+            return session.draw(g, robot);
+        }
         let t = g.tokens;
         let ty = g.ty;
         let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
@@ -2433,7 +2523,7 @@ impl Screen for Confirm {
         // Run it, or not.
         for (i, ry) in self.list.layout(g, 2, rows_top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, ry, W - 2.0 * PAD, row_h);
-            let (name, value) = if i == 0 { ("Run it", "it could change something") } else { ("Don't run it", "") };
+            let (name, value) = if i == 0 { ("Run it", if self.critical { "it could change something" } else { "" }) } else { ("Don't run it", "") };
             g.row(r, name, value, t.dim, i == self.list.focus);
         }
         g.hint("enter: confirm · esc: don't run");

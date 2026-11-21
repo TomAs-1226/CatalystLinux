@@ -7,6 +7,9 @@
 //! catalyst-shell --bench         draw 600 frames off screen; print time and memory
 //! catalyst-shell --smooth        how even the frames of each transition are, at the
 //!                                handheld's estimated speed and at worse
+//! catalyst-shell --passcode-bench   what making and checking the lock screen's
+//!                                passcode takes on this processor
+//! catalyst-shell --standby-shots <dir>   StandBy's faces and the lock screen, to PNG
 //!     --robot <team|ip|host>     robot to connect to (overrides the saved one)
 //!     --demo                     a scripted robot instead of a real one
 //!     --arrive <seconds>         the scripted robot, plugged in that long after start
@@ -47,6 +50,7 @@ mod connect;
 mod control;
 mod deep;
 mod device;
+mod faces;
 mod files;
 mod gfx;
 mod git;
@@ -66,27 +70,31 @@ mod keys;
 mod lights;
 mod level;
 mod local;
+mod lock;
+mod lockpages;
 mod logs;
 mod look;
 mod monitor;
 mod nettools;
 mod notes;
 mod panel;
+mod passcode;
 mod photos;
 mod pit;
 mod power;
 mod pty;
 mod platform;
 mod recents;
+mod reminders;
 mod remote;
 mod robot;
 mod schedule;
 mod screens;
 mod screenshot;
-mod search;
 mod setup;
 mod share;
 mod shell;
+mod spotlight;
 mod standby;
 mod sys;
 mod tailscale;
@@ -97,6 +105,7 @@ mod terminal;
 mod tools;
 mod trends;
 mod units;
+mod upnext;
 mod weather;
 mod wifi;
 mod wpilog;
@@ -210,7 +219,7 @@ fn settings_text(s: &shell::Settings) -> String {
         ("face_down", s.face_down.to_string()),
         ("brightness", s.brightness.to_string()),
     ];
-    lines.iter().chain(s.battery.lines().iter()).map(|(k, v)| format!("{k}={v}\n")).collect()
+    lines.iter().chain(s.battery.lines().iter()).chain(s.lock.lines().iter()).map(|(k, v)| format!("{k}={v}\n")).collect()
 }
 
 fn load_settings(settings: &mut shell::Settings) {
@@ -222,7 +231,7 @@ fn load_settings(settings: &mut shell::Settings) {
 /// Read settings from their file's text; anything not understood is left as it was.
 fn parse_settings(text: &str, settings: &mut shell::Settings) {
     for line in text.lines() {
-        if line.split_once('=').is_some_and(|(k, v)| settings.battery.parse(k, v)) {
+        if line.split_once('=').is_some_and(|(k, v)| settings.battery.parse(k, v) || settings.lock.parse(k, v)) {
             continue;
         }
         match line.split_once('=') {
@@ -340,6 +349,13 @@ fn main() {
     }
     let flag = |name: &str| args.iter().any(|a| a == name);
     let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    // What making and checking the lock screen's passcode takes here.
+    if flag("--passcode-bench") {
+        println!("{}", passcode::bench());
+        return;
+    }
+    // StandBy's and the lock screen's "next reminder": from Reminders.
+    upnext::set_reminders(reminders::next_for_upnext);
 
     // The simulator on a computer saves in the user's folder unless told otherwise.
     if flag("--sim") && std::env::var_os("CATALYST_CONF").is_none() {
@@ -390,6 +406,10 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--shots") {
         return shots(shell, std::path::Path::new(&dir));
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--standby-shots") {
+        return standby_shots(std::path::Path::new(&dir));
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--looks") {
@@ -471,11 +491,11 @@ fn main() {
     loop {
         let moving = shell.animating();
         // Idle, a look four times a second (for a lift); in deep standby,
-        // once a minute.
+        // once a minute (sooner when a reminder or the queue comes first).
         let timeout = if moving {
             next_frame.saturating_duration_since(Instant::now())
         } else if shell.deep_asleep() {
-            deep::WAIT
+            shell.deep_wait()
         } else {
             Duration::from_millis(250)
         };
@@ -489,7 +509,7 @@ fn main() {
             platform.panel_sleep(false);
             panel_asleep = false;
         }
-        beat.set_floor(shell.saving().then_some(power::SAVER_FRAME_MS));
+        beat.set_floor(shell.frame_floor());
         if moving && Instant::now() < next_frame {
             continue;
         }
@@ -1044,11 +1064,129 @@ fn motion(dir: &std::path::Path) {
     println!("motion in {}", dir.display());
 }
 
+/// Spotlight's part of the tour: growing out of the island, results as they
+/// are typed (apps and values, a sum, a conversion, a match, a team), a
+/// preview, over an app, a result opening out of its row, the recent picks,
+/// light mode and the large text size.
+#[cfg(not(target_arch = "aarch64"))]
+fn spotlight_shots(dir: &std::path::Path) {
+    use Key::*;
+    let settle = |shell: &mut Shell, frames: usize| {
+        for _ in 0..frames {
+            if shell.tick(1.0 / 60.0) {
+                shell.draw();
+            }
+        }
+    };
+    let save = |shell: &mut Shell, name: &str| {
+        shell.draw();
+        platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}.png")), 3);
+    };
+    let typed = |shell: &mut Shell, text: &str| {
+        shell.key(Delete);
+        for c in text.chars() {
+            shell.key(Char(c));
+            settle(shell, 2);
+        }
+        settle(shell, 50);
+    };
+    // A note, two hosts and the album's photos, for it to find.
+    let notes = notes::dir();
+    std::fs::create_dir_all(&notes).ok();
+    std::fs::write(notes.join("2026-11-20-101500.txt"), "Swerve offsets\n\nfront left 0.412 rad\nfront right 1.873 rad\nback left 2.551 rad\nback right 5.090 rad\n\n— Q31 · nov 20 10:15\n").ok();
+    std::fs::write(config_dir().join("ssh-hosts"), "lvuser@10.58.5.2\nthomas@build.local\n").ok();
+    photos::seed_demo();
+    spotlight::index().refresh(true);
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    // Out of the island: caught growing, then at rest with nothing typed yet.
+    shell.key(Ctrl('\n'));
+    settle(&mut shell, 6);
+    save(&mut shell, "32-spotlight-growing");
+    settle(&mut shell, 60);
+    save(&mut shell, "32b-spotlight");
+    typed(&mut shell, "lo");
+    save(&mut shell, "32c-spotlight-lo");
+    typed(&mut shell, "12*7");
+    save(&mut shell, "32d-spotlight-sum");
+    typed(&mut shell, "3 in to mm");
+    save(&mut shell, "32e-spotlight-units");
+    typed(&mut shell, "q31");
+    save(&mut shell, "32f-spotlight-match");
+    typed(&mut shell, "254");
+    save(&mut shell, "32g-spotlight-team");
+    // Tab: a robot value's preview, then a note's (read on its thread).
+    typed(&mut shell, "volts");
+    shell.key(Tab);
+    settle(&mut shell, 40);
+    save(&mut shell, "32h-spotlight-preview-value");
+    shell.key(Left);
+    typed(&mut shell, "swerve");
+    shell.key(Tab);
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(10));
+        settle(&mut shell, 2);
+    }
+    settle(&mut shell, 40);
+    save(&mut shell, "32i-spotlight-preview-note");
+    shell.key(Back);
+    settle(&mut shell, 8);
+    save(&mut shell, "32j-spotlight-back-into-the-island");
+    settle(&mut shell, 90);
+    // Over an app: Logs. A setting found, and opened out of its row.
+    for key in [Right, Right, Enter] {
+        shell.key(key);
+        settle(&mut shell, 60);
+    }
+    shell.key(Ctrl('\n'));
+    settle(&mut shell, 40);
+    typed(&mut shell, "bright");
+    save(&mut shell, "32k-spotlight-over-an-app");
+    shell.key(Enter);
+    settle(&mut shell, 7);
+    save(&mut shell, "32l-spotlight-opening");
+    settle(&mut shell, 90);
+    save(&mut shell, "32m-spotlight-opened");
+    // Back to Home; with nothing typed, the picks made lately.
+    for _ in 0..3 {
+        shell.key(Back);
+        settle(&mut shell, 60);
+    }
+    shell.key(Ctrl('\n'));
+    settle(&mut shell, 60);
+    save(&mut shell, "32n-spotlight-recent");
+    shell.key(Back);
+    settle(&mut shell, 90);
+    // Light mode, and the large text size.
+    shell.settings.light = true;
+    shell.apply_settings();
+    settle(&mut shell, 60);
+    shell.key(Ctrl('\n'));
+    settle(&mut shell, 40);
+    typed(&mut shell, "net");
+    save(&mut shell, "32o-spotlight-light");
+    shell.key(Back);
+    settle(&mut shell, 90);
+    shell.settings.light = false;
+    shell.settings.text = gfx::TextSize::Large;
+    shell.apply_settings();
+    settle(&mut shell, 60);
+    shell.key(Ctrl('\n'));
+    settle(&mut shell, 40);
+    typed(&mut shell, "wi");
+    save(&mut shell, "32p-spotlight-large-text");
+}
+
 /// A scripted tour: press keys, let motion settle, save each screen.
 #[cfg(not(target_arch = "aarch64"))]
 fn shots(mut shell: Shell, dir: &std::path::Path) {
     use Key::*;
     std::fs::create_dir_all(dir).expect("create the screenshot folder");
+    // Only Spotlight's part, when that is all that is wanted.
+    if std::env::var("CATALYST_SHOTS_ONLY").as_deref() == Ok("spotlight") {
+        return spotlight_shots(dir);
+    }
     // From Files to Settings, however many apps lie between.
     let files_to_settings: Vec<Key> =
         [Ctrl('q'), Back].into_iter().chain(std::iter::repeat_n(Right, steps_to("Settings") - steps_to("Files"))).chain([Enter]).collect();
@@ -1267,17 +1405,13 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     }
     settle(&mut shell, 60);
     save(&mut shell, "89-shortcuts-keyboard");
-    // Search, from Home: Space, then a few letters.
+    // Spotlight: from Home and over an app, as it is typed into.
+    spotlight_shots(dir);
+    // Git, with no repositories yet.
     let mut shell = Shell::new(Robot::demo());
     shell.apply_settings();
     settle(&mut shell, 100);
-    for key in [Char(' '), Char('l'), Char('o')] {
-        shell.key(key);
-        settle(&mut shell, 40);
-    }
-    save(&mut shell, "32-search");
-    // Git, with no repositories yet.
-    let keys = [Back, Back].into_iter().chain(std::iter::repeat_n(Right, steps_to("Git"))).chain([Enter]);
+    let keys = std::iter::repeat_n(Right, steps_to("Git")).chain([Enter]);
     for key in keys {
         shell.key(key);
         settle(&mut shell, 60);
@@ -2369,6 +2503,7 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     typed(&mut shell, "elevator");
     press(&mut shell, &[Enter], 60);
     save(&mut shell, "120b-files-hex-found");
+    reminder_shots(dir);
     std::fs::remove_dir_all(&notes_dir).ok();
     let written =std::fs::read_dir(dir).map_or(0, |d| d.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "png")).count());
     println!("{written} screens in {}, {frames} frames at {:.2} ms each", dir.display(), started.elapsed().as_secs_f64() * 1e3 / frames as f64);
@@ -2381,12 +2516,518 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     }
 }
 
+/// Reminders in the gallery, on the demo event: Today with one come due and
+/// the pit's cues, the lists turning, Upcoming and Done; quick add reading
+/// what is typed; the pit routine; a note's bell in Notes and its reminder;
+/// Bezel's light look; and one coming due with the screen off, which wakes
+/// it with the island and opens Reminders.
+#[cfg(not(target_arch = "aarch64"))]
+fn reminder_shots(dir: &std::path::Path) {
+    use reminders::parse::Parsed;
+    use reminders::{Book, Link, Repeat, When};
+    use Key::*;
+    let settle = |shell: &mut Shell, frames: usize| {
+        for _ in 0..frames {
+            if shell.tick(1.0 / 60.0) {
+                shell.draw();
+            }
+        }
+    };
+    let save = |shell: &mut Shell, name: &str| {
+        shell.draw();
+        platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}.png")), 3);
+    };
+    let press = |shell: &mut Shell, keys: &[Key], frames: usize| {
+        for key in keys {
+            shell.key(*key);
+            settle(shell, frames);
+        }
+    };
+    let typed = |shell: &mut Shell, text: &str| {
+        for c in text.chars() {
+            shell.key(Char(c));
+        }
+        settle(shell, 12);
+    };
+    // Two pit notes, one of them to be reminded of (the tour's own folder,
+    // emptied first).
+    let notes_dir = notes::dir();
+    std::fs::remove_dir_all(&notes_dir).ok();
+    std::fs::create_dir_all(&notes_dir).ok();
+    for (file, text) in [
+        ("2026-11-20-1130.txt", "Elevator belt\nfollower slips at the top · retension\n\n— Q19 · nov 20 11:30\n"),
+        ("2026-11-21-0905.txt", "Intake off can_s0\nmove it to can_s1 before Q27\n\n— Q27 · nov 21 09:05\n"),
+    ] {
+        std::fs::write(notes_dir.join(file), text).ok();
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    // The demo event's reminders, a fresh book of them.
+    let view = shell.robot.schedule.view();
+    reminders::with(|s| {
+        std::fs::remove_file(reminders::path()).ok();
+        s.book = Book::open(reminders::path());
+        let n = reminders::plan::Now { at: reminders::now(), zone: &reminders::plan::Here, view: view.as_ref() };
+        let add = |book: &mut Book, typed: &str| {
+            for p in reminders::parse::parse(typed, &n).expect("a reminder") {
+                book.add(p, &n);
+            }
+        };
+        s.book.add(Parsed { text: "swap battery".into(), when: When::In(n.at - 150), repeat: Repeat::Never, list: None, link: Link::None }, &n);
+        add(&mut s.book, "run the pit checklist 20 min before each match");
+        add(&mut s.book, "after each match: check bumpers, download logs");
+        add(&mut s.book, "before Q40 charge the spare");
+        add(&mut s.book, "buy zip ties #personal");
+        add(&mut s.book, "tomorrow 8am robot inspection");
+        add(&mut s.book, "every weekday at 07:30 bus to school #personal");
+        s.book.add(Parsed { text: "Elevator belt".into(), when: When::Match(reminders::Cue::After, reminders::Of::Next), repeat: Repeat::Never, list: None, link: Link::Note("2026-11-20-1130.txt".into()) }, &n);
+        for done in ["charge battery 3", "zip-tie the radio"] {
+            let id = s.book.add(Parsed { text: done.into(), when: When::Whenever, repeat: Repeat::Never, list: None, link: Link::None }, &n);
+            s.book.tick(id, &n, true);
+        }
+        s.book.fire(&n, true);
+    });
+    settle(&mut shell, 30);
+    press(&mut shell, &vec![Right; steps_to("Reminders")], 12);
+    settle(&mut shell, 40);
+    save(&mut shell, "121-home-reminders");
+    press(&mut shell, &[Enter], 90);
+    press(&mut shell, &[Down], 30);
+    save(&mut shell, "121b-reminders-today");
+    press(&mut shell, &[Down, Down, Down], 20);
+    settle(&mut shell, 30);
+    save(&mut shell, "121c-reminders-today-cues");
+    shell.key(Right);
+    settle(&mut shell, 7);
+    save(&mut shell, "121d-reminders-turning");
+    settle(&mut shell, 60);
+    press(&mut shell, &[Down], 30);
+    save(&mut shell, "121e-reminders-upcoming");
+    press(&mut shell, &[Right], 60);
+    save(&mut shell, "121f-reminders-done");
+    // Quick add: the examples, then a line read as it is typed, then several at once.
+    press(&mut shell, &[Left, Left], 40);
+    press(&mut shell, &[Char('n')], 60);
+    save(&mut shell, "122-reminders-new");
+    typed(&mut shell, "before Q40 bring the cart");
+    settle(&mut shell, 20);
+    save(&mut shell, "122b-reminders-new-read");
+    for _ in 0.."before Q40 bring the cart".len() {
+        shell.key(Backspace);
+    }
+    typed(&mut shell, "tomorrow 8am check bumpers every day");
+    save(&mut shell, "122c-reminders-new-repeat");
+    for _ in 0.."tomorrow 8am check bumpers every day".len() {
+        shell.key(Backspace);
+    }
+    typed(&mut shell, "after each match: swap battery, check bumpers, download logs");
+    save(&mut shell, "122d-reminders-new-several");
+    press(&mut shell, &[Back], 40);
+    // The pit routine.
+    press(&mut shell, &[Char('p')], 60);
+    save(&mut shell, "123-reminders-pit-routine");
+    // Notes: the bell on the note with a reminder, and giving another one.
+    // (Esc on Home goes back to its first app.)
+    for _ in 0..4 {
+        shell.key(Back);
+        settle(&mut shell, 30);
+    }
+    // Each note's row in Notes, below its New note row.
+    let row = |title: &str| 1 + notes::load(&notes_dir).iter().position(|n| n.title == title).expect("the tour's note");
+    press(&mut shell, &vec![Right; steps_to("Notes")], 12);
+    press(&mut shell, &[Enter], 90);
+    press(&mut shell, &vec![Down; row("Elevator belt")], 30);
+    save(&mut shell, "124-notes-bell");
+    press(&mut shell, &[Home], 20);
+    press(&mut shell, &vec![Down; row("Intake off can_s0")], 20);
+    press(&mut shell, &[Char('r')], 60);
+    typed(&mut shell, "before Q40");
+    save(&mut shell, "124b-notes-remind");
+    for _ in 0..4 {
+        shell.key(Back);
+        settle(&mut shell, 30);
+    }
+    // In Bezel's light look.
+    shell.settings.theme = look::Theme::Bezel;
+    shell.settings.light = true;
+    shell.apply_settings();
+    press(&mut shell, &vec![Right; steps_to("Reminders")], 12);
+    press(&mut shell, &[Enter], 90);
+    press(&mut shell, &[Down], 30);
+    save(&mut shell, "125-reminders-bezel-light");
+    for _ in 0..3 {
+        shell.key(Back);
+        settle(&mut shell, 30);
+    }
+    shell.settings.theme = look::Theme::Catalyst;
+    shell.settings.light = false;
+    shell.apply_settings();
+    settle(&mut shell, 30);
+    // With the screen off, one comes due: the screen wakes with the island
+    // holding it, the keyboard's lights blink, and Reminders opens on it.
+    shell.settings.screen_off = 30;
+    reminders::with(|s| {
+        let n = reminders::plan::Now { at: reminders::now(), zone: &reminders::plan::Here, view: None };
+        s.book.add(Parsed { text: "tighten the intake chain".into(), when: When::In(n.at + 2), repeat: Repeat::Never, list: None, link: Link::None }, &n);
+    });
+    for _ in 0..40 {
+        shell.tick(1.0);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    settle(&mut shell, 14);
+    save(&mut shell, "126-reminder-due-waking");
+    settle(&mut shell, 60);
+    save(&mut shell, "126b-reminder-due");
+    let missing = shell.gfx.missing_icons();
+    if !missing.is_empty() {
+        eprintln!("icons asked for that are not built in: {}", missing.iter().cloned().collect::<Vec<_>>().join(", "));
+        std::process::exit(1);
+    }
+    std::fs::remove_file(reminders::path()).ok();
+}
+
 /// The robot's top-level tables, as Tables lists them.
 #[cfg(not(target_arch = "aarch64"))]
 fn robot_tables(robot: &Robot) -> Vec<String> {
     let mut tables: Vec<String> = robot.under("").into_iter().filter_map(|(k, _)| k.split_once('/').map(|(t, _)| t.to_owned())).collect();
     tables.dedup();
     tables
+}
+
+/// StandBy's faces (by day, at night, in light mode, turning), the lock
+/// screen (waiting, typed into, wrong, shaking, waiting out, opening, each
+/// face and colour, with notices), and their Settings pages, the passcode's
+/// steps and the editor: all as the simulator draws them, at 9:41.
+#[cfg(not(target_arch = "aarch64"))]
+fn standby_shots(dir: &std::path::Path) {
+    use Key::*;
+    std::fs::create_dir_all(dir).expect("create the screenshot folder");
+    tour_fixtures();
+    photos::seed_demo();
+    upnext::set_reminders(upnext::demo_reminder);
+    let morning = chrono::NaiveDate::from_ymd_opt(2026, 11, 21).and_then(|d| d.and_hms_opt(9, 41, 0));
+    faces::pretend_time(morning);
+    let settle = |shell: &mut Shell, frames: usize| {
+        for _ in 0..frames {
+            if shell.tick(1.0 / 60.0) {
+                shell.draw();
+            }
+        }
+    };
+    let save = |shell: &mut Shell, name: &str| {
+        shell.draw();
+        platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}.png")), 3);
+        println!("{name}");
+    };
+    let fresh = |light: bool| {
+        let mut shell = Shell::new(Robot::demo());
+        shell.settings.light = light;
+        shell.apply_settings();
+        shell
+    };
+    // Left on the charger: the screen dims, then StandBy comes.
+    let to_standby = |shell: &mut Shell| {
+        shell.pretend_charger(Some(true));
+        shell.settings.screen_off = 30;
+        for _ in 0..32 {
+            shell.tick(1.0);
+        }
+        settle(shell, 120);
+        assert!(shell.faces_showing(), "StandBy on the charger");
+    };
+    let mut shell = fresh(false);
+    settle(&mut shell, 100);
+    to_standby(&mut shell);
+    save(&mut shell, "01-clock-digits");
+    // The pager tucks away 2.5 s after the last key.
+    shell.key(Right);
+    settle(&mut shell, 8);
+    save(&mut shell, "02-clock-style-turning");
+    settle(&mut shell, 200);
+    save(&mut shell, "03-clock-dial");
+    shell.key(Right);
+    settle(&mut shell, 200);
+    save(&mut shell, "04-clock-dots");
+    shell.key(Left);
+    shell.key(Left);
+    settle(&mut shell, 60);
+    for name in ["05-charge", "06-next-match", "07-weather", "08-photos", "09-everything"] {
+        shell.key(Down);
+        settle(&mut shell, if name == "08-photos" { 30 } else { 200 });
+        if name == "08-photos" {
+            // The photo is decoded on a thread of its own.
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            settle(&mut shell, 200);
+        }
+        save(&mut shell, name);
+    }
+    // Past the last face: a give, and back.
+    shell.key(Down);
+    settle(&mut shell, 5);
+    save(&mut shell, "10-rubber-band-at-the-end");
+    settle(&mut shell, 60);
+    shell.key(Up);
+    settle(&mut shell, 9);
+    save(&mut shell, "11-turning-between-faces");
+    settle(&mut shell, 200);
+    // Night: red, and the light down (the simulator dims the picture itself).
+    for _ in 0..5 {
+        shell.key(Up);
+    }
+    settle(&mut shell, 200);
+    faces::pretend_time(chrono::NaiveDate::from_ymd_opt(2026, 11, 21).and_then(|d| d.and_hms_opt(23, 18, 0)));
+    for _ in 0..6 {
+        shell.tick(1.0);
+    }
+    settle(&mut shell, 300);
+    save(&mut shell, "12-night-clock");
+    shell.key(Right);
+    settle(&mut shell, 200);
+    save(&mut shell, "13-night-dial-resting");
+    shell.key(Left);
+    for _ in 0..5 {
+        shell.key(Down);
+    }
+    settle(&mut shell, 300);
+    save(&mut shell, "14-night-everything");
+    faces::pretend_time(morning);
+    // Light mode is its own design: StandBy goes light too.
+    let mut shell = fresh(true);
+    shell.settings.lock.face = lock::Face::Clock;
+    settle(&mut shell, 100);
+    to_standby(&mut shell);
+    save(&mut shell, "15-light-clock");
+    shell.key(Down);
+    settle(&mut shell, 200);
+    save(&mut shell, "16-light-charge");
+
+    // The lock screen: a passcode set, so it starts locked.
+    let (phc, _, _) = passcode::make("2468").expect("hashes");
+    passcode::keep(&phc).expect("kept");
+    let mut shell = fresh(false);
+    shell.settings.lock.face = lock::Face::Clock;
+    settle(&mut shell, 120);
+    assert!(shell.locked());
+    save(&mut shell, "20-lock-screen");
+    for c in "24".chars() {
+        shell.key(Char(c));
+    }
+    settle(&mut shell, 4);
+    save(&mut shell, "21-lock-typing-dots-growing");
+    settle(&mut shell, 60);
+    save(&mut shell, "22-lock-typed");
+    for c in "99".chars() {
+        shell.key(Char(c));
+    }
+    shell.key(Enter);
+    settle(&mut shell, 2);
+    save(&mut shell, "23-lock-checking");
+    while shell.checking_passcode() {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        settle(&mut shell, 1);
+    }
+    settle(&mut shell, 4);
+    save(&mut shell, "24-lock-wrong-shaking");
+    settle(&mut shell, 90);
+    save(&mut shell, "25-lock-wrong");
+    // Four more wrong: a wait.
+    for wrong in ["1111", "2222", "3333", "4444"] {
+        for c in wrong.chars() {
+            shell.key(Char(c));
+        }
+        shell.key(Enter);
+        while shell.checking_passcode() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            settle(&mut shell, 1);
+        }
+        settle(&mut shell, 90);
+        if wrong == "3333" {
+            save(&mut shell, "25b-lock-one-more-before-a-wait");
+        }
+    }
+    save(&mut shell, "26-lock-wait");
+    // Kept again: the wrong tries forgotten.
+    passcode::keep(&phc).expect("kept");
+    let mut shell = fresh(false);
+    settle(&mut shell, 120);
+    shell.say("time to queue for Q31");
+    shell.say("timer done · 5:00");
+    settle(&mut shell, 200);
+    save(&mut shell, "27-lock-notices");
+    shell.settings.lock.previews = true;
+    shell.apply_settings();
+    settle(&mut shell, 60);
+    save(&mut shell, "28-lock-notice-words");
+    shell.settings.lock.previews = false;
+    for (name, face, colour) in [("29-lock-stacked-ice", lock::LockFace::Stacked, lock::LockColour::Ice), ("30-lock-dots-amber", lock::LockFace::Dots, lock::LockColour::Amber), ("31-lock-centre-accent", lock::LockFace::Centre, lock::LockColour::Accent)] {
+        (shell.settings.lock.lock_face, shell.settings.lock.colour) = (face, colour);
+        shell.apply_settings();
+        settle(&mut shell, 30);
+        save(&mut shell, name);
+    }
+    (shell.settings.lock.lock_face, shell.settings.lock.colour) = (lock::LockFace::Centre, lock::LockColour::White);
+    shell.apply_settings();
+    // The right one: it lifts away, over where it was.
+    for c in "2468".chars() {
+        shell.key(Char(c));
+    }
+    shell.key(Enter);
+    while shell.checking_passcode() {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        settle(&mut shell, 1);
+    }
+    settle(&mut shell, 9);
+    save(&mut shell, "32-lock-opening");
+    settle(&mut shell, 120);
+    save(&mut shell, "33-unlocked-notices-said");
+    // The larger text, and the light mode.
+    let mut shell = fresh(true);
+    settle(&mut shell, 120);
+    save(&mut shell, "34-lock-light");
+    let mut shell = fresh(false);
+    shell.settings.text = gfx::TextSize::Large;
+    shell.apply_settings();
+    settle(&mut shell, 120);
+    save(&mut shell, "35-lock-large-text");
+    // StandBy with a passcode: leaving it is the lock screen.
+    let mut shell = fresh(false);
+    settle(&mut shell, 60);
+    for c in "2468".chars() {
+        shell.key(Char(c));
+    }
+    shell.key(Enter);
+    while shell.checking_passcode() {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        settle(&mut shell, 1);
+    }
+    settle(&mut shell, 120);
+    to_standby(&mut shell);
+    shell.key(Char(' '));
+    settle(&mut shell, 12);
+    save(&mut shell, "36-standby-giving-way-to-the-lock");
+    settle(&mut shell, 120);
+
+    // Settings: the two new sections, Lock screen, the passcode's steps,
+    // the editor, StandBy.
+    let mut shell = fresh(false);
+    settle(&mut shell, 60);
+    for c in "2468".chars() {
+        shell.key(Char(c));
+    }
+    shell.key(Enter);
+    while shell.checking_passcode() {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        settle(&mut shell, 1);
+    }
+    settle(&mut shell, 120);
+    let to_settings = std::iter::repeat_n(Right, steps_to("Settings")).chain([Enter]).chain(std::iter::repeat_n(Down, screens::settings_row("Lock screen")));
+    for key in to_settings {
+        shell.key(key);
+        settle(&mut shell, 40);
+    }
+    settle(&mut shell, 60);
+    save(&mut shell, "40-settings-list");
+    shell.key(Enter);
+    settle(&mut shell, 90);
+    save(&mut shell, "41-settings-lock-screen");
+    for _ in 0..4 {
+        shell.key(Down);
+        settle(&mut shell, 30);
+    }
+    settle(&mut shell, 60);
+    save(&mut shell, "42-settings-lock-screen-note");
+    for _ in 0..4 {
+        shell.key(Up);
+        settle(&mut shell, 20);
+    }
+    shell.key(Enter);
+    settle(&mut shell, 90);
+    save(&mut shell, "43-passcode-current");
+    for c in "2468".chars() {
+        shell.key(Char(c));
+    }
+    shell.key(Enter);
+    while shell.checking_passcode() {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        settle(&mut shell, 1);
+    }
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        settle(&mut shell, 2);
+    }
+    save(&mut shell, "44-passcode-new");
+    for c in "hunt".chars() {
+        shell.key(Char(c));
+    }
+    settle(&mut shell, 60);
+    shell.key(Enter);
+    settle(&mut shell, 60);
+    save(&mut shell, "45-passcode-again");
+    for c in "hung".chars() {
+        shell.key(Char(c));
+    }
+    shell.key(Enter);
+    settle(&mut shell, 5);
+    save(&mut shell, "46-passcode-not-the-same-shaking");
+    settle(&mut shell, 50);
+    save(&mut shell, "46b-passcode-not-the-same");
+    settle(&mut shell, 60);
+    shell.key(Back);
+    settle(&mut shell, 90);
+    // Customise: the lock screen itself, live.
+    shell.key(Down);
+    settle(&mut shell, 20);
+    shell.key(Down);
+    settle(&mut shell, 20);
+    shell.key(Enter);
+    settle(&mut shell, 120);
+    save(&mut shell, "47-editor-clock");
+    shell.key(Right);
+    settle(&mut shell, 60);
+    save(&mut shell, "48-editor-clock-stacked");
+    shell.key(Down);
+    shell.key(Right);
+    settle(&mut shell, 60);
+    save(&mut shell, "49-editor-colour-ice");
+    for _ in 0..3 {
+        shell.key(Down);
+    }
+    shell.key(Left);
+    settle(&mut shell, 60);
+    save(&mut shell, "50-editor-match-hidden");
+    shell.key(Right);
+    shell.key(Up);
+    shell.key(Up);
+    shell.key(Up);
+    shell.key(Left);
+    shell.key(Up);
+    shell.key(Left);
+    settle(&mut shell, 30);
+    shell.key(Back);
+    settle(&mut shell, 90);
+    shell.key(Back);
+    settle(&mut shell, 90);
+    shell.key(Down);
+    settle(&mut shell, 40);
+    shell.key(Enter);
+    settle(&mut shell, 90);
+    save(&mut shell, "51-settings-standby");
+    for _ in 0..3 {
+        shell.key(Down);
+        settle(&mut shell, 20);
+    }
+    settle(&mut shell, 40);
+    save(&mut shell, "52-settings-standby-note");
+    shell.key(Up);
+    settle(&mut shell, 20);
+    shell.key(Enter);
+    settle(&mut shell, 200);
+    save(&mut shell, "53-standby-shown-now");
+    passcode::remove().ok();
+    faces::pretend_time(None);
+    println!("StandBy and lock screen shots in {}", dir.display());
 }
 
 /// Home's tiles come in the order of the built-in apps, and Left and Right go
@@ -2630,6 +3271,18 @@ fn smooth(mut shell: Shell) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gallery's Reminders pictures alone, into CATALYST_SHOTS (or the
+    /// temporary folder): `cargo test --profile sim -p catalyst-shell
+    /// reminders_gallery -- --ignored`.
+    #[test]
+    #[ignore]
+    fn reminders_gallery() {
+        shell::tests::sandbox();
+        let dir = std::env::var_os("CATALYST_SHOTS").map(std::path::PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("catalyst-reminder-shots"));
+        std::fs::create_dir_all(&dir).unwrap();
+        reminder_shots(&dir);
+    }
 
     fn ms(v: f32) -> Duration {
         Duration::from_secs_f32(v / 1000.0)
