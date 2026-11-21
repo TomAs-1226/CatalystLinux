@@ -1265,17 +1265,26 @@ test, `live_open_meteo`); not yet from a CardputerZero over its own Wi-Fi.
 The Assistant app answers questions about the robot, typed on the
 keyboard, with the team's own key for **OpenAI** (GPT-6.2 Sol) or **Claude**
 (Claude Opus 5.5): Settings › Keys, the handheld's setup, or the page for
-setting up from a computer. With both keys, Tab › Answers with chooses; a
-change of service starts a new conversation. **Effort** is light (`low`) or
-medium (`medium`, the default).
+setting up from a computer. A third service, **on this handheld**, is the
+on-device model once it is downloaded in Settings; until then Tab › Answers
+with says where to get it. Tab › Answers with goes round the services that
+can answer; a change of service starts a new conversation. **Effort** is
+light (`low`) or medium (`medium`, the default).
 
-**Lightweight on purpose.** Nothing of the model runs on the handheld: each
-turn is one HTTPS request made with `curl`, as the schedule and Weather are,
-on a thread of its own. The key reaches curl through a file only root can
-read (`-H @file`, removed straight after), never on its command line where
-any process could read it. Claude is used through its API with a key from
-the Claude Console, not a Claude Code sign-in token, which Anthropic allows
-only in its own apps.
+**Lightweight on purpose.** With OpenAI or Claude nothing of the model runs
+on the handheld: each turn is one HTTPS request made with `curl`, as the
+schedule and Weather are, on a thread of its own. The key reaches curl
+through a file only root can read (`-H @file`, removed straight after),
+never on its command line where any process could read it. Claude is used
+through its API with a key from the Claude Console, not a Claude Code
+sign-in token, which Anthropic allows only in its own apps.
+
+The on-device model is asked the same way, over plain HTTP to its server on
+the handheld itself (`127.0.0.1` only; curl is held to `http` there), in
+OpenAI's chat-completions shape (`POST /chat/completions`, at most 400
+tokens back). It answers from what it knows, with no tools and no web, and
+its server is started when it is first asked and stopped when the service
+is changed away from it.
 
 - OpenAI: the Responses API, `store: false`, so nothing is kept on OpenAI's
   side between turns; every turn sends the conversation back, reasoning
@@ -1286,9 +1295,26 @@ only in its own apps.
   (`cache_control`), and a request declined on safety grounds is answered by
   another Claude model on the server (`fallbacks: "default"`).
 
+**The web.** It can search the web and read pages: Claude with its server
+tools `web_search` and `web_fetch` (`web_search_20260209`,
+`web_fetch_20260209`, at most five of each a turn, a fetched page held to
+20,000 tokens), OpenAI with its hosted `web_search`. Each shows as a step,
+*searched the web: …* or *read thebluealliance.com*, failed ones dimmed with
+why. The search results go back to the service exactly as they came
+(encrypted content and all), and a turn the server paused (`pause_turn`) is
+carried on by itself, up to five times. Under the answer a **sources** line
+names the pages it rests on (the ones cited, then the ones read); Enter on
+it, with nothing typed, lists them, and Enter on one opens it in the Web app
+(lynx).
+
 **Its tools:** what the robot publishes (Catalyst's telemetry by group, and
 the health checks firing), the Catalyst Agent's report from the Systemcore,
-the match logs pulled to the handheld, and the Actions. It can **run
+the match logs pulled to the handheld, the event's schedule (the team's next
+match, and the rest), the live graphs' latest values, the handheld itself
+(battery, Wi-Fi, storage, memory, temperature, uptime, version), a text file
+under `/data` (at most 64 KB, a folder listed; never keys, Wi-Fi, SSH,
+Tailscale, update state, kept conversations or anything named like a secret
+or token), and the Actions. It can **run
 Actions** by itself, except a **critical** one, which could change something:
 its card waits in the conversation, Enter opens a page showing it in full
 (what, why, the command exactly as it will run) that starts on *Don't run
@@ -1297,16 +1323,45 @@ Every command it runs is kept as a file in `/data/assistant` (what, when,
 why, which model, whether you said yes, and what it printed; the newest 200
 stay), where Files opens.
 
+**Conversations are kept**, the newest 20, in `/data/assistant/chats`: each
+as the service's own items (so it carries on exactly where it was) with what
+the page showed, readable only by root. Tab › Conversations lists them,
+newest first; Enter carries one on with the service it was with, **d** twice
+forgets it. Tab › New conversation starts afresh.
+
 Up and Down scroll the conversation; Esc clears the line, stops an answer
 under way, or leaves; Ctrl N starts afresh. Answers are kept short and plain
 for the panel (no Markdown); its text is set at the caption's size so more
 fits. At most twelve rounds of tools go into one question.
 
 In the simulator a script answers in each service's own shape (so the real
-parsing runs) with the demo robot; `CATALYST_AI_LIVE=1` asks the real
-services, and the ignored test `live_services_answer` does so with keys from
-`OPENAI_API_KEY` and `ANTHROPIC_API_KEY`. Not yet tried against the live
-services from this repository's tests or from a CardputerZero.
+parsing runs) with the demo robot, the web included: a question about the
+rules, the manual or autonomous is searched for, with a source.
+`CATALYST_AI_LIVE=1` asks the real services, and the ignored test
+`live_services_answer` does so with keys from `OPENAI_API_KEY` and
+`ANTHROPIC_API_KEY`. Not yet tried against the live services from this
+repository's tests or from a CardputerZero: the web tools' real replies,
+whether the Claude Console organization has web search turned on (web fetch
+needs nothing), OpenAI taking its `web_search_call` items back with
+`store: false`, and the on-device model's server are all still to be seen.
+
+## Browse
+
+Browse (Home, just before the Assistant) is the web read for you, with the
+Assistant's key. Type an **address** and the service reads the page and gives
+it back as clean text: its title, its sections, and the links worth
+following, along the bottom. Type a **question** and it searches and
+answers, with the pages it used as the links. An empty page offers five
+places to start (The Blue Alliance, the WPILib documentation, Chief Delphi,
+the FRC Q&A and FIRST's news).
+
+Keyboard first: typing goes to the address bar, Enter goes; Up and Down
+scroll the page with the same glide as every list; Left and Right choose a
+link, Enter follows it; Backspace or Esc goes back a page (the last twelve
+are kept), and Tab types afresh. Each page is a conversation of its own, so
+following links does not pile up what each page cost, and the address goes
+in the question itself, which is what lets Claude's `web_fetch` read it.
+The on-device model has no web, so Browse needs an OpenAI or Claude key.
 
 ## Actions
 
