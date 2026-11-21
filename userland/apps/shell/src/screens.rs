@@ -49,7 +49,7 @@ struct App {
     open: fn(&Robot) -> Box<dyn Screen>,
 }
 
-const APPS: [App; 20] = [
+const APPS: [App; 21] = [
     App { icon: "smart_toy", name: "Robot", open: |_| Box::new(RobotScreen::default()) },
     App { icon: "monitor_heart", name: "Health", open: |_| Box::new(Health::default()) },
     App { icon: "description", name: "Logs", open: |_| Box::new(LogsScreen::default()) },
@@ -69,6 +69,7 @@ const APPS: [App; 20] = [
     App { icon: "qr_code_scanner", name: "AprilTag", open: |_| Box::new(crate::apriltags::Reader::new()) },
     App { icon: "insights", name: "Graphs", open: |_| Box::new(crate::graphs::Graphs::new()) },
     App { icon: "checklist", name: "Pit", open: |_| Box::new(crate::pit::Pit::default()) },
+    App { icon: "settings_remote", name: "Remote", open: |_| Box::new(crate::irremote::Remotes::new()) },
     App { icon: "settings", name: "Settings", open: |_| Box::new(SettingsApp::new()) },
 ];
 

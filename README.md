@@ -15,7 +15,7 @@ windows that grow out of tiles whenever it is there.
 | `userland/crates/bezel` | Bezel on the CPU: tonal surfaces, the two type voices, Material Symbols, and the full glass pass (refraction, frost, edge light, groups, shadow). |
 | `userland/crates/nt4` | A NetworkTables 4.1 client: one thread, read-only, reconnects on its own. |
 | `userland/crates/apriltag` | AprilTag detection: AprilRobotics' C library (3.4.5, BSD 2-Clause, vendored with the 36h11 family FRC uses) behind a small flat shim, with each tag's pose. |
-| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, AprilTag, Graphs, Pit, Settings) and the launcher for external ones. |
+| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, AprilTag, Graphs, Pit, Remote, Settings) and the launcher for external ones. |
 | `userland/apps/update` | `catalyst-update`: system updates on the handheld (A/B, tried once, rolled back if it does not come up), and the release tool that makes and signs them. |
 | `userland/apps/flasher` | Catalyst Flasher: the newest release onto an SD card in one go. |
 | `userland/assets/app-icon` | Catalyst's icon (the FrcCatalyst bolt) at each size Windows uses, built into the simulator; `assets/` holds it for Raspberry Pi Imager's listing. |
@@ -806,6 +806,41 @@ Space holds the picture. It checks what the robot's vision should be seeing.
 Not yet checked on a CardputerZero: the camera's connection and power (the
 image names it `dtoverlay=imx219`, as M5Stack's own image does), the frame
 rate the CM0 reaches, and the lens figures.
+
+## Remote: a universal remote
+
+The CardputerZero has an infrared LED (GPIO12) and an infrared receiver
+(GPIO13). The Remote app learns any remote's buttons and sends them back:
+
+- **Remotes** are kept by name ("TV", "Projector"), each with named buttons:
+  `n` names a new one, `e` renames, `d` twice removes.
+- **Learning**: `l` (or the last row) listens; point the remote at the
+  handheld and press its button. What was heard is drawn as it arrives, and
+  named if its protocol is a common one: NEC (and NEC with a 16-bit address),
+  Samsung, Sony SIRC (12, 15 and 20 bits), Philips RC5 and RC6, e.g.
+  `NEC · 0x04 · 0x08`. Then it is given a name and kept.
+- **Sending**: Enter sends a button; held down, it keeps sending it, as the
+  remote would (a NEC remote's repeat code, RC5's and RC6's toggle bit kept;
+  a new press flips the toggle). A recognised button is sent cleanly at its
+  protocol's own timing and carrier (38 kHz NEC and Samsung, 40 kHz Sony,
+  36 kHz RC5 and RC6; Sony three times over, as its receivers expect). One
+  in a protocol it does not know (an air conditioner's) is sent back exactly
+  as it was heard, at 38 kHz.
+
+Remotes are kept in `remotes.json` beside the settings. Underneath, the
+shell talks to the kernel's LIRC devices directly (`ir.rs`): the
+transmitter is the kernel's `gpio-ir-tx` and the receiver `gpio-ir-recv`,
+from M5Stack's own overlay lines in `config.txt` (the receiver with the
+empty key map, so a remote in the room is never taken for a keyboard).
+Neither driver loads at start: the transmitter is loaded while the app is
+open and the receiver only while a button is being learned, since every
+edge of infrared it sees is an interrupt; both are unloaded after. In the
+simulator there is no infrared: it has two remotes to try, sends are only
+timed, and learning hears a simulated TV remote.
+
+Not yet checked on a CardputerZero: the LED's range, and the receiver's
+timing (the decoders allow for a receiver lengthening light by a hundred
+microseconds or so, tested).
 
 ## USB to a computer
 
