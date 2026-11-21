@@ -10,6 +10,24 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.5.4
+
+### Spotlight
+- Search is now Spotlight: press Ctrl-Enter on any screen, even in the Terminal, and a glass search bar grows out of the island. Space and / on Home open it too.
+- Results appear from the first key: apps, any setting, Actions, notes, reminders, files, photos, repositories, SSH hosts, robot values, match logs and the schedule. Type a match or team number to jump to it.
+- Type a sum ("12*7") or a conversion ("3 in to mm") and the answer shows at once; the last rows search the web or ask the Assistant.
+- Enter opens a result where you are, and Esc brings you back; Tab shows a preview. What you pick often comes first.
+- Actions found in Spotlight still ask first, showing the exact command.
+
+### Reminders
+- Reminders: a new app with Today, Upcoming and Done. Type it the way you'd say it: "swap battery in 10 min", "tomorrow 8am check bumpers", "before Q42 charge spare".
+- Pit reminders follow the event schedule: before a match, at queueing, after each match, or between matches. When the event runs late, they move with it.
+- The pit routine (p) puts your usual after-match jobs on the list in one go.
+- Snooze with s (press again for longer), repeat with r, switch pit or personal with l.
+- In Notes, press r to be reminded of a note. A bell shows which notes have one, and the reminder opens the note.
+- A reminder that comes due wakes the screen, shows in the island and blinks the keyboard lights, in deep standby too.
+- The time-to-queue alert now arrives in deep standby too, and wakes the screen.
+
 ## 0.5.3
 
 ### Fixed
