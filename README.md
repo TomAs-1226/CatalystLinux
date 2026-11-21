@@ -1188,6 +1188,73 @@ place search knows a few cities, so nothing needs the network;
 the kept file are tested against the live services from a PC (an ignored
 test, `live_open_meteo`); not yet from a CardputerZero over its own Wi-Fi.
 
+## Assistant
+
+The Assistant app answers questions about the robot, typed on the
+keyboard, with the team's own key for **OpenAI** (GPT-6.2 Sol) or **Claude**
+(Claude Opus 5.5): Settings › Keys, the handheld's setup, or the page for
+setting up from a computer. With both keys, Tab › Answers with chooses; a
+change of service starts a new conversation. **Effort** is light (`low`) or
+medium (`medium`, the default).
+
+**Lightweight on purpose.** Nothing of the model runs on the handheld: each
+turn is one HTTPS request made with `curl`, as the schedule and Weather are,
+on a thread of its own. The key reaches curl through a file only root can
+read (`-H @file`, removed straight after), never on its command line where
+any process could read it. Claude is used through its API with a key from
+the Claude Console, not a Claude Code sign-in token, which Anthropic allows
+only in its own apps.
+
+- OpenAI: the Responses API, `store: false`, so nothing is kept on OpenAI's
+  side between turns; every turn sends the conversation back, reasoning
+  items (encrypted) included, so the model keeps its train of thought across
+  tool calls.
+- Claude: the Messages API (version `2026-10-21`). Thinking blocks go back
+  unchanged; the conversation is cached on Anthropic's side
+  (`cache_control`), and a request declined on safety grounds is answered by
+  another Claude model on the server (`fallbacks: "default"`).
+
+**Its tools:** what the robot publishes (Catalyst's telemetry by group, and
+the health checks firing), the Catalyst Agent's report from the Systemcore,
+the match logs pulled to the handheld, and the Actions. It can **run
+Actions** by itself, except a **critical** one, which could change something:
+its card waits in the conversation, Enter opens a page showing it in full
+(what, why, the command exactly as it will run) that starts on *Don't run
+it*, and Esc on the card skips it. A no goes back to the model as a no.
+Every command it runs is kept as a file in `/data/assistant` (what, when,
+why, which model, whether you said yes, and what it printed; the newest 200
+stay), where Files opens.
+
+Up and Down scroll the conversation; Esc clears the line, stops an answer
+under way, or leaves; Ctrl N starts afresh. Answers are kept short and plain
+for the panel (no Markdown); its text is set at the caption's size so more
+fits. At most twelve rounds of tools go into one question.
+
+In the simulator a script answers in each service's own shape (so the real
+parsing runs) with the demo robot; `CATALYST_AI_LIVE=1` asks the real
+services, and the ignored test `live_services_answer` does so with keys from
+`OPENAI_API_KEY` and `ANTHROPIC_API_KEY`. Not yet tried against the live
+services from this repository's tests or from a CardputerZero.
+
+## Actions
+
+Actions keeps shell commands under a name, run with one key in a terminal of
+their own. The team's own come first, then **26 built-in** ones for the robot
+(ping, its agent, the logs on it, a trace, its name), the network (Wi-Fi link
+and networks, Ethernet, addresses, routes, name servers, the internet) and
+the handheld (disk, memory, processes, load, clock, temperature, speed,
+services, USB and I2C devices, the kernel's messages and the system log),
+plus restarting Wi-Fi or the handheld. Built-in ones stay as they are; **e**
+on one keeps a copy to change. `{robot}` and `{team}` are filled in when one
+runs.
+
+Whether the assistant must ask before running one is worked out from the
+command: anything not known to only look (an unknown program or script,
+ssh, git, gradle, a redirect into a file, curl sending data) is critical.
+Each command's editor can say otherwise (auto, asks first, runs it); that
+choice is kept in `commands-ask`, apart from the list, so an older shell
+still reads the list after an update is rolled back.
+
 ## USB to a computer
 
 Settings › USB chooses what the handheld is to a computer its USB-C port is
@@ -1394,13 +1461,13 @@ Systemcore, the log reader against a log from a real robot, the schedule
 against the live Blue Alliance and Nexus services, setup from a computer over
 a real network, and the catalogue against its repository (which does not
 exist yet; its install path is tested with a stand-in download). Not yet
-built: the agent's machine pages (CPU, CAN buses, cameras), the AI log
-analysis, the camera, audio.
+built: the agent's machine pages (CPU, CAN buses, cameras), audio. (The
+camera and the assistant, which reads the match logs, came later.)
 
 ## Roadmap
 
 Chosen so far, not yet built: scripting with a kit for writing Bezel apps (so
-an external app can draw like a built-in one); the AI log analysis.
+an external app can draw like a built-in one).
 
 Added since, also not yet built:
 

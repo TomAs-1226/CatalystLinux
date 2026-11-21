@@ -13,12 +13,23 @@ the first section (this introduction) is not shown.
 ## 0.4.1
 
 ### New
+- Assistant: ask about the robot, answered by GPT-6.2 Sol or Claude Opus 5.5 with your own key. It reads what the robot publishes, its agent and the match logs, and runs Actions.
+- Before the assistant runs anything that could change something, a page shows it in full and asks you to confirm.
+- Everything the assistant runs is kept in /data/assistant, with its output.
+- Actions has 26 built-in commands for the robot, the network and the handheld.
 - Weather: now, the next 24 hours and the week, from Open-Meteo. No key needed.
-- An assistant that answers with GPT-6.2 Sol or Claude Opus 5.5. It reads the robot's data and runs your saved Actions, and asks you first before anything critical.
 - Update logs: what's new before an update installs, once after it does, and every version's notes in About › Update history.
+- OpenAI and Claude keys in Settings › Keys, on the handheld's setup and on the page for setting up from a computer.
+
+### Better
+- The selector glides with a spring and stretches as it moves; pages settle with a little give.
+- Esc on Home goes back to its first page.
+- The camera turns its picture the right way up and runs at up to 30 frames a second, with tags read alongside.
 
 ### Fixed
-- Setup from a computer: sending the form works again, and the handheld shows each item arriving.
+- Setup from a computer: sending the form works, and the handheld shows each item arriving.
+- Setup from a computer goes on to the keyboard lesson and the handheld's own pages.
+- Graphs has its icon again.
 
 ## 0.4.0 · 20 Nov 2026
 
