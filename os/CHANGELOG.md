@@ -13,6 +13,7 @@ the first section (this introduction) is not shown.
 ## 0.4.2
 
 ### Fixed
+- Installing an update no longer stops with "illegal instruction". The programs had been built to use crypto instructions this processor does not have; connecting to a robot could have hit the same.
 - HTTPS works: updates, Weather, the event schedule, the assistant, the app catalogue and git all reach their servers. curl had been built without a list of certificates to trust, so every secure connection failed.
 - The clock is set from the web when a network blocks the time servers, and never starts earlier than the system was built.
 - Settings › Name & time › Clock: Enter asks the network for the time now.
