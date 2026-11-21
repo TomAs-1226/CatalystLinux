@@ -247,6 +247,148 @@ pub fn read_back(disk: &Disk, len: u64, progress: &mut dyn FnMut(u64)) -> Result
     Ok(sha2_hex(&hasher.finalize()))
 }
 
+/// One MBR partition: its type, first sector and length in sectors.
+pub type Part = (u8, u32, u32);
+
+/// The four partitions of an MBR (sector 0), if it is one.
+pub fn partitions(mbr: &[u8]) -> Option<[Part; 4]> {
+    if mbr.len() < 512 || mbr[510] != 0x55 || mbr[511] != 0xAA {
+        return None;
+    }
+    let mut out = [(0u8, 0u32, 0u32); 4];
+    for (i, p) in out.iter_mut().enumerate() {
+        let e = &mbr[446 + 16 * i..446 + 16 * (i + 1)];
+        *p = (e[4], u32::from_le_bytes([e[8], e[9], e[10], e[11]]), u32::from_le_bytes([e[12], e[13], e[14], e[15]]));
+    }
+    Some(out)
+}
+
+/// Where an image may be written over a card while its data partition (the
+/// fourth) is kept: the boot partition and both systems must lie exactly
+/// where the image puts them, and the data partition start where it does
+/// (it may have grown since). The bytes from the first partition's start up
+/// to the data partition's, as (from, to).
+pub fn keep_data_range(image: &[Part; 4], card: &[Part; 4]) -> Result<(u64, u64), String> {
+    for i in 0..3 {
+        if image[i] != card[i] {
+            return Err(format!("the card's partition {} is not where this image has it ({:?} on the card, {:?} in the image)", i + 1, card[i], image[i]));
+        }
+    }
+    if image[3].0 != card[3].0 || image[3].1 != card[3].1 {
+        return Err("the card's data partition does not start where this image's does".into());
+    }
+    if image[0].1 == 0 || image[3].1 <= image[0].1 {
+        return Err("the image's partitions are not in order".into());
+    }
+    Ok((u64::from(image[0].1) * SECTOR as u64, u64::from(image[3].1) * SECTOR as u64))
+}
+
+/// Windows lets nothing write into the sectors of a volume it holds, even
+/// through the whole disk: each of these partitions' volumes is locked and
+/// dismounted, and stays so while the files returned are kept (dropping
+/// them lets go). Elsewhere, nothing to do.
+pub fn lock_partitions(disk: &Disk, partitions: &[u32]) -> Result<Vec<std::fs::File>, String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        const FSCTL_LOCK_VOLUME: u32 = 0x0009_0018;
+        const FSCTL_DISMOUNT_VOLUME: u32 = 0x0009_0020;
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn DeviceIoControl(device: *mut std::ffi::c_void, code: u32, input: *mut std::ffi::c_void, input_len: u32, output: *mut std::ffi::c_void, output_len: u32, returned: *mut u32, overlapped: *mut std::ffi::c_void) -> i32;
+        }
+        let Some(n) = disk.number else { return Ok(Vec::new()) };
+        let mut held = Vec::new();
+        for p in partitions {
+            let path = format!(r"\\.\Harddisk{n}Partition{p}");
+            let volume = std::fs::OpenOptions::new().read(true).write(true).open(&path).map_err(|e| format!("opening partition {p}: {e}"))?;
+            for (code, what) in [(FSCTL_LOCK_VOLUME, "lock"), (FSCTL_DISMOUNT_VOLUME, "dismount")] {
+                let mut returned = 0u32;
+                // SAFETY: a valid handle, no buffers.
+                let ok = unsafe { DeviceIoControl(volume.as_raw_handle(), code, std::ptr::null_mut(), 0, std::ptr::null_mut(), 0, &mut returned, std::ptr::null_mut()) };
+                if ok == 0 {
+                    return Err(format!("could not {what} partition {p}: {}", std::io::Error::last_os_error()));
+                }
+            }
+            held.push(volume);
+        }
+        Ok(held)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (disk, partitions);
+        Ok(Vec::new())
+    }
+}
+
+/// Write the bytes of an image that lie in [from, to) to the same place on
+/// the disk, and nothing else. Returns their SHA-256.
+pub fn write_range(disk: &Disk, image: &mut dyn Read, from: u64, to: u64, progress: &mut dyn FnMut(u64)) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let mut out = std::fs::OpenOptions::new().write(true).open(&disk.path).map_err(|e| format!("opening the card: {e}"))?;
+    let mut hasher = Sha256::new();
+    let mut chunk = vec![0u8; 4 << 20];
+    let mut at = 0u64;
+    while at < to {
+        let want = (chunk.len() as u64).min(to - at) as usize;
+        let mut filled = 0;
+        while filled < want {
+            let n = image.read(&mut chunk[filled..want]).map_err(|e| format!("reading the image: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            filled += n;
+        }
+        if filled == 0 {
+            return Err("the image ended before the data partition".into());
+        }
+        let end = at + filled as u64;
+        if end > from {
+            let skip = from.saturating_sub(at) as usize;
+            let data = &chunk[skip..filled];
+            hasher.update(data);
+            let mut padded = data.to_vec();
+            padded.resize(data.len().div_ceil(SECTOR) * SECTOR, 0);
+            out.seek(SeekFrom::Start(at + skip as u64)).map_err(|e| format!("writing the card: {e}"))?;
+            out.write_all(&padded).map_err(|e| format!("writing the card: {e}"))?;
+            progress(end - from);
+        }
+        at = end;
+    }
+    out.flush().map_err(|e| format!("writing the card: {e}"))?;
+    out.sync_all().ok();
+    Ok(sha2_hex(&hasher.finalize()))
+}
+
+/// Read [from, to) of the card back and hash it.
+pub fn read_back_range(disk: &Disk, from: u64, to: u64, progress: &mut dyn FnMut(u64)) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let mut f = std::fs::File::open(&disk.path).map_err(|e| format!("reading the card back: {e}"))?;
+    f.seek(SeekFrom::Start(from)).map_err(|e| format!("reading the card back: {e}"))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 4 << 20];
+    let mut done = from;
+    while done < to {
+        let want = ((to - done) as usize).min(buf.len());
+        let n = f.read(&mut buf[..want]).map_err(|e| format!("reading the card back: {e}"))?;
+        if n == 0 {
+            return Err("the card ended early".into());
+        }
+        hasher.update(&buf[..n]);
+        done += n as u64;
+        progress(done - from);
+    }
+    Ok(sha2_hex(&hasher.finalize()))
+}
+
+/// The first sector of the card: its partition table.
+pub fn read_mbr(disk: &Disk) -> Result<Vec<u8>, String> {
+    let mut f = std::fs::File::open(&disk.path).map_err(|e| format!("reading the card: {e}"))?;
+    let mut mbr = vec![0u8; SECTOR];
+    f.read_exact(&mut mbr).map_err(|e| format!("reading the card: {e}"))?;
+    Ok(mbr)
+}
+
 pub fn sha2_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -254,6 +396,54 @@ pub fn sha2_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An MBR with these partitions.
+    fn mbr(parts: &[Part; 4]) -> Vec<u8> {
+        let mut m = vec![0u8; 512];
+        for (i, (kind, first, len)) in parts.iter().enumerate() {
+            let e = &mut m[446 + 16 * i..446 + 16 * (i + 1)];
+            e[4] = *kind;
+            e[8..12].copy_from_slice(&first.to_le_bytes());
+            e[12..16].copy_from_slice(&len.to_le_bytes());
+        }
+        m[510] = 0x55;
+        m[511] = 0xAA;
+        m
+    }
+
+    #[test]
+    fn keeping_the_data_partition_writes_only_the_boot_and_systems() {
+        let dir = std::env::temp_dir().join(format!("catalyst-flasher-keep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // The image: boot at sector 8, systems after, data at 40 (small).
+        let image_parts: [Part; 4] = [(0x0c, 8, 8), (0x83, 16, 12), (0x83, 28, 12), (0x83, 40, 8)];
+        let mut image = mbr(&image_parts);
+        image.resize(48 * 512, 0);
+        for (i, b) in image.iter_mut().enumerate().skip(512) {
+            *b = (i % 250) as u8 + 1;
+        }
+        // The card: the same, but its data partition grown and full of data.
+        let card_parts: [Part; 4] = [(0x0c, 8, 8), (0x83, 16, 12), (0x83, 28, 12), (0x83, 40, 400)];
+        let mut card = mbr(&card_parts);
+        card.resize(440 * 512, 0xDD);
+        let card_path = dir.join("card.img");
+        std::fs::write(&card_path, &card).unwrap();
+        let disk = Disk { path: card_path.clone(), number: None, name: "test".into(), size: card.len() as u64, mounted: String::new() };
+
+        let (from, to) = keep_data_range(&image_parts, &partitions(&read_mbr(&disk).unwrap()).unwrap()).unwrap();
+        assert_eq!((from, to), (8 * 512, 40 * 512));
+        let hash = write_range(&disk, &mut &image[..], from, to, &mut |_| {}).unwrap();
+        assert_eq!(read_back_range(&disk, from, to, &mut |_| {}).unwrap(), hash);
+        let after = std::fs::read(&card_path).unwrap();
+        assert_eq!(&after[..512], &card[..512], "the card's partition table (its grown data partition) stays");
+        assert_eq!(&after[from as usize..to as usize], &image[from as usize..to as usize], "boot and systems are the image's");
+        assert!(after[to as usize..].iter().all(|b| *b == 0xDD), "not a byte of the data partition touched");
+
+        // A card laid out otherwise is refused before anything is written.
+        let other: [Part; 4] = [(0x0c, 8, 8), (0x83, 16, 10), (0x83, 26, 12), (0x83, 38, 400)];
+        assert!(keep_data_range(&image_parts, &other).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn an_image_lands_whole_with_its_head_written_last() {

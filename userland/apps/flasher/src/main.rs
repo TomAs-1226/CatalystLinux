@@ -381,7 +381,42 @@ impl App {
 /// `--write IMAGE --disk DISK --yes`: write a card with no window, for
 /// scripts. Only a disk the window would offer (removable, not the one the
 /// computer starts from, no larger than an SD card), and only with `--yes`.
-fn write_headless(image: &str, disk: Option<String>, yes: bool) -> Result<(), String> {
+/// `--keep-data`: the boot partition and both systems written over a card of
+/// the same layout, its partition table and data partition (settings, Wi-Fi,
+/// keys, logs) left as they are. `head` reads the image for its partition
+/// table; `image` from the start again, to write.
+fn write_keeping_data(disk: &disks::Disk, head: &mut dyn Read, image: &mut dyn Read) -> Result<(), String> {
+    use std::io::Write as _;
+    let mut mbr = vec![0u8; 512];
+    head.read_exact(&mut mbr).map_err(|e| format!("reading the image: {e}"))?;
+    let theirs = disks::partitions(&mbr).ok_or("the image has no partition table")?;
+    let ours = disks::partitions(&disks::read_mbr(disk)?).ok_or("the card has no partition table: write it whole instead")?;
+    let (from, to) = disks::keep_data_range(&theirs, &ours)?;
+    println!("keeping the data partition: writing {} MB from {} MB in", (to - from) >> 20, from >> 20);
+    // The boot partition and both systems let go of while they are written.
+    let locks = disks::lock_partitions(disk, &[1, 2, 3])?;
+    let started = std::time::Instant::now();
+    let mut last = 0u64;
+    let written = disks::write_range(disk, image, from, to, &mut |n| {
+        if n >= last + (256 << 20) {
+            last = n;
+            print!("\rwritten {} MB", n >> 20);
+            std::io::stdout().flush().ok();
+        }
+    });
+    let hash = written?;
+    println!("\rwritten {} MB in {:.0} s · sha256 {hash}", (to - from) >> 20, started.elapsed().as_secs_f32());
+    let back = disks::read_back_range(disk, from, to, &mut |_| {});
+    drop(locks);
+    if back? != hash {
+        return Err("the card did not read back as written".into());
+    }
+    println!("read back: the same · the data partition untouched");
+    disks::refresh(disk);
+    Ok(())
+}
+
+fn write_headless(image: &str, disk: Option<String>, yes: bool, keep_data: bool) -> Result<(), String> {
     use std::io::Write as _;
     let disks = disks::list();
     let Some(path) = disk else {
@@ -408,6 +443,13 @@ fn write_headless(image: &str, disk: Option<String>, yes: bool) -> Result<(), St
     let total = if gz { 0 } else { file.metadata().map_or(0, |m| m.len()) };
     if total > disk.size {
         return Err("the image is larger than the card".into());
+    }
+    let open = || -> Result<Box<dyn Read>, String> {
+        let file = std::fs::File::open(&path).map_err(|e| format!("opening the image: {e}"))?;
+        Ok(if gz { Box::new(flate2::read::GzDecoder::new(std::io::BufReader::new(file))) } else { Box::new(std::io::BufReader::new(file)) })
+    };
+    if keep_data {
+        return write_keeping_data(&disk, &mut *open()?, &mut *open()?);
     }
     disks::prepare(&disk)?;
     let mut reader: Box<dyn Read> = if gz { Box::new(flate2::read::GzDecoder::new(std::io::BufReader::new(file))) } else { Box::new(std::io::BufReader::new(file)) };
@@ -441,7 +483,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     if let Some(image) = value("--write") {
-        match write_headless(&image, value("--disk"), args.iter().any(|a| a == "--yes")) {
+        match write_headless(&image, value("--disk"), args.iter().any(|a| a == "--yes"), args.iter().any(|a| a == "--keep-data")) {
             Ok(()) => println!("done: the card is ready"),
             Err(why) => {
                 eprintln!("catalyst-flasher: {why}");
