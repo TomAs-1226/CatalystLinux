@@ -33,6 +33,8 @@
 mod about;
 mod agent;
 mod ai;
+mod browse;
+mod local;
 mod apps;
 mod apriltags;
 mod brand;
@@ -1765,6 +1767,7 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     // for a yes, its choices, and an Action's editor saying what it does.
     keys::Keys::default().save().ok();
     std::fs::remove_file(config_dir().join("assistant")).ok();
+    std::fs::remove_dir_all(config_dir().join("assistant-chats")).ok();
     let mut shell = Shell::new(Robot::demo());
     shell.apply_settings();
     settle(&mut shell, 100);
@@ -1794,6 +1797,21 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     save(&mut shell, "108-assistant-answer");
     press(&mut shell, &[Up, Up], 40);
     save(&mut shell, "108b-assistant-scrolled-up");
+    // A question the rules answer: the web searched and a page read, the
+    // answer with its sources under it, and those on a page of their own.
+    for c in "what are the autonomous rules?".chars() {
+        shell.key(Char(c));
+    }
+    press(&mut shell, &[Enter], 20);
+    for _ in 0..40 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        settle(&mut shell, 8);
+    }
+    settle(&mut shell, 60);
+    save(&mut shell, "108c-assistant-web-answer");
+    press(&mut shell, &[Enter], 90);
+    save(&mut shell, "108d-assistant-sources");
+    press(&mut shell, &[Back], 90);
     let mut actions = commands::load();
     actions.push(commands::Saved { name: "Deploy robot code".into(), command: "cd /data/code/robot && ./gradlew deploy".into(), ask: commands::Ask::Auto });
     commands::save(&actions);
@@ -1820,9 +1838,11 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     save(&mut shell, "109d-assistant-skipped");
     press(&mut shell, &[Tab], 90);
     save(&mut shell, "110-assistant-choices");
-    // Back to Home, on the Assistant's tile (a third Esc would take Home to
-    // its first app).
-    press(&mut shell, &[Back, Back], 90);
+    press(&mut shell, &[Down, Down, Enter], 90);
+    save(&mut shell, "110b-assistant-conversations");
+    // Back to Home, on the Assistant's tile (a fourth Esc would take Home
+    // to its first app).
+    press(&mut shell, &[Back, Back, Back], 90);
     press(&mut shell, &vec![Left; steps_to("Assistant") - steps_to("Actions")], 20);
     press(&mut shell, &[Enter], 90);
     press(&mut shell, &vec![Down; actions.len() + 1], 20);
@@ -1832,7 +1852,46 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     press(&mut shell, &[Char('e')], 90);
     press(&mut shell, &[Down, Down], 40);
     save(&mut shell, "111b-action-asks-first");
+
+    // Browse, with the same key: places to start from, an address being
+    // read, the page it made with links to follow, one chosen, and a
+    // question answered with its sources among the links.
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    press(&mut shell, &vec![Right; steps_to("Browse")], 20);
+    settle(&mut shell, 60);
+    save(&mut shell, "112-home-browse-tile");
+    press(&mut shell, &[Enter], 90);
+    save(&mut shell, "112b-browse-start");
+    press(&mut shell, &[Down], 40);
+    press(&mut shell, &[Enter], 20);
+    save(&mut shell, "112c-browse-reading");
+    for _ in 0..40 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        settle(&mut shell, 8);
+    }
+    settle(&mut shell, 60);
+    save(&mut shell, "112d-browse-page");
+    press(&mut shell, &[Down, Down, Down], 40);
+    save(&mut shell, "112e-browse-scrolled");
+    press(&mut shell, &[Right], 60);
+    save(&mut shell, "112f-browse-link");
+    press(&mut shell, &[Tab], 30);
+    for c in "how long is autonomous this year?".chars() {
+        shell.key(Char(c));
+    }
+    settle(&mut shell, 10);
+    save(&mut shell, "112g-browse-typed");
+    press(&mut shell, &[Enter], 20);
+    for _ in 0..40 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        settle(&mut shell, 8);
+    }
+    settle(&mut shell, 60);
+    save(&mut shell, "112h-browse-answer");
     keys::Keys::default().save().ok();
+    std::fs::remove_dir_all(config_dir().join("assistant-chats")).ok();
     std::fs::remove_file(config_dir().join("commands")).ok();
     std::fs::remove_file(config_dir().join("commands-ask")).ok();
     let written =std::fs::read_dir(dir).map_or(0, |d| d.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "png")).count());

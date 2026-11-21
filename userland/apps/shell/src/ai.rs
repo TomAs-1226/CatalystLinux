@@ -18,11 +18,27 @@
 //!
 //! Effort is "light" (low) or "medium", as chosen; medium by default.
 //!
+//! - On this handheld: the on-device model (`crate::local`, llama.cpp's
+//!   server on 127.0.0.1) through OpenAI-style chat completions. No tools and
+//!   no web: short answers, offline.
+//!
 //! Its tools: what the robot publishes (FRC Catalyst under `/Catalyst/`), the
-//! Catalyst Agent's report from the Systemcore, the match logs pulled, and the
-//! saved Actions. Looking is free. An Action that could change something
-//! (`commands::Saved::critical`) waits for the person to say yes, and a no
-//! goes back to the model as a no.
+//! Catalyst Agent's report from the Systemcore, the match logs pulled, the
+//! event schedule, the values on the live graphs, text files under /data, the
+//! handheld's own state, and the saved Actions. Looking is free. An Action
+//! that could change something (`commands::Saved::critical`) waits for the
+//! person to say yes, and a no goes back to the model as a no.
+//!
+//! The web: both services search and read pages on their own servers
+//! (Claude's `web_search` and `web_fetch` server tools; OpenAI's hosted
+//! `web_search`). What they come back with is kept in the conversation
+//! exactly as it came (search results carry encrypted content the service
+//! needs again), the steps are shown as rows, and the pages an answer rests
+//! on are listed under it: Enter opens one in the Web app. Browse
+//! (`crate::browse`) is the same engine as a browser.
+//!
+//! Conversations are kept (`/data/assistant/chats`, the last 20) in the
+//! service's own form, so one reopened carries on where it stopped.
 //!
 //! The simulator answers from a script with the demo robot, unless told to
 //! ask the real services (`CATALYST_AI_LIVE`).
@@ -67,15 +83,43 @@ const OUTPUT_KEEP: usize = 6000;
 /// Values one look at the robot returns at most.
 const VALUES_AT_MOST: usize = 150;
 /// The simulator's scripted service waits this long, as a real one would.
-const DEMO_PAUSE: f32 = 0.9;
+pub(crate) const DEMO_PAUSE: f32 = 0.9;
+/// The on-device model answers in at most this many tokens: it is slow.
+const LOCAL_MAX_TOKENS: u32 = 400;
+/// How long the on-device model may take for one answer.
+const LOCAL_SECONDS: u32 = 300;
+/// Times a paused turn (the service's own web loop ran long) is carried on
+/// before the assistant stops to ask.
+const CONTINUATIONS: usize = 5;
+/// Searches and page reads one request may make, and how much of a page read
+/// comes into the conversation (tokens; pages are cut there).
+const WEB_USES: u32 = 5;
+const FETCH_TOKENS: u32 = 20_000;
+/// Conversations kept.
+const CHATS_KEPT: usize = 20;
 
 const SYSTEM: &str = "You are the assistant on Catalyst Linux, a pocket Linux handheld (an M5Stack CardputerZero) that an FRC robotics team carries in the pit and the stands.
 
 Its screen is 320 by 170 pixels. Answer in plain sentences and keep it short: usually two to five sentences, at most about 80 words unless asked for more. No Markdown: no headings, bullets, bold, tables or code blocks. If a list helps, put each item on its own short line.
 
-The team's robot runs FRC Catalyst, which publishes its telemetry under /Catalyst/ in NetworkTables, and the Catalyst Agent on the robot's Systemcore reports the robot program, its recent log, CPU and memory. Look with the tools before you answer anything about the robot, and never guess a value: if something is not published, say so. Say plainly when the robot is not linked.
+The team's robot runs FRC Catalyst, which publishes its telemetry under /Catalyst/ in NetworkTables, and the Catalyst Agent on the robot's Systemcore reports the robot program, its recent log, CPU and memory. Look with the tools before you answer anything about the robot, and never guess a value: if something is not published, say so. Say plainly when the robot is not linked. The event schedule, the live graphs, text files under /data and the handheld's own state are there to look at too.
+
+You can search the web and read pages. Use them for anything current or outside this handheld: FRC rules and the game manual, parts and their specifications, WPILib and vendor documentation, events and results. Say where an answer came from; the handheld lists the pages under it.
 
 Actions are the team's saved shell commands on this handheld. Run one when it answers the question or the person asks for it. Some are critical because they could change something; the handheld asks the person before those run, and they may decline. Then say what it would have done and leave it. Do not run a critical Action that the person did not ask for and the question does not need.";
+
+/// For the on-device model: small, offline, with nothing to look at.
+const LOCAL_SYSTEM: &str = "You are a small assistant running offline on a pocket Linux handheld that an FRC robotics team uses. Answer in two or three short, plain sentences. You cannot see the robot, the web or any files: if the question needs them, say so in one sentence.";
+
+/// For Browse: the page or the answer, in a form the handheld lays out.
+pub(crate) const BROWSE_SYSTEM: &str = "You are the web browser on Catalyst Linux, a pocket handheld with a 320 by 170 pixel screen and a keyboard, used by an FRC robotics team.
+
+When the person gives an address, read that page with web_fetch (or open it) and give it back as readable text: its main content in short paragraphs, with headings where the page has sections, leaving out navigation, adverts, cookie notices and other boilerplate. Keep the page's own words where you can; shorten long pages to what matters. When the person asks a question, search the web and answer it briefly from what you read.
+
+Write in exactly this form and nothing else:
+TITLE: the page's title, or the question answered in a few words
+then the text: paragraphs separated by a blank line, a line starting with \"## \" for a heading, no other Markdown.
+Last, a line \"LINKS:\" and then up to twelve links worth following (from the page, or the sources you used), one a line as: short description | full URL";
 
 // -------------------------------------------------------------- services ---
 
@@ -84,16 +128,20 @@ Actions are the team's saved shell commands on this handheld. Run one when it an
 pub enum Service {
     OpenAi,
     Claude,
+    /// The on-device model (`crate::local`).
+    Local,
 }
 
 impl Service {
-    pub const ALL: [Service; 2] = [Service::OpenAi, Service::Claude];
+    pub const ALL: [Service; 3] = [Service::OpenAi, Service::Claude, Service::Local];
 
-    /// Its key's name in the keys file.
+    /// Its name in the prefs file, and (for the two services) its key's
+    /// name in the keys file.
     pub fn key(self) -> &'static str {
         match self {
             Service::OpenAi => "openai",
             Service::Claude => "claude",
+            Service::Local => "local",
         }
     }
 
@@ -102,6 +150,7 @@ impl Service {
         match self {
             Service::OpenAi => "GPT-6.2 Sol",
             Service::Claude => "Claude Opus 5.5",
+            Service::Local => crate::local::model_name(),
         }
     }
 
@@ -110,6 +159,7 @@ impl Service {
         match self {
             Service::OpenAi => "gpt-6.2 sol",
             Service::Claude => "opus 5.5",
+            Service::Local => "on device",
         }
     }
 
@@ -117,6 +167,7 @@ impl Service {
         match self {
             Service::OpenAi => "gpt-6.2-sol",
             Service::Claude => "claude-opus-5-5",
+            Service::Local => "local",
         }
     }
 
@@ -124,6 +175,7 @@ impl Service {
         match self {
             Service::OpenAi => "OpenAI",
             Service::Claude => "Anthropic",
+            Service::Local => "The on-device model",
         }
     }
 
@@ -131,7 +183,14 @@ impl Service {
         match self {
             Service::OpenAi => OPENAI_URL,
             Service::Claude => CLAUDE_URL,
+            Service::Local => "",
         }
+    }
+
+    /// A service on the internet, with tools and the web; the on-device
+    /// model has neither.
+    pub fn online(self) -> bool {
+        self != Service::Local
     }
 }
 
@@ -204,11 +263,20 @@ impl Prefs {
     }
 }
 
-/// The service that answers, and its key: the one chosen if its key is set,
-/// else the first that has one.
+/// The service that answers, and its key: the one chosen if it can answer
+/// (its key set; the on-device model downloaded), else the first that can,
+/// the two services before the on-device model.
 pub fn answering(prefs: &Prefs, keys: &Keys) -> Option<(Service, String)> {
-    let with_key = |s: Service| keys.get(s.key()).map(|k| (s, k.to_owned()));
-    prefs.service.and_then(with_key).or_else(|| Service::ALL.into_iter().find_map(with_key))
+    let can = |s: Service| match s {
+        Service::Local => crate::local::ready().then(|| (s, String::new())),
+        _ => keys.get(s.key()).map(|k| (s, k.to_owned())),
+    };
+    prefs.service.and_then(can).or_else(|| Service::ALL.into_iter().find_map(can))
+}
+
+/// The services that can answer now.
+pub fn available(keys: &Keys) -> Vec<Service> {
+    Service::ALL.into_iter().filter(|s| if *s == Service::Local { crate::local::ready() } else { keys.get(s.key()).is_some() }).collect()
 }
 
 thread_local! {
@@ -233,7 +301,7 @@ pub fn tile() -> (String, Option<&'static str>) {
 }
 
 /// The simulator answers from a script unless told otherwise.
-fn demo() -> bool {
+pub(crate) fn demo() -> bool {
     !cfg!(target_arch = "aarch64") && std::env::var_os("CATALYST_AI_LIVE").is_none()
 }
 
@@ -261,6 +329,26 @@ fn tool_specs() -> Vec<(&'static str, &'static str, Value)> {
         (
             "match_logs",
             "The match logs pulled from the robot onto this handheld, each with its match and time and what stood out: faults and warnings, the lowest battery voltage, the worst loop time and overruns, brownouts, the hottest mechanism and the busiest CAN bus.",
+            nothing(),
+        ),
+        (
+            "event_schedule",
+            "The team's event and its matches from The Blue Alliance (and FRC Nexus when its key is set): the next match and when to queue, each match's alliances and score, and what is queueing now.",
+            nothing(),
+        ),
+        (
+            "graph_values",
+            "The values on the live graphs this handheld is recording from the robot: each key with its recent samples (seconds ago, value), newest last.",
+            nothing(),
+        ),
+        (
+            "read_file",
+            "A text file on this handheld under /data (notes, logs, robot code, configuration), read only: its first 64 KB. Secrets (keys, Wi-Fi passwords, SSH and Tailscale state) are not given out.",
+            json!({"type": "object", "properties": {"path": {"type": "string", "description": "The file's path, under /data, e.g. /data/notes/pit.txt; a folder lists what is in it."}}, "required": ["path"], "additionalProperties": false}),
+        ),
+        (
+            "handheld_status",
+            "This handheld itself: its battery, whether Wi-Fi and Ethernet are up and their addresses, storage left, memory, temperature, uptime and the system's version.",
             nothing(),
         ),
         (
@@ -373,6 +461,120 @@ fn list_actions(actions: &[Saved]) -> Value {
     json!(actions.iter().map(|s| json!({"name": s.name, "command": s.command, "critical": s.critical()})).collect::<Vec<_>>())
 }
 
+fn event_schedule(robot: &Robot) -> Value {
+    let Some(view) = robot.schedule.view() else {
+        return json!({"known": false, "why": "no schedule yet: it needs the team number, Wi-Fi with internet and a Blue Alliance key"});
+    };
+    let now = chrono::Utc::now().timestamp();
+    let when = |t: Option<i64>| t.map(|t| chrono::DateTime::from_timestamp(t, 0).map(|d| d.with_timezone(&chrono::Local).format("%a %H:%M").to_string()).unwrap_or_default());
+    let matches: Vec<Value> = view
+        .matches
+        .iter()
+        .take(40)
+        .map(|m| {
+            json!({"match": m.label, "red": m.red, "blue": m.blue, "time": when(m.time), "queue": when(m.queue_at), "score": m.score.map(|(r, b)| json!({"red": r, "blue": b})), "status": m.status})
+        })
+        .collect();
+    json!({
+        "team": view.team,
+        "event": view.event.as_ref().map(|e| json!({"name": e.name, "key": e.key, "start": e.start, "end": e.end})),
+        "next": view.next(now).map(|m| m.label.clone()),
+        "nowQueuing": view.now_queuing,
+        "matches": matches,
+        "problem": view.problem,
+    })
+}
+
+fn graph_values(robot: &Robot) -> Value {
+    let rec = &robot.graphs;
+    let now = rec.now();
+    let graphs: Vec<Value> = rec
+        .keys()
+        .iter()
+        .enumerate()
+        .map(|(i, key)| {
+            let points = rec.points(i).map(|p| p.iter().rev().take(30).rev().map(|(t, v)| json!([((now - t) * 10.0).round() / 10.0, (v * 1e4).round() / 1e4])).collect::<Vec<_>>()).unwrap_or_default();
+            json!({"key": key, "samples": points})
+        })
+        .collect();
+    json!({"graphs": graphs, "samplesAre": "[seconds ago, value]"})
+}
+
+/// Files under /data that are never given out: keys, passwords, private
+/// keys and the like.
+fn secret(path: &std::path::Path) -> bool {
+    let text = path.to_string_lossy().to_lowercase();
+    let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    ["/catalyst/keys", "/wifi/", "/ssh/", "/tailscale/", "/update/", ".assistant-request", "/.ssh/", ".git-credentials", "/assistant/chats"].iter().any(|s| text.contains(s))
+        || name.starts_with("id_")
+        || name.ends_with(".pem")
+        || name.ends_with(".key")
+        || name.contains("secret")
+        || name.contains("token")
+        || name == "keys"
+}
+
+/// The /data a path must be under: the handheld's, or the simulator's stand-in.
+fn data_root() -> PathBuf {
+    if cfg!(target_os = "linux") && std::path::Path::new("/data").is_dir() {
+        PathBuf::from("/data")
+    } else {
+        crate::config_dir()
+    }
+}
+
+/// A text file under /data (its first 64 KB), or a folder's contents.
+fn read_file(path: &str) -> Result<String, String> {
+    const MOST: u64 = 64 * 1024;
+    let root = data_root();
+    let asked = std::path::Path::new(path.trim());
+    let relative = asked.strip_prefix("/data").unwrap_or(asked);
+    let full = root.join(relative.strip_prefix("/").unwrap_or(relative));
+    let real = full.canonicalize().map_err(|_| format!("{path}: no such file"))?;
+    let root = root.canonicalize().unwrap_or(root);
+    if !real.starts_with(&root) {
+        return Err("only files under /data can be read".into());
+    }
+    if secret(&real) {
+        return Err(format!("{path} holds secrets: it is not given out"));
+    }
+    if real.is_dir() {
+        let mut names: Vec<String> = std::fs::read_dir(&real)
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .filter(|e| !secret(&e.path()))
+            .map(|e| format!("{}{}", e.file_name().to_string_lossy(), if e.path().is_dir() { "/" } else { "" }))
+            .collect();
+        names.sort();
+        names.truncate(200);
+        return Ok(json!({"folder": path, "entries": names}).to_string());
+    }
+    let size = real.metadata().map_err(|e| e.to_string())?.len();
+    let mut bytes = Vec::new();
+    std::fs::File::open(&real).and_then(|f| f.take(MOST).read_to_end(&mut bytes)).map_err(|e| e.to_string())?;
+    if bytes.iter().take(4096).any(|b| *b == 0) {
+        return Err(format!("{path} is not text ({size} bytes)"));
+    }
+    Ok(json!({"path": path, "bytes": size, "cut": size > MOST, "text": String::from_utf8_lossy(&bytes)}).to_string())
+}
+
+fn handheld_status() -> Value {
+    json!({
+        "version": crate::sysupdate::version(),
+        "battery": crate::sys::battery(),
+        "minutesLeft": crate::sys::battery_minutes_left(),
+        "wifiOn": crate::wifi::switched_on(),
+        "wifiAddress": crate::sys::address("wlan0"),
+        "ethernetUp": crate::sys::link_up("eth0"),
+        "ethernetAddress": crate::sys::address("eth0"),
+        "storage": crate::sys::storage(),
+        "memory": crate::sys::memory(),
+        "processorTemperature": crate::sys::cpu_temperature(),
+        "uptime": crate::sys::uptime(),
+        "time": chrono::Local::now().format("%Y-%m-%d %H:%M %Z").to_string(),
+    })
+}
+
 /// A call the model made.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Call {
@@ -409,6 +611,10 @@ fn plan(call: &Call, robot: &Robot, actions: &[Saved]) -> Plan {
             None => Plan::Now(Err("no robot address yet: the team or robot is set in the Robot app".into())),
         },
         "match_logs" => Plan::Now(Ok(match_logs(robot).to_string())),
+        "event_schedule" => Plan::Now(Ok(event_schedule(robot).to_string())),
+        "graph_values" => Plan::Now(Ok(graph_values(robot).to_string())),
+        "read_file" => Plan::Now(read_file(call.input["path"].as_str().unwrap_or_default())),
+        "handheld_status" => Plan::Now(Ok(handheld_status().to_string())),
         "list_actions" => Plan::Now(Ok(list_actions(actions).to_string())),
         "run_action" => {
             let name = call.input["name"].as_str().unwrap_or_default().trim();
@@ -551,10 +757,28 @@ pub enum Stop {
     Answered,
     /// The model wants its tools first.
     Tools,
+    /// The service's own loop (searching, reading) ran long and paused: the
+    /// conversation goes back as it is and it carries on.
+    Paused,
     /// It would not answer, and why.
     Refused(String),
     /// It ran out of room.
     Cut,
+}
+
+/// A page an answer rests on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Source {
+    pub title: String,
+    pub url: String,
+}
+
+/// Something the service did on its own servers while answering: searched
+/// the web, read a page. Its words, and whether it worked.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WebStep {
+    pub words: String,
+    pub ok: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -562,18 +786,66 @@ pub struct Reply {
     pub text: String,
     pub calls: Vec<Call>,
     pub stop: Stop,
+    pub steps: Vec<WebStep>,
+    pub sources: Vec<Source>,
+}
+
+impl Reply {
+    fn stopped(stop: Stop) -> Self {
+        Reply { text: String::new(), calls: Vec::new(), stop, steps: Vec::new(), sources: Vec::new() }
+    }
+}
+
+/// What a conversation is for: the assistant (robot tools, Actions, the
+/// web) or Browse (the web only, pages given back in Browse's own form).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Assistant,
+    Browse,
 }
 
 /// The conversation as the service keeps it: its own items, sent back whole
-/// each turn and never edited, so reasoning carried in them stays valid.
+/// each turn and never edited, so reasoning (and search results' encrypted
+/// content) carried in them stays valid.
 pub struct Chat {
     service: Service,
+    mode: Mode,
     items: Vec<Value>,
 }
 
+/// A page's host, for a step's words: "thebluealliance.com".
+pub(crate) fn host_of(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    host.trim_start_matches("www.").to_owned()
+}
+
+/// Sources in order, each page once, at most `n`.
+fn dedupe(sources: Vec<Source>, n: usize) -> Vec<Source> {
+    let mut out: Vec<Source> = Vec::new();
+    for s in sources {
+        if !s.url.is_empty() && !out.iter().any(|o| o.url == s.url) {
+            out.push(Source { title: if s.title.trim().is_empty() { host_of(&s.url) } else { s.title.trim().to_owned() }, url: s.url });
+        }
+    }
+    out.truncate(n);
+    out
+}
+
+/// Sources shown under an answer at most.
+const SOURCES_SHOWN: usize = 6;
+
 impl Chat {
     pub fn new(service: Service) -> Self {
-        Chat { service, items: Vec::new() }
+        Self::for_mode(service, Mode::Assistant)
+    }
+
+    pub fn for_mode(service: Service, mode: Mode) -> Self {
+        Chat { service, mode, items: Vec::new() }
+    }
+
+    pub fn service(&self) -> Service {
+        self.service
     }
 
     pub fn ask(&mut self, text: &str) {
@@ -589,110 +861,241 @@ impl Chat {
         self.items.truncate(len);
     }
 
-    /// The request for the next answer.
-    pub fn body(&self, effort: Effort) -> Value {
-        let specs = tool_specs();
-        match self.service {
-            Service::OpenAi => json!({
-                "model": self.service.model(),
-                "instructions": SYSTEM,
-                "input": self.items,
-                "tools": specs.iter().map(|(name, about, schema)| json!({"type": "function", "name": name, "description": about, "parameters": schema, "strict": true})).collect::<Vec<_>>(),
-                "reasoning": {"effort": effort.wire()},
-                "store": false,
-                "include": ["reasoning.encrypted_content"],
-                "max_output_tokens": OPENAI_MAX_OUTPUT,
-            }),
-            Service::Claude => json!({
-                "model": self.service.model(),
-                "max_tokens": CLAUDE_MAX_TOKENS,
-                "system": SYSTEM,
-                "tools": specs.iter().map(|(name, about, schema)| json!({"name": name, "description": about, "input_schema": schema, "strict": true})).collect::<Vec<_>>(),
-                "output_config": {"effort": effort.wire()},
-                "fallbacks": "default",
-                "cache_control": {"type": "ephemeral"},
-                "messages": self.items,
-            }),
+    /// The items, as kept on disk.
+    fn items(&self) -> &[Value] {
+        &self.items
+    }
+
+    /// A conversation again from its kept items.
+    fn with_items(service: Service, mode: Mode, items: Vec<Value>) -> Self {
+        Chat { service, mode, items }
+    }
+
+    fn system(&self) -> &'static str {
+        match (self.service, self.mode) {
+            (Service::Local, _) => LOCAL_SYSTEM,
+            (_, Mode::Browse) => BROWSE_SYSTEM,
+            (_, Mode::Assistant) => SYSTEM,
         }
     }
 
-    /// An answer taken into the conversation: its words and the calls it
-    /// makes. A refusal leaves the conversation as it was.
+    /// The request for the next answer.
+    pub fn body(&self, effort: Effort) -> Value {
+        // Browse has the web alone; the assistant its own tools too.
+        let specs = if self.mode == Mode::Assistant { tool_specs() } else { Vec::new() };
+        match self.service {
+            Service::OpenAi => {
+                let mut tools: Vec<Value> = specs.iter().map(|(name, about, schema)| json!({"type": "function", "name": name, "description": about, "parameters": schema, "strict": true})).collect();
+                tools.push(json!({"type": "web_search"}));
+                json!({
+                    "model": self.service.model(),
+                    "instructions": self.system(),
+                    "input": self.items,
+                    "tools": tools,
+                    "reasoning": {"effort": effort.wire()},
+                    "store": false,
+                    "include": ["reasoning.encrypted_content", "web_search_call.action.sources"],
+                    "max_output_tokens": OPENAI_MAX_OUTPUT,
+                })
+            }
+            Service::Claude => {
+                let mut tools: Vec<Value> = specs.iter().map(|(name, about, schema)| json!({"name": name, "description": about, "input_schema": schema, "strict": true})).collect();
+                tools.push(json!({"type": "web_search_20260209", "name": "web_search", "max_uses": WEB_USES}));
+                tools.push(json!({"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": WEB_USES, "citations": {"enabled": true}, "max_content_tokens": FETCH_TOKENS}));
+                json!({
+                    "model": self.service.model(),
+                    "max_tokens": CLAUDE_MAX_TOKENS,
+                    "system": self.system(),
+                    "tools": tools,
+                    "output_config": {"effort": effort.wire()},
+                    "fallbacks": "default",
+                    "cache_control": {"type": "ephemeral"},
+                    "messages": self.items,
+                })
+            }
+            Service::Local => {
+                let mut messages = vec![json!({"role": "system", "content": self.system()})];
+                messages.extend(self.items.iter().cloned());
+                json!({"model": self.service.model(), "messages": messages, "max_tokens": LOCAL_MAX_TOKENS, "stream": false})
+            }
+        }
+    }
+
+    /// An answer taken into the conversation: its words, the calls it makes,
+    /// what it did on the web and the pages it rests on. A refusal leaves the
+    /// conversation as it was.
     pub fn take(&mut self, v: &Value) -> Result<Reply, String> {
         if let Some(message) = v["error"]["message"].as_str() {
             return Err(short(message, 140));
         }
+        match self.service {
+            Service::Claude => self.take_claude(v),
+            Service::OpenAi => self.take_openai(v),
+            Service::Local => self.take_local(v),
+        }
+    }
+
+    fn take_claude(&mut self, v: &Value) -> Result<Reply, String> {
+        let content = v["content"].as_array().cloned().unwrap_or_default();
+        let stop = v["stop_reason"].as_str().unwrap_or_default();
+        if stop == "refusal" {
+            let why = v["stop_details"]["explanation"].as_str().filter(|s| !s.trim().is_empty()).unwrap_or("it would not answer that");
+            return Ok(Reply::stopped(Stop::Refused(short(why, 140))));
+        }
         let mut text = String::new();
         let mut calls = Vec::new();
-        match self.service {
-            Service::Claude => {
-                let content = v["content"].as_array().cloned().unwrap_or_default();
-                let stop = v["stop_reason"].as_str().unwrap_or_default();
-                if stop == "refusal" {
-                    let why = v["stop_details"]["explanation"].as_str().filter(|s| !s.trim().is_empty()).unwrap_or("it would not answer that");
-                    return Ok(Reply { text, calls, stop: Stop::Refused(short(why, 140)) });
-                }
-                for block in &content {
-                    match block["type"].as_str() {
-                        Some("text") => push_text(&mut text, block["text"].as_str().unwrap_or_default()),
-                        Some("tool_use") => calls.push(Call { id: str_of(&block["id"]), name: str_of(&block["name"]), input: block["input"].clone() }),
-                        _ => {}
-                    }
-                }
-                if content.is_empty() {
-                    return if stop == "end_turn" { Ok(Reply { text, calls, stop: Stop::Answered }) } else { Err("an empty answer came back".into()) };
-                }
-                self.items.push(json!({"role": "assistant", "content": content}));
-                let stop = match stop {
-                    "tool_use" if !calls.is_empty() => Stop::Tools,
-                    "max_tokens" => Stop::Cut,
-                    _ => Stop::Answered,
-                };
-                Ok(Reply { text, calls, stop })
-            }
-            Service::OpenAi => {
-                let output = v["output"].as_array().cloned().unwrap_or_default();
-                let mut refusal = None;
-                for item in &output {
-                    match item["type"].as_str() {
-                        Some("message") => {
-                            for part in item["content"].as_array().into_iter().flatten() {
-                                match part["type"].as_str() {
-                                    Some("output_text") => push_text(&mut text, part["text"].as_str().unwrap_or_default()),
-                                    Some("refusal") => refusal = Some(part["refusal"].as_str().unwrap_or("it would not answer that").to_owned()),
-                                    _ => {}
-                                }
-                            }
+        let mut steps: Vec<WebStep> = Vec::new();
+        // Each server tool call's step, by its id, to mark it failed if its
+        // result is an error.
+        let mut step_of: Vec<(String, usize)> = Vec::new();
+        let (mut cited, mut read, mut found) = (Vec::new(), Vec::new(), Vec::new());
+        for block in &content {
+            match block["type"].as_str() {
+                Some("text") => {
+                    push_text(&mut text, block["text"].as_str().unwrap_or_default());
+                    for c in block["citations"].as_array().into_iter().flatten() {
+                        if c["type"] == "web_search_result_location" {
+                            cited.push(Source { title: str_of(&c["title"]), url: str_of(&c["url"]) });
                         }
-                        Some("function_call") => calls.push(Call {
-                            id: str_of(&item["call_id"]),
-                            name: str_of(&item["name"]),
-                            input: item["arguments"].as_str().and_then(|a| serde_json::from_str(a).ok()).unwrap_or(Value::Null),
-                        }),
-                        _ => {}
                     }
                 }
-                let incomplete = v["status"].as_str() == Some("incomplete");
-                if incomplete && v["incomplete_details"]["reason"].as_str() == Some("content_filter") {
-                    refusal.get_or_insert_with(|| "it would not answer that".into());
+                Some("tool_use") => calls.push(Call { id: str_of(&block["id"]), name: str_of(&block["name"]), input: block["input"].clone() }),
+                Some("server_tool_use") => {
+                    let words = match block["name"].as_str() {
+                        Some("web_search") => format!("searched the web: {}", short(block["input"]["query"].as_str().unwrap_or_default(), 60)),
+                        Some("web_fetch") => format!("read {}", host_of(block["input"]["url"].as_str().unwrap_or_default())),
+                        _ => continue,
+                    };
+                    step_of.push((str_of(&block["id"]), steps.len()));
+                    steps.push(WebStep { words, ok: true });
                 }
-                if let Some(why) = refusal {
-                    return Ok(Reply { text: String::new(), calls: Vec::new(), stop: Stop::Refused(short(&why, 140)) });
+                Some(kind @ ("web_search_tool_result" | "web_fetch_tool_result")) => {
+                    let result = &block["content"];
+                    // An error is one object, not a list of results.
+                    let failed = result.is_object() && result["error_code"].is_string();
+                    if failed {
+                        if let Some((_, at)) = step_of.iter().find(|(id, _)| *id == str_of(&block["tool_use_id"])) {
+                            steps[*at].ok = false;
+                            steps[*at].words = format!("{} · {}", steps[*at].words, result["error_code"].as_str().unwrap_or_default().replace('_', " "));
+                        }
+                    } else if kind == "web_search_tool_result" {
+                        for r in result.as_array().into_iter().flatten() {
+                            found.push(Source { title: str_of(&r["title"]), url: str_of(&r["url"]) });
+                        }
+                    } else {
+                        read.push(Source { title: str_of(&result["content"]["title"]), url: str_of(&result["url"]) });
+                    }
                 }
-                if output.is_empty() {
-                    return Err("an empty answer came back".into());
-                }
-                self.items.extend(output);
-                let stop = if incomplete {
-                    Stop::Cut
-                } else if calls.is_empty() {
-                    Stop::Answered
-                } else {
-                    Stop::Tools
-                };
-                Ok(Reply { text, calls, stop })
+                _ => {}
             }
         }
+        if content.is_empty() {
+            return if stop == "end_turn" { Ok(Reply::stopped(Stop::Answered)) } else { Err("an empty answer came back".into()) };
+        }
+        // The whole message goes back as it came: server tool blocks, their
+        // results' encrypted content and the citations included.
+        self.items.push(json!({"role": "assistant", "content": content}));
+        let stop = match stop {
+            "tool_use" if !calls.is_empty() => Stop::Tools,
+            "pause_turn" => Stop::Paused,
+            "max_tokens" => Stop::Cut,
+            _ => Stop::Answered,
+        };
+        let sources = sources_from(cited, read, found);
+        Ok(Reply { text, calls, stop, steps, sources })
+    }
+
+    fn take_openai(&mut self, v: &Value) -> Result<Reply, String> {
+        let output = v["output"].as_array().cloned().unwrap_or_default();
+        let mut text = String::new();
+        let mut calls = Vec::new();
+        let mut refusal = None;
+        let mut steps = Vec::new();
+        let (mut cited, mut read, mut found) = (Vec::new(), Vec::new(), Vec::new());
+        for item in &output {
+            match item["type"].as_str() {
+                Some("message") => {
+                    for part in item["content"].as_array().into_iter().flatten() {
+                        match part["type"].as_str() {
+                            Some("output_text") => {
+                                push_text(&mut text, part["text"].as_str().unwrap_or_default());
+                                for a in part["annotations"].as_array().into_iter().flatten() {
+                                    if a["type"] == "url_citation" {
+                                        cited.push(Source { title: str_of(&a["title"]), url: str_of(&a["url"]) });
+                                    }
+                                }
+                            }
+                            Some("refusal") => refusal = Some(part["refusal"].as_str().unwrap_or("it would not answer that").to_owned()),
+                            _ => {}
+                        }
+                    }
+                }
+                Some("function_call") => calls.push(Call {
+                    id: str_of(&item["call_id"]),
+                    name: str_of(&item["name"]),
+                    input: item["arguments"].as_str().and_then(|a| serde_json::from_str(a).ok()).unwrap_or(Value::Null),
+                }),
+                Some("web_search_call") => {
+                    let action = &item["action"];
+                    let ok = item["status"].as_str() != Some("failed");
+                    let words = match action["type"].as_str() {
+                        Some("open_page") => {
+                            let url = str_of(&action["url"]);
+                            read.push(Source { title: String::new(), url: url.clone() });
+                            format!("read {}", host_of(&url))
+                        }
+                        Some("find_in_page") => format!("looked in {} for “{}”", host_of(action["url"].as_str().unwrap_or_default()), short(action["pattern"].as_str().unwrap_or_default(), 30)),
+                        _ => {
+                            let query = action["query"].as_str().or_else(|| action["queries"][0].as_str()).unwrap_or_default();
+                            if query.is_empty() {
+                                "searched the web".to_owned()
+                            } else {
+                                format!("searched the web: {}", short(query, 60))
+                            }
+                        }
+                    };
+                    for s in action["sources"].as_array().into_iter().flatten() {
+                        if let Some(url) = s["url"].as_str() {
+                            found.push(Source { title: str_of(&s["title"]), url: url.to_owned() });
+                        }
+                    }
+                    steps.push(WebStep { words, ok });
+                }
+                _ => {}
+            }
+        }
+        let incomplete = v["status"].as_str() == Some("incomplete");
+        if incomplete && v["incomplete_details"]["reason"].as_str() == Some("content_filter") {
+            refusal.get_or_insert_with(|| "it would not answer that".into());
+        }
+        if let Some(why) = refusal {
+            return Ok(Reply::stopped(Stop::Refused(short(&why, 140))));
+        }
+        if output.is_empty() {
+            return Err("an empty answer came back".into());
+        }
+        // Every item goes back as it came: reasoning, searches and all.
+        self.items.extend(output);
+        let stop = if incomplete {
+            Stop::Cut
+        } else if calls.is_empty() {
+            Stop::Answered
+        } else {
+            Stop::Tools
+        };
+        let sources = sources_from(cited, read, found);
+        Ok(Reply { text, calls, stop, steps, sources })
+    }
+
+    fn take_local(&mut self, v: &Value) -> Result<Reply, String> {
+        let choice = &v["choices"][0];
+        let text = choice["message"]["content"].as_str().ok_or("the on-device model gave no answer")?.trim().to_owned();
+        if text.is_empty() {
+            return Err("the on-device model gave an empty answer".into());
+        }
+        self.items.push(json!({"role": "assistant", "content": text}));
+        let stop = if choice["finish_reason"].as_str() == Some("length") { Stop::Cut } else { Stop::Answered };
+        Ok(Reply { text, calls: Vec::new(), stop, steps: Vec::new(), sources: Vec::new() })
     }
 
     /// What the calls came to, sent back together.
@@ -707,8 +1110,20 @@ impl Chat {
                 let results: Vec<Value> = outcomes.iter().map(|o| json!({"type": "tool_result", "tool_use_id": o.id, "content": o.text, "is_error": o.error})).collect();
                 self.items.push(json!({"role": "user", "content": results}));
             }
+            // The on-device model has no tools to answer for.
+            Service::Local => {}
         }
     }
+}
+
+/// The pages an answer rests on: those it cites, then those it read; with
+/// neither, the first few it found.
+fn sources_from(cited: Vec<Source>, read: Vec<Source>, found: Vec<Source>) -> Vec<Source> {
+    let mut sources = dedupe(cited.into_iter().chain(read).collect(), SOURCES_SHOWN);
+    if sources.is_empty() {
+        sources = dedupe(found, 3);
+    }
+    sources
 }
 
 fn str_of(v: &Value) -> String {
@@ -723,7 +1138,7 @@ fn push_text(text: &mut String, more: &str) {
 }
 
 /// At most `n` characters, cut with an ellipsis.
-fn short(text: &str, n: usize) -> String {
+pub(crate) fn short(text: &str, n: usize) -> String {
     let text = text.trim();
     if text.chars().count() <= n {
         text.to_owned()
@@ -734,7 +1149,7 @@ fn short(text: &str, n: usize) -> String {
 
 /// An answer as the small screen shows it: Markdown's marks taken out, its
 /// bullets as dots, no runs of blank lines.
-fn plain(text: &str) -> String {
+pub(crate) fn plain(text: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
     for line in text.lines() {
         let line = line.trim_end();
@@ -761,13 +1176,16 @@ fn plain(text: &str) -> String {
 // ------------------------------------------------------------- transport ---
 
 /// One request to the service, as JSON back.
-fn request(service: Service, key: &str, body: &Value) -> Result<Value, String> {
+pub(crate) fn request(service: Service, key: &str, body: &Value) -> Result<Value, String> {
     if demo() {
         return Ok(demo_reply(service, body));
     }
+    if service == Service::Local {
+        return request_local(body);
+    }
     let headers = match service {
         Service::OpenAi => format!("Authorization: Bearer {key}\nContent-Type: application/json\n"),
-        Service::Claude => format!("x-api-key: {key}\nanthropic-version: {CLAUDE_VERSION}\nanthropic-beta: {CLAUDE_BETA}\nContent-Type: application/json\n"),
+        Service::Claude | Service::Local => format!("x-api-key: {key}\nanthropic-version: {CLAUDE_VERSION}\nanthropic-beta: {CLAUDE_BETA}\nContent-Type: application/json\n"),
     };
     // The key goes to curl in a file only root reads, not on its command
     // line where any process could see it.
@@ -803,6 +1221,43 @@ fn request(service: Service, key: &str, body: &Value) -> Result<Value, String> {
     serde_json::from_str(body).map_err(|_| "the answer could not be read".to_owned())
 }
 
+/// The on-device model: its server started if it is not running, then asked
+/// OpenAI-style chat completions over plain HTTP, on this handheld only.
+fn request_local(body: &Value) -> Result<Value, String> {
+    let base = crate::local::start()?;
+    if !(base.starts_with("http://127.0.0.1:") || base.starts_with("http://localhost:")) {
+        return Err("the on-device model must be on this handheld".into());
+    }
+    crate::local::touch();
+    let url = format!("{}/chat/completions", base.trim_end_matches('/'));
+    let max_time = LOCAL_SECONDS.to_string();
+    let mut child = Command::new("curl")
+        .args(["-sS", "--max-time", &max_time, "--proto", "=http", "-H", "Content-Type: application/json", "--data-binary", "@-", "-w", "\n%{http_code}", &url])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| "curl could not start".to_owned())?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(body.to_string().as_bytes()).map_err(|_| "the question could not be sent".to_owned())?;
+    }
+    let output = child.wait_with_output().map_err(|_| "the on-device model stopped".to_owned())?;
+    crate::local::touch();
+    if !output.status.success() {
+        return Err(match output.status.code() {
+            Some(7) => "the on-device model is not running".into(),
+            Some(28) => "the on-device model took too long".into(),
+            _ => "the on-device model did not answer".into(),
+        });
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let (body, code) = text.rsplit_once('\n').unwrap_or(("", &text));
+    if code.trim() != "200" {
+        return Err(format!("the on-device model answered {}", code.trim()));
+    }
+    serde_json::from_str(body).map_err(|_| "the answer could not be read".to_owned())
+}
+
 /// Why curl could not get an answer, in a few words.
 fn curl_failure(code: Option<i32>, stderr: &str) -> String {
     match code {
@@ -834,11 +1289,15 @@ const DEMO_ANSWER: &str = "The robot is linked and running well. Two things stan
 /// The scripted service: from the conversation so far, the next reply, in
 /// the service's own shape (so the simulator goes through the real parsing).
 fn demo_reply(service: Service, body: &Value) -> Value {
+    if service == Service::Local {
+        return json!({"object": "chat.completion", "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": DEMO_LOCAL}}]});
+    }
+    let browsing = body["system"].as_str().or_else(|| body["instructions"].as_str()).is_some_and(|s| s == BROWSE_SYSTEM);
     let (question, rounds, last) = match service {
-        Service::Claude => {
+        Service::Claude | Service::Local => {
             let messages = body["messages"].as_array().cloned().unwrap_or_default();
             let at = messages.iter().rposition(|m| m["role"] == "user" && m["content"].is_string()).unwrap_or(0);
-            let question = messages.get(at).and_then(|m| m["content"].as_str()).unwrap_or_default().to_lowercase();
+            let question = messages.get(at).and_then(|m| m["content"].as_str()).unwrap_or_default().to_owned();
             let results: Vec<&Value> = messages.iter().skip(at + 1).filter(|m| m["role"] == "user").collect();
             let last = results.last().and_then(|m| m["content"].as_array()).and_then(|c| c.last()).map(|b| str_of(&b["content"])).unwrap_or_default();
             (question, results.len(), last)
@@ -846,14 +1305,25 @@ fn demo_reply(service: Service, body: &Value) -> Value {
         Service::OpenAi => {
             let input = body["input"].as_array().cloned().unwrap_or_default();
             let at = input.iter().rposition(|i| i["role"] == "user").unwrap_or(0);
-            let question = input.get(at).and_then(|i| i["content"].as_str()).unwrap_or_default().to_lowercase();
+            let question = input.get(at).and_then(|i| i["content"].as_str()).unwrap_or_default().to_owned();
             let outputs = |i: &Value| i["type"] == "function_call_output";
             let rounds = (at + 1..input.len()).filter(|&k| outputs(&input[k]) && !outputs(&input[k - 1])).count();
             let last = input.iter().skip(at + 1).rev().find(|i| outputs(i)).map(|i| str_of(&i["output"])).unwrap_or_default();
             (question, rounds, last)
         }
     };
-    let deploy = question.contains("deploy");
+    if browsing {
+        let opening = question.strip_prefix("Open ").map(str::trim);
+        return match opening {
+            Some(url) => demo_web(service, None, Some((url, DEMO_PAGE_TITLE)), DEMO_PAGE, &[]),
+            None => demo_web(service, Some(&question), None, DEMO_BROWSE_ANSWER, &[(DEMO_MANUAL_TITLE, DEMO_MANUAL_URL)]),
+        };
+    }
+    let lower = question.to_lowercase();
+    if ["rule", "manual", "autonomous"].iter().any(|w| lower.contains(w)) {
+        return demo_web(service, Some("2026 FRC REBUILT match timing autonomous"), None, DEMO_WEB_ANSWER, &[(DEMO_MANUAL_TITLE, DEMO_MANUAL_URL)]);
+    }
+    let deploy = lower.contains("deploy");
     let (text, calls): (&str, Vec<(&str, Value)>) = match (deploy, rounds) {
         (true, 0) => ("", vec![("run_action", json!({"name": "Deploy robot code", "reason": "you asked for the code to be deployed"}))]),
         (true, _) if last.contains("declined") => ("Left it: nothing was deployed. Say when the robot is on its cart and disabled, and I'll run it then.", vec![]),
@@ -863,7 +1333,7 @@ fn demo_reply(service: Service, body: &Value) -> Value {
         (false, _) => (DEMO_ANSWER, vec![]),
     };
     match service {
-        Service::Claude => {
+        Service::Claude | Service::Local => {
             let mut content = Vec::new();
             if !text.is_empty() {
                 content.push(json!({"type": "text", "text": text}));
@@ -885,6 +1355,94 @@ fn demo_reply(service: Service, body: &Value) -> Value {
         }
     }
 }
+
+/// A scripted answer that searched the web (`search`) or read a page
+/// (`fetch`: its URL and title) first, citing `cited`, in the service's shape
+/// as its documentation gives it.
+fn demo_web(service: Service, search: Option<&str>, fetch: Option<(&str, &str)>, text: &str, cited: &[(&str, &str)]) -> Value {
+    match service {
+        Service::Claude | Service::Local => {
+            let mut content = Vec::new();
+            if let Some(query) = search {
+                content.push(json!({"type": "server_tool_use", "id": "srvtoolu_demo_search", "name": "web_search", "input": {"query": query}}));
+                let results: Vec<Value> = cited
+                    .iter()
+                    .chain([("FRC Game Q&A", "https://frc-qa.firstinspires.org/")].iter())
+                    .map(|(title, url)| json!({"type": "web_search_result", "url": url, "title": title, "encrypted_content": "demo-encrypted", "page_age": "January 10, 2026"}))
+                    .collect();
+                content.push(json!({"type": "web_search_tool_result", "tool_use_id": "srvtoolu_demo_search", "content": results}));
+            }
+            if let Some((url, title)) = fetch {
+                content.push(json!({"type": "server_tool_use", "id": "srvtoolu_demo_fetch", "name": "web_fetch", "input": {"url": url}}));
+                content.push(json!({"type": "web_fetch_tool_result", "tool_use_id": "srvtoolu_demo_fetch", "content": {
+                    "type": "web_fetch_result", "url": url,
+                    "content": {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "(the page)"}, "title": title, "citations": {"enabled": true}},
+                    "retrieved_at": "2026-11-21T10:30:00Z"
+                }}));
+            }
+            let citations: Vec<Value> = cited
+                .iter()
+                .map(|(title, url)| json!({"type": "web_search_result_location", "url": url, "title": title, "encrypted_index": "demo-index", "cited_text": "Autonomous lasts 20 seconds."}))
+                .collect();
+            let mut block = json!({"type": "text", "text": text});
+            if !citations.is_empty() {
+                block["citations"] = json!(citations);
+            }
+            content.push(block);
+            json!({"type": "message", "role": "assistant", "model": service.model(), "content": content, "stop_reason": "end_turn"})
+        }
+        Service::OpenAi => {
+            let mut output = vec![json!({"type": "reasoning", "id": "rs_demo_web", "summary": [], "encrypted_content": "demo"})];
+            if let Some(query) = search {
+                let sources: Vec<Value> = cited.iter().map(|(_, url)| json!({"type": "url", "url": url})).collect();
+                output.push(json!({"type": "web_search_call", "id": "ws_demo_search", "status": "completed", "action": {"type": "search", "query": query, "sources": sources}}));
+            }
+            if let Some((url, _)) = fetch {
+                output.push(json!({"type": "web_search_call", "id": "ws_demo_open", "status": "completed", "action": {"type": "open_page", "url": url}}));
+            }
+            let annotations: Vec<Value> = cited.iter().map(|(title, url)| json!({"type": "url_citation", "start_index": 0, "end_index": 10, "url": url, "title": title})).collect();
+            output.push(json!({"type": "message", "id": "msg_demo_web", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": text, "annotations": annotations}]}));
+            json!({"object": "response", "status": "completed", "model": service.model(), "output": output})
+        }
+    }
+}
+
+const DEMO_LOCAL: &str = "A brownout is when the battery voltage sags so low under load that the robot controller cuts power to the motors to keep itself running. Check the battery, its leads and the main breaker first.";
+
+const DEMO_MANUAL_TITLE: &str = "2026 FRC Game Manual";
+const DEMO_MANUAL_URL: &str = "https://www.firstinspires.org/robotics/frc/game-and-season";
+
+const DEMO_WEB_ANSWER: &str = "In 2026 REBUILT a match runs 2 minutes 40 seconds: autonomous for the first 20 seconds, then 2 minutes 20 seconds of teleoperated play.";
+
+const DEMO_BROWSE_ANSWER: &str = "TITLE: How long autonomous is in 2026
+A match in 2026 REBUILT runs 2 minutes 40 seconds. Autonomous takes the first 20 seconds; teleoperated play takes the remaining 2 minutes 20 seconds.
+
+## What happens in autonomous
+Robots move on their own, from code written before the match. Drivers keep their hands off the controls until teleop begins.
+
+LINKS:
+2026 FRC Game Manual | https://www.firstinspires.org/robotics/frc/game-and-season
+FRC Game Q&A | https://frc-qa.firstinspires.org/";
+
+const DEMO_PAGE_TITLE: &str = "WPILib Documentation";
+
+const DEMO_PAGE: &str = "TITLE: WPILib Documentation
+WPILib is the library FRC teams write their robot programs with, in Java, C++ or Python. These pages cover installing it, the command-based framework, hardware APIs, and the tools that come with it.
+
+## Getting started
+Install the WPILib suite for your computer, create a project from a template, and deploy it to the robot from Visual Studio Code.
+
+## Command-based programming
+Subsystems hold the robot's mechanisms; commands describe what they do, and triggers tie commands to buttons and sensors.
+
+## Hardware
+Motor controllers, sensors and pneumatics, and how each is wired and used from code.
+
+LINKS:
+Zero to Robot | https://docs.wpilib.org/en/stable/docs/zero-to-robot/introduction.html
+Command-based programming | https://docs.wpilib.org/en/stable/docs/software/commandbased/index.html
+Hardware APIs | https://docs.wpilib.org/en/stable/docs/software/hardware-apis/index.html
+Vision processing | https://docs.wpilib.org/en/stable/docs/software/vision-processing/index.html";
 
 /// What an Action prints in the simulator.
 fn demo_output(line: &str) -> String {
@@ -912,6 +1470,8 @@ enum Entry {
     Asks { name: String, command: String, reason: String, state: AskState },
     /// Something that went wrong, or a stop.
     Note(String),
+    /// The pages the answer above rests on.
+    Sources(Vec<Source>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -947,6 +1507,18 @@ static NEW_CHAT: AtomicBool = AtomicBool::new(false);
 /// The confirm page's answer, taken up when the assistant is on top again.
 static DECISION: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
 
+/// A kept conversation to reopen, chosen in Conversations; taken up when the
+/// assistant is on top again.
+static OPEN_CHAT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn take_open_chat() -> Option<String> {
+    OPEN_CHAT.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
+fn open_chat_waiting() -> bool {
+    OPEN_CHAT.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+}
+
 /// An entry laid out: its lines at the width it was wrapped to, and height.
 #[derive(Clone)]
 struct Laid {
@@ -979,6 +1551,12 @@ pub struct Assistant {
     /// The Actions to use instead of the saved ones (tests, which share
     /// one settings folder and run at once).
     actions_given: Option<Vec<Saved>>,
+    /// Paused turns carried on for the question under way.
+    continuations: usize,
+    /// This conversation's name among those kept (when it started), once it
+    /// has an answer worth keeping; and where they are kept (tests: apart).
+    chat_id: Option<String>,
+    chats: PathBuf,
 }
 
 const GAP: f32 = 6.0;
@@ -1013,6 +1591,9 @@ impl Assistant {
             laid: None,
             revision: 0,
             actions_given: None,
+            continuations: 0,
+            chat_id: None,
+            chats: chats_dir(),
         }
     }
 
@@ -1043,8 +1624,43 @@ impl Assistant {
         self.calls.clear();
         self.outcomes.clear();
         self.busy = Busy::Idle;
+        self.chat_id = None;
         self.revision += 1;
         self.scroll.jump(0.0);
+    }
+
+    /// A kept conversation, back as it was left, to carry on.
+    fn reopen(&mut self, id: &str) -> Result<(), String> {
+        let kept = load_chat(&self.chats, id).ok_or("that conversation is no longer kept")?;
+        let keys = Keys::load();
+        let key = match kept.service {
+            Service::Local if crate::local::ready() => String::new(),
+            Service::Local => return Err("it was with the on-device model, which is not downloaded".into()),
+            s => keys.get(s.key()).ok_or_else(|| format!("it was with {}, whose key is gone", s.model_name()))?.to_owned(),
+        };
+        self.service = Some((kept.service, key));
+        self.chat = Some(Chat::with_items(kept.service, Mode::Assistant, kept.items));
+        self.entries = kept.entries.into_iter().map(|e| (e, -10.0)).collect();
+        self.calls.clear();
+        self.outcomes.clear();
+        self.busy = Busy::Idle;
+        self.chat_id = Some(id.to_owned());
+        self.revision += 1;
+        self.scroll.jump(0.0);
+        Ok(())
+    }
+
+    /// The conversation kept (once it has a whole answer), newest of the
+    /// kept ones, so it can be reopened later.
+    fn keep(&mut self) {
+        let (Some(chat), true) = (&self.chat, self.idle()) else { return };
+        if chat.len() == 0 {
+            return;
+        }
+        let id = self.chat_id.get_or_insert_with(|| chrono::Utc::now().timestamp_millis().to_string()).clone();
+        let title = self.entries.iter().find_map(|(e, _)| if let Entry::You(q) = e { Some(q.clone()) } else { None }).unwrap_or_default();
+        let entries: Vec<Entry> = self.entries.iter().map(|(e, _)| e.clone()).collect();
+        save_chat(&self.chats, &id, chat.service(), &title, chat.items(), &entries);
     }
 
     fn send(&mut self) {
@@ -1058,6 +1674,7 @@ impl Assistant {
         self.input.clear();
         self.question = text.clone();
         self.rounds = 0;
+        self.continuations = 0;
         self.actions = self.actions_given.clone().unwrap_or_else(crate::commands::all);
         self.push(Entry::You(text));
         self.ask();
@@ -1108,11 +1725,29 @@ impl Assistant {
             Ok(reply) => reply,
             Err(why) => return self.failed(why),
         };
+        // What it did on the web, then what it said, then the pages it rests on.
+        for step in &reply.steps {
+            self.push(Entry::Step { words: step.words.clone(), state: if step.ok { StepState::Done } else { StepState::Failed } });
+        }
         if !reply.text.trim().is_empty() {
             self.push(Entry::Said(plain(&reply.text)));
         }
+        if !reply.sources.is_empty() && reply.stop != Stop::Paused {
+            self.push(Entry::Sources(reply.sources.clone()));
+        }
         match reply.stop {
-            Stop::Answered => {}
+            Stop::Answered => self.keep(),
+            Stop::Paused => {
+                // The service's own loop ran long: the conversation goes back
+                // as it is, and it carries on where it stopped.
+                self.continuations += 1;
+                if self.continuations > CONTINUATIONS {
+                    self.push(Entry::Note("it kept on searching · ask again to carry on".into()));
+                    self.keep();
+                } else {
+                    self.ask();
+                }
+            }
             Stop::Tools => {
                 self.calls = reply.calls.into();
                 self.next_call(robot);
@@ -1172,9 +1807,15 @@ impl Assistant {
         if self.rounds >= ROUNDS {
             self.busy = Busy::Idle;
             self.push(Entry::Note(format!("stopped after {ROUNDS} rounds of looking · ask again to carry on")));
+            self.keep();
             return;
         }
         self.ask();
+    }
+
+    /// The pages of the newest answer that has any.
+    fn last_sources(&self) -> Option<Vec<Source>> {
+        self.entries.iter().rev().find_map(|(e, _)| if let Entry::Sources(s) = e { Some(s.clone()) } else { None })
     }
 
     /// Run an Action on a thread, and keep a record of it on disk.
@@ -1262,6 +1903,7 @@ impl Assistant {
                     let h = lines.len() as f32 * cap_lh + 2.0;
                     Laid { lines, h }
                 }
+                Entry::Sources(_) => Laid { lines: Vec::new(), h: cap_lh + 2.0 },
             });
         }
         self.laid = Some((self.revision, size, laid));
@@ -1321,6 +1963,12 @@ struct StepWords {
     done: String,
 }
 
+/// A step done on the web: "searched the web: …", "read example.com",
+/// "looked in example.com for …" (not "read Loop/", a group of values).
+fn web_words(words: &str) -> bool {
+    words.starts_with("searched the web") || words.starts_with("looked in ") || words.strip_prefix("read ").is_some_and(|host| host.contains('.') && !host.contains('/'))
+}
+
 fn step_words(call: &Call) -> StepWords {
     let same = |s: &str| StepWords { working: s.to_owned(), done: s.to_owned() };
     match call.name.as_str() {
@@ -1332,6 +1980,10 @@ fn step_words(call: &Call) -> StepWords {
         "robot_agent" => StepWords { working: "asking the robot's agent".into(), done: "asked the robot's agent".into() },
         "match_logs" => same("looked at the match logs"),
         "list_actions" => same("looked at the actions"),
+        "event_schedule" => same("looked at the schedule"),
+        "graph_values" => same("looked at the live graphs"),
+        "handheld_status" => same("looked at this handheld"),
+        "read_file" => same(&format!("opened {}", call.input["path"].as_str().unwrap_or("a file").trim())),
         "run_action" => {
             let name = call.input["name"].as_str().unwrap_or_default().to_lowercase();
             StepWords { working: format!("running {name}"), done: format!("ran {name}") }
@@ -1342,11 +1994,11 @@ fn step_words(call: &Call) -> StepWords {
 
 /// The conversation's text: the sans at the caption's size (which follows the
 /// text size chosen), so more of it fits on the panel.
-fn chat_style(g: &Gfx) -> bezel::TextStyle {
+pub(crate) fn chat_style(g: &Gfx) -> bezel::TextStyle {
     bezel::TextStyle::body(g.ty.caption.size)
 }
 
-fn chat_line(g: &Gfx) -> f32 {
+pub(crate) fn chat_line(g: &Gfx) -> f32 {
     g.ty.caption.size + 3.5
 }
 
@@ -1381,8 +2033,17 @@ impl Screen for Assistant {
     }
 
     fn resume(&mut self) {
+        // A kept conversation chosen: back to it, with its own service.
+        if let Some(id) = take_open_chat() {
+            self.prefs = Prefs::load();
+            if let Err(why) = self.reopen(&id) {
+                self.start_over();
+                self.push(Entry::Note(why));
+            }
+            return;
+        }
         // A key added or the service changed: a fresh conversation, as the
-        // two services cannot carry on each other's.
+        // services cannot carry on each other's.
         let prefs = Prefs::load();
         let now = answering(&prefs, &Keys::load());
         let changed = now.as_ref().map(|(s, _)| *s) != self.service.as_ref().map(|(s, _)| *s);
@@ -1432,6 +2093,12 @@ impl Screen for Assistant {
             Key::Back if !self.idle() => self.stop(),
             Key::Back => return Nav::Pop,
             Key::Enter if !self.idle() => *cx.say = Some("still answering · esc stops it".into()),
+            // Nothing typed: the newest answer's pages, to open one.
+            Key::Enter if self.input.trim().is_empty() => {
+                if let Some(sources) = self.last_sources() {
+                    return Nav::Push(Box::new(SourcesPage::new(sources)));
+                }
+            }
             Key::Enter => self.send(),
             Key::Backspace => {
                 self.input.pop();
@@ -1542,6 +2209,7 @@ impl Screen for Assistant {
             g.text_at(PAD + 34.0, cy, Align::Left, &words, ty.caption, t.dim);
         }
         let mut ring: Option<(Rect, f32)> = None;
+        let newest_sources = self.entries.iter().rposition(|(e, _)| matches!(e, Entry::Sources(_))).unwrap_or(usize::MAX);
         for (i, ((entry, born), l)) in self.entries.iter().zip(&laid).enumerate().rev() {
             y -= l.h;
             if y + l.h < area.y {
@@ -1589,6 +2257,7 @@ impl Screen for Assistant {
                     let (icon, color) = match state {
                         StepState::Working => ("schedule", t.dim),
                         StepState::Done if words.starts_with("ran") || words.starts_with("running") => ("play_circle", t.dim),
+                        StepState::Done if web_words(words) => ("language", t.dim),
                         StepState::Done => ("visibility", t.dim),
                         StepState::Failed => ("error", g.fault()),
                     };
@@ -1632,6 +2301,21 @@ impl Screen for Assistant {
                     for (k, line) in l.lines.iter().enumerate() {
                         let cy = top + (k as f32 + 0.5) * cap_lh;
                         g.text_alpha(PAD + 20.0, cy, line, ty.caption, t.dim, fade(cy));
+                    }
+                }
+                Entry::Sources(list) => {
+                    // The pages an answer rests on, by site; Enter opens them
+                    // while this is the newest and nothing is typed.
+                    let cy = top + l.h * 0.5;
+                    g.icon_alpha("link", false, PAD + 8.0, cy, 13.0, t.dim, fade(cy));
+                    let opens = i == newest_sources && self.input.is_empty() && self.idle();
+                    let right = if opens { "enter ›" } else { "" };
+                    let right_w = if opens { g.measure(right, ty.caption) + 8.0 } else { 0.0 };
+                    let hosts: Vec<String> = list.iter().map(|s| host_of(&s.url)).collect();
+                    let words = g.text.fit(&format!("sources · {}", hosts.join(" · ")), &ty.caption, W - 2.0 * PAD - 22.0 - right_w);
+                    g.text_alpha(PAD + 20.0, cy, &words, ty.caption, t.dim, fade(cy));
+                    if opens {
+                        g.text_alpha(W - PAD - right_w + 6.0, cy, right, ty.caption, t.faint, fade(cy));
                     }
                 }
             }
@@ -1758,22 +2442,19 @@ impl Screen for Confirm {
 
 // --------------------------------------------------------------- choices ---
 
-/// Which service answers, how hard it thinks, and a fresh conversation.
+/// Which service answers, how hard it thinks, the conversations kept, and a
+/// fresh one.
 pub struct Choices {
     prefs: Prefs,
     keys: Keys,
     list: ListState,
 }
 
-const CHOICE_ROWS: usize = 4;
+const CHOICE_ROWS: usize = 5;
 
 impl Choices {
     fn new() -> Self {
         Choices { prefs: Prefs::load(), keys: Keys::load(), list: ListState::default() }
-    }
-
-    fn with_keys(&self) -> Vec<Service> {
-        Service::ALL.into_iter().filter(|s| self.keys.get(s.key()).is_some()).collect()
     }
 }
 
@@ -1786,18 +2467,34 @@ impl Screen for Choices {
         self.keys = Keys::load();
     }
 
+    fn update(&mut self, _cx: &mut Cx) -> Nav {
+        // A conversation chosen in the list: on back to the assistant.
+        if open_chat_waiting() {
+            return Nav::Pop;
+        }
+        Nav::Stay
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         match (key, self.list.focus) {
             (Key::Back | Key::Leave, _) => return Nav::Pop,
             (Key::Enter | Key::Right, 0) => {
-                let with_keys = self.with_keys();
+                let can = available(&self.keys);
                 let current = answering(&self.prefs, &self.keys).map(|(s, _)| s);
-                match with_keys.len() {
-                    0 | 1 => *cx.say = Some("the other service needs its key in keys".into()),
+                match can.len() {
+                    0 => *cx.say = Some("add a key in keys, or download the on-device model in settings".into()),
+                    1 => {
+                        *cx.say = Some(if crate::local::ready() { "the other services need their keys".into() } else { "a key in keys, or the on-device model from settings, adds another".into() })
+                    }
                     _ => {
-                        let at = with_keys.iter().position(|s| Some(*s) == current).unwrap_or(0);
-                        self.prefs.service = Some(with_keys[(at + 1) % with_keys.len()]);
+                        let at = can.iter().position(|s| Some(*s) == current).unwrap_or(0);
+                        self.prefs.service = Some(can[(at + 1) % can.len()]);
                         self.prefs.save();
+                        // Away from the on-device model: its memory back now,
+                        // not when it would have idled out.
+                        if current == Some(Service::Local) {
+                            crate::local::stop();
+                        }
                         *cx.say = Some("a new conversation with it".into());
                     }
                 }
@@ -1806,11 +2503,12 @@ impl Screen for Choices {
                 self.prefs.effort = self.prefs.effort.next();
                 self.prefs.save();
             }
-            (Key::Enter | Key::Right, 2) => {
+            (Key::Enter | Key::Right, 2) => return Nav::Push(Box::new(Conversations::new(chats_dir()))),
+            (Key::Enter | Key::Right, 3) => {
                 NEW_CHAT.store(true, Ordering::Relaxed);
                 return Nav::Pop;
             }
-            (Key::Enter | Key::Right, 3) => return Nav::Push(Box::new(crate::screens::SettingsApp::keys_page())),
+            (Key::Enter | Key::Right, 4) => return Nav::Push(Box::new(crate::screens::SettingsApp::keys_page())),
             (other, _) => crate::screens::list_key(&mut self.list, other, CHOICE_ROWS),
         }
         Nav::Stay
@@ -1820,23 +2518,294 @@ impl Screen for Choices {
         let t = g.tokens;
         let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
         let answering = answering(&self.prefs, &self.keys).map(|(s, _)| s);
+        let kept = list_chats(&chats_dir()).len();
+        let keys = Service::ALL.iter().filter(|s| s.online() && self.keys.get(s.key()).is_some()).count();
         for (i, y) in self.list.layout(g, CHOICE_ROWS, top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let (name, value, color) = match i {
                 0 => ("Answers with", answering.map_or("no key yet".to_owned(), |s| s.model_name().to_owned()), t.ink),
-                1 => ("Effort", self.prefs.effort.name().to_owned(), t.ink),
-                2 => ("New conversation", String::new(), t.dim),
-                _ => ("Keys", format!("{} of 2 set", self.with_keys().len()), t.dim),
+                1 => ("Effort", if answering == Some(Service::Local) { "–".to_owned() } else { self.prefs.effort.name().to_owned() }, t.ink),
+                2 => ("Conversations", if kept == 0 { "none yet".to_owned() } else { format!("{kept} kept ›") }, t.dim),
+                3 => ("New conversation", String::new(), t.dim),
+                _ => ("Keys", format!("{keys} of 2 set"), t.dim),
             };
             g.row(r, name, &value, color, i == self.list.focus);
         }
         self.list.scrollbar(g, CHOICE_ROWS, top, bottom);
         g.hint(match self.list.focus {
-            0 => "enter: the other service · a new conversation",
+            0 if crate::local::ready() => "enter: the next one · a new conversation",
+            0 => "on-device model: download it in settings",
             1 => "light answers sooner · medium thinks it through",
-            2 => "enter: clear this one",
+            2 => "enter: reopen one and carry on",
+            3 => "enter: clear this one",
             _ => "openai and claude keys",
         });
+    }
+}
+
+// --------------------------------------------------------- conversations ---
+
+/// The conversations kept, newest first: Enter reopens one, d (twice)
+/// forgets one.
+pub struct Conversations {
+    dir: PathBuf,
+    kept: Vec<KeptSummary>,
+    list: ListState,
+    deleting: Option<usize>,
+}
+
+impl Conversations {
+    fn new(dir: PathBuf) -> Self {
+        Conversations { kept: list_chats(&dir), dir, list: ListState::default(), deleting: None }
+    }
+}
+
+/// "just now", "12 min ago", "3 h ago", "yesterday", "4 days ago".
+fn ago(seconds: i64) -> String {
+    match seconds.max(0) {
+        s if s < 90 => "just now".into(),
+        s if s < 3600 => format!("{} min ago", s / 60),
+        s if s < 86_400 => format!("{} h ago", s / 3600),
+        s if s < 2 * 86_400 => "yesterday".into(),
+        s => format!("{} days ago", s / 86_400),
+    }
+}
+
+impl Screen for Conversations {
+    fn title(&self) -> &str {
+        // "Conversations" would not fit beside the robot's name.
+        "Chats"
+    }
+
+    fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
+        let armed = self.deleting.take();
+        let at = self.list.focus;
+        match key {
+            Key::Back | Key::Leave => return Nav::Pop,
+            Key::Enter | Key::Right => {
+                if let Some(k) = self.kept.get(at) {
+                    *OPEN_CHAT.lock().unwrap_or_else(|e| e.into_inner()) = Some(k.id.clone());
+                    return Nav::Pop;
+                }
+            }
+            Key::Char('d') if at < self.kept.len() => {
+                if armed == Some(at) {
+                    forget_chat(&self.dir, &self.kept[at].id);
+                    self.kept = list_chats(&self.dir);
+                    self.list.focus = self.list.focus.min(self.kept.len().saturating_sub(1));
+                    *cx.say = Some("forgotten".into());
+                } else {
+                    *cx.say = Some("d again forgets it".into());
+                    self.deleting = Some(at);
+                }
+            }
+            other => crate::screens::list_key(&mut self.list, other, self.kept.len()),
+        }
+        Nav::Stay
+    }
+
+    fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
+        let t = g.tokens;
+        if self.kept.is_empty() {
+            g.empty("forum", "no conversations kept yet");
+            g.hint("each one is kept once it has an answer");
+            return;
+        }
+        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let now = chrono::Utc::now().timestamp();
+        let style = if g.theme == crate::look::Theme::Bezel { g.ty.body } else { g.ty.label };
+        for (i, y) in self.list.layout(g, self.kept.len(), top, row_h, 3.0, bottom) {
+            let k = &self.kept[i];
+            let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
+            let value = ago(now - k.updated);
+            let value_w = g.measure(&value, style);
+            let title = g.text.fit(&k.title, &g.ty.body, (r.w - value_w - 34.0).max(40.0));
+            g.row(r, &title, &value, t.dim, i == self.list.focus);
+        }
+        self.list.scrollbar(g, self.kept.len(), top, bottom);
+        // Which service it was with, for the one chosen: it carries on there.
+        let with = self.kept.get(self.list.focus).map_or("", |k| k.service.label());
+        g.hint(&format!("enter: carry on with {with} · d: forget"));
+    }
+}
+
+// --------------------------------------------------------------- sources ---
+
+/// The pages an answer rests on: Enter opens one in the Web app (lynx).
+pub struct SourcesPage {
+    sources: Vec<Source>,
+    list: ListState,
+}
+
+impl SourcesPage {
+    pub(crate) fn new(sources: Vec<Source>) -> Self {
+        SourcesPage { sources, list: ListState::default() }
+    }
+}
+
+/// A URL as one word for the shell: in single quotes, its own quotes
+/// escaped, so `&` and `?` reach lynx as they are.
+fn shell_word(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// The Web app (lynx in a terminal) on a page.
+pub(crate) fn open_in_web(url: &str) -> Nav {
+    let command = format!("lynx -accept_all_cookies -nopause {}", shell_word(url));
+    Nav::Push(Box::new(crate::terminal::Terminal::running("Web", &command, crate::connect::session_dir())))
+}
+
+impl Screen for SourcesPage {
+    fn title(&self) -> &str {
+        "Sources"
+    }
+
+    fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
+        match key {
+            Key::Back | Key::Leave => Nav::Pop,
+            Key::Enter | Key::Right => self.sources.get(self.list.focus).map_or(Nav::Stay, |s| open_in_web(&s.url)),
+            other => {
+                crate::screens::list_key(&mut self.list, other, self.sources.len());
+                Nav::Stay
+            }
+        }
+    }
+
+    fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
+        let t = g.tokens;
+        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        // The title has the row; where it is from is said below, for the
+        // one chosen.
+        for (i, y) in self.list.layout(g, self.sources.len(), top, row_h, 3.0, bottom) {
+            let s = &self.sources[i];
+            let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
+            let title = g.text.fit(&s.title, &g.ty.body, r.w - 24.0);
+            g.row(r, &title, "", t.dim, i == self.list.focus);
+        }
+        self.list.scrollbar(g, self.sources.len(), top, bottom);
+        let host = self.sources.get(self.list.focus).map(|s| host_of(&s.url)).unwrap_or_default();
+        let host = g.text.fit(&host, &g.ty.caption, W * 0.55);
+        g.hint(&format!("enter: open {host} in web"));
+    }
+}
+
+// ----------------------------------------------------------- kept chats ---
+
+/// Where conversations are kept: /data/assistant/chats on the handheld.
+fn chats_dir() -> PathBuf {
+    if cfg!(target_os = "linux") && std::path::Path::new("/data").is_dir() {
+        PathBuf::from("/data/assistant/chats")
+    } else {
+        crate::config_dir().join("assistant-chats")
+    }
+}
+
+/// A kept conversation, as listed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KeptSummary {
+    pub id: String,
+    pub title: String,
+    pub service: Service,
+    /// When it last had an answer (seconds since 1970).
+    pub updated: i64,
+}
+
+/// A kept conversation, whole.
+struct Kept {
+    service: Service,
+    items: Vec<Value>,
+    entries: Vec<Entry>,
+}
+
+fn entry_json(entry: &Entry) -> Value {
+    match entry {
+        Entry::You(text) => json!({"you": text}),
+        Entry::Said(text) => json!({"said": text}),
+        Entry::Step { words, state } => json!({"step": words, "ok": *state != StepState::Failed}),
+        Entry::Asks { name, command, reason, state } => json!({"asks": name, "command": command, "reason": reason, "answer": match state { AskState::Yes => "yes", AskState::No => "no", AskState::Waiting => "no" }}),
+        Entry::Note(text) => json!({"note": text}),
+        Entry::Sources(list) => json!({"sources": list.iter().map(|s| json!({"title": s.title, "url": s.url})).collect::<Vec<_>>()}),
+    }
+}
+
+fn entry_from(v: &Value) -> Option<Entry> {
+    let text = |k: &str| v[k].as_str().map(str::to_owned);
+    if let Some(t) = text("you") {
+        return Some(Entry::You(t));
+    }
+    if let Some(t) = text("said") {
+        return Some(Entry::Said(t));
+    }
+    if let Some(words) = text("step") {
+        return Some(Entry::Step { words, state: if v["ok"].as_bool() == Some(false) { StepState::Failed } else { StepState::Done } });
+    }
+    if let Some(name) = text("asks") {
+        let state = if v["answer"] == "yes" { AskState::Yes } else { AskState::No };
+        return Some(Entry::Asks { name, command: text("command").unwrap_or_default(), reason: text("reason").unwrap_or_default(), state });
+    }
+    if let Some(t) = text("note") {
+        return Some(Entry::Note(t));
+    }
+    let list = v["sources"].as_array()?;
+    Some(Entry::Sources(list.iter().map(|s| Source { title: str_of(&s["title"]), url: str_of(&s["url"]) }).collect()))
+}
+
+/// Keep a conversation (replacing its earlier copy); the oldest beyond
+/// `CHATS_KEPT` go.
+fn save_chat(dir: &std::path::Path, id: &str, service: Service, title: &str, items: &[Value], entries: &[Entry]) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let kept = json!({
+        "service": service.key(),
+        "title": short(title, 80),
+        "updated": chrono::Utc::now().timestamp(),
+        "items": items,
+        "entries": entries.iter().map(entry_json).collect::<Vec<_>>(),
+    });
+    let saved = crate::sys::write_private(&dir.join(format!("{id}.json")), kept.to_string().as_bytes()).is_ok();
+    let all = list_chats(dir);
+    for old in all.iter().skip(CHATS_KEPT) {
+        forget_chat(dir, &old.id);
+    }
+    saved
+}
+
+/// The kept conversations, newest first.
+pub fn list_chats(dir: &std::path::Path) -> Vec<KeptSummary> {
+    let mut all: Vec<KeptSummary> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            let id = path.file_stem()?.to_string_lossy().into_owned();
+            if path.extension()? != "json" {
+                return None;
+            }
+            let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
+            let service = Service::ALL.into_iter().find(|s| v["service"] == s.key())?;
+            Some(KeptSummary { id, title: str_of(&v["title"]), service, updated: v["updated"].as_i64().unwrap_or(0) })
+        })
+        .collect();
+    all.sort_by_key(|k| std::cmp::Reverse((k.updated, k.id.clone())));
+    all
+}
+
+fn load_chat(dir: &std::path::Path, id: &str) -> Option<Kept> {
+    if id.contains(['/', '\\', '.']) {
+        return None;
+    }
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(format!("{id}.json"))).ok()?).ok()?;
+    let service = Service::ALL.into_iter().find(|s| v["service"] == s.key())?;
+    let items = v["items"].as_array()?.clone();
+    let entries = v["entries"].as_array().into_iter().flatten().filter_map(entry_from).collect();
+    Some(Kept { service, items, entries })
+}
+
+fn forget_chat(dir: &std::path::Path, id: &str) {
+    if !id.contains(['/', '\\', '.']) {
+        std::fs::remove_file(dir.join(format!("{id}.json"))).ok();
     }
 }
 
@@ -1877,7 +2846,10 @@ mod tests {
         assert_eq!(body["store"], false, "nothing kept on OpenAI's side");
         assert_eq!(body["input"][0]["content"], "how is the robot?");
         assert_eq!(body["tools"][0]["type"], "function");
-        assert!(body["tools"].as_array().unwrap().iter().all(|t| t["parameters"]["additionalProperties"] == false && t["strict"] == true));
+        let tools = body["tools"].as_array().unwrap();
+        assert!(tools.iter().filter(|t| t["type"] == "function").all(|t| t["parameters"]["additionalProperties"] == false && t["strict"] == true));
+        assert_eq!(tools.last(), Some(&json!({"type": "web_search"})), "the hosted web search, as OpenAI's guide gives it");
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content", "web_search_call.action.sources"]));
         let mut chat = Chat::new(Service::Claude);
         chat.ask("how is the robot?");
         let body = chat.body(Effort::Medium);
@@ -1887,9 +2859,215 @@ mod tests {
         assert!(body.get("thinking").is_none(), "Opus 5.5 thinks as it sees fit; nothing to set");
         assert!(body.get("temperature").is_none());
         assert_eq!(body["messages"][0]["role"], "user");
-        assert!(body["tools"].as_array().unwrap().iter().all(|t| t["input_schema"]["type"] == "object"));
+        let tools = body["tools"].as_array().unwrap();
+        assert!(tools.iter().filter(|t| t.get("type").is_none()).all(|t| t["input_schema"]["type"] == "object"));
+        // The server tools, as the docs give them: no code_execution beside them.
+        let server: Vec<&Value> = tools.iter().filter(|t| t.get("type").is_some()).collect();
+        assert_eq!(server[0], &json!({"type": "web_search_20260209", "name": "web_search", "max_uses": WEB_USES}));
+        assert_eq!(server[1]["type"], "web_fetch_20260209");
+        assert_eq!(server[1]["name"], "web_fetch");
+        assert_eq!(server[1]["citations"], json!({"enabled": true}));
+        assert!(!tools.iter().any(|t| t["name"] == "code_execution"));
         let names: Vec<&str> = tool_specs().iter().map(|(n, ..)| *n).collect();
-        assert_eq!(names, ["robot_status", "robot_values", "robot_agent", "match_logs", "list_actions", "run_action"]);
+        assert_eq!(names, ["robot_status", "robot_values", "robot_agent", "match_logs", "event_schedule", "graph_values", "read_file", "handheld_status", "list_actions", "run_action"]);
+        // The on-device model: OpenAI-style chat completions, its own short
+        // prompt first, no tools.
+        let mut chat = Chat::new(Service::Local);
+        chat.ask("what is a brownout?");
+        let body = chat.body(Effort::Medium);
+        assert_eq!(body["messages"][0], json!({"role": "system", "content": LOCAL_SYSTEM}));
+        assert_eq!(body["messages"][1], json!({"role": "user", "content": "what is a brownout?"}));
+        assert_eq!(body["max_tokens"], LOCAL_MAX_TOKENS);
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn claude_web_steps_and_sources_come_out_and_its_blocks_go_back_verbatim() {
+        let mut chat = Chat::new(Service::Claude);
+        chat.ask("how long is auto?");
+        // The documentation's own response shape.
+        let reply = json!({"content": [
+            {"type": "text", "text": "I'll search."},
+            {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {"query": "frc 2026 auto length"}},
+            {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": [
+                {"type": "web_search_result", "url": "https://www.firstinspires.org/manual", "title": "Game Manual", "encrypted_content": "Eqgf…", "page_age": "January 10, 2026"},
+                {"type": "web_search_result", "url": "https://frc-qa.firstinspires.org/", "title": "Q&A", "encrypted_content": "Eqgg…"}
+            ]},
+            {"type": "server_tool_use", "id": "srvtoolu_2", "name": "web_fetch", "input": {"url": "https://www.chiefdelphi.com/t/1"}},
+            {"type": "web_fetch_tool_result", "tool_use_id": "srvtoolu_2", "content": {"type": "web_fetch_tool_result_error", "error_code": "url_not_accessible"}},
+            {"type": "server_tool_use", "id": "srvtoolu_3", "name": "web_fetch", "input": {"url": "https://docs.wpilib.org/a"}},
+            {"type": "web_fetch_tool_result", "tool_use_id": "srvtoolu_3", "content": {"type": "web_fetch_result", "url": "https://docs.wpilib.org/a", "content": {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "…"}, "title": "WPILib A"}, "retrieved_at": "2025-08-25T10:30:00Z"}},
+            {"type": "text", "text": "Autonomous lasts 20 seconds.", "citations": [{"type": "web_search_result_location", "url": "https://www.firstinspires.org/manual", "title": "Game Manual", "encrypted_index": "Eo8B…", "cited_text": "Autonomous…"}]}
+        ], "stop_reason": "end_turn"});
+        let r = chat.take(&reply).unwrap();
+        assert_eq!(r.stop, Stop::Answered);
+        assert_eq!(r.text, "I'll search.\nAutonomous lasts 20 seconds.");
+        assert_eq!(
+            r.steps,
+            [
+                WebStep { words: "searched the web: frc 2026 auto length".into(), ok: true },
+                WebStep { words: "read chiefdelphi.com · url not accessible".into(), ok: false },
+                WebStep { words: "read docs.wpilib.org".into(), ok: true },
+            ]
+        );
+        // Cited first, then what it read; the merely found are left out.
+        assert_eq!(r.sources, [Source { title: "Game Manual".into(), url: "https://www.firstinspires.org/manual".into() }, Source { title: "WPILib A".into(), url: "https://docs.wpilib.org/a".into() }]);
+        // Every block goes back exactly as it came, encrypted content and all.
+        assert_eq!(chat.items[1]["content"], reply["content"]);
+        // A paused turn: kept, and to be carried on with no new question.
+        let before = chat.len();
+        let paused = chat.take(&json!({"content": [{"type": "server_tool_use", "id": "srvtoolu_9", "name": "web_search", "input": {"query": "more"}}], "stop_reason": "pause_turn"})).unwrap();
+        assert_eq!(paused.stop, Stop::Paused);
+        assert_eq!(chat.len(), before + 1);
+        assert_eq!(chat.body(Effort::Medium)["messages"].as_array().unwrap().last().unwrap()["role"], "assistant", "sent back ending on the paused message itself");
+        // A search that failed as a whole: its error object, not a list.
+        let failed = chat.take(&json!({"content": [
+            {"type": "server_tool_use", "id": "s", "name": "web_search", "input": {"query": "x"}},
+            {"type": "web_search_tool_result", "tool_use_id": "s", "content": {"type": "web_search_tool_result_error", "error_code": "max_uses_exceeded"}},
+            {"type": "text", "text": "Could not look."}
+        ], "stop_reason": "end_turn"})).unwrap();
+        assert_eq!(failed.steps, [WebStep { words: "searched the web: x · max uses exceeded".into(), ok: false }]);
+        assert!(failed.sources.is_empty());
+    }
+
+    #[test]
+    fn openai_web_searches_show_as_steps_and_their_citations_as_sources() {
+        let mut chat = Chat::new(Service::OpenAi);
+        chat.ask("latest news?");
+        // The documentation's own output shape.
+        let reply = json!({"status": "completed", "output": [
+            {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "enc"},
+            {"type": "web_search_call", "id": "ws_1", "status": "completed", "action": {"type": "search", "query": "latest frc news", "sources": [{"type": "url", "url": "https://a.example/x"}, {"type": "url", "url": "https://b.example/y"}]}},
+            {"type": "web_search_call", "id": "ws_2", "status": "completed", "action": {"type": "open_page", "url": "https://b.example/y"}},
+            {"type": "web_search_call", "id": "ws_3", "status": "completed", "action": {"type": "find_in_page", "url": "https://b.example/y", "pattern": "kickoff"}},
+            {"id": "msg_1", "type": "message", "status": "completed", "role": "assistant", "content": [{"type": "output_text", "text": "Kickoff is in January.", "annotations": [{"type": "url_citation", "start_index": 0, "end_index": 7, "url": "https://b.example/y", "title": "B news"}]}]}
+        ]});
+        let r = chat.take(&reply).unwrap();
+        assert_eq!(r.text, "Kickoff is in January.");
+        assert_eq!(r.steps.iter().map(|s| s.words.as_str()).collect::<Vec<_>>(), ["searched the web: latest frc news", "read b.example", "looked in b.example for “kickoff”"]);
+        assert_eq!(r.sources, [Source { title: "B news".into(), url: "https://b.example/y".into() }], "the cited page once, though it was also opened");
+        assert_eq!(&chat.items[1..], reply["output"].as_array().unwrap().as_slice(), "every item goes back as it came");
+        // With nothing cited or opened, the first few found stand in.
+        let mut chat = Chat::new(Service::OpenAi);
+        chat.ask("q");
+        let r = chat.take(&json!({"status": "completed", "output": [
+            {"type": "web_search_call", "id": "ws", "status": "completed", "action": {"type": "search", "queries": ["one"], "sources": [{"type": "url", "url": "https://c.example/"}]}},
+            {"type": "message", "content": [{"type": "output_text", "text": "An answer.", "annotations": []}]}
+        ]})).unwrap();
+        assert_eq!(r.steps[0].words, "searched the web: one");
+        assert_eq!(r.sources, [Source { title: "c.example".into(), url: "https://c.example/".into() }]);
+    }
+
+    #[test]
+    fn the_on_device_model_answers_in_chat_completions_shape() {
+        let mut chat = Chat::new(Service::Local);
+        chat.ask("hi");
+        let r = chat.take(&json!({"choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": " Hello. "}}]})).unwrap();
+        assert_eq!((r.text.as_str(), r.stop), ("Hello.", Stop::Answered));
+        assert_eq!(chat.items[1], json!({"role": "assistant", "content": "Hello."}));
+        assert_eq!(chat.take(&json!({"choices": [{"finish_reason": "length", "message": {"content": "a long"}}]})).unwrap().stop, Stop::Cut);
+        assert!(chat.take(&json!({"choices": []})).is_err());
+    }
+
+    #[test]
+    fn secrets_under_data_are_never_given_out() {
+        crate::shell::tests::sandbox();
+        let root = data_root();
+        std::fs::create_dir_all(root.join("notes")).unwrap();
+        std::fs::write(root.join("notes/pit.txt"), "swap battery 3").unwrap();
+        let read = read_file("/data/notes/pit.txt").unwrap();
+        assert!(read.contains("swap battery 3"), "{read}");
+        assert!(read_file("/data/notes").unwrap().contains("pit.txt"), "a folder lists its files");
+        for secret_path in ["/data/catalyst/keys", "/data/wifi/wpa_supplicant.conf", "/data/ssh/id_ed25519", "/data/tailscale/state", "/data/x/api.token"] {
+            assert!(secret(std::path::Path::new(secret_path)), "{secret_path}");
+        }
+        assert!(read_file("/data/../../etc/passwd").is_err(), "nothing above /data");
+        std::fs::remove_dir_all(root.join("notes")).ok();
+    }
+
+    #[test]
+    fn conversations_are_kept_newest_first_and_reopened_whole() {
+        let dir = std::env::temp_dir().join(format!("catalyst-chats-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let items = vec![json!({"role": "user", "content": "q"}), json!({"role": "assistant", "content": [{"type": "text", "text": "a"}]})];
+        let entries = vec![
+            Entry::You("q".into()),
+            Entry::Step { words: "searched the web: q".into(), state: StepState::Done },
+            Entry::Said("a".into()),
+            Entry::Sources(vec![Source { title: "T".into(), url: "https://t.example/".into() }]),
+            Entry::Asks { name: "Deploy".into(), command: "./gradlew deploy".into(), reason: "asked".into(), state: AskState::No },
+            Entry::Note("stopped".into()),
+        ];
+        assert!(save_chat(&dir, "100", Service::Claude, "q", &items, &entries));
+        let kept = load_chat(&dir, "100").unwrap();
+        assert_eq!((kept.service, kept.items.clone(), kept.entries.clone()), (Service::Claude, items.clone(), entries.clone()));
+        // The oldest go beyond the most kept; the list is newest first.
+        for i in 0..CHATS_KEPT + 2 {
+            save_chat(&dir, &format!("{}", 200 + i), Service::OpenAi, &format!("chat {i}"), &items, &[]);
+        }
+        let all = list_chats(&dir);
+        assert_eq!(all.len(), CHATS_KEPT);
+        assert!(all.windows(2).all(|w| (w[0].updated, &w[0].id) >= (w[1].updated, &w[1].id)));
+        assert!(load_chat(&dir, "../keys").is_none(), "only a kept conversation's own name");
+        forget_chat(&dir, &all[0].id);
+        assert_eq!(list_chats(&dir).len(), CHATS_KEPT - 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_web_question_shows_its_steps_and_sources_and_is_kept() {
+        crate::shell::tests::sandbox();
+        for service in [Service::OpenAi, Service::Claude] {
+            let (mut robot, mut settings, mut say) = cx_parts();
+            let mut page = page_for(service);
+            page.chats = std::env::temp_dir().join(format!("catalyst-webchat-{}-{service:?}", std::process::id()));
+            std::fs::remove_dir_all(&page.chats).ok();
+            type_and_send(&mut page, "how long is autonomous this year?", &mut robot, &mut settings, &mut say);
+            run(&mut page, &mut robot, &mut settings, &mut say, 400);
+            let entries: Vec<Entry> = page.entries.iter().map(|(e, _)| e.clone()).collect();
+            assert!(entries.iter().any(|e| matches!(e, Entry::Step { words, state: StepState::Done } if words.starts_with("searched the web"))), "{service:?}: {entries:?}");
+            assert_eq!(entries.last(), Some(&Entry::Sources(vec![Source { title: DEMO_MANUAL_TITLE.into(), url: DEMO_MANUAL_URL.into() }])));
+            // Enter with nothing typed opens them.
+            let mut cx = Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true };
+            assert!(matches!(page.key(Key::Enter, &mut cx), Nav::Push(_)));
+            // Kept, and reopened whole on a fresh page.
+            let kept = list_chats(&page.chats);
+            assert_eq!(kept.len(), 1);
+            assert_eq!(kept[0].title, "how long is autonomous this year?");
+            let mut again = page_for(service);
+            again.chats = page.chats.clone();
+            let mut keys = Keys::default();
+            keys.set(service.key(), "sk-test");
+            keys.save().unwrap();
+            again.reopen(&kept[0].id).unwrap();
+            assert_eq!(again.entries.iter().map(|(e, _)| e.clone()).collect::<Vec<_>>(), entries);
+            assert_eq!(again.chat.as_ref().unwrap().len(), page.chat.as_ref().unwrap().len());
+            std::fs::remove_dir_all(&page.chats).ok();
+        }
+        Keys::default().save().ok();
+    }
+
+    #[test]
+    fn a_paused_turn_is_carried_on_without_a_new_question() {
+        crate::shell::tests::sandbox();
+        let (mut robot, _, _) = cx_parts();
+        let mut page = page_for(Service::Claude);
+        page.input = "search for something".into();
+        page.send();
+        page.busy = Busy::Idle;
+        let before = page.chat.as_ref().unwrap().len();
+        page.took(Ok(json!({"content": [{"type": "server_tool_use", "id": "s1", "name": "web_search", "input": {"query": "x"}}], "stop_reason": "pause_turn"})), &robot);
+        assert!(matches!(page.busy, Busy::Asking(_)), "asked again at once");
+        assert_eq!(page.continuations, 1);
+        let items = page.chat.as_ref().unwrap();
+        assert_eq!(items.len(), before + 1, "the paused message kept; no new question");
+        // Too many: it stops and says so.
+        page.continuations = CONTINUATIONS;
+        page.busy = Busy::Idle;
+        page.took(Ok(json!({"content": [{"type": "server_tool_use", "id": "s2", "name": "web_search", "input": {"query": "y"}}], "stop_reason": "pause_turn"})), &robot);
+        assert!(page.idle());
+        assert!(matches!(page.entries.last(), Some((Entry::Note(n), _)) if n.contains("kept on searching")));
+        let _ = &mut robot;
     }
 
     #[test]
@@ -1993,13 +3171,30 @@ mod tests {
         let mut page = Assistant::with(Prefs::default(), Some((service, "sk-test".into())));
         let saved = |name: &str, command: &str| Saved { name: name.into(), command: command.into(), ask: crate::commands::Ask::Auto };
         page.actions_given = Some(vec![saved("Ping the robot", "ping -c 4 {robot}"), saved("Deploy robot code", "cd /data/code/robot && ./gradlew deploy")]);
+        // Each page keeps its conversations apart from every other test's.
+        static PAGES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = PAGES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        page.chats = std::env::temp_dir().join(format!("catalyst-page-chats-{}-{n}", std::process::id()));
         page
+    }
+
+    #[test]
+    fn the_on_device_model_answers_plainly_with_no_tools() {
+        crate::shell::tests::sandbox();
+        let (mut robot, mut settings, mut say) = cx_parts();
+        let mut page = page_for(Service::Local);
+        type_and_send(&mut page, "how is the robot doing?", &mut robot, &mut settings, &mut say);
+        run(&mut page, &mut robot, &mut settings, &mut say, 400);
+        let entries: Vec<Entry> = page.entries.iter().map(|(e, _)| e.clone()).collect();
+        assert_eq!(entries.len(), 2, "a question and its answer, nothing looked at: {entries:?}");
+        assert!(matches!(&entries[1], Entry::Said(s) if s.contains("brownout")));
+        assert!(page.idle());
     }
 
     #[test]
     fn a_question_looks_at_the_robot_runs_an_action_and_is_answered_by_either_service() {
         crate::shell::tests::sandbox();
-        for service in Service::ALL {
+        for service in [Service::OpenAi, Service::Claude] {
             let (mut robot, mut settings, mut say) = cx_parts();
             let mut page = page_for(service);
             type_and_send(&mut page, "how is the robot doing?", &mut robot, &mut settings, &mut say);

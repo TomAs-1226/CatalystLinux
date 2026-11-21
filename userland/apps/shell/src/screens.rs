@@ -52,7 +52,7 @@ struct App {
     open: fn(&Robot) -> Box<dyn Screen>,
 }
 
-const APPS: [App; 26] = [
+const APPS: [App; 27] = [
     App { icon: "smart_toy", name: "Robot", open: |_| Box::new(RobotScreen::default()) },
     App { icon: "monitor_heart", name: "Health", open: |_| Box::new(Health::default()) },
     App { icon: "description", name: "Logs", open: |_| Box::new(LogsScreen::default()) },
@@ -76,6 +76,8 @@ const APPS: [App; 26] = [
     App { icon: "straighten", name: "Level", open: |_| Box::new(crate::level::Level::new()) },
     App { icon: "explore", name: "Compass", open: |_| Box::new(crate::level::Compass::new()) },
     App { icon: "sunny", name: "Weather", open: |_| Box::new(crate::weather::Weather::new()) },
+    // The web read for you: an address made readable, a question answered.
+    App { icon: "travel_explore", name: "Browse", open: |_| Box::new(crate::browse::Browse::new()) },
     App { icon: "auto_awesome", name: "Assistant", open: |_| Box::new(crate::ai::Assistant::new()) },
     // Pages as text: lynx in a terminal, on a start page of searches and FRC sites.
     App {
@@ -448,6 +450,7 @@ impl Home {
             "Compass" => ("heading".into(), None),
             "Weather" => crate::weather::tile(),
             "Assistant" => crate::ai::tile(),
+            "Browse" => ("read the web".into(), None),
             "Web" => ("pages as text".into(), None),
             "Logs" => {
                 let rows = robot.logs.list();
@@ -3307,7 +3310,7 @@ mod tests {
         pretend(Some(Found::Nothing));
         let shown = builtin(&Home::new());
         assert!(!shown.iter().any(|n| n == "Level" || n == "Compass"), "{shown:?}");
-        assert_eq!(shown.len(), 24, "the twenty-four the emulator's run counts on (Remote, Weather, Assistant and Web are on every unit)");
+        assert_eq!(shown.len(), 25, "the twenty-five the emulator's run counts on (Remote, Weather, Browse, Assistant and Web are on every unit)");
         assert_eq!(shown.last().map(String::as_str), Some("Settings"), "Settings stays last");
         assert_eq!(builtin_apps().position(|(_, _, n)| n == "Terminal"), Some(8), "Terminal where it was");
         assert!(!builtin_apps().any(|(_, _, n)| n == "Level"), "nor in search");
