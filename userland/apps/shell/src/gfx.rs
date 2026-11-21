@@ -104,6 +104,9 @@ pub struct Gfx {
     pub canvas: Canvas,
     pub text: Text,
     pub icons: Icons,
+    /// Icon names asked for that were never built in: drawn as nothing, so
+    /// kept to be caught (the gallery and the tests fail on any).
+    missing_icons: std::collections::BTreeSet<String>,
     pub glass: Glass,
     pub tokens: Tokens,
     /// The accent the palette was grown from.
@@ -210,6 +213,7 @@ impl Gfx {
             canvas: Canvas::new(W as i32, H as i32),
             text: Text::new(),
             icons: Icons::new(),
+            missing_icons: Default::default(),
             glass: Glass::new(),
             tokens,
             accent: bezel::Accent::Orange,
@@ -356,13 +360,22 @@ impl Gfx {
     }
 
     pub fn icon(&mut self, name: &str, filled: bool, cx: f32, cy: f32, size: f32, color: Color) {
-        self.icons.draw(&mut self.canvas, name, filled, cx + self.ox, cy, size, color, 1.0);
+        self.icon_alpha(name, filled, cx, cy, size, color, 1.0);
     }
 
     /// An icon at an opacity.
     #[allow(clippy::too_many_arguments)]
     pub fn icon_alpha(&mut self, name: &str, filled: bool, cx: f32, cy: f32, size: f32, color: Color, alpha: f32) {
-        self.icons.draw(&mut self.canvas, name, filled, cx + self.ox, cy, size, color, alpha);
+        let drawn = self.icons.draw(&mut self.canvas, name, filled, cx + self.ox, cy, size, color, alpha);
+        if !drawn && !name.is_empty() && !self.missing_icons.contains(name) {
+            eprintln!("catalyst-shell: no icon called {name:?}");
+            self.missing_icons.insert(name.to_owned());
+        }
+    }
+
+    /// The icon names asked for that are not built in.
+    pub fn missing_icons(&self) -> &std::collections::BTreeSet<String> {
+        &self.missing_icons
     }
 
     /// Drawing set something moving: frames should follow at once.

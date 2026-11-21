@@ -11,6 +11,11 @@
 //! the page came from. Esc goes back a page, Tab skips one, and anything
 //! skipped can be set later in Settings, or from a computer. The keyboard
 //! lesson is also offered on its own, from Settings › Help.
+//!
+//! Set up from a computer on first start, what it sent arrives a row at a
+//! time, and then come the pages only the handheld can do (the hardware
+//! check, the keyboard lesson, the name and time zone, power), with those the
+//! computer left unanswered.
 
 use bezel::{Accent, Color, Rect, TextStyle, Tokens, Tone};
 use detent::role;
@@ -349,6 +354,36 @@ pub struct Setup {
     /// page's list scrolling as it fills.
     received: Vec<(String, String)>,
     received_scroll: detent::Animated,
+    /// The pages this setup goes through: all of `FLOW`, or, once a computer
+    /// has sent its answers on first start, those only the handheld can do
+    /// (`left_for_handheld`).
+    flow: Vec<Page>,
+    /// A computer sent the answers on first start: setup goes on from what
+    /// it received, and never back to the welcome.
+    sent_from_computer: bool,
+}
+
+/// What is left to do on the handheld once a computer has sent its answers
+/// on first start, in `FLOW`'s order. The page on the computer has nothing
+/// for the hardware check, the keyboard lesson, the name and time zone or
+/// the power choices, so those always follow. Wi-Fi is passed by (there is a
+/// network: the page came over it; any networks sent are joined), and so are
+/// the keys (typed on the computer, or left for Settings). The team, the
+/// choices and the look are asked again only if the computer left them all
+/// unanswered.
+fn left_for_handheld(a: &crate::remote::Answers) -> Vec<Page> {
+    let choices_sent = [a.open_robot, a.match_report, a.ssh, a.calm].iter().any(Option::is_some);
+    let look_sent = a.accent.is_some() || a.light.is_some() || a.text.is_some() || a.home.is_some();
+    FLOW.iter()
+        .copied()
+        .filter(|page| match page {
+            Page::Wifi | Page::Keys => false,
+            Page::Team => a.team.is_none(),
+            Page::Choices => !choices_sent,
+            Page::Look => !look_sent,
+            _ => true,
+        })
+        .collect()
 }
 
 impl Setup {
@@ -375,6 +410,8 @@ impl Setup {
             wifi_by_setup: false,
             received: Vec::new(),
             received_scroll: detent::Animated::new(0.0, role::release()).with_rest(0.01),
+            flow: FLOW.to_vec(),
+            sent_from_computer: false,
         }
     }
 
@@ -393,6 +430,15 @@ impl Setup {
         let mut setup = Setup { from_settings: true, ..Self::new() };
         setup.received = crate::remote::received(answers);
         setup.go(Page::Receiving, true);
+        setup
+    }
+
+    /// First start after a computer sent `answers`: the first of the pages
+    /// left for the handheld, for the gallery.
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn after_computer(answers: &crate::remote::Answers) -> Self {
+        let mut setup = Setup { flow: left_for_handheld(answers), sent_from_computer: true, ..Self::new() };
+        setup.go(setup.flow[0], true);
         setup
     }
 
@@ -437,6 +483,26 @@ impl Setup {
             }
         }
         crate::save_settings(cx.settings);
+    }
+
+    /// What a computer sent: shown arriving, put in place, and on first
+    /// start followed by the pages only the handheld can do.
+    fn take_answers(&mut self, answers: crate::remote::Answers, cx: &mut Cx) {
+        // What arrived, to show it coming in, row by row; then in place.
+        self.received = crate::remote::received(&answers);
+        // On first start, what only the handheld can do follows (the
+        // keyboard lesson above all); from Settings, this was the whole job.
+        if !self.from_settings {
+            self.flow = left_for_handheld(&answers);
+            self.sent_from_computer = true;
+        }
+        self.apply(answers, cx);
+        if !self.from_settings {
+            // What the computer sent is in place whatever happens next.
+            crate::mark_setup_done();
+        }
+        self.received_scroll.jump(0.0);
+        self.go(Page::Receiving, true);
     }
 
     fn go(&mut self, page: Page, forward: bool) {
@@ -544,8 +610,8 @@ impl Setup {
         let page = match self.page {
             Page::Welcome | Page::Computer => FLOW[0],
             Page::Finishing => Page::Finishing,
-            page => match FLOW.iter().position(|p| *p == page) {
-                Some(i) if i + 1 < FLOW.len() => FLOW[i + 1],
+            page => match self.flow.iter().position(|p| *p == page) {
+                Some(i) if i + 1 < self.flow.len() => self.flow[i + 1],
                 // The last page: everything chosen is kept, and setup is not shown again.
                 _ => {
                     crate::save_settings(cx.settings);
@@ -565,8 +631,10 @@ impl Setup {
         let page = match self.page {
             Page::Welcome | Page::Computer => Page::Welcome,
             Page::Finishing => return Nav::Stay,
-            page => match FLOW.iter().position(|p| *p == page) {
-                Some(i) if i > 0 => FLOW[i - 1],
+            page => match self.flow.iter().position(|p| *p == page) {
+                Some(i) if i > 0 => self.flow[i - 1],
+                // What a computer sent is in place: nothing to go back to.
+                _ if self.sent_from_computer => return Nav::Stay,
                 _ => Page::Welcome,
             },
         };
@@ -683,13 +751,13 @@ impl Setup {
         brand::mark(g, LEFT + 4.0, 13.0, 12.0, CRIMSON, 1.0);
         // The steps: those done, the one under way in crimson, those to come.
         // (Not for a page opened alone from Settings.)
-        let at = FLOW.iter().position(|p| *p == self.page);
+        let at = self.flow.iter().position(|p| *p == self.page);
         if self.from_settings || (at.is_none() && self.page != Page::Finishing) {
             return;
         }
         let (w, gap) = (14.0, 4.0);
-        let x0 = W - LEFT - FLOW.len() as f32 * (w + gap) + gap;
-        for i in 0..FLOW.len() {
+        let x0 = W - LEFT - self.flow.len() as f32 * (w + gap) + gap;
+        for i in 0..self.flow.len() {
             let color = match at {
                 Some(at) if i == at => CRIMSON,
                 Some(at) if i < at => INK_THIN,
@@ -739,7 +807,7 @@ impl Setup {
         if !self.has_next() {
             return;
         }
-        let label = if self.page == *FLOW.last().expect("setup has pages") { "Finish" } else { "Next" };
+        let label = if self.flow.last() == Some(&self.page) { "Finish" } else { "Next" };
         let style = TextStyle::sans(11.0, 600.0);
         let bw = g.measure(label, style) + 28.0;
         let r = Rect::new(W - LEFT - bw, BAR_CY - 9.0, bw, 18.0);
@@ -1211,14 +1279,7 @@ impl Screen for Setup {
 
     fn update(&mut self, cx: &mut Cx) -> Nav {
         let Some(answers) = self.remote.as_mut().and_then(|r| r.take()) else { return Nav::Stay };
-        // What arrived, to show it coming in, row by row; then in place.
-        self.received = crate::remote::received(&answers);
-        self.apply(answers, cx);
-        if !self.from_settings {
-            crate::mark_setup_done();
-        }
-        self.received_scroll.jump(0.0);
-        self.go(Page::Receiving, true);
+        self.take_answers(answers, cx);
         Nav::Stay
     }
 
@@ -1260,7 +1321,9 @@ impl Screen for Setup {
             }
             self.received_scroll.tick(dt);
             if self.entered >= RECEIVE_FIRST + self.received.len() as f32 * RECEIVE_STEP + RECEIVE_HOLD {
-                self.go(Page::Finishing, true);
+                // On to what is left for the handheld, else all set.
+                let next = if self.sent_from_computer { self.flow.first().copied() } else { None };
+                self.go(next.unwrap_or(Page::Finishing), true);
             }
             changed = true;
         }
@@ -1534,6 +1597,57 @@ mod tests {
         for (name, _) in crate::remote::received(&full) {
             assert!(g.measure(&name, TextStyle::sans(11.0, 600.0)) + 32.0 + 60.0 <= W - 2.0 * LEFT, "{name}");
         }
+    }
+
+    #[test]
+    fn after_a_computer_sends_on_first_start_the_handheld_pages_follow() {
+        crate::shell::tests::sandbox();
+        let (mut settings, mut robot) = (crate::shell::Settings::default(), Robot::none());
+        // First start, set up from a computer that sent the team, a network,
+        // the look and the choices.
+        let mut setup = Setup::new();
+        setup.go(Page::Computer, true);
+        let sent = crate::remote::answers(&crate::remote::parse_form("team=5805&ssid1=Workshop&psk1=hunter22&accent=rose&mode=light&choices=1&open_robot=on"));
+        let mut say = None;
+        setup.take_answers(sent, &mut Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true });
+        assert_eq!(setup.page, Page::Receiving);
+        assert_eq!(setup.flow, [Page::Hardware, Page::Lesson, Page::Place, Page::Power], "what the computer page has nothing for");
+        // What arrived shows, then on to the hardware check: not all set yet.
+        let mut waited = 0.0;
+        while setup.page == Page::Receiving && waited < 10.0 {
+            setup.tick(0.1);
+            waited += 0.1;
+        }
+        assert_eq!(setup.page, Page::Hardware);
+        // Nothing to go back to: what was sent is in place.
+        press(&mut setup, &mut settings, &mut robot, Key::Back);
+        assert_eq!(setup.page, Page::Hardware);
+        // Through them in order (Tab skips each, the lesson whole), then all set.
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            seen.push(setup.page);
+            press(&mut setup, &mut settings, &mut robot, Key::Tab);
+        }
+        assert_eq!(seen, [Page::Hardware, Page::Lesson, Page::Place, Page::Power]);
+        assert_eq!(setup.page, Page::Finishing);
+        // A computer that left the team, the look and the choices unanswered:
+        // those are asked here too. Wi-Fi and the keys never are.
+        assert_eq!(
+            left_for_handheld(&crate::remote::Answers::default()),
+            [Page::Hardware, Page::Lesson, Page::Team, Page::Place, Page::Choices, Page::Power, Page::Look]
+        );
+        // From Settings, receiving is the whole job.
+        let sent = crate::remote::answers(&crate::remote::parse_form("team=5805"));
+        let mut again = Setup { from_settings: true, ..Setup::new() };
+        again.go(Page::Computer, true);
+        let mut say = None;
+        again.take_answers(sent, &mut Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true });
+        let mut waited = 0.0;
+        while again.page == Page::Receiving && waited < 10.0 {
+            again.tick(0.1);
+            waited += 0.1;
+        }
+        assert_eq!(again.page, Page::Finishing);
     }
 
     #[test]
