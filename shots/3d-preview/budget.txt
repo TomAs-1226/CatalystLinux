@@ -1,5 +1,5 @@
 pack (in the program file; read in place, never copied whole): 2869 kB
-on this PC: decoding and colouring a robot frame (112 px, its parts by state): 228 µs; a frame while it turns (two angles blended): 44 µs
+on this PC: decoding and colouring a robot frame (112 px, its parts by state): 230 µs; a frame while it turns (two angles blended): 44 µs
 the handheld, estimated at 20x this PC (README's factor): 4.6 ms to decode a frame, 0.9 ms a frame while it turns
 cache of coloured frames: at most 384 kB (CACHE_BYTES)
 the Robot page turning for 20 s: 343 kB of frames at most, 57 frames decoded
