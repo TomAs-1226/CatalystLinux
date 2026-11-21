@@ -1,0 +1,12 @@
+id = sudoku
+name = Sudoku
+icon = grid_on
+about = one answer, three levels
+description = A new puzzle each game, made on the handheld with exactly one answer: easy, standard or hard. Pencil notes, mistakes shown at once, how many of each digit are left, and your best time at each level.
+version = 1.0.0
+run = ./catalyst-sudoku
+screen = own
+binary = catalyst-sudoku
+credit = Rebuilt for Catalyst from sudokuzero by dbrhspyjkf-code (MIT), in the CardputerZero app store
+licence = MIT
+source = https://github.com/TomAs-1226/CatalystLinux/tree/main/userland/catalogue/sudoku

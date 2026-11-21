@@ -1,0 +1,12 @@
+id = orbits
+name = Orbits
+icon = icon.svg
+about = gravity, in your pocket
+description = Watch gravity at work: the solar system, three stars in a figure of eight, a binary with a distant third, and a galaxy of sixty-three stars round its core. Speed time up or slow it down, follow any body, and set a new body loose.
+version = 1.0.0
+run = ./catalyst-orbits
+screen = own
+binary = catalyst-orbits
+credit = Rebuilt for Catalyst from AstroBox by eggfly and kur1k0 (MIT), in the CardputerZero app store
+licence = MIT
+source = https://github.com/TomAs-1226/CatalystLinux/tree/main/userland/catalogue/orbits

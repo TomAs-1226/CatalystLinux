@@ -1,0 +1,12 @@
+id = battleship
+name = Battleship
+icon = icon.svg
+about = your fleet against the handheld
+description = Ten by ten, five ships each. Place your fleet by hand or at random, then trade shots with a computer player that hunts the way yutacar's does: by where a ship could still be. Easy, normal or hard.
+version = 1.0.0
+run = ./catalyst-battleship
+screen = own
+binary = catalyst-battleship
+credit = Rebuilt for Catalyst from Battleship by yutacar (MIT), in the CardputerZero app store
+licence = MIT
+source = https://github.com/TomAs-1226/CatalystLinux/tree/main/userland/catalogue/battleship

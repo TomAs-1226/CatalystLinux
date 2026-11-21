@@ -20,6 +20,13 @@
 //! with no folder or `app` file needed: it runs in the terminal.
 //!
 //! Either way, Ctrl-Q or Esc held for a second always comes back Home.
+//!
+//! The app file is read by `appkg` (the catalogue's format: an id, a
+//! version, what it uses, its credit and licence besides the above). An
+//! app may carry its own icon (`icon = icon.svg`, a Material Symbol in its
+//! 960-unit box), drawn as the shell's own are. An app is told the whole
+//! look in use and given a folder of its own on `/data` that outlives
+//! updates (`CATALYST_APP_DATA`): what Catalyst Kit reads.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -50,6 +57,11 @@ pub struct App {
     /// The folder it is run from.
     pub dir: PathBuf,
     pub kind: Kind,
+    /// Its id (the folder's name unless the app file says), its version
+    /// (empty if it does not say) and what it says it uses.
+    pub id: String,
+    pub version: String,
+    pub permissions: Vec<appkg::Permission>,
 }
 
 /// The folders apps are looked for in: those that come with the system, then
@@ -67,24 +79,29 @@ pub fn folders() -> Vec<PathBuf> {
 
 /// Read an `app` file. `None` if it names nothing to run.
 pub fn parse(text: &str, dir: &Path) -> Option<App> {
-    let mut app = App { name: String::new(), icon: String::new(), about: String::new(), run: String::new(), dir: dir.to_owned(), kind: Kind::Terminal };
-    for line in text.lines() {
-        let Some((key, value)) = line.split_once('=') else { continue };
-        let value = value.trim();
-        match key.trim() {
-            "name" => app.name = value.chars().take(24).collect(),
-            "icon" => app.icon = value.to_owned(),
-            "about" => app.about = value.chars().take(40).collect(),
-            "run" => app.run = value.to_owned(),
-            "screen" => app.kind = if value == "own" { Kind::Own } else { Kind::Terminal },
-            _ => {}
-        }
-    }
-    if app.run.is_empty() {
+    let m = appkg::Manifest::parse(text);
+    if m.run.is_empty() {
         return None;
     }
-    if app.name.is_empty() {
-        app.name = dir.file_name()?.to_string_lossy().into_owned();
+    let folder = dir.file_name()?.to_string_lossy().into_owned();
+    let id = if appkg::valid_id(&m.id) { m.id.clone() } else { folder.clone() };
+    let mut app = App {
+        name: if m.name.is_empty() { folder } else { m.name.clone() },
+        icon: m.icon.clone(),
+        about: m.about.clone(),
+        run: m.run.clone(),
+        dir: dir.to_owned(),
+        kind: if m.screen == appkg::Screen::Own { Kind::Own } else { Kind::Terminal },
+        id,
+        version: m.version.clone(),
+        permissions: m.permissions.clone(),
+    };
+    // Its own icon, carried beside the app file: drawn by the name `app:<id>`.
+    if app.icon.ends_with(".svg") && !app.icon.contains('/') {
+        let own = format!("app:{}", app.id);
+        let path = std::fs::read_to_string(dir.join(&app.icon)).ok().and_then(|svg| bezel::icons::svg_path(&svg));
+        let registered = path.is_some_and(|path| bezel::icons::register(&own, path));
+        app.icon = if registered { own } else { String::new() };
     }
     Some(finish(app))
 }
@@ -106,8 +123,9 @@ fn loose_script(path: &Path) -> Option<App> {
         return None;
     }
     let file = path.file_name()?.to_string_lossy().into_owned();
+    let stem: String = path.file_stem()?.to_string_lossy().into_owned();
     Some(finish(App {
-        name: path.file_stem()?.to_string_lossy().chars().take(24).collect(),
+        name: stem.chars().take(24).collect(),
         icon: String::new(),
         about: "script".into(),
         // Through sh, so the script need not be marked executable (the
@@ -115,6 +133,9 @@ fn loose_script(path: &Path) -> Option<App> {
         run: format!("sh './{}'", file.replace('\'', "'\\''")),
         dir: path.parent()?.to_owned(),
         kind: Kind::Terminal,
+        id: stem.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect(),
+        version: String::new(),
+        permissions: Vec::new(),
     }))
 }
 
@@ -210,6 +231,16 @@ impl Screen for Handover {
     }
 }
 
+/// An app's own folder for what it keeps (scores, settings): outside its
+/// app folder, which an update replaces whole, so it outlives updates.
+/// Made when the app first starts; removing the app leaves it.
+pub fn data_dir(id: &str) -> PathBuf {
+    let base = if cfg!(target_os = "linux") && Path::new("/data").is_dir() { PathBuf::from("/data/catalyst/app-data") } else { crate::config_dir().join("app-data") };
+    let dir = base.join(if appkg::valid_id(id) { id } else { "app" });
+    std::fs::create_dir_all(&dir).ok();
+    dir
+}
+
 /// Start a program that draws for itself, with the panel and the look in use
 /// passed along so it can match.
 fn spawn(app: &App, settings: &Settings, framebuffer: Option<String>) -> std::io::Result<Child> {
@@ -231,6 +262,21 @@ fn spawn(app: &App, settings: &Settings, framebuffer: Option<String>) -> std::io
         .env("CATALYST_CALM", if settings.calm { "1" } else { "0" })
         .env("CATALYST_ACCENT", settings.accent.key())
         .env("CATALYST_TEXT", settings.text.name().to_lowercase());
+    // The rest of the look, so an app drawn with Catalyst Kit wears it whole;
+    // who it is, and its own folder on /data, kept when it is updated.
+    let permissions: Vec<&str> = app.permissions.iter().map(|p| p.name()).collect();
+    command
+        .env("CATALYST_THEME", settings.theme.name())
+        .env("CATALYST_WALLPAPER", settings.wallpaper.name())
+        .env("CATALYST_CORNERS", settings.corners.name())
+        .env("CATALYST_LETTERS", settings.letters.name())
+        .env("CATALYST_WIDTH", settings.width.name())
+        .env("CATALYST_CLOCK24", if settings.clock24 { "1" } else { "0" })
+        .env("CATALYST_ISLAND", settings.island.name())
+        .env("CATALYST_APP_ID", &app.id)
+        .env("CATALYST_APP_NAME", &app.name)
+        .env("CATALYST_APP_DATA", data_dir(&app.id))
+        .env("CATALYST_PERMISSIONS", permissions.join(","));
     #[cfg(target_os = "linux")]
     {
         // Its own process group, so the program and anything it started can
@@ -317,6 +363,26 @@ mod tests {
         assert_eq!(parse("run = x\nicon = no_such_symbol\nscreen = own", dir).unwrap().icon, "apps");
         // Nothing to run is not an app.
         assert!(parse("name = Empty\n", dir).is_none());
+        // The catalogue's words: an id, a version, what it uses.
+        let full = parse("id = big-clock\nname = Clock\nversion = 1.2.0\npermissions = network, speaker\nrun = ./clock\n", dir).unwrap();
+        assert_eq!((full.id.as_str(), full.version.as_str()), ("big-clock", "1.2.0"));
+        assert_eq!(full.permissions, [appkg::Permission::Network, appkg::Permission::Speaker]);
+        assert_eq!(bare.id, "processes", "the folder names it when the file does not");
+    }
+
+    #[test]
+    fn an_app_carries_its_own_icon() {
+        let dir = std::env::temp_dir().join(format!("catalyst-app-icon-{}", std::process::id())).join("squares");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("icon.svg"), r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960"><path d="M160-160v-640h640v640H160Z"/></svg>"#).unwrap();
+        let app = parse("name = Squares\nicon = icon.svg\nrun = ./squares\nscreen = own\n", &dir).unwrap();
+        assert_eq!(app.icon, "app:squares");
+        assert!(bezel::Icons::has("app:squares"));
+        // One drawn in another box is not drawn wrong: the plain symbol stands in.
+        std::fs::write(dir.join("icon.svg"), r#"<svg viewBox="0 0 24 24"><path d="M0 0h24v24H0z"/></svg>"#).unwrap();
+        let other_box = parse("name = Squares\nicon = icon.svg\nrun = ./squares\nscreen = own\n", &dir).unwrap();
+        assert_eq!(other_box.icon, "apps");
+        std::fs::remove_dir_all(dir.parent().unwrap()).ok();
     }
 
     #[test]
@@ -347,10 +413,24 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("catalyst-run-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let settings = Settings { light: true, calm: false, text: crate::gfx::TextSize::Standard, accent: bezel::Accent::Blue, ..Settings::default() };
-        let app = |run: &str| App { name: "T".into(), icon: "apps".into(), about: String::new(), run: run.into(), dir: dir.clone(), kind: Kind::Own };
+        let app = |run: &str| App {
+            name: "T".into(),
+            icon: "apps".into(),
+            about: String::new(),
+            run: run.into(),
+            dir: dir.clone(),
+            kind: Kind::Own,
+            id: "t".into(),
+            version: "1.0.0".into(),
+            permissions: vec![appkg::Permission::Network],
+        };
         let mut child = spawn(&app("echo $CATALYST_FB $CATALYST_LIGHT $CATALYST_ACCENT $CATALYST_TEXT > seen"), &settings, Some("/dev/fb7".into())).unwrap();
         assert!(child.wait().unwrap().success());
         assert_eq!(std::fs::read_to_string(dir.join("seen")).unwrap().trim(), "/dev/fb7 1 blue standard");
+        // The whole look and the app's own folder, as Catalyst Kit reads them.
+        let mut child = spawn(&app("echo $CATALYST_THEME $CATALYST_CORNERS $CATALYST_APP_ID $CATALYST_PERMISSIONS ${CATALYST_APP_DATA##*/} > seen"), &settings, None).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(std::fs::read_to_string(dir.join("seen")).unwrap().trim(), format!("{} {} t network t", settings.theme.name(), settings.corners.name()));
         // One that would run for a minute, with a child of its own, is stopped at once, child and all.
         let mut child = spawn(&app("sleep 60 & echo $! > child; wait"), &settings, None).unwrap();
         std::thread::sleep(Duration::from_millis(300));

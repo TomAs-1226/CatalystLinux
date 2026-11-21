@@ -116,6 +116,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "catalyst-appkg"
+version = "1.0.0"
+dependencies = [
+ "ed25519-compact",
+ "flate2",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "catalyst-battleship"
+version = "1.0.0"
+dependencies = [
+ "catalyst-kit",
+]
+
+[[package]]
 name = "catalyst-flasher"
 version = "0.1.0"
 dependencies = [
@@ -128,11 +145,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "catalyst-hello"
+version = "1.0.0"
+dependencies = [
+ "catalyst-kit",
+]
+
+[[package]]
+name = "catalyst-kit"
+version = "1.0.0"
+dependencies = [
+ "bezel",
+ "chrono",
+ "detent",
+ "libc",
+ "minifb",
+ "png",
+]
+
+[[package]]
+name = "catalyst-orbits"
+version = "1.0.0"
+dependencies = [
+ "catalyst-kit",
+]
+
+[[package]]
 name = "catalyst-shell"
 version = "0.1.0"
 dependencies = [
  "apriltag",
  "bezel",
+ "catalyst-appkg",
  "chrono",
  "detent",
  "jpeg-decoder",
@@ -147,6 +191,20 @@ dependencies = [
  "serde_json",
  "sha2",
  "vte",
+]
+
+[[package]]
+name = "catalyst-sudoku"
+version = "1.0.0"
+dependencies = [
+ "catalyst-kit",
+]
+
+[[package]]
+name = "catalyst-typing"
+version = "1.0.0"
+dependencies = [
+ "catalyst-kit",
 ]
 
 [[package]]
