@@ -144,13 +144,13 @@ pcm.catalyst_bluetooth_volume {
 	resolution 101
 }
 EOF
-			echo bluetooth >"$RUN/output.new"
+			echo bluetooth >"$RUN/output.$$"
 		else
-			echo local >"$RUN/output.new"
+			echo local >"$RUN/output.$$"
 		fi
-	} >"$RUN/asound.conf.new"
-	mv "$RUN/asound.conf.new" "$RUN/asound.conf"
-	mv "$RUN/output.new" "$RUN/output"
+	} >"$RUN/asound.conf.$$"
+	mv "$RUN/asound.conf.$$" "$RUN/asound.conf"
+	mv "$RUN/output.$$" "$RUN/output"
 }
 
 # The headphones' jack, as the kernel sees it.

@@ -12,6 +12,7 @@
 #   catalyst-bluetooth connect ADDRESS
 #   catalyst-bluetooth disconnect ADDRESS
 #   catalyst-bluetooth forget ADDRESS
+#   catalyst-bluetooth watch           sound to the headphones as they come and go
 #
 # `devices` prints ADDRESS, paired|new, connected|-, the kind (BlueZ's icon:
 # audio-headphones, audio-headset, audio-card for a speaker) and the name,
@@ -109,13 +110,26 @@ start_daemons() {
 	# A2DP to headphones and speakers (the handheld is the source). Logs to syslog.
 	start-stop-daemon -S -q -b -m -p /run/catalyst-bluealsa.pid -x "$(bluealsa_bin)" -- -S -p a2dp-source
 	bluetoothctl power on >/dev/null 2>&1
-	catalyst-audio route >/dev/null 2>&1
+	# Sound follows the headphones: to them as they connect (at boot too,
+	# when they come back by themselves), and back to the speaker as they
+	# go (switched off, out of range).
+	start-stop-daemon -S -q -b -m -p /run/catalyst-bluealsa-watch.pid -x /usr/sbin/catalyst-bluetooth -- watch
 	return 0
+}
+
+# Every stream bluealsa offers or takes away: ALSA's default made again.
+watch() {
+	# Stopped, the whole of it goes (bluealsa-cli and the loop with it).
+	trap 'trap - TERM; kill 0' TERM
+	catalyst-audio route >/dev/null 2>&1
+	bluealsa-cli monitor 2>/dev/null | while read -r _; do
+		catalyst-audio route >/dev/null 2>&1
+	done
 }
 
 stop_daemons() {
 	bluetoothctl power off >/dev/null 2>&1
-	for name in bluealsa bluetoothd dbus; do
+	for name in bluealsa-watch bluealsa bluetoothd dbus; do
 		pid=/run/catalyst-$name.pid
 		[ -e "$pid" ] && start-stop-daemon -K -q -p "$pid" -R TERM/5/KILL/2
 		rm -f "$pid"
@@ -187,7 +201,11 @@ on)
 	mkdir -p /data/catalyst
 	touch "$FLAG"
 	sync
-	with_boot add_block || { echo "config.txt could not be changed" >&2; exit 1; }
+	if ! with_boot add_block; then
+		rm -f "$FLAG"
+		echo "config.txt could not be changed" >&2
+		exit 1
+	fi
 	if [ -e "$HCI" ]; then
 		start_daemons
 	else
@@ -205,6 +223,9 @@ start)
 	;;
 stop)
 	stop_daemons
+	;;
+watch)
+	watch
 	;;
 status)
 	status
@@ -266,7 +287,7 @@ forget)
 	catalyst-audio route >/dev/null
 	;;
 *)
-	echo "usage: $0 on|off|start|stop|status|scan|devices|pair|connect|disconnect|forget" >&2
+	echo "usage: $0 on|off|start|stop|status|scan|devices|pair|connect|disconnect|forget|watch" >&2
 	exit 2
 	;;
 esac

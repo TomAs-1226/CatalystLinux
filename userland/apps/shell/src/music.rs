@@ -287,8 +287,7 @@ fn innertube(endpoint: &str, mut body: Value) -> Result<Value, String> {
     }
     // Headers (the cookies with them) go to curl in a file only root
     // reads, never on its command line.
-    std::fs::create_dir_all(crate::config_dir()).ok();
-    let file = crate::config_dir().join(format!(".music-request-{}", std::process::id()));
+    let file = private_file("request");
     crate::sys::write_private(&file, headers.as_bytes()).map_err(|_| "could not prepare the request".to_owned())?;
     let url = format!("{ORIGIN}/youtubei/v1/{endpoint}?prettyPrint=false");
     let output = (|| {
@@ -380,12 +379,45 @@ fn up_next(id: &str) -> Result<Vec<Track>, String> {
 
 // -------------------------------------------------------------- streams ---
 
+/// Which yt-dlp finds streams: the newer of the image's and the one brought
+/// to /data (an update later than that copy can come with the image).
+/// Asked once a run (each asking is a second of Python on the handheld),
+/// and again after an update.
+static RESOLVER_CHOSEN: Mutex<Option<&'static str>> = Mutex::new(None);
+
 fn resolver() -> &'static str {
-    if Path::new(RESOLVER_UPDATED).exists() {
-        RESOLVER_UPDATED
-    } else {
-        RESOLVER
+    *RESOLVER_CHOSEN.lock().unwrap().get_or_insert_with(|| {
+        if !Path::new(RESOLVER_UPDATED).exists() {
+            return RESOLVER;
+        }
+        // yt-dlp's versions are dates, zero-padded: newer sorts later.
+        match (version_of(RESOLVER_UPDATED), version_of(RESOLVER)) {
+            (Some(copy), Some(image)) if copy >= image => RESOLVER_UPDATED,
+            (Some(_), None) => RESOLVER_UPDATED,
+            _ => RESOLVER,
+        }
+    })
+}
+
+fn version_of(exe: &str) -> Option<String> {
+    let mut cmd = Command::new("python3");
+    cmd.args([exe, "--version"]).stdin(Stdio::null());
+    let out = dies_with_shell(&mut cmd).output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_owned()).filter(|v| out.status.success() && !v.is_empty())
+}
+
+/// A child process that ends with the shell (were the shell to crash and
+/// start again, an ffmpeg left behind would play on, out of reach).
+fn dies_with_shell(cmd: &mut Command) -> &mut Command {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            Ok(())
+        });
     }
+    cmd
 }
 
 /// A song's audio-only stream: Opus where there is one (YouTube's best for
@@ -402,10 +434,21 @@ fn resolve(id: &str) -> Result<String, String> {
     cmd.arg(resolver())
         .args(["--quiet", "--no-warnings", "--no-playlist", "--no-progress", "-f", "bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio", "-g"])
         .args(["--js-runtimes", &js, "--cache-dir", "/data/music/cache"]);
-    if signed_in() {
-        cmd.args(["--cookies", COOKIES]);
+    // Signed in: the cookies as a private copy, since yt-dlp writes its jar
+    // back as it ends (a sign-out meanwhile would be undone, and the file
+    // left readable by all).
+    let jar = signed_in().then(|| std::fs::read(COOKIES).ok()).flatten().and_then(|cookies| {
+        let path = private_file("cookies");
+        crate::sys::write_private(&path, &cookies).ok().map(|_| path)
+    });
+    if let Some(path) = &jar {
+        cmd.arg("--cookies").arg(path);
     }
-    let out = cmd.arg(format!("{ORIGIN}/watch?v={id}")).stdin(Stdio::null()).output().map_err(|_| "the stream finder could not start".to_owned())?;
+    let out = dies_with_shell(cmd.arg(format!("{ORIGIN}/watch?v={id}")).stdin(Stdio::null())).output();
+    if let Some(path) = &jar {
+        std::fs::remove_file(path).ok();
+    }
+    let out = out.map_err(|_| "the stream finder could not start".to_owned())?;
     let text = String::from_utf8_lossy(&out.stdout);
     match text.lines().find(|l| l.starts_with("https://")) {
         Some(url) if out.status.success() => Ok(url.trim().to_owned()),
@@ -434,19 +477,34 @@ fn update_resolver() -> Result<String, String> {
     if !Path::new(RESOLVER_UPDATED).exists() {
         std::fs::copy(RESOLVER, RESOLVER_UPDATED).map_err(|e| format!("could not copy the stream finder: {e}"))?;
     }
-    let out = Command::new("python3").args([RESOLVER_UPDATED, "--update-to", "stable"]).stdin(Stdio::null()).output().map_err(|_| "the stream finder could not start".to_owned())?;
-    if !out.status.success() {
-        return Err("the update could not be fetched".into());
+    let mut cmd = Command::new("python3");
+    cmd.args([RESOLVER_UPDATED, "--update-to", "stable"]).stdin(Stdio::null());
+    let updated = dies_with_shell(&mut cmd).output().is_ok_and(|o| o.status.success());
+    *RESOLVER_CHOSEN.lock().unwrap() = None;
+    match version_of(RESOLVER_UPDATED) {
+        Some(v) if updated => Ok(v),
+        // Nothing half-done left to be chosen.
+        _ => {
+            std::fs::remove_file(RESOLVER_UPDATED).ok();
+            Err("the update could not be fetched".into())
+        }
     }
-    resolver_version().ok_or_else(|| "the stream finder did not start after updating".into())
 }
 
 fn resolver_version() -> Option<String> {
     if !on_device() {
         return Some("2026.10.26".into());
     }
-    let out = Command::new("python3").args([resolver(), "--version"]).stdin(Stdio::null()).output().ok()?;
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_owned()).filter(|v| !v.is_empty())
+    version_of(resolver())
+}
+
+/// A file of this run's own, for one request: in /tmp (memory, not the
+/// card), named so no two requests ever share one.
+fn private_file(what: &str) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let dir = if on_device() { PathBuf::from(ART_DIR) } else { std::env::temp_dir().join("catalyst-music") };
+    std::fs::create_dir_all(&dir).ok();
+    dir.join(format!(".{what}-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)))
 }
 
 // ---------------------------------------------------------------- player ---
@@ -501,7 +559,7 @@ enum Cmd {
 /// The sound being made: ffmpeg playing to ALSA, or (in the simulator) a
 /// clock.
 enum Sound {
-    Process { child: Child, error: Arc<Mutex<String>> },
+    Process { child: Child, error: Arc<Mutex<String>>, errors: Option<std::thread::JoinHandle<()>> },
     Silent { since: Instant },
 }
 
@@ -542,7 +600,7 @@ fn player() -> &'static Player {
     PLAYER.get_or_init(|| {
         let (tx, rx) = channel::<Cmd>();
         let state = Arc::new(Mutex::new(Shared { queue: Vec::new(), at: 0, phase: Phase::Empty, offset: 0.0, played: Arc::new(AtomicU64::new(0)), playing_since: None, finding: false }));
-        let worker = Worker { tx: tx.clone(), state: state.clone(), sound: None, urls: HashMap::new(), finding: None, waiting: VecDeque::new() };
+        let worker = Worker { tx: tx.clone(), state: state.clone(), sound: None, urls: HashMap::new(), finding: None, waiting: VecDeque::new(), retry_at: None, busy_tries: 0, refound: None };
         std::thread::Builder::new().name("music".into()).stack_size(256 * 1024).spawn(move || worker.run(rx)).ok();
         Player { tx, state }
     })
@@ -614,17 +672,35 @@ struct Worker {
     /// The stream being found now, and those waiting their turn.
     finding: Option<String>,
     waiting: VecDeque<String>,
+    /// The sound device was busy (Bluetooth takes one program at a time,
+    /// and a chime may have it): tried again a moment later, a few times.
+    retry_at: Option<Instant>,
+    busy_tries: u8,
+    /// A song whose stream went stale has been found again once already.
+    refound: Option<String>,
 }
 
 impl Worker {
     fn run(mut self, rx: std::sync::mpsc::Receiver<Cmd>) {
         loop {
             match rx.recv_timeout(Duration::from_millis(250)) {
-                Ok(cmd) => self.handle(cmd),
+                Ok(cmd) => {
+                    // Anything asked for overrides a try again that was waiting.
+                    if !matches!(cmd, Cmd::Resolved(..) | Cmd::Radio(..)) {
+                        self.retry_at = None;
+                        self.busy_tries = 0;
+                    }
+                    self.handle(cmd)
+                }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
             self.watch();
+            if self.retry_at.is_some_and(|at| Instant::now() >= at) {
+                self.retry_at = None;
+                let at = self.state.lock().unwrap().offset;
+                self.start(at);
+            }
         }
         self.stop_sound();
     }
@@ -720,27 +796,40 @@ impl Worker {
                 }
             }
             Cmd::Remove(i) => {
-                let playing = {
+                // What happens to the song now: nothing (another was taken
+                // out), the next one in its place, or the end of the queue.
+                enum After {
+                    Nothing,
+                    Next { was_playing: bool },
+                    End,
+                }
+                let after = {
                     let mut s = self.state.lock().unwrap();
                     if i >= s.queue.len() {
                         return;
                     }
                     s.queue.remove(i);
-                    let playing = i == s.at;
                     if i < s.at {
                         s.at -= 1;
+                        After::Nothing
+                    } else if i > s.at {
+                        After::Nothing
+                    } else if s.at < s.queue.len() {
+                        After::Next { was_playing: matches!(s.phase, Phase::Playing | Phase::Loading) }
+                    } else {
+                        After::End
                     }
-                    if s.queue.is_empty() {
-                        s.phase = Phase::Empty;
-                        s.at = 0;
-                    }
-                    s.at = s.at.min(s.queue.len().saturating_sub(1));
-                    playing && !s.queue.is_empty()
                 };
-                if playing {
-                    self.start(0.0);
-                } else if self.state.lock().unwrap().queue.is_empty() {
-                    self.stop_sound();
+                match after {
+                    After::Nothing => self.prefetch(),
+                    After::Next { was_playing: true } => self.start(0.0),
+                    After::Next { was_playing: false } | After::End => {
+                        self.stop_sound();
+                        let mut s = self.state.lock().unwrap();
+                        s.at = s.at.min(s.queue.len().saturating_sub(1));
+                        s.offset = 0.0;
+                        s.phase = if s.queue.is_empty() { Phase::Empty } else { Phase::Paused };
+                    }
                 }
             }
             Cmd::Resolved(id, found) => {
@@ -910,10 +999,20 @@ impl Worker {
     /// A song that ended moves on; one that failed says why (a stream whose
     /// address went stale is found again, once).
     fn watch(&mut self) {
+        if self.sound.is_some() && self.state.lock().unwrap().played.load(Ordering::Relaxed) > 0 {
+            self.busy_tries = 0;
+            self.refound = None;
+        }
         let ended = match &mut self.sound {
-            Some(Sound::Process { child, error, .. }) => match child.try_wait() {
+            Some(Sound::Process { child, error, errors }) => match child.try_wait() {
                 Ok(Some(status)) if status.success() => Some(Ok(())),
-                Ok(Some(_)) => Some(Err(error.lock().unwrap().clone())),
+                Ok(Some(_)) => {
+                    // Ended: its standard error is closed, so this is quick.
+                    if let Some(errors) = errors.take() {
+                        errors.join().ok();
+                    }
+                    Some(Err(error.lock().unwrap().clone()))
+                }
                 _ => None,
             },
             Some(Sound::Silent { since }) => {
@@ -935,8 +1034,17 @@ impl Worker {
                     (s.queue.get(s.at).map(|t| t.id.clone()).unwrap_or_default(), s.position(), s.played.load(Ordering::Relaxed))
                 };
                 let stale = why.contains("403") || why.contains("Forbidden") || why.contains("404");
-                if stale && self.urls.remove(&id).is_some() {
-                    // Found again, and on from where it was.
+                let busy = why.contains("busy");
+                if busy && played == 0 && self.busy_tries < 4 {
+                    // Waiting a moment for whatever has the device.
+                    self.busy_tries += 1;
+                    self.retry_at = Some(Instant::now() + Duration::from_millis(900));
+                    let mut s = self.state.lock().unwrap();
+                    s.offset = position;
+                    s.phase = Phase::Loading;
+                } else if stale && self.refound.as_deref() != Some(id.as_str()) && self.urls.remove(&id).is_some() {
+                    // Found again (once), and on from where it was.
+                    self.refound = Some(id);
                     self.start(position);
                 } else {
                     let said = if played == 0 && why.is_empty() { "the song could not be played".into() } else { short_ffmpeg_error(&why) };
@@ -980,7 +1088,8 @@ fn short_ffmpeg_error(text: &str) -> String {
 /// how far it has got on its standard output.
 fn spawn_ffmpeg(url: &str, at: f32, played: Arc<AtomicU64>) -> Result<Sound, String> {
     let start = format!("{at:.2}");
-    let mut child = Command::new(FFMPEG)
+    let mut cmd = Command::new(FFMPEG);
+    let mut child = dies_with_shell(&mut cmd)
         .args(["-nostdin", "-hide_banner", "-loglevel", "error"])
         .args(["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "4"])
         .args(["-ss", &start, "-i", url, "-vn", "-af", "aresample=48000", "-ac", "2"])
@@ -1004,9 +1113,10 @@ fn spawn_ffmpeg(url: &str, at: f32, played: Arc<AtomicU64>) -> Result<Sound, Str
             .ok();
     }
     let error = Arc::new(Mutex::new(String::new()));
+    let mut errors = None;
     if let Some(mut err) = child.stderr.take() {
         let error = error.clone();
-        std::thread::Builder::new()
+        errors = std::thread::Builder::new()
             .name("music-errors".into())
             .stack_size(64 * 1024)
             .spawn(move || {
@@ -1016,7 +1126,7 @@ fn spawn_ffmpeg(url: &str, at: f32, played: Arc<AtomicU64>) -> Result<Sound, Str
             })
             .ok();
     }
-    Ok(Sound::Process { child, error })
+    Ok(Sound::Process { child, error, errors })
 }
 
 // ------------------------------------------------------------------- art ---
@@ -1026,10 +1136,14 @@ struct Covers {
     ready: HashMap<String, Arc<Picture>>,
     order: VecDeque<String>,
     wanted: VecDeque<(String, String)>,
+    /// The one being fetched now.
+    fetching: Option<String>,
     busy: bool,
 }
 
 static COVERS: Mutex<Option<Covers>> = Mutex::new(None);
+/// Counts covers as they arrive, so a page showing them draws again.
+static COVERS_ARRIVED: AtomicU64 = AtomicU64::new(0);
 const COVERS_KEPT: usize = 24;
 /// Covers are decoded at least this big (the now-playing page's is 96 px).
 const COVER_PX: usize = 112;
@@ -1037,16 +1151,17 @@ const COVER_PX: usize = 112;
 /// A song's cover if it is to hand; else asked for, and `None` for now.
 fn cover(track: &Track) -> Option<Arc<Picture>> {
     let mut covers = COVERS.lock().unwrap();
-    let c = covers.get_or_insert_with(|| Covers { ready: HashMap::new(), order: VecDeque::new(), wanted: VecDeque::new(), busy: false });
+    let c = covers.get_or_insert_with(|| Covers { ready: HashMap::new(), order: VecDeque::new(), wanted: VecDeque::new(), fetching: None, busy: false });
     if let Some(p) = c.ready.get(&track.id) {
         return Some(p.clone());
     }
     if !on_device() {
         let p = Arc::new(demo_cover(track));
         c.ready.insert(track.id.clone(), p.clone());
+        c.order.push_back(track.id.clone());
         return Some(p);
     }
-    if track.art.is_empty() || c.wanted.iter().any(|(id, _)| *id == track.id) {
+    if track.art.is_empty() || c.fetching.as_deref() == Some(track.id.as_str()) || c.wanted.iter().any(|(id, _)| *id == track.id) {
         return None;
     }
     c.wanted.push_back((track.id.clone(), track.art.clone()));
@@ -1063,7 +1178,10 @@ fn fetch_covers() {
             let mut covers = COVERS.lock().unwrap();
             let c = covers.as_mut().unwrap();
             match c.wanted.pop_front() {
-                Some(w) => w,
+                Some(w) => {
+                    c.fetching = Some(w.0.clone());
+                    w
+                }
                 None => {
                     c.busy = false;
                     return;
@@ -1074,6 +1192,7 @@ fn fetch_covers() {
         let picture = fetch_cover(&id, &url).unwrap_or_default();
         let mut covers = COVERS.lock().unwrap();
         let c = covers.as_mut().unwrap();
+        c.fetching = None;
         c.ready.insert(id.clone(), Arc::new(picture));
         c.order.push_back(id);
         while c.order.len() > COVERS_KEPT {
@@ -1081,6 +1200,7 @@ fn fetch_covers() {
                 c.ready.remove(&old);
             }
         }
+        COVERS_ARRIVED.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -1253,6 +1373,8 @@ pub struct MusicScreen {
     armed: bool,
     /// The progress bar's fill, gliding.
     bar: detent::Animated,
+    /// Covers arrived when last drawn.
+    covers_seen: u64,
     last_phase: Phase,
     changed: bool,
 }
@@ -1286,6 +1408,7 @@ impl MusicScreen {
             updating: None,
             armed: false,
             bar: detent::Animated::new(0.0, detent::role::hold()).with_rest(0.002),
+            covers_seen: 0,
             last_phase: Phase::Empty,
             changed: true,
         };
@@ -1359,8 +1482,10 @@ impl Screen for MusicScreen {
         self.title_for()
     }
 
+    /// The start page and search take letters: typing anywhere there
+    /// searches (the shell would otherwise make f, x, z and c arrows).
     fn wants_text(&self) -> bool {
-        self.typing
+        self.typing || matches!(self.page, Page::Start | Page::Search)
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -1423,7 +1548,7 @@ impl Screen for MusicScreen {
                         }
                         StartRow::Account => self.go(Page::Account),
                     },
-                    Key::Char('n') if matches!(row, StartRow::Song(_)) => {
+                    Key::Ctrl('n') if matches!(row, StartRow::Song(_)) => {
                         if let StartRow::Song(i) = row {
                             send(Cmd::PlayNext(self.picks[i].clone()));
                             *cx.say = Some(format!("next: {}", self.picks[i].title));
@@ -1446,7 +1571,7 @@ impl Screen for MusicScreen {
                     let results = self.results.clone();
                     self.play(&results, self.list.focus, true);
                 }
-                Key::Char('n') => {
+                Key::Ctrl('n') => {
                     if let Some(t) = self.results.get(self.list.focus).cloned() {
                         *cx.say = Some(format!("next: {}", t.title));
                         send(Cmd::PlayNext(t));
@@ -1464,7 +1589,7 @@ impl Screen for MusicScreen {
                     send(Cmd::Jump(self.list.focus));
                     self.go(Page::Playing);
                 }
-                Key::Delete | Key::Backspace | Key::Char('x') => send(Cmd::Remove(self.list.focus)),
+                Key::Delete => send(Cmd::Remove(self.list.focus)),
                 other => crate::screens::list_key(&mut self.list, other, n.queue.len()),
             },
             Page::Account => {
@@ -1559,6 +1684,11 @@ impl Screen for MusicScreen {
             }
         }
         let moving = self.bar.tick(dt);
+        let arrived = COVERS_ARRIVED.load(Ordering::Relaxed);
+        if arrived != self.covers_seen {
+            self.covers_seen = arrived;
+            self.changed = true;
+        }
         std::mem::take(&mut self.changed) | moving | (self.page == Page::Playing && n.phase == Phase::Playing) | self.picks_job.is_some() | self.search_job.is_some()
     }
 
@@ -1666,9 +1796,9 @@ impl MusicScreen {
         }
         self.list.scrollbar(g, rows.len(), top, bottom);
         let row = rows.get(focus).copied();
-        let songs = format!("{} · enter: play · n: play next", self.picks_are);
+        let songs = format!("{} · enter: play · ctrl n: next", self.picks_are);
         let hint: &[&str] = match row {
-            Some(StartRow::Song(_)) => &[&songs, "enter: play · n: next"],
+            Some(StartRow::Song(_)) => &[&songs, "enter: play · ctrl n: next"],
             Some(StartRow::NowPlaying) => &["enter: now playing · tab, anywhere here", "enter: now playing"],
             Some(StartRow::Account) if signed_in() => &["signed in with your browser's cookies", "signed in"],
             Some(StartRow::Account) => &["signed out unless you sign in", "signed out"],
@@ -1713,7 +1843,7 @@ impl MusicScreen {
         if self.typing {
             g.hint_any(&["enter: search · esc: back", "enter: search"]);
         } else if !results.is_empty() {
-            g.hint_any(&["enter: play, then its radio · n: play next", "enter: play · n: next"]);
+            g.hint_any(&["enter: play, then its radio · ctrl n: next", "enter: play · ctrl n: next"]);
         } else {
             g.hint("/: search again");
         }
@@ -1740,7 +1870,7 @@ impl MusicScreen {
             }
         }
         self.list.scrollbar(g, n.queue.len(), top, bottom);
-        g.hint_any(&["enter: play this · x: take it out", "enter: play · x: out"]);
+        g.hint_any(&["enter: play this · del: take it out", "enter: play · del: out"]);
     }
 
     fn draw_account(&mut self, g: &mut Gfx) {
@@ -1951,6 +2081,11 @@ mod tests {
         assert!(wait(&|n| n.queue.len() == songs.len()));
         assert_eq!(media_key(Media::PlayPause).as_deref(), Some("paused"));
         assert!(wait(&|n| n.phase == Phase::Paused));
+        // Taking out the song paused on: the next in its place, still paused.
+        let before = now();
+        let next = before.queue[before.at + 1].id.clone();
+        send(Cmd::Remove(before.at));
+        assert!(wait(&|n| n.queue.len() == before.queue.len() - 1 && n.phase == Phase::Paused && n.track().is_some_and(|t| t.id == next)));
     }
 
     /// YouTube Music itself, signed out: a search, the home page and a radio
@@ -1984,7 +2119,7 @@ mod tests {
     #[test]
     fn every_hint_fits_whole_at_every_text_size() {
         let mut g = Gfx::new(bezel::Tokens::dark());
-        let shortest = ["enter · ←→ · ↓", "enter · ← · /", "enter: try again", "enter: play · n: next", "enter: now playing", "type to search", "signed out unless you sign in", "enter: search", "enter: play · x: out", "enter: update", "enter again: sign out", "enter: sign out", "signed in", "signed out"];
+        let shortest = ["enter · ←→ · ↓", "enter · ← · /", "enter: try again", "enter: play · ctrl n: next", "enter: now playing", "type to search", "signed out unless you sign in", "enter: search", "enter: play · del: out", "enter: update", "enter again: sign out", "enter: sign out", "signed in", "signed out"];
         for size in [crate::gfx::TextSize::Standard, crate::gfx::TextSize::Large] {
             g.set_text_size(size);
             let caption = g.ty.caption;

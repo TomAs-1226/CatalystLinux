@@ -451,6 +451,9 @@ enum Row {
 
 const ROWS: [Row; 7] = [Row::Volume, Row::Mute, Row::Output, Row::Test, Row::Microphone, Row::MicGain, Row::Bluetooth];
 
+/// How long the microphone's level is shown after the last key, in seconds.
+const LISTEN_FOR: f32 = 30.0;
+
 /// Settings › Sound: the volume, silence, where sound goes, a test sound,
 /// the microphone (with its level, live, while it is chosen) and its gain,
 /// and Bluetooth.
@@ -464,6 +467,10 @@ pub struct SoundScreen {
     /// The microphone's meter, while its row is chosen.
     meter: Option<MicMeter>,
     meter_bar: detent::Animated,
+    /// The last key on the page: the microphone stops listening a while
+    /// after it, so a page left open as the screen goes off (or locks, or
+    /// sleeps deep) does not record on.
+    last_key: Instant,
     working: Option<(Row, Job<Result<(), String>>)>,
     changed: bool,
 }
@@ -479,6 +486,7 @@ impl SoundScreen {
             meter: None,
             meter_bar: detent::Animated::new(0.0, detent::role::tick()).with_rest(0.003),
             working: None,
+            last_key: Instant::now(),
             changed: true,
         };
         page.read_now();
@@ -550,6 +558,7 @@ impl Screen for SoundScreen {
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
+        self.last_key = Instant::now();
         let row = self.row();
         let left_right = matches!(key, Key::Left | Key::Right);
         let step = if key == Key::Left { -1 } else { 1 };
@@ -627,7 +636,7 @@ impl Screen for SoundScreen {
             self.read_now();
         }
         // The microphone is listened to only while its row is chosen.
-        let listening = self.row() == Row::Microphone && self.working.is_none();
+        let listening = self.row() == Row::Microphone && self.working.is_none() && self.last_key.elapsed().as_secs_f32() < LISTEN_FOR;
         if listening && self.meter.is_none() {
             self.meter = Some(MicMeter::start());
         } else if !listening && self.meter.is_some() {

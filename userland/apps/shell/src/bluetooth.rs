@@ -487,7 +487,7 @@ impl BluetoothScreen {
                         Some(Work::Connect) => "connecting…",
                         Some(Work::Disconnect) => "disconnecting…",
                         Some(Work::Forget) => "forgetting…",
-                        _ if self.armed == Some(row) => "f again: forget",
+                        _ if self.armed == Some(row) => "del again: forget",
                         _ if d.connected => "playing",
                         _ if d.paired => "paired",
                         _ => "pair",
@@ -511,8 +511,8 @@ impl BluetoothScreen {
             Row::Restart => words(&["the radio starts with the handheld, once", "enter: restart"]),
             Row::Seen => words(&["the handheld's name, as headphones see it", "the handheld's name"]),
             Row::Device(i) => match self.devices().get(i) {
-                Some(d) if d.connected => vec![format!("{} · enter: disconnect · f: forget", d.kind.words()), "enter: disconnect · f: forget".into()],
-                Some(d) if d.paired => vec![format!("{} · enter: connect · f: forget", d.kind.words()), "enter: connect · f: forget".into()],
+                Some(d) if d.connected => vec![format!("{} · enter: disconnect · del: forget", d.kind.words()), "enter: disconnect · del: forget".into()],
+                Some(d) if d.paired => vec![format!("{} · enter: connect · del: forget", d.kind.words()), "enter: connect · del: forget".into()],
                 Some(d) => vec![format!("{} · enter: pair and play here", d.kind.words()), "enter: pair and play here".into()],
                 None => Vec::new(),
             },
@@ -534,7 +534,7 @@ impl Screen for BluetoothScreen {
         match key {
             Key::Back if armed.is_some() => {}
             Key::Back => return Nav::Pop,
-            _ if self.working.is_some() && matches!(key, Key::Enter | Key::Char('f') | Key::Delete) => *cx.say = Some("a moment…".into()),
+            _ if self.working.is_some() && matches!(key, Key::Enter | Key::Delete) => *cx.say = Some("a moment…".into()),
             Key::Enter => match row {
                 Row::Switch => self.start(if self.status().enabled { Work::Off } else { Work::On }, String::new()),
                 Row::Restart if armed == Some(Row::Restart) => self.start(Work::Restart, String::new()),
@@ -557,7 +557,7 @@ impl Screen for BluetoothScreen {
                 }
                 _ => {}
             },
-            Key::Char('f') | Key::Delete => {
+            Key::Delete => {
                 if let Row::Device(i) = row {
                     if let Some(d) = self.devices().get(i).filter(|d| d.paired).cloned() {
                         if armed == Some(row) {

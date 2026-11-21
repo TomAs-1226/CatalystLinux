@@ -38,6 +38,12 @@ case "\$1" in route) echo bluetooth ;; output) [ -z "\${2:-}" ] && cat "$T/outpu
 [ "\$1" = output ] && [ -n "\${2:-}" ] && echo "\$2 \${3:-}" >"$T/output"
 exit 0
 EOF
+# bluealsa-cli monitor: headphones connecting, then going.
+cat >"$T/bin/bluealsa-cli" <<EOF
+#!/bin/sh
+[ "\$1" = monitor ] && printf 'PCMAdded /org/bluealsa/hci0/dev_0C_A6_94_12_34_56/a2dpsrc/sink\nPCMRemoved /org/bluealsa/hci0/dev_0C_A6_94_12_34_56/a2dpsrc/sink\n'
+exit 0
+EOF
 for stub in modprobe dbus-uuidgen start-stop-daemon; do
 	printf '#!/bin/sh\necho "%s $*" >>"%s/daemons.log"\n' "$stub" "$T" >"$T/bin/$stub"
 done
@@ -128,10 +134,24 @@ echo "bluetooth 11:22:33:44:55:66" >"$T/output"
 $P forget 0C:A6:94:12:34:56
 check "forgetting another leaves the choice alone" "$(grep -c '^output speaker$' "$T/audio.log")" "0"
 
+echo "== sound follows the headphones"
+: >"$T/audio.log"
+$P watch
+check "routed at the start, and as each stream comes and goes" "$(grep -c '^route$' "$T/audio.log")" "3"
+check "the daemons' start starts it" "$(grep -c 'catalyst-bluealsa-watch.pid -x /usr/sbin/catalyst-bluetooth -- watch' "$HERE/os/board/cardputer-zero/rootfs-overlay/usr/sbin/catalyst-bluetooth")" "1"
+
 echo "== switched off"
+echo $$ >"$T/run-bluealsa-watch.pid"
 $P off
 check "the flag is gone" "$([ -e "$T/data/catalyst/bluetooth-enabled" ] && echo kept || echo gone)" "gone"
 check "the radio powered down" "$(grep -c '^power off$' "$T/bluetoothctl.log")" "1"
 check "config.txt as it was" "$(cmp -s "$T/boot/config.txt" "$T/original.txt" && echo same)" "same"
+check "its watcher stopped with the daemons" "$(grep -c 'start-stop-daemon -K -q -p .*run-bluealsa-watch.pid' "$T/daemons.log")" "1"
+
+echo "== config.txt that cannot be changed"
+mv "$T/boot/config.txt" "$T/boot/away.txt"
+check "on says so" "$($P on 2>&1 >/dev/null | tail -n1)" "config.txt could not be changed"
+check "and is not left half on" "$([ -e "$T/data/catalyst/bluetooth-enabled" ] && echo on || echo off):$(status_of enabled)" "off:no"
+mv "$T/boot/away.txt" "$T/boot/config.txt"
 
 exit $fail

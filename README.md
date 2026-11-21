@@ -1255,8 +1255,10 @@ off the radio is not powered and nothing of it runs.
 - **Pairing** asks nothing ("just works", as headphones do it); paired
   devices are trusted, so they connect again by themselves. While the device
   chosen is connected, `default` plays to it at the same system volume;
-  when it goes, sound comes back to the speaker. One program at a time plays
-  to Bluetooth (bluez-alsa does not mix).
+  when it goes (switched off, out of range), sound comes back to the
+  speaker by itself (a watcher on bluealsa's streams rewrites `default`).
+  One program at a time plays to Bluetooth (bluez-alsa 4.3 does not mix):
+  Music waits a moment and tries again if a chime has it.
 - **Why not PipeWire:** for the same headphones PipeWire needs WirePlumber
   (and its Lua) beside BlueZ and D-Bus: about 20 to 25 MB resident against
   about 7 MB for bluez-alsa, BlueZ and D-Bus together, and the speaker is
