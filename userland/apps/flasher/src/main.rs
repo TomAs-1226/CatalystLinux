@@ -378,9 +378,72 @@ impl App {
     }
 }
 
+/// `--write IMAGE --disk DISK --yes`: write a card with no window, for
+/// scripts. Only a disk the window would offer (removable, not the one the
+/// computer starts from, no larger than an SD card), and only with `--yes`.
+fn write_headless(image: &str, disk: Option<String>, yes: bool) -> Result<(), String> {
+    use std::io::Write as _;
+    let disks = disks::list();
+    let Some(path) = disk else {
+        let offered: Vec<String> = disks.iter().map(|d| format!("{} ({}, {:.1} GB)", d.path.display(), d.name, d.size as f64 / 1e9)).collect();
+        return Err(format!("say which card with --disk; offered: {}", if offered.is_empty() { "none".into() } else { offered.join(", ") }));
+    };
+    let disk = disks.into_iter().find(|d| d.path.display().to_string().eq_ignore_ascii_case(&path)).ok_or_else(|| format!("{path} is not a card this writes (removable, not the system's, at most 300 GB)"))?;
+    println!("card: {} · {} · {:.1} GB{}", disk.path.display(), disk.name, disk.size as f64 / 1e9, if disk.mounted.is_empty() { String::new() } else { format!(" · mounted at {}", disk.mounted) });
+    if !yes {
+        return Err("everything on it is erased: add --yes to go ahead".into());
+    }
+    if !disks::can_write() {
+        return Err("writing a card needs Administrator".into());
+    }
+    let path = PathBuf::from(image);
+    let gz = path.extension().is_some_and(|e| e == "gz");
+    let file = std::fs::File::open(&path).map_err(|e| format!("opening the image: {e}"))?;
+    let total = if gz { 0 } else { file.metadata().map_or(0, |m| m.len()) };
+    if total > disk.size {
+        return Err("the image is larger than the card".into());
+    }
+    disks::prepare(&disk)?;
+    let mut reader: Box<dyn Read> = if gz { Box::new(flate2::read::GzDecoder::new(std::io::BufReader::new(file))) } else { Box::new(std::io::BufReader::new(file)) };
+    let mut last = 0u64;
+    let started = std::time::Instant::now();
+    let (len, hash) = disks::write(&disk, &mut reader, &mut |n| {
+        if n >= last + (256 << 20) {
+            last = n;
+            print!("\rwritten {} MB", n >> 20);
+            std::io::stdout().flush().ok();
+        }
+    })?;
+    println!("\rwritten {} MB in {:.0} s · sha256 {hash}", len >> 20, started.elapsed().as_secs_f32());
+    let mut last = 0u64;
+    let back = disks::read_back(&disk, len, &mut |n| {
+        if n >= last + (256 << 20) {
+            last = n;
+            print!("\rread back {} MB", n >> 20);
+            std::io::stdout().flush().ok();
+        }
+    })?;
+    if back != hash {
+        return Err("the card did not read back as written: try another card".into());
+    }
+    println!("\rread back {} MB: the same", len >> 20);
+    disks::refresh(&disk);
+    Ok(())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    if let Some(image) = value("--write") {
+        match write_headless(&image, value("--disk"), args.iter().any(|a| a == "--yes")) {
+            Ok(()) => println!("done: the card is ready"),
+            Err(why) => {
+                eprintln!("catalyst-flasher: {why}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     // An image dropped on the program's icon arrives as its only argument.
     let file = value("--source").filter(|s| s != "stable" && s != "nightly").or_else(|| args.iter().find(|a| !a.starts_with("--") && (a.ends_with(".img") || a.ends_with(".img.gz"))).cloned()).map(PathBuf::from);
     let mut app = App {
