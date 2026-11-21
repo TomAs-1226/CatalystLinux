@@ -78,6 +78,7 @@ mod setup;
 mod shell;
 mod standby;
 mod sys;
+mod tailscale;
 mod sysupdate;
 mod usb;
 mod term;
@@ -1301,6 +1302,63 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     held.save().ok();
     crate::github::sign_out();
     std::fs::remove_dir_all(git::code_dir().join("robot-2027")).ok();
+
+    // Tailscale, in Settings › Network (the simulator's made-up tailnet):
+    // off, switched on and showing its sign-in code, then signed in with the
+    // tailnet's machines; and the code again in Bezel's look, light, at the
+    // large text size. Off again after, for the shots that follow.
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    let keys = std::iter::repeat_n(Right, steps_to("Settings")).chain([Enter]).chain(std::iter::repeat_n(Down, screens::settings_row("Network"))).chain([Enter, Down]);
+    for key in keys {
+        shell.key(key);
+        settle(&mut shell, 30);
+    }
+    settle(&mut shell, 60);
+    save(&mut shell, "90-network");
+    let real_time = |shell: &mut Shell, seconds: f32| {
+        let until = Instant::now() + Duration::from_secs_f32(seconds);
+        while Instant::now() < until {
+            settle(shell, 6);
+            std::thread::sleep(Duration::from_millis(40));
+        }
+    };
+    shell.key(Enter);
+    real_time(&mut shell, 0.4);
+    settle(&mut shell, 60);
+    save(&mut shell, "90b-tailscale-off");
+    shell.key(Enter);
+    real_time(&mut shell, 2.6);
+    settle(&mut shell, 30);
+    save(&mut shell, "90c-tailscale-sign-in");
+    tailscale::demo_signed_in();
+    real_time(&mut shell, 2.4);
+    settle(&mut shell, 40);
+    save(&mut shell, "90d-tailscale-on");
+    for key in [Down, Down, Down] {
+        shell.key(key);
+        settle(&mut shell, 20);
+    }
+    settle(&mut shell, 40);
+    save(&mut shell, "90e-tailscale-machines");
+    shell.key(End);
+    settle(&mut shell, 30);
+    shell.key(Enter);
+    settle(&mut shell, 40);
+    save(&mut shell, "90f-tailscale-sign-out");
+    shell.key(Back);
+    tailscale::switch(false).ok();
+    let mut shell = Shell::new(Robot::demo());
+    (shell.settings.theme, shell.settings.light, shell.settings.text) = (look::Theme::Bezel, true, gfx::TextSize::Large);
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    tailscale::switch(true).ok();
+    shell.show(Box::new(tailscale::TailscaleScreen::new()));
+    real_time(&mut shell, 2.6);
+    settle(&mut shell, 40);
+    save(&mut shell, "90g-tailscale-sign-in-bezel-light-large");
+    tailscale::switch(false).ok();
 
     // About, laid out as Android's; seven presses on Build number make a
     // developer, and Developer options appear.

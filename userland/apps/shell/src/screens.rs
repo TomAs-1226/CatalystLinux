@@ -2037,6 +2037,8 @@ enum Item {
     FaceDown,
     // Network.
     WifiSetup,
+    /// Settings › Network › Tailscale: a page of its own (tailscale.rs).
+    Tailscale,
     /// Settings › USB: what the handheld is to a computer, and whether one has it.
     UsbSection,
     UsbMode,
@@ -2121,7 +2123,7 @@ fn glance_items(order: &[Widget]) -> Vec<Item> {
 
 /// Where everything in Settings is, for search: what it is called, the
 /// section it is in, and its place there (none: the section itself).
-const SETTING_PLACES: [(&str, Item, Option<usize>); 60] = [
+const SETTING_PLACES: [(&str, Item, Option<usize>); 61] = [
     ("Robot settings", Item::RobotSection, None),
     ("Open Robot on link", Item::RobotSection, Some(0)),
     ("Match report after a match", Item::RobotSection, Some(1)),
@@ -2160,6 +2162,7 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 60] = [
     ("Face down to sleep", Item::Display, Some(5)),
     ("Network", Item::Network, None),
     ("Wi-Fi networks", Item::Network, Some(0)),
+    ("Tailscale", Item::Network, Some(1)),
     ("Name & time", Item::NameSection, None),
     ("Handheld name", Item::NameSection, Some(0)),
     ("Time zone", Item::NameSection, Some(1)),
@@ -2276,7 +2279,7 @@ impl SettingsApp {
                 let motion: &[Item] = if crate::imu::has_motion() { &[LiftWake, FaceDown] } else { &[] };
                 Self::page("Display", [Brightness, Graphics, ScreenOff, Processor].into_iter().chain(motion.iter().copied()).collect())
             }
-            Network => Self::page("Network", std::iter::once(WifiSetup).chain((0..4).map(Info)).collect()),
+            Network => Self::page("Network", [WifiSetup, Tailscale].into_iter().chain((0..4).map(Info)).collect()),
             KeysSection => Self::page("Keys", (0..crate::keys::SERVICES.len()).map(KeyFor).chain(std::iter::once(KeysFromFile)).collect()),
             Access => Self::page("Access", vec![Ssh]),
             UpdateSection => Self::page("Updates", vec![UpdateState, UpdateAction, UpdateNote, UpdateChannel, UpdateAuto, UpdateOvernight]),
@@ -2454,6 +2457,7 @@ impl SettingsApp {
             LiftWake => ("Lift to wake".into(), onoff(g.lift_wake), g.lift_wake),
             FaceDown => ("Face down to sleep".into(), onoff(g.face_down), g.face_down),
             WifiSetup => section("Wi-Fi networks", "join".to_owned()),
+            Tailscale => section("Tailscale", (if crate::tailscale::enabled() { "on" } else { "off" }).to_owned()),
             Ssh => ("SSH access".into(), onoff(crate::ssh_enabled()), crate::ssh_enabled()),
             DemoRobot => ("Demo robot".into(), onoff(robot.is_demo()), robot.is_demo()),
             OpenRobot => ("Open Robot on link".into(), onoff(g.open_robot), g.open_robot),
@@ -2720,6 +2724,7 @@ impl Screen for SettingsApp {
         match key {
             Key::Back => return Nav::Pop,
             Key::Enter | Key::Right if item == Item::WifiSetup => return Nav::Push(Box::new(WifiScreen::new())),
+            Key::Enter | Key::Right if item == Item::Tailscale => return Nav::Push(Box::new(crate::tailscale::TailscaleScreen::new())),
             Key::Enter | Key::Right if item == Item::FromComputer => return Nav::Push(Box::new(crate::setup::Setup::from_computer())),
             Key::Enter | Key::Right if item == Item::About => return Nav::Push(Box::new(crate::about::About::new(crate::about::Kind::Main))),
             Key::Enter | Key::Right if item == Item::UpdateNote => {

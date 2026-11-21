@@ -33,7 +33,7 @@ for f in etc/init.d/catalyst-early etc/init.d/catalyst-shell etc/init.d/catalyst
 	etc/init.d/catalyst-wifi etc/init.d/catalyst-ssh etc/init.d/catalyst-update etc/init.d/catalyst-usb \
 	usr/sbin/catalyst-ssh-toggle usr/sbin/catalyst-net usr/sbin/catalyst-grow-data usr/sbin/catalyst-wifi-toggle \
 	usr/sbin/catalyst-usb usr/sbin/catalyst-power usr/sbin/catalyst-time usr/share/udhcpc/default.script.d/50-catalyst-time \
-	usr/libexec/catalyst/git-credential; do
+	usr/libexec/catalyst/git-credential etc/init.d/catalyst-tailscale usr/sbin/catalyst-tailscale; do
 	chmod 0755 "$TARGET_DIR/$f"
 done
 mkdir -p "$TARGET_DIR/data"
@@ -61,7 +61,7 @@ done
 #
 #   sysinit   /sys and /dev
 #   boot      catalyst-early (panel and key drivers, storage), catalyst-shell
-#   default   catalyst-late (clock, hotplug, log), network, Wi-Fi, SSH, USB, serial login
+#   default   catalyst-late (clock, hotplug, log), network, Wi-Fi, SSH, USB, Tailscale, serial login
 #
 # The shell is on screen before anything in "default" starts. Buildroot's
 # stock set (two dozen services meant for a general machine, several of which
@@ -80,6 +80,7 @@ link default catalyst-wifi
 link default catalyst-ssh
 link default catalyst-update
 link default catalyst-usb
+link default catalyst-tailscale
 link default agetty.ttyAMA0
 link shutdown killprocs
 link shutdown mount-ro
@@ -90,7 +91,7 @@ link shutdown mount-ro
 # (SSH is only ever started by catalyst-ssh, when it is switched on).
 for script in "$TARGET_DIR"/etc/init.d/*; do
 	case "$(basename "$script")" in
-	catalyst-early | catalyst-shell | catalyst-late | catalyst-net | catalyst-wifi | catalyst-ssh | catalyst-update | catalyst-usb) ;;
+	catalyst-early | catalyst-shell | catalyst-late | catalyst-net | catalyst-wifi | catalyst-ssh | catalyst-update | catalyst-usb | catalyst-tailscale) ;;
 	sysfs | devfs | agetty | agetty.ttyAMA0 | killprocs | mount-ro | functions.sh) ;;
 	*) rm -f "$script" ;;
 	esac

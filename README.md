@@ -875,6 +875,44 @@ drives the system's `wpa_supplicant`; networks are kept in
 not loaded at all, and switching it off unloads it. On a PC a scripted set of
 networks stands in.
 
+## Tailscale
+
+Settings › Network › Tailscale puts the handheld on your tailnet: it reaches
+your other machines from anywhere (SSH to a laptop from Connect, a
+dashboard at home) and they reach it. It is off until switched on there,
+and while it is off nothing of it runs.
+
+- **Switching on** starts `tailscaled` (the `catalyst-tailscale` service)
+  and asks it to connect. The first time, the page shows a QR code: scan it
+  with a phone's camera and sign in to Tailscale there (or open the link
+  under it on any device). The sign-in and the machine's key are kept in
+  `/data/tailscale`, so it stays signed in across restarts and updates.
+- **Signed in**, the page shows this handheld's address on the tailnet, the
+  tailnet's name, its other machines (online ones with their addresses, the
+  others with when they were last seen), how much memory `tailscaled` is
+  using, and Sign out (pressed twice). Switching off keeps the sign-in.
+- It changes nothing else: no firewall rules (`--netfilter-mode=off`) and no
+  DNS (`--accept-dns=false`), and the handheld keeps its own name. Nothing
+  goes to Tailscale's log service.
+
+It is our own slim build (`os/package/catalyst-tailscale`): Tailscale
+1.102.3, the newest Buildroot's Go 1.27 builds, with only what a client on
+the kernel's TUN needs (the OS router, the CLI inside the daemon, the
+notification bus, health, port mapping, raw-socket NAT traversal, baked-in
+root certificates; Tailscale's own `featuretags --min`, as its
+`build_dist.sh --extra-small` does). One static, stripped 13.3 MB program is
+both `tailscaled` and `tailscale`. Buildroot's own `tailscale` package is not
+used: it switches on nftables, NAT and connection tracking in the kernel,
+which this client does without. The kernel's TUN is a module already, loaded
+when Tailscale starts.
+
+Memory: run under qemu on four cores, signed out and idle, it holds 5 to 8
+MB of its own plus about 13 MB of its program's pages (read from the card,
+shared with the `tailscale` command, given back under pressure), so about
+20 MB; signed in with a handful of machines, an estimated 25 to 30 MB. The
+page's Memory row reads the real figure on the handheld. On a PC, a made-up
+tailnet stands in and signs in by itself a few seconds after its code shows.
+
 ## Match logs
 
 The handheld pulls `.wpilog` files from the robot over the Ethernet cable,

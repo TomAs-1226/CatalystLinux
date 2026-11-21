@@ -1,0 +1,39 @@
+#!/sbin/openrc-run
+# Tailscale is off unless it was switched on in Settings › Network ›
+# Tailscale, which runs "catalyst-tailscale on". Its state (the machine's
+# key and the login) lives on /data, so it stays signed in across restarts
+# and updates. No firewall rules and no DNS changes: the handheld reaches
+# the tailnet's machines by their addresses and names, and they reach it.
+
+description="Tailscale, only when enabled"
+
+pidfile=/run/tailscaled.pid
+
+depend() {
+	need catalyst-early
+	after catalyst-late catalyst-net catalyst-wifi
+}
+
+start() {
+	if [ ! -e /data/catalyst/tailscale-enabled ]; then
+		einfo "Tailscale is switched off"
+		return 0
+	fi
+	ebegin "Starting Tailscale"
+	modprobe -q tun 2>/dev/null
+	mkdir -p /data/tailscale /run/tailscale
+	chmod 0700 /data/tailscale
+	# Nothing goes to Tailscale's log service.
+	TS_NO_LOGS_NO_SUPPORT=true start-stop-daemon -S -b -m -p "$pidfile" -x /usr/sbin/tailscaled -- \
+		--state=/data/tailscale/tailscaled.state --statedir=/data/tailscale \
+		--socket=/run/tailscale/tailscaled.sock --port=41641
+	eend $?
+}
+
+stop() {
+	[ -e "$pidfile" ] || return 0
+	ebegin "Stopping Tailscale"
+	start-stop-daemon -K -q -p "$pidfile" -R TERM/10/KILL/2
+	rm -f "$pidfile"
+	eend 0
+}
