@@ -190,6 +190,7 @@ fn settings_text(s: &shell::Settings) -> String {
         ("power", s.power.key().to_owned()),
         ("lift_wake", s.lift_wake.to_string()),
         ("face_down", s.face_down.to_string()),
+        ("brightness", s.brightness.to_string()),
     ];
     lines.iter().chain(s.battery.lines().iter()).map(|(k, v)| format!("{k}={v}\n")).collect()
 }
@@ -241,6 +242,7 @@ fn parse_settings(text: &str, settings: &mut shell::Settings) {
                 settings.screen_off = v.parse::<u32>().ok().filter(|s| standby::SCREEN_OFF_CHOICES.contains(s)).unwrap_or(settings.screen_off)
             }
             Some(("power", v)) => settings.power = standby::Power::from_key(v).unwrap_or(settings.power),
+            Some(("brightness", v)) => settings.brightness = v.parse::<u32>().ok().filter(|b| (10..=100).contains(b)).unwrap_or(settings.brightness),
             Some(("lift_wake", v)) => settings.lift_wake = v != "false",
             Some(("face_down", v)) => settings.face_down = v != "false",
             _ => {}
@@ -441,6 +443,8 @@ fn main() {
     let mut next_frame = Instant::now();
     // The panel asleep with the screen dark (deep standby).
     let mut panel_asleep = false;
+    // The backlight is dark from power-on until the first picture is sent.
+    let mut lit = false;
     loop {
         let moving = shell.animating();
         let timeout = if moving { next_frame.saturating_duration_since(Instant::now()) } else { Duration::from_millis(250) };
@@ -475,6 +479,10 @@ fn main() {
         }
         let cost = speed.busy(work);
         let part = if changed || platform.present_always() { platform.present(&shell.gfx.canvas) } else { 0.0 };
+        if !lit && part > 0.0 {
+            lit = true;
+            shell.light_up();
+        }
         // An external app that draws for itself: once its page has arrived,
         // the panel is its own until it ends or is left.
         if let Some(app) = shell.take_launch() {
@@ -1054,7 +1062,9 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
         ("23-setup-welcome", &[]),
         ("24-setup-computer", &[Down, Enter]),
         // The hardware check: each part on a chip, then one looked at.
-        ("84-setup-hardware", &[Back, Enter]),
+        // Wi-Fi first (its radio switched on as the page arrives), then on.
+        ("26-setup-wifi", &[Back, Enter]),
+        ("84-setup-hardware", &[Down, Enter]),
         ("84b-setup-hardware-battery", &[Right, Right]),
         // The keyboard lesson: its five cards, each practised a little.
         ("85-setup-lesson-modifiers", &[Tab]),
@@ -1068,8 +1078,7 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
         ("87-time-zones", &[Enter, Enter]),
         ("87b-time-zone-search", &[Char(' '), Char('n'), Char('e'), Char('w')]),
         ("86b-setup-name-and-time-chosen", &[Enter]),
-        ("26-setup-wifi", &[Tab]),
-        ("27-setup-keys", &[Down, Enter, Down]),
+        ("27-setup-keys", &[Tab, Down]),
         ("28-setup-choices", &[Tab, Down]),
         // Battery and power: the screen off after two minutes.
         ("84c-setup-power", &[Tab, Right]),
@@ -1333,6 +1342,13 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     shell.show_battery_empty();
     settle(&mut shell, 70);
     save(&mut shell, "83-battery-empty");
+    // Set up from a computer with no network yet: Wi-Fi offered there.
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    shell.show(Box::new(setup::Setup::without_network()));
+    settle(&mut shell, 100);
+    save(&mut shell, "24b-setup-computer-no-network");
 
     // The developer's tools, each from a fresh Home. What they read comes
     // in real time (a reading a second, a ping a second), so real time is

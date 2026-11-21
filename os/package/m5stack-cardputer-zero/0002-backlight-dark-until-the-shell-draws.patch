@@ -1,0 +1,29 @@
+From: Catalyst Linux
+Subject: [PATCH] cardputerzero-v5: keep the backlight dark until the shell draws
+
+The backlight was forced on as its driver probed, before the panel was set
+up, so the panel's power-on memory (noise) showed, and then black until
+the first frame. Now it starts dark at level 0; the panel driver's enable
+powers it on at that level, and the shell brings it up once there is a
+picture.
+
+--- a/modules/CardputerZero/cardputerzero-v5-overlay.dts	2026-11-20 17:37:09.283930314 -0800
++++ b/modules/CardputerZero/cardputerzero-v5-overlay.dts	2026-11-20 17:37:09.283930314 -0800
+@@ -326,10 +326,14 @@
+                     45000 45500 46000 46500 47000 47500 48000 48500 49000 49500
+                     50000
+                 >;
+-                default-brightness-level = <75>;
++                /*
++                 * Catalyst Linux: dark until the shell has drawn its first
++                 * frame and brings the light up to the level kept in its
++                 * settings. Lit at probe, the panel showed what its memory
++                 * held from power-on before it was set up.
++                 */
++                default-brightness-level = <0>;
+                 power-supply = <&backlight_power>;
+-                /* Force the backlight on during initialization */
+-                force-enable-on-init;
+             };
+ 
+             spk_mute_switch: spk-mute-switch {

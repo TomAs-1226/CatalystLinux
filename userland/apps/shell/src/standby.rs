@@ -199,6 +199,25 @@ impl Standby {
         }
     }
 
+    /// The first picture is on the panel: the backlight comes up to
+    /// `percent` from dark, on the smooth spring (at once in the calm
+    /// version). A shell started again over a lit panel leaves it as it is.
+    pub fn rise_from_dark(&mut self, percent: u32, calm: bool) {
+        if !self.backlight || crate::sys::brightness().is_some_and(|now| now > 0) {
+            return;
+        }
+        crate::sys::backlight_power(true);
+        self.base = Some(percent.clamp(10, 100));
+        self.written = None;
+        self.level.jump(0.0);
+        if calm {
+            self.level.jump(1.0);
+        } else {
+            self.level.set_with(1.0, role::smooth());
+        }
+        self.light();
+    }
+
     /// The processor speed chosen in Settings: set now unless the screen is off.
     pub fn set_power(&mut self, power: Power) {
         self.power = power;

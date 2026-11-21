@@ -46,7 +46,10 @@ enum Page {
 /// Setup's pages after the welcome, in order: Next goes one along, Esc one
 /// back, and the progress marks count them. A page added here is in the
 /// flow everywhere; it needs only its rows, its keys and its drawing.
-const FLOW: [Page; 9] = [Page::Hardware, Page::Lesson, Page::Team, Page::Place, Page::Wifi, Page::Keys, Page::Choices, Page::Power, Page::Look];
+///
+/// Wi-Fi comes first: the clock sets itself from the network, and the rest
+/// (the time zone, the keys, the event schedule) is easier with one.
+const FLOW: [Page; 9] = [Page::Wifi, Page::Hardware, Page::Lesson, Page::Team, Page::Place, Page::Keys, Page::Choices, Page::Power, Page::Look];
 
 const SURFACE: Color = Color::hex(0x1c1d23);
 const SURFACE_FOCUSED: Color = Color::hex(0x272830);
@@ -65,9 +68,12 @@ const BAR_CY: f32 = 157.0;
 /// size (a test measures them): nothing on this screen is cut short.
 const WORDS_WELCOME: &str = "Let's get this handheld ready for your robot.";
 const WORDS_COMPUTER: &str = "On a computer on the same network, open:";
+const WORDS_NO_NETWORK: &str = "First the handheld needs a network.";
+const WORDS_OR_CABLE: &str = "Or plug in an Ethernet cable.";
+const WORDS_OPENS_ITSELF: &str = "The page opens here once there is one.";
 const WORDS_TEAM: &str = "The robot's address follows from it: 10.TE.AM.2";
 const WORDS_PLACE: &str = "Its name on the network, and the time it keeps.";
-const WORDS_WIFI: &str = "For updates and the event schedule.";
+const WORDS_WIFI: &str = "For the clock, updates and the event schedule.";
 const WORDS_KEYS: &str = "For the event schedule and log analysis.";
 const WORDS_TYPING: &str = "Enter keeps it; esc leaves it as it was.";
 const WORDS_LOOK: &str = "Change any of these later in Settings.";
@@ -323,6 +329,13 @@ pub struct Setup {
     from_settings: bool,
     /// The hardware page's parts, looked for once it is first shown.
     hardware: Option<crate::hwcheck::Check>,
+    /// The computer page with no network yet: seconds since it last looked
+    /// for one, to offer the page as soon as there is.
+    looked_for_network: f32,
+    /// Wi-Fi was switched on by arriving at its page (so the radio warms up
+    /// while the page is read); switched off again if it is passed by
+    /// without joining anything.
+    wifi_by_setup: bool,
 }
 
 impl Setup {
@@ -345,6 +358,8 @@ impl Setup {
             remote: None,
             from_settings: false,
             hardware: None,
+            looked_for_network: 0.0,
+            wifi_by_setup: false,
         }
     }
 
@@ -354,6 +369,14 @@ impl Setup {
         let mut setup = Setup { from_settings: true, ..Self::new() };
         setup.go(Page::Computer, true);
         setup.remote = crate::remote::Remote::start();
+        setup
+    }
+
+    /// The computer page as it is with no network yet, for the gallery.
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn without_network() -> Self {
+        let mut setup = Setup { from_settings: true, ..Self::new() };
+        setup.go(Page::Computer, true);
         setup
     }
 
@@ -399,6 +422,12 @@ impl Setup {
         self.from = if forward { 1.0 } else { -1.0 };
         self.typing = None;
         self.note = None;
+        // The radio takes seconds to start: on as the page arrives, so the
+        // networks are listed by the time "Choose a network" is pressed.
+        if page == Page::Wifi && !crate::wifi::switched_on() {
+            crate::wifi::switch(true);
+            self.wifi_by_setup = true;
+        }
         self.wifi = (page == Page::Wifi).then(crate::wifi::Wifi::open);
         if page != Page::Computer {
             self.remote = None;
@@ -456,6 +485,14 @@ impl Setup {
     /// Keep what the page being left holds: the team, the keys, the name.
     fn keep(&mut self, cx: &mut Cx) {
         match self.page {
+            // Passed by without joining a network: the radio setup switched
+            // on goes off again (it is the largest draw after the screen).
+            Page::Wifi if self.wifi_by_setup => {
+                if !crate::sys::address("wlan0").is_some_and(|a| a.contains('.')) {
+                    crate::wifi::switch(false);
+                }
+                self.wifi_by_setup = false;
+            }
             Page::Team => self.save_team(cx),
             Page::Keys => {
                 self.keys.save().ok();
@@ -1055,6 +1092,13 @@ impl Screen for Setup {
                     crate::mark_setup_done();
                     return Nav::Done;
                 }
+                // No network yet for the computer page: join Wi-Fi from here.
+                (Page::Computer, _) if self.remote.is_none() => {
+                    if !crate::wifi::switched_on() {
+                        crate::wifi::switch(true);
+                    }
+                    return Nav::Push(Box::new(crate::screens::WifiScreen::new()));
+                }
                 (Page::Place, 0) => self.focus = 1,
                 (Page::Place, _) => return Nav::Push(Box::new(crate::device::ZonePicker::new())),
                 (Page::Wifi, 0) => {
@@ -1106,6 +1150,15 @@ impl Screen for Setup {
         }
         if let Some(remote) = &mut self.remote {
             changed |= remote.tick();
+        } else if self.page == Page::Computer {
+            // Waiting for a network (Wi-Fi joined, or a cable): the page is
+            // offered as soon as there is an address to give.
+            self.looked_for_network += dt;
+            if self.looked_for_network >= 2.0 {
+                self.looked_for_network = 0.0;
+                self.remote = crate::remote::Remote::start();
+                changed |= self.remote.is_some();
+            }
         }
         if let Some(wifi) = &self.wifi {
             let seen = wifi.generation();
@@ -1146,7 +1199,7 @@ impl Screen for Setup {
                 self.bar(g, "enter chooses");
             }
             Page::Computer => {
-                self.heading(g, "Set up from a computer", WORDS_COMPUTER);
+                self.heading(g, "Set up from a computer", if self.remote.is_some() { WORDS_COMPUTER } else { WORDS_NO_NETWORK });
                 let (a, dx, dy) = self.reveal(2);
                 match &self.remote {
                     Some(remote) => {
@@ -1159,9 +1212,13 @@ impl Screen for Setup {
                         g.text_alpha(LEFT, BAR_CY, &remote.status(), TextStyle::code(9.0), INK_FAINT, a);
                     }
                     None => {
-                        g.text_alpha(LEFT + dx, 84.0 + dy, "No network yet: plug in the Ethernet cable,", TextStyle::sans(11.0, 400.0), INK_STRONG, a);
-                        g.text_alpha(LEFT + dx, 100.0 + dy, "or go back and set up here.", TextStyle::sans(11.0, 400.0), INK_STRONG, a);
-                        self.bar(g, "esc back");
+                        let _ = (a, dx, dy);
+                        self.row(g, 0, ROWS_TOP + 6.0, row_w, 21.0, "Connect to Wi-Fi", "›", false);
+                        let (a, dx, dy) = self.reveal(3);
+                        let small = TextStyle::sans(11.0, 400.0);
+                        g.text_alpha(LEFT + 11.0 + dx, ROWS_TOP + 46.0 + dy, WORDS_OR_CABLE, small, INK_THIN, a);
+                        g.text_alpha(LEFT + 11.0 + dx, ROWS_TOP + 62.0 + dy, WORDS_OPENS_ITSELF, small, INK_THIN, a);
+                        self.bar(g, "enter: wi-fi · esc back");
                     }
                 }
             }
@@ -1292,7 +1349,20 @@ mod tests {
     fn every_line_of_setup_fits_the_panel_whole() {
         let mut g = Gfx::new(Tokens::dark());
         let words = TextStyle::sans(11.0, 400.0);
-        let lines = [WORDS_WELCOME, WORDS_COMPUTER, WORDS_TEAM, WORDS_PLACE, WORDS_WIFI, WORDS_KEYS, WORDS_TYPING, WORDS_LOOK, WORDS_HARDWARE];
+        let lines = [
+            WORDS_WELCOME,
+            WORDS_COMPUTER,
+            WORDS_NO_NETWORK,
+            WORDS_OR_CABLE,
+            WORDS_OPENS_ITSELF,
+            WORDS_TEAM,
+            WORDS_PLACE,
+            WORDS_WIFI,
+            WORDS_KEYS,
+            WORDS_TYPING,
+            WORDS_LOOK,
+            WORDS_HARDWARE,
+        ];
         for line in lines.iter().chain(CHOICES.iter().map(|c| &c.1)).chain(POWER.iter().map(|p| &p.1)) {
             let w = g.measure(line, words);
             assert!(w <= W - 2.0 * LEFT, "{line:?} is {w:.0} px, wider than {}", W - 2.0 * LEFT);

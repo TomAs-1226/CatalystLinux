@@ -275,9 +275,19 @@ fn describe(state: &str, ssid: Option<&str>, address: Option<&str>) -> String {
         ("ASSOCIATING" | "ASSOCIATED" | "AUTHENTICATING" | "4WAY_HANDSHAKE" | "GROUP_HANDSHAKE", ..) => "joining".into(),
         ("SCANNING", ..) => "looking for networks".into(),
         ("INTERFACE_DISABLED", ..) => "wi-fi hardware is off".into(),
-        ("", ..) => "wi-fi is starting".into(),
+        // No answer from wpa_supplicant yet: the start script says why.
+        ("", ..) => match service_status().as_deref() {
+            Some("the radio did not start") => "the radio did not start".into(),
+            _ => "starting the radio".into(),
+        },
         _ => "not connected".into(),
     }
+}
+
+/// What the Wi-Fi service last said of itself (`/run/catalyst-wifi.status`):
+/// starting, running, off, or why it did not start.
+fn service_status() -> Option<String> {
+    std::fs::read_to_string("/run/catalyst-wifi.status").ok().map(|s| s.trim().to_owned())
 }
 
 // ------------------------------------------------------------- device ---
@@ -349,18 +359,22 @@ fn join(ssid: &str, password: Option<&str>) {
 }
 
 fn run(shared: &Shared, rx: &Receiver<Cmd>) {
-    publish(shared, read_state());
+    let mut state = read_state();
+    publish(shared, state.clone());
     if enabled() {
         cli(&["scan"]);
     }
     let mut since_scan = 0u32;
     while !shared.stop.load(Ordering::Relaxed) {
-        match rx.recv_timeout(Duration::from_millis(1500)) {
+        // Until the first networks are in (the radio still starting, its
+        // first look round), ask every tick; after that, every 12 s.
+        let every = if state.networks.is_empty() { 1 } else { 8 };
+        // Quicker ticks while the list is still empty.
+        let tick = if state.networks.is_empty() { 700 } else { 1500 };
+        match rx.recv_timeout(Duration::from_millis(tick)) {
             Ok(Cmd::Enable(on)) => {
                 Command::new(TOGGLE).arg(if on { "on" } else { "off" }).status().ok();
                 if on {
-                    // Give the service a moment to come up before asking it anything.
-                    thread::sleep(Duration::from_millis(1500));
                     cli(&["scan"]);
                 }
             }
@@ -374,15 +388,17 @@ fn run(shared: &Shared, rx: &Receiver<Cmd>) {
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 since_scan += 1;
-                // A fresh scan every 12 s while the screen is open.
-                if since_scan >= 8 && enabled() {
+                // A fresh scan every 12 s while the screen is open (at once
+                // while there is nothing listed yet).
+                if since_scan >= every && enabled() {
                     since_scan = 0;
                     cli(&["scan"]);
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
-        publish(shared, read_state());
+        state = read_state();
+        publish(shared, state.clone());
     }
 }
 

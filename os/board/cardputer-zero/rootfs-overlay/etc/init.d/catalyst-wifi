@@ -17,17 +17,25 @@ depend() {
 start() {
 	if [ ! -e /data/catalyst/wifi-enabled ]; then
 		einfo "Wi-Fi is switched off"
+		echo off >/run/catalyst-wifi.status
 		return 0
 	fi
 	ebegin "Starting Wi-Fi"
+	# How it stands, for the shell to say: starting, running, or why not.
+	echo starting >/run/catalyst-wifi.status
 	modprobe brcmfmac
-	# The radio takes a moment to load its firmware and appear.
+	# The radio loads its firmware over SDIO and appears: usually within two
+	# seconds, given fifteen (a first start after power-on can be slower).
 	n=0
-	while [ ! -e /sys/class/net/wlan0 ] && [ $n -lt 50 ]; do
+	while [ ! -e /sys/class/net/wlan0 ] && [ $n -lt 150 ]; do
 		sleep 0.1
 		n=$((n + 1))
 	done
 	if [ ! -e /sys/class/net/wlan0 ]; then
+		echo "the radio did not start" >/run/catalyst-wifi.status
+		# What the driver said, kept for looking into it (Files › catalyst).
+		mkdir -p /data/catalyst
+		dmesg | grep -iE "brcm|mmc1|sdio|cfg80211|firmware" | tail -n 40 >/data/catalyst/wifi-start.log
 		eend 1 "the radio did not appear"
 		return 1
 	fi
@@ -41,6 +49,10 @@ start() {
 	wpa_supplicant -B -P /run/wpa_supplicant.pid -i wlan0 -c /data/wifi/wpa_supplicant.conf >/dev/null
 	start-stop-daemon -S -b -m -p /run/ifplugd.wlan0.pid -x /usr/sbin/ifplugd -- \
 		-n -i wlan0 -I -u 0 -d 2 -t 2 -r /usr/sbin/catalyst-net -x dhcp-only
+	# The first look round at once, so networks are listed by the time
+	# anyone opens the page.
+	wpa_cli -p /run/wpa_supplicant -i wlan0 scan >/dev/null 2>&1
+	echo running >/run/catalyst-wifi.status
 	eend 0
 }
 
@@ -54,5 +66,6 @@ stop() {
 	# Unload the driver, and what it alone was using: the radio goes quiet.
 	sleep 0.3
 	modprobe -r brcmfmac 2>/dev/null
+	echo off >/run/catalyst-wifi.status
 	eend 0
 }

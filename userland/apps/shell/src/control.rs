@@ -168,7 +168,11 @@ impl Control {
             Key::Left | Key::Right if item == Item::Brightness => {
                 let step = if key == Key::Left { -10 } else { 10 };
                 self.level = (self.level as i32 + step).clamp(10, 100) as u32;
-                if !crate::sys::set_brightness(self.level) {
+                if crate::sys::set_brightness(self.level) {
+                    // Kept, for the next start.
+                    settings.brightness = self.level;
+                    crate::save_settings(settings);
+                } else {
                     DEMO_LEVEL.store(self.level, Ordering::Relaxed);
                 }
                 self.bar.set(self.level as f32 / 100.0);

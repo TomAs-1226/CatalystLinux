@@ -72,6 +72,9 @@ pub struct Settings {
     /// Settings › Battery: the saver, low-battery care, Wi-Fi in standby,
     /// the red light.
     pub battery: crate::power::Choices,
+    /// The backlight's level, in percent, kept across restarts: it starts
+    /// dark and rises to this once the first picture is on the panel.
+    pub brightness: u32,
     /// Where there is a motion sensor: the screen comes on when the
     /// handheld is picked up, and goes off when it is put face down.
     pub lift_wake: bool,
@@ -189,6 +192,7 @@ impl Default for Settings {
             screen_off: 60,
             power: crate::standby::Power::Balanced,
             battery: crate::power::Choices::default(),
+            brightness: 70,
             lift_wake: true,
             face_down: true,
         }
@@ -901,7 +905,10 @@ impl Shell {
             let step: i32 = if key == Key::BrightnessUp { 10 } else { -10 };
             let said = match crate::sys::brightness() {
                 Some(now) if crate::sys::set_brightness((now as i32 + step).clamp(10, 100) as u32) => {
-                    format!("brightness {}%", crate::sys::brightness().unwrap_or(now))
+                    // Kept, for the next start.
+                    self.settings.brightness = crate::sys::brightness().unwrap_or(now);
+                    crate::save_settings(&self.settings);
+                    format!("brightness {}%", self.settings.brightness)
                 }
                 _ => "the backlight is on the handheld".to_owned(),
             };
@@ -2349,6 +2356,20 @@ impl Shell {
         self.open(Box::new(crate::power::Empty::new(self.settings.calm)), Path::Slide);
     }
 
+    /// A screen opened straight away, for the gallery.
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn show(&mut self, screen: Box<dyn Screen>) {
+        self.open(screen, Path::Slide);
+    }
+
+    /// The first picture is on the panel: the backlight, dark since power-on
+    /// (so nothing the panel held before it was set up ever shows), rises
+    /// to the level kept in the settings.
+    pub fn light_up(&mut self) {
+        self.standby.rise_from_dark(self.settings.brightness, self.settings.calm);
+        self.moving = true;
+    }
+
     /// The screen is off and dark: the panel itself can sleep.
     pub fn panel_off(&self) -> bool {
         self.standby.asleep()
@@ -2847,8 +2868,9 @@ pub(crate) mod tests {
         assert!(shell.robot.is_demo());
         shell.start_setup();
         frames(&mut shell, 30, FRAME);
-        // Set up here; past the hardware check and the keyboard lesson; the team.
+        // Set up here; past Wi-Fi, the hardware check and the keyboard lesson; the team.
         shell.key(Key::Enter);
+        shell.key(Key::Tab);
         shell.key(Key::Tab);
         shell.key(Key::Tab);
         for c in "5805".chars() {
@@ -2869,9 +2891,11 @@ pub(crate) mod tests {
         assert_eq!(title(&shell), "Setup");
         let light = shell.settings.light;
         let accent = shell.settings.accent;
-        // Set up here; the hardware check and the keyboard lesson skipped;
-        // team 5805; the name and time zone as they are; no Wi-Fi now; keys
+        // Set up here; no Wi-Fi now; the hardware check and the keyboard
+        // lesson skipped; team 5805; the name and time zone as they are; keys
         // skipped; choices: the first off; power as it is.
+        shell.key(Key::Enter);
+        shell.key(Key::Down);
         shell.key(Key::Enter);
         shell.key(Key::Tab);
         shell.key(Key::Tab);
@@ -2880,8 +2904,6 @@ pub(crate) mod tests {
         }
         shell.key(Key::Enter);
         shell.key(Key::Tab);
-        shell.key(Key::Down);
-        shell.key(Key::Enter);
         shell.key(Key::Tab);
         assert!(shell.settings.open_robot);
         shell.key(Key::Enter);

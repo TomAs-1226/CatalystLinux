@@ -2472,6 +2472,8 @@ impl SettingsApp {
                 Some(now) => {
                     crate::sys::set_brightness((now as i32 + step * 10).clamp(10, 100) as u32);
                     self.backlight = crate::sys::brightness();
+                    // Kept, for the next start (saved below).
+                    cx.settings.brightness = self.backlight.unwrap_or(now);
                 }
                 None => *cx.say = Some("the backlight is on the device".into()),
             },
