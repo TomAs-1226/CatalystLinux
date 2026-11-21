@@ -15,7 +15,7 @@ windows that grow out of tiles whenever it is there.
 | `userland/crates/bezel` | Bezel on the CPU: tonal surfaces, the two type voices, Material Symbols, and the full glass pass (refraction, frost, edge light, groups, shadow). |
 | `userland/crates/nt4` | A NetworkTables 4.1 client: one thread, read-only, reconnects on its own. |
 | `userland/crates/apriltag` | AprilTag detection: AprilRobotics' C library (3.4.5, BSD 2-Clause, vendored with the 36h11 family FRC uses) behind a small flat shim, with each tag's pose. |
-| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, AprilTag, Graphs, Pit, Remote, Level, Compass, Weather, Settings) and the launcher for external ones. |
+| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, Camera, Photos, AprilTag, Graphs, Pit, Remote, Level, Compass, Weather, Settings) and the launcher for external ones. |
 | `userland/apps/update` | `catalyst-update`: system updates on the handheld (A/B, tried once, rolled back if it does not come up), and the release tool that makes and signs them. |
 | `userland/apps/flasher` | Catalyst Flasher: the newest release onto an SD card in one go. |
 | `userland/assets/app-icon` | Catalyst's icon (the FrcCatalyst bolt) at each size Windows uses, built into the simulator; `assets/` holds it for Raspberry Pi Imager's listing. |
@@ -1124,6 +1124,68 @@ Not yet checked on a CardputerZero: the picture the right way up after the
 half turn, the frame rate the CM0 reaches at 30 a second, how often it reads
 tags, and the lens figures.
 
+## Camera and Photos
+
+The Camera is the IMX219 as a camera: its picture in colour, photos kept in
+an album, and QR codes read. The AprilTag reader is still there beside it.
+
+- **The viewfinder** fills the panel's height at the photo's own shape (4:3,
+  227 × 170), with a rail of controls beside it: photo or scan (← → or Tab),
+  the shutter, and the newest photo (↓ opens the album on it). Enter or Space
+  takes a photo: the shutter presses in, the picture flashes, the photo is
+  saved and its thumbnail drops into the corner. `t` sets a timer (3 s, then
+  10 s, then off), counted down over the picture; Esc stops it. `g` lays a
+  rule-of-thirds grid over the picture. `n` is for low light: the exposure may
+  run to a fifth of a second, so the preview slows down too.
+- **Photos are full size.** The preview is 320 × 240 YUV 4:2:0 at up to 30
+  frames a second from the sensor's binned full-view mode. A photo stops the
+  preview and asks the sensor for all 3280 × 2464 pixels. `catalyst-camera`
+  waits a few frames so the exposure settles, then writes the JPEG
+  (libjpeg-turbo, quality 92) straight from the camera's buffer, with no RGB
+  copy in between. The preview carries on as soon as the photo is written.
+  The camera's memory (CMA) is 32 MB, so where a full-size frame cannot be had
+  it takes the binned 1640 × 1232 instead, and the note says which size it
+  saved. Photos are written to a temporary file and renamed into place, so a
+  photo is never half there.
+- **Where they go:** `/data/photos`, named for when they were taken
+  (`IMG_20261121_140312.jpg`, with `_2` added if two land in the same
+  second). Files opens a photo in the viewer too.
+- **Scan mode** reads QR codes from the preview's brightness, about four
+  times a second, on a thread of its own (rqrr, pure Rust), so the preview
+  never waits for it. A code read is outlined and a card rises with what it
+  holds:
+  - a Wi-Fi code (`WIFI:T:WPA;S:…;P:…;;`, escapes and all) offers to join
+    that network, through the same Wi-Fi page as Settings, which says when it
+    has joined;
+  - a web address opens in the Web app (lynx). Only `http` and `https` are
+    opened, and the address is passed quoted, so a code cannot run a command;
+  - anything else is shown as text, on a page of its own.
+- **Photos** (the album) is a grid of thumbnails, newest first, four across.
+  The thumbnails are made on a thread and kept in `/data/photos/.thumbs`, so
+  each is decoded only once. Enter opens a photo on the whole panel:
+  - ← → go to the previous or next photo;
+  - `+` (or Enter) zooms to 2× and then 4×, and `-` zooms back out. Zoomed,
+    the arrows pan, and Esc goes back to the whole photo first;
+  - `i` shows the details: name, size in pixels and megapixels, the file's
+    size, and when it was taken;
+  - `d` asks, and `d` again deletes it (its thumbnail goes too).
+- **Memory.** A photo is decoded at an eighth, a quarter or half of its size,
+  whichever is the smallest that still covers the panel at the zoom asked
+  for. Even at 4× a full-size photo is decoded at half its size (6 MB), never
+  its whole 24 MB. Only one photo is decoded at a time, even when you turn
+  through them quickly; until it is ready, its thumbnail stands in.
+- **In the simulator** a simulated camera shows a field at the end of an
+  afternoon, drifting a little as a hand would, with a Wi-Fi code held up in
+  front of it in scan mode. Its photos are written by a JPEG encoder in the
+  shell (`jpeg-encoder`, built only for computers), and the album starts with
+  six of them. The QR reader reads the simulated code at the preview's size
+  (tested).
+
+Not yet checked on a CardputerZero: the colours and which way up the colour
+preview is, whether a full-size photo fits in the camera's 32 MB or falls back
+to 1640 × 1232, the preview's frame rate and how long a photo takes to write,
+and how far away a QR code can be read at 320 × 240.
+
 ## Remote: a universal remote
 
 The CardputerZero has an infrared LED (GPIO12) and an infrared receiver
@@ -1575,4 +1637,9 @@ fonts built into the shell are subsets of them. The board drivers come from
 program is Bosch's (`bmi270_config_file` from the BMI270 Sensor API,
 BSD-3-Clause), vendored under `userland/assets/bmi270` with its licence.
 Weather's forecasts and place names come from Open-Meteo at run time (CC BY
-4.0), as does the simulator's captured forecast.
+4.0), as does the simulator's captured forecast. The Camera's photos are
+written by libjpeg-turbo (IJG, BSD-3-Clause and zlib licences) in
+`catalyst-camera`. In the shell, QR codes are read by rqrr ((MIT or Apache
+2.0) and ISC) and photos are decoded by jpeg-decoder (MIT or Apache 2.0). The
+simulator alone writes its photos with jpeg-encoder ((MIT or Apache 2.0) and
+IJG).

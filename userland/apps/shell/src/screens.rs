@@ -52,7 +52,7 @@ struct App {
     open: fn(&Robot) -> Box<dyn Screen>,
 }
 
-const APPS: [App; 26] = [
+const APPS: [App; 28] = [
     App { icon: "smart_toy", name: "Robot", open: |_| Box::new(RobotScreen::default()) },
     App { icon: "monitor_heart", name: "Health", open: |_| Box::new(Health::default()) },
     App { icon: "description", name: "Logs", open: |_| Box::new(LogsScreen::default()) },
@@ -69,6 +69,9 @@ const APPS: [App; 26] = [
     App { icon: "network_check", name: "Net tools", open: |_| Box::new(crate::nettools::NetTools::new()) },
     App { icon: "settings_ethernet", name: "Connect", open: |_| Box::new(crate::connect::Connect::new()) },
     App { icon: "play_circle", name: "Actions", open: |_| Box::new(crate::commands::Commands::new()) },
+    // The camera's apps side by side: photos (and QR codes), the album, tags.
+    App { icon: "photo_camera", name: "Camera", open: |_| Box::new(crate::camera::Camera::new()) },
+    App { icon: "photo_library", name: "Photos", open: |_| Box::new(crate::photos::Album::new()) },
     App { icon: "qr_code_scanner", name: "AprilTag", open: |_| Box::new(crate::apriltags::Reader::new()) },
     App { icon: "insights", name: "Graphs", open: |_| Box::new(crate::graphs::Graphs::new()) },
     App { icon: "checklist", name: "Pit", open: |_| Box::new(crate::pit::Pit::default()) },
@@ -447,6 +450,8 @@ impl Home {
             "Level" => ("pitch · roll".into(), None),
             "Compass" => ("heading".into(), None),
             "Weather" => crate::weather::tile(),
+            "Camera" => ("photo · scan".into(), None),
+            "Photos" => crate::photos::tile(),
             "Assistant" => crate::ai::tile(),
             "Web" => ("pages as text".into(), None),
             "Logs" => {
@@ -2914,6 +2919,20 @@ impl WifiScreen {
     pub fn for_setup() -> Self {
         WifiScreen { back_when_joined: true, ..Self::new() }
     }
+
+    /// A network a QR code named, joined now: the list showing it, and back
+    /// by itself once that network (not just any) has given an address.
+    pub fn joining(ssid: &str, password: Option<String>) -> Self {
+        let page = WifiScreen { back_when_joined: true, joining: true, ..Self::new() };
+        page.wifi.join(ssid, password);
+        JOINING.with(|j| *j.borrow_mut() = Some(ssid.to_owned()));
+        page
+    }
+}
+
+thread_local! {
+    /// The network `WifiScreen::joining` waits for.
+    static JOINING: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 impl Screen for WifiScreen {
@@ -2977,7 +2996,10 @@ impl Screen for WifiScreen {
         self.seen = generation;
         // From setup: joined, with an address, counts the moment before going back.
         if self.back_when_joined && self.joining {
-            match (&mut self.online_for, self.wifi.state().online()) {
+            let state = self.wifi.state();
+            // Joining one by name: that one, current, before it counts.
+            let on_it = JOINING.with(|j| j.borrow().as_ref().is_none_or(|want| state.networks.iter().any(|n| n.current && &n.ssid == want)));
+            match (&mut self.online_for, state.online() && on_it) {
                 (Some(t), true) => *t += dt,
                 (None, true) => self.online_for = Some(0.0),
                 (_, false) => self.online_for = None,
@@ -2990,6 +3012,7 @@ impl Screen for WifiScreen {
         if self.online_for.is_some_and(|t| t >= JOINED_PAUSE) {
             self.online_for = None;
             self.joining = false;
+            JOINING.with(|j| *j.borrow_mut() = None);
             *cx.say = Some(format!("connected · {}", self.wifi.state().status));
             return Nav::Pop;
         }
@@ -3307,7 +3330,7 @@ mod tests {
         pretend(Some(Found::Nothing));
         let shown = builtin(&Home::new());
         assert!(!shown.iter().any(|n| n == "Level" || n == "Compass"), "{shown:?}");
-        assert_eq!(shown.len(), 24, "the twenty-four the emulator's run counts on (Remote, Weather, Assistant and Web are on every unit)");
+        assert_eq!(shown.len(), 26, "the twenty-six the emulator's run counts on (Remote, Weather, Camera, Photos, Assistant and Web are on every unit)");
         assert_eq!(shown.last().map(String::as_str), Some("Settings"), "Settings stays last");
         assert_eq!(builtin_apps().position(|(_, _, n)| n == "Terminal"), Some(8), "Terminal where it was");
         assert!(!builtin_apps().any(|(_, _, n)| n == "Level"), "nor in search");

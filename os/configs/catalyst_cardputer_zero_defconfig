@@ -97,6 +97,10 @@ BR2_PACKAGE_NCURSES_ADDITIONAL_TERMINFO="t/tmux t/tmux-256color"
 BR2_PACKAGE_LIBCAMERA=y
 BR2_PACKAGE_LIBCAMERA_PIPELINE_RPI_VC4=y
 BR2_PACKAGE_CATALYST_CAMERA=y
+# Photos as JPEG: libjpeg-turbo, its NEON code (plain NEON: nothing this
+# processor lacks).
+BR2_PACKAGE_JPEG=y
+BR2_PACKAGE_JPEG_TURBO=y
 # resize2fs, to grow /data over the whole card on first boot.
 BR2_PACKAGE_E2FSPROGS=y
 BR2_PACKAGE_E2FSPROGS_RESIZE2FS=y
