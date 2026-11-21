@@ -153,6 +153,15 @@ impl Converter {
         Converter { kind, from: 0, typed: "1".into(), list: ListState::default() }
     }
 
+    /// A kind open on an amount already typed against one of its units (from search).
+    pub fn at(kind: usize, from: usize, typed: &str) -> Self {
+        let kind = kind.min(KINDS.len() - 1);
+        let from = from.min(KINDS[kind].units.len() - 1);
+        let mut list = ListState::default();
+        list.focus = from;
+        Converter { kind, from, typed: typed.chars().take(18).collect(), list }
+    }
+
     fn value(&self) -> f64 {
         self.typed.replace(',', ".").parse::<f64>().unwrap_or(0.0)
     }

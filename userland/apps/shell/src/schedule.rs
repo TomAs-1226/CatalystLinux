@@ -470,6 +470,16 @@ pub struct ScheduleScreen {
     placed: bool,
 }
 
+impl ScheduleScreen {
+    /// The schedule open on one match (by its place in the list), as search
+    /// finds a match or a team.
+    pub fn at(index: usize) -> Self {
+        let mut list = ListState::default();
+        list.focus = index;
+        ScheduleScreen { list, placed: true }
+    }
+}
+
 impl Screen for ScheduleScreen {
     fn title(&self) -> &str {
         "Schedule"

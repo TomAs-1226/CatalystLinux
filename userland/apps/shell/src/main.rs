@@ -83,10 +83,10 @@ mod robot;
 mod schedule;
 mod screens;
 mod screenshot;
-mod search;
 mod setup;
 mod share;
 mod shell;
+mod spotlight;
 mod standby;
 mod sys;
 mod tailscale;
@@ -1044,11 +1044,129 @@ fn motion(dir: &std::path::Path) {
     println!("motion in {}", dir.display());
 }
 
+/// Spotlight's part of the tour: growing out of the island, results as they
+/// are typed (apps and values, a sum, a conversion, a match, a team), a
+/// preview, over an app, a result opening out of its row, the recent picks,
+/// light mode and the large text size.
+#[cfg(not(target_arch = "aarch64"))]
+fn spotlight_shots(dir: &std::path::Path) {
+    use Key::*;
+    let settle = |shell: &mut Shell, frames: usize| {
+        for _ in 0..frames {
+            if shell.tick(1.0 / 60.0) {
+                shell.draw();
+            }
+        }
+    };
+    let save = |shell: &mut Shell, name: &str| {
+        shell.draw();
+        platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}.png")), 3);
+    };
+    let typed = |shell: &mut Shell, text: &str| {
+        shell.key(Delete);
+        for c in text.chars() {
+            shell.key(Char(c));
+            settle(shell, 2);
+        }
+        settle(shell, 50);
+    };
+    // A note, two hosts and the album's photos, for it to find.
+    let notes = notes::dir();
+    std::fs::create_dir_all(&notes).ok();
+    std::fs::write(notes.join("2026-11-20-101500.txt"), "Swerve offsets\n\nfront left 0.412 rad\nfront right 1.873 rad\nback left 2.551 rad\nback right 5.090 rad\n\n— Q31 · nov 20 10:15\n").ok();
+    std::fs::write(config_dir().join("ssh-hosts"), "lvuser@10.58.5.2\nthomas@build.local\n").ok();
+    photos::seed_demo();
+    spotlight::index().refresh(true);
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    // Out of the island: caught growing, then at rest with nothing typed yet.
+    shell.key(Ctrl('\n'));
+    settle(&mut shell, 6);
+    save(&mut shell, "32-spotlight-growing");
+    settle(&mut shell, 60);
+    save(&mut shell, "32b-spotlight");
+    typed(&mut shell, "lo");
+    save(&mut shell, "32c-spotlight-lo");
+    typed(&mut shell, "12*7");
+    save(&mut shell, "32d-spotlight-sum");
+    typed(&mut shell, "3 in to mm");
+    save(&mut shell, "32e-spotlight-units");
+    typed(&mut shell, "q31");
+    save(&mut shell, "32f-spotlight-match");
+    typed(&mut shell, "254");
+    save(&mut shell, "32g-spotlight-team");
+    // Tab: a robot value's preview, then a note's (read on its thread).
+    typed(&mut shell, "volts");
+    shell.key(Tab);
+    settle(&mut shell, 40);
+    save(&mut shell, "32h-spotlight-preview-value");
+    shell.key(Left);
+    typed(&mut shell, "swerve");
+    shell.key(Tab);
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(10));
+        settle(&mut shell, 2);
+    }
+    settle(&mut shell, 40);
+    save(&mut shell, "32i-spotlight-preview-note");
+    shell.key(Back);
+    settle(&mut shell, 8);
+    save(&mut shell, "32j-spotlight-back-into-the-island");
+    settle(&mut shell, 90);
+    // Over an app: Logs. A setting found, and opened out of its row.
+    for key in [Right, Right, Enter] {
+        shell.key(key);
+        settle(&mut shell, 60);
+    }
+    shell.key(Ctrl('\n'));
+    settle(&mut shell, 40);
+    typed(&mut shell, "bright");
+    save(&mut shell, "32k-spotlight-over-an-app");
+    shell.key(Enter);
+    settle(&mut shell, 7);
+    save(&mut shell, "32l-spotlight-opening");
+    settle(&mut shell, 90);
+    save(&mut shell, "32m-spotlight-opened");
+    // Back to Home; with nothing typed, the picks made lately.
+    for _ in 0..3 {
+        shell.key(Back);
+        settle(&mut shell, 60);
+    }
+    shell.key(Ctrl('\n'));
+    settle(&mut shell, 60);
+    save(&mut shell, "32n-spotlight-recent");
+    shell.key(Back);
+    settle(&mut shell, 90);
+    // Light mode, and the large text size.
+    shell.settings.light = true;
+    shell.apply_settings();
+    settle(&mut shell, 60);
+    shell.key(Ctrl('\n'));
+    settle(&mut shell, 40);
+    typed(&mut shell, "net");
+    save(&mut shell, "32o-spotlight-light");
+    shell.key(Back);
+    settle(&mut shell, 90);
+    shell.settings.light = false;
+    shell.settings.text = gfx::TextSize::Large;
+    shell.apply_settings();
+    settle(&mut shell, 60);
+    shell.key(Ctrl('\n'));
+    settle(&mut shell, 40);
+    typed(&mut shell, "wi");
+    save(&mut shell, "32p-spotlight-large-text");
+}
+
 /// A scripted tour: press keys, let motion settle, save each screen.
 #[cfg(not(target_arch = "aarch64"))]
 fn shots(mut shell: Shell, dir: &std::path::Path) {
     use Key::*;
     std::fs::create_dir_all(dir).expect("create the screenshot folder");
+    // Only Spotlight's part, when that is all that is wanted.
+    if std::env::var("CATALYST_SHOTS_ONLY").as_deref() == Ok("spotlight") {
+        return spotlight_shots(dir);
+    }
     // From Files to Settings, however many apps lie between.
     let files_to_settings: Vec<Key> =
         [Ctrl('q'), Back].into_iter().chain(std::iter::repeat_n(Right, steps_to("Settings") - steps_to("Files"))).chain([Enter]).collect();
@@ -1267,17 +1385,13 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     }
     settle(&mut shell, 60);
     save(&mut shell, "89-shortcuts-keyboard");
-    // Search, from Home: Space, then a few letters.
+    // Spotlight: from Home and over an app, as it is typed into.
+    spotlight_shots(dir);
+    // Git, with no repositories yet.
     let mut shell = Shell::new(Robot::demo());
     shell.apply_settings();
     settle(&mut shell, 100);
-    for key in [Char(' '), Char('l'), Char('o')] {
-        shell.key(key);
-        settle(&mut shell, 40);
-    }
-    save(&mut shell, "32-search");
-    // Git, with no repositories yet.
-    let keys = [Back, Back].into_iter().chain(std::iter::repeat_n(Right, steps_to("Git"))).chain([Enter]);
+    let keys = std::iter::repeat_n(Right, steps_to("Git")).chain([Enter]);
     for key in keys {
         shell.key(key);
         settle(&mut shell, 60);

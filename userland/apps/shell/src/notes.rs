@@ -16,7 +16,8 @@ use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
 use crate::tools::{Field, Typed};
 
-fn dir() -> PathBuf {
+/// Where notes are kept (search reads them too).
+pub fn dir() -> PathBuf {
     if cfg!(target_os = "linux") && Path::new("/data").is_dir() {
         PathBuf::from("/data/notes")
     } else {

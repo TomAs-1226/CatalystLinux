@@ -76,7 +76,7 @@ anyway*. From a terminal it takes the shell's own options: `--no-intro`,
 Arrow keys or `F` `X` `Z` `C` (the keys that carry the arrows on the
 Cardputer) move, Enter opens, Esc goes back. On Home, Left and Right go
 through the apps in order (on to the next row, and the next page), Up and
-Down within a page. Space on Home searches.
+Down within a page. Ctrl-Enter searches from any screen (Space on Home too).
 Ctrl-Space brings the control centre down over any screen, and Ctrl-Tab the
 recent apps; Left from Home's first tile is the glance page. `?` held for five seconds on any screen that
 is not taking text brings up the list of shortcuts (the island counts down
@@ -266,11 +266,51 @@ The start animation is personal too: once the team is known (from the robot's
 address) and a robot has linked, the line under the name reads
 `team 5805 · atlas` instead of the version.
 
-**Search**: Space (or /) on Home, then type. One list finds apps, everything
-in Settings, any value the robot publishes, and match logs, ranked by where
-the words are found (the start of a name, then the start of a word in it,
-then anywhere). Enter opens it; Esc clears, then leaves. The bare letters
-stay arrows on Home, so search has its own key.
+**Spotlight** is search from anywhere, as on a Mac. **Ctrl-Enter** brings
+it up over any screen, an app, a text field or the terminal included (no
+program in a terminal can tell Ctrl-Enter from Enter, so it takes nothing
+from one; the control centre gives way to it); Space or / on Home do too,
+as search's keys always have. It is a bar of glass that grows out of the
+island: the island stretches into it as its glass materializes (its
+refraction ramps up, never its opacity), and the screen behind is held
+still and dims a little.
+
+- **As you type**, from the first key, ranked: the apps (by other names too:
+  "math" finds Calculator), every page and switch in Settings (opened at
+  its row, a key said to be set or not), the Actions, notes (by what they
+  say, too), files under /data, photos, git repositories, the SSH hosts kept
+  in Connect, the robot's values (with the value), match logs, the event
+  schedule (a match number such as "q31" or "qm 31", a team number, or
+  "next"), sums ("12*7", "0x1f") and unit conversions ("3 in to mm", "12
+  ft·lb in nm", "5 lb") with the Calculator's and Units' own engines; then,
+  always last, search the web for it (in Web) and ask the assistant (which
+  sends it there).
+- **Ranked** the way a name is read: the whole name, its start, the start
+  of a word in it (a capital starts one: "volts" finds BatteryVolts), its
+  initials ("nt" is Net tools), anywhere in it, the other words it is known
+  by, and for apps, settings and actions a close misspelling ("termnal").
+  Then by kind (apps first, files last), then the shorter name. What was
+  picked lately (kept in `/data/catalyst/spotlight-picks`) comes first among
+  close matches, and with nothing typed the picks are offered.
+- **Keys**: Up and Down move through the results; Enter opens one, growing
+  out of its row, over the screen Spotlight came up on, so Esc from there
+  comes back to it; Tab or → shows a preview where there is one (a file's or
+  a note's first lines, a photo, a value as it is now, a match's alliances,
+  a sum in every base, an amount in every unit, what an Action runs), and ←
+  goes back; Fn-Backspace clears; Esc springs it back into the island. An
+  Action opens the confirm page with the command exactly as it will run,
+  and runs there, in place, on a yes.
+- **Never in the way**: the index is read on a thread of its own at a lower
+  priority, a provider at a time and again only when what it reads has
+  changed (a folder's change time; files a folder at a time), so a key never
+  waits on the storage. At its fullest (4,000 files, the most it holds, and
+  every other kind) it holds about a megabyte, and a search takes 0.1 to
+  0.3 ms on a desktop processor. It never opens over a lock screen, nor over
+  first-boot setup.
+- **Other apps add their own** results with `spotlight::register` and a
+  small `Provider` trait (`apps/shell/src/spotlight/index.rs`): items read
+  in the background, answers worked out from what is typed, how to open
+  one, and a preview.
 
 One step left of Home's first app is the **glance page** (负一屏): cards to be
 read without opening anything, two to a page, the pages running further left.

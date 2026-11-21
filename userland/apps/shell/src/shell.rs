@@ -300,6 +300,8 @@ pub enum Nav {
     Pop,
     /// Pull the control centre down.
     Control,
+    /// Bring Spotlight up over this screen (Space on Home).
+    Spotlight,
     /// Done: give way to the screen beneath, fading out over it as it appears.
     Done,
     /// Back to Home, and take the tour there.
@@ -382,6 +384,11 @@ pub trait Screen {
     /// Enter held down repeats, as a remote's button does when held (the
     /// Remote app's buttons). Elsewhere Enter counts once a press.
     fn repeats_enter(&self) -> bool {
+        false
+    }
+    /// A lock screen: nothing that reaches past it opens over it while it
+    /// is anywhere on the stack (Spotlight; see `Shell::locked`).
+    fn locks(&self) -> bool {
         false
     }
 }
@@ -678,6 +685,13 @@ pub struct Shell {
     /// glass is worked out once and then moved as a picture.
     control_under: Option<Vec<u32>>,
     control_glass: Option<Vec<u32>>,
+    /// Spotlight, over whatever screen is showing; while it is out, the frame
+    /// it came up over (the screen and the status, not yet the island's
+    /// glass, which it grows out of) and the page dots that frame asked for.
+    spotlight: crate::spotlight::Spotlight,
+    spotlight_under: Option<(Vec<u32>, Option<(usize, usize, f32)>)>,
+    /// Spotlight's index has been set reading, ahead of its first search.
+    spotlight_warmed: bool,
     /// Whether the robot was linked at the last tick, and how long it has
     /// been gone, to tell a robot arriving from a link that blinked.
     was_linked: bool,
@@ -805,6 +819,7 @@ fn key_name(key: Key) -> String {
         Key::Char(c) => c.to_string(),
         Key::Ctrl(' ') => "ctrl space".into(),
         Key::Ctrl('\t') => "ctrl tab".into(),
+        Key::Ctrl('\n') => "ctrl enter".into(),
         Key::Ctrl(c) => format!("ctrl {c}"),
         Key::Leave => "esc held".into(),
     }
@@ -864,6 +879,9 @@ impl Shell {
             control: Control::new(),
             control_under: None,
             control_glass: None,
+            spotlight: crate::spotlight::Spotlight::new(),
+            spotlight_under: None,
+            spotlight_warmed: false,
             spent: Default::default(),
             tour: None,
             tour_after: None,
@@ -1111,6 +1129,20 @@ impl Shell {
         if self.switcher.as_ref().is_some_and(|s| !s.leaving()) {
             return self.switcher_key(key);
         }
+        // Spotlight on its way back into the island: Ctrl-Enter turns it
+        // round; any other key makes it go at once, and lands on the screen
+        // beneath, drawn live.
+        if !self.spotlight.is_open() && self.spotlight.visible() {
+            if key == Key::Ctrl('\n') {
+                return self.summon_spotlight();
+            }
+            self.spotlight.gone_now();
+            self.spotlight_under = None;
+        }
+        // Spotlight takes the keys while it is up (the backlight's aside).
+        if self.spotlight.is_open() && !matches!(key, Key::BrightnessDown | Key::BrightnessUp) {
+            return self.spotlight_key(key);
+        }
         // Ctrl-Tab brings them up over any screen, a terminal included: no
         // program in a terminal can be sent Ctrl-Tab, so it takes nothing.
         if key == Key::Ctrl('\t') {
@@ -1146,6 +1178,12 @@ impl Shell {
             Key::Backspace => Key::Back,
             other => other,
         };
+        // Ctrl-Enter brings Spotlight up over any screen, a terminal included
+        // (no program can tell it from Enter), and over the control centre,
+        // which gives way to it.
+        if key == Key::Ctrl('\n') {
+            return self.summon_spotlight();
+        }
         // A key while the control centre is on its way out: it finishes going
         // at once, so the key lands on a screen that is drawn live, not on
         // the still picture held behind the sheet.
@@ -1237,6 +1275,7 @@ impl Shell {
             Nav::Open(screen, from) => self.open(screen, Path::Grow(from)),
             Nav::Pop => self.close(),
             Nav::Control => self.set_control(true),
+            Nav::Spotlight => self.summon_spotlight(),
             Nav::Done => self.finish_top(),
             Nav::Tour => self.tour_from_home(),
         }
@@ -1546,7 +1585,7 @@ impl Shell {
             self.arrival = Some(waited + dt);
             return;
         }
-        let on_home = self.stack.len() == 1 && self.transition.is_none() && !self.control.visible();
+        let on_home = self.stack.len() == 1 && self.transition.is_none() && !self.control.visible() && !self.spotlight.visible();
         if self.settings.open_robot && on_home && patient {
             let calm = self.settings.calm;
             self.dirty = true;
@@ -1610,7 +1649,7 @@ impl Shell {
         // once, sliding in over Home when Home is at rest and in sight.
         if let Some(version) = crate::changelog::due_after_update(&self.update) {
             let at_rest = self.stack.len() == 1 && self.transition.is_none() && self.curtain.is_none() && self.intro.is_none();
-            let clear = self.tour.is_none() && self.tour_after.is_none() && self.switcher.is_none() && !self.control.is_open();
+            let clear = self.tour.is_none() && self.tour_after.is_none() && self.switcher.is_none() && !self.control.is_open() && !self.spotlight.visible();
             if at_rest && clear && !self.standby.asleep() && crate::setup_done() {
                 if let Some(page) = crate::changelog::WhatsNew::after_update(&version) {
                     self.open(Box::new(page), Path::Slide);
@@ -1654,7 +1693,7 @@ impl Shell {
         let rows = self.robot.logs.list();
         let Some(row) = rows.iter().find(|row| !watch.known.contains(&row.name)) else { return };
         let Some(detail) = crate::screens::LogDetail::of(row) else { return };
-        let busy = watch.touched || self.control.visible() || self.transition.is_some();
+        let busy = watch.touched || self.control.visible() || self.spotlight.visible() || self.transition.is_some();
         let over = match self.stack.len() {
             1 => true,
             2 => self.stack[1].0.title() == "Robot",
@@ -1800,6 +1839,7 @@ impl Shell {
             self.control_glass = None;
             self.dirty = true;
         }
+        moving |= self.tick_spotlight(motion_dt);
         if self.transition.is_none() {
             moving |= self.stack.last_mut().is_some_and(|(s, _)| s.tick(motion_dt));
             // Work that reached the screen from outside, and a screen that is done.
@@ -1832,6 +1872,7 @@ impl Shell {
         // control centre or the recent apps over it included) it counts once.
         let enter_repeats = self.transition.is_none()
             && !self.control.is_open()
+            && !self.spotlight.is_open()
             && self.switcher.is_none()
             && self.tour.is_none()
             && self.stack.last().is_some_and(|(s, _)| s.repeats_enter());
@@ -1971,6 +2012,27 @@ impl Shell {
             return;
         }
         let over = self.control.visible();
+        // Spotlight is up: the screen behind is held as it was (drawn live
+        // only while a screen is still on its way), and the bar grows over it.
+        if self.spotlight.visible() && !over {
+            if self.transition.is_some() {
+                self.spotlight_under = None;
+            }
+            match &self.spotlight_under {
+                Some((under, pager)) => {
+                    self.gfx.canvas.px.copy_from_slice(under);
+                    self.gfx.pager = *pager;
+                }
+                None => {
+                    // Drawn without the island's glass: the bar is drawn with it.
+                    self.draw_frame();
+                    if self.transition.is_none() {
+                        self.spotlight_under = Some((self.gfx.canvas.px.clone(), self.gfx.pager));
+                    }
+                }
+            }
+            return self.draw_spotlight();
+        }
         match (&self.control_under, over) {
             // The control centre is out: the screen behind is held as it was.
             (Some(under), true) => self.gfx.canvas.px.copy_from_slice(under),
@@ -2206,7 +2268,33 @@ impl Shell {
                 x -= 17.0;
             }
         }
+        // With Spotlight up, the island and the page dots go through the
+        // glass pass with its bar, over this frame held still (`draw_spotlight`).
+        if self.spotlight.visible() {
+            if g.take_motion_started() {
+                self.moving = true;
+            }
+            return;
+        }
+        self.draw_chrome(began, None, 0.0);
+    }
 
+    /// Where the island is just now: as wide as its words, however far its
+    /// spring has taken it.
+    fn island_rect(&self) -> Rect {
+        let island_h = self.gfx.island_h();
+        let iw = self.island_w.value().max(island_h);
+        Rect::new((W - iw) * 0.5, 4.0, iw, island_h)
+    }
+
+    /// The glass over the screen: the island, the page dots' platter, and
+    /// Spotlight's bar when it is up (`bar`, in the island's group, so it
+    /// grows out of it). `hide`: how far Spotlight has come, as the island's
+    /// words and the page dots give way to it.
+    fn draw_chrome(&mut self, began: std::time::Instant, bar: Option<GlassShape>, hide: f32) {
+        let g = &mut self.gfx;
+        let t = g.tokens;
+        let shown = (1.0 - 2.0 * hide).clamp(0.0, 1.0);
         // The island: link status at rest, growing to carry a message.
         let linked = self.robot.linked();
         let (label, icon) = match (&self.message, self.settings.island) {
@@ -2238,14 +2326,20 @@ impl Shell {
         let iw = self.island_w.value().max(island_h);
         let island = Rect::new((W - iw) * 0.5, 4.0, iw, island_h);
         self.places.island = Some(island);
-        // Every glass shape goes through one pass; each family is its own group.
-        let mut shapes = vec![GlassShape::new(island, island_h * 0.5, 0)];
+        // Every glass shape goes through one pass; each family is its own
+        // group. Spotlight's bar goes first in the island's: where the two
+        // meet, it is the bar's; and the island's glass gives way as the
+        // bar's materializes, so at rest the bar is the island, grown.
+        let island_glass = bar.map_or(1.0, |b| 1.0 - b.strength);
+        let mut shapes: Vec<GlassShape> = bar.into_iter().collect();
+        shapes.push(GlassShape { strength: island_glass, ..GlassShape::new(island, island_h * 0.5, 0) });
         let pager = g.pager.map(|(pages, current, ox)| {
             let w = pages as f32 * 9.0 + 7.0;
             (Rect::new((W - w) * 0.5 + ox, H - 13.0, w, 10.0), pages, current)
         });
         if let Some((platter, ..)) = pager {
-            shapes.push(GlassShape::new(platter, 5.0, 1));
+            // Under Spotlight's bar the page dots dematerialize, as glass leaves.
+            shapes.push(GlassShape { strength: 1.0 - hide, ..GlassShape::new(platter, 5.0, 1) });
         }
         self.places.pager = pager.map(|(platter, ..)| platter);
         let before_glass = std::time::Instant::now();
@@ -2255,7 +2349,7 @@ impl Shell {
         if let Some((platter, pages, current)) = pager {
             for i in 0..pages {
                 let color = if i == current { t.ink } else { t.faint };
-                g.canvas.circle(platter.x + 8.0 + i as f32 * 9.0, platter.cy(), 2.0, color, 1.0);
+                g.canvas.circle(platter.x + 8.0 + i as f32 * 9.0, platter.cy(), 2.0, color, 1.0 - hide);
             }
         }
 
@@ -2266,8 +2360,8 @@ impl Shell {
         let words = ((grown - 0.55) / 0.45).clamp(0.0, 1.0);
         g.canvas.set_clip(island.inset(2.0));
         let dot = if icon { t.signal } else if linked { t.ice } else { t.faint };
-        g.canvas.circle(island.x + 12.0, island.cy(), 3.0, dot, 1.0);
-        g.text_alpha(island.x + 22.0, island.cy(), &label, caption, t.ink, words);
+        g.canvas.circle(island.x + 12.0, island.cy(), 3.0, dot, shown);
+        g.text_alpha(island.x + 22.0, island.cy(), &label, caption, t.ink, words * shown);
         g.canvas.clear_clip();
         if g.take_motion_started() {
             self.moving = true;
@@ -2822,6 +2916,8 @@ impl Shell {
             }
             Event::Empty => {
                 self.standby.wake_now();
+                // Over everything: Spotlight gives way at once.
+                self.spotlight.gone_now();
                 let card = crate::power::Empty::new(self.settings.calm);
                 let card = if crate::power::postponed_floor(&self.care) { card.at_floor() } else { card };
                 self.open(Box::new(card), Path::Slide);
@@ -3019,6 +3115,164 @@ impl Shell {
         let shade = self.standby.shade();
         if shade > 0.0 {
             bezel::simd::mix_into(px, None, (shade.clamp(0.0, 1.0) * 256.0) as u32);
+        }
+    }
+}
+
+// -------------------------------------------------------------- spotlight ---
+
+impl Shell {
+    /// Whether the handheld is locked: a lock screen anywhere on the stack,
+    /// or a lock drawn over the screens (`spotlight::set_locked`). Nothing
+    /// that reaches past it (Spotlight) opens while it is.
+    pub fn locked(&self) -> bool {
+        crate::spotlight::lock_held() || self.stack.iter().any(|(s, _)| s.locks())
+    }
+
+    /// Bring Spotlight up over whatever is showing: not over a lock, nor a
+    /// screen that takes the whole panel (first-boot setup). The control
+    /// centre gives way to it at once.
+    fn summon_spotlight(&mut self) {
+        let whole_panel = self.stack.last().is_some_and(|(s, _)| s.full_screen());
+        if self.locked() || whole_panel || self.tour.is_some() {
+            return;
+        }
+        if self.control.visible() {
+            self.control.set_open(false, &self.settings);
+            self.control.shown.jump(0.0);
+            self.control_under = None;
+            self.control_glass = None;
+        }
+        if !self.spotlight.visible() {
+            self.spotlight_under = None;
+        }
+        self.spotlight.summon(self.settings.calm, &self.robot);
+        self.moving = true;
+        self.dirty = true;
+    }
+
+    /// Whether Spotlight is up (for the tests).
+    #[cfg(test)]
+    pub fn spotlight_open(&self) -> bool {
+        self.spotlight.is_open()
+    }
+
+    fn spotlight_key(&mut self, key: Key) {
+        use crate::spotlight::Outcome;
+        self.moving = true;
+        match key {
+            // The recent apps, or the control centre, in its place.
+            Key::Ctrl('\t') => {
+                self.spotlight.gone_now();
+                self.spotlight_under = None;
+                return self.open_recents(None);
+            }
+            Key::Ctrl(' ') => {
+                self.spotlight.gone_now();
+                self.spotlight_under = None;
+                return self.set_control(true);
+            }
+            _ => {}
+        }
+        match self.spotlight.key(key, &self.robot) {
+            Outcome::Stay => {}
+            Outcome::Close => self.spotlight.dismiss(),
+            Outcome::Open(hit, from) => self.open_from_spotlight(&hit, from),
+        }
+    }
+
+    /// A result picked: Spotlight goes, and what it opens grows out of the
+    /// row it was on, over the frame as it showed. Esc from there comes back
+    /// to the screen Spotlight came up over. What cannot open is said in the
+    /// island, as the bar springs back into it.
+    fn open_from_spotlight(&mut self, hit: &crate::spotlight::Hit, from: Rect) {
+        let backdrop = self.gfx.canvas.px.clone();
+        let mut say = None;
+        let at_rest = self.transition.is_none();
+        let opened = crate::spotlight::index().open(hit, &mut Cx { robot: &mut self.robot, settings: &mut self.settings, say: &mut say, at_rest });
+        if let Some(text) = say {
+            self.say(text);
+        }
+        let screen = match opened {
+            Ok(screen) => screen,
+            Err(why) => {
+                self.spotlight.dismiss();
+                return self.say(why);
+            }
+        };
+        self.spotlight.gone_now();
+        self.spotlight_under = None;
+        // A screen still on its way lands first: the new one grows over a still one.
+        self.settle_transition();
+        let app = hit.item.weight == crate::spotlight::weight::APP;
+        self.open_over(screen, from, backdrop, app);
+        self.apply_settings();
+    }
+
+    /// Open `screen` out of `from` over `backdrop`, on top of whatever shows.
+    /// An app (`app`) opened over Home that was left a while ago comes back
+    /// as it was, as from its tile.
+    fn open_over(&mut self, screen: Box<dyn Screen>, from: Rect, backdrop: Vec<u32>, app: bool) {
+        self.gfx.focus_reset();
+        if let Some(words) = screen.greeting() {
+            self.say(words);
+        }
+        let path = Path::Grow(from);
+        if app && self.stack.len() == 1 {
+            if let Some(mut recent) = self.recents.find(screen.title()).and_then(|at| self.recents.take(at)) {
+                drop(screen);
+                recent.stack[0].1 = path;
+                return self.bring_back(recent, from, Some(backdrop));
+            }
+        }
+        self.stack.push((screen, path));
+        self.gfx.reveal_start();
+        self.moving = true;
+        self.dirty = true;
+        if self.settings.calm {
+            self.transition = None;
+            return;
+        }
+        self.transition = Some(Transition::new(path, 0.0, 1.0, None, Some(backdrop)));
+    }
+
+    /// Spotlight in time: its springs and results; gone at once if the
+    /// handheld locks meanwhile; its held frame let go once it has gone; and
+    /// its index set reading a moment after start, ahead of the first search.
+    fn tick_spotlight(&mut self, motion_dt: f32) -> bool {
+        if !self.spotlight_warmed && self.clock > 2.0 {
+            self.spotlight_warmed = true;
+            crate::spotlight::warm();
+        }
+        let mut moving = false;
+        if self.spotlight.visible() {
+            if self.locked() {
+                self.spotlight.gone_now();
+            }
+            moving |= self.spotlight.tick(motion_dt, &self.robot);
+        }
+        if !self.spotlight.visible() && self.spotlight_under.is_some() {
+            self.spotlight_under = None;
+            self.dirty = true;
+        }
+        moving
+    }
+
+    /// Spotlight over the frame held behind it: the frame dims a little as
+    /// the bar comes, the bar's glass goes through one pass with the island
+    /// and the page dots, and what sits on it is drawn on top.
+    fn draw_spotlight(&mut self) {
+        let began = std::time::Instant::now();
+        let dim = (self.spotlight.dim().clamp(0.0, 1.0) * 256.0) as u32;
+        if dim > 0 {
+            bezel::simd::mix_into(&mut self.gfx.canvas.px, None, dim);
+        }
+        let island = self.island_rect();
+        let bar = self.spotlight.glass(&self.gfx, island);
+        self.draw_chrome(began, Some(bar), self.spotlight.shown());
+        self.spotlight.draw(&mut self.gfx, island);
+        if self.gfx.take_motion_started() {
+            self.moving = true;
         }
     }
 }
@@ -3637,7 +3891,7 @@ pub(crate) mod tests {
         let keys = [
             Key::Up, Key::Down, Key::Left, Key::Right, Key::Enter, Key::Back, Key::Backspace, Key::Tab, Key::PageUp, Key::PageDown,
             Key::Char('n'), Key::Char('d'), Key::Char('x'), Key::Char('é'), Key::Char(' '), Key::Char('a'), Key::Char('✓'),
-            Key::Ctrl('q'), Key::Ctrl(' '), Key::Ctrl('s'), Key::Ctrl('k'), Key::Leave,
+            Key::Ctrl('q'), Key::Ctrl(' '), Key::Ctrl('s'), Key::Ctrl('k'), Key::Leave, Key::Ctrl('\n'), Key::Char('/'),
         ];
         // A small, fixed generator: the same run every time, so a failure can be replayed.
         let mut seed = 0x2545_F491_4F6C_DD1Du64;
@@ -4129,5 +4383,298 @@ pub(crate) mod tests {
         // A page pushed from rest has nothing beneath it.
         shell.open(Box::new(Page("three")), Path::Slide);
         assert!(shell.transition.as_ref().unwrap().beneath.is_none());
+    }
+
+    // ----------------------------------------------------------- spotlight ---
+
+    /// Spotlight's index read in full now, rather than whenever its thread
+    /// gets there.
+    fn index_read() {
+        crate::spotlight::index().refresh(true);
+    }
+
+    fn type_in(shell: &mut Shell, text: &str) {
+        for c in text.chars() {
+            shell.key(Key::Char(c));
+            frames(shell, 1, FRAME);
+        }
+    }
+
+    /// The stack's titles, Home first.
+    fn titles_of(shell: &Shell) -> Vec<String> {
+        shell.stack.iter().map(|(s, _)| s.title().to_owned()).collect()
+    }
+
+    /// Ctrl-Enter, some typing, Esc: from wherever it was, back to there,
+    /// with nothing typed reaching the screen behind.
+    fn up_and_away(shell: &mut Shell, typed: &str) {
+        let before = titles_of(shell);
+        shell.key(Key::Ctrl('\n'));
+        assert!(shell.spotlight_open(), "over {before:?}");
+        type_in(shell, typed);
+        assert_eq!(shell.spotlight.query(), typed, "the keys went to Spotlight");
+        assert_eq!(titles_of(shell), before, "and nothing reached the screen behind");
+        shell.key(Key::Back);
+        assert!(!shell.spotlight_open());
+        frames(shell, 90, FRAME);
+        assert!(!shell.spotlight.visible() && shell.spotlight_under.is_none(), "gone, and its picture let go");
+        assert_eq!(titles_of(shell), before);
+    }
+
+    #[test]
+    fn ctrl_enter_brings_spotlight_up_over_any_screen_and_esc_goes_back_there() {
+        let mut shell = shell();
+        // Home, where the bare letters are arrows: here they type.
+        up_and_away(&mut shell, "fxzc");
+        // An app.
+        open_app(&mut shell, "Robot", "Logs");
+        up_and_away(&mut shell, "logs");
+        // A page deep in Settings, with the focus moved.
+        back_home(&mut shell);
+        open_app(&mut shell, "Robot", "Settings");
+        shell.key(Key::Down);
+        shell.key(Key::Enter);
+        frames(&mut shell, 60, FRAME);
+        up_and_away(&mut shell, "wi");
+        // The terminal, which takes every other key for its program.
+        back_home(&mut shell);
+        open_app(&mut shell, "Settings", "Terminal");
+        up_and_away(&mut shell, "ls");
+        // Over the control centre, which gives way to it.
+        shell.key(Key::Ctrl(' '));
+        frames(&mut shell, 30, FRAME);
+        shell.key(Key::Ctrl('\n'));
+        assert!(shell.spotlight_open() && !shell.control_open() && !shell.control.visible());
+        // Ctrl-Space from Spotlight: the control centre in its place.
+        shell.key(Key::Ctrl(' '));
+        assert!(!shell.spotlight.visible() && shell.control_open());
+        shell.key(Key::Back);
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(title(&shell), "Terminal");
+    }
+
+    #[test]
+    fn space_and_slash_on_home_still_search() {
+        let mut shell = shell();
+        shell.key(Key::Char(' '));
+        assert!(shell.spotlight_open(), "Space, as before");
+        assert_eq!(shell.spotlight.query(), "", "and is not typed");
+        shell.key(Key::Ctrl('q'));
+        assert!(!shell.spotlight_open(), "Ctrl-Q puts it away too");
+        frames(&mut shell, 90, FRAME);
+        shell.key(Key::Char('/'));
+        assert!(shell.spotlight_open());
+        // Ctrl-Enter again puts it away.
+        shell.key(Key::Ctrl('\n'));
+        assert!(!shell.spotlight_open());
+        assert_eq!(shell.stack.len(), 1);
+    }
+
+    #[test]
+    fn it_grows_out_of_the_island_its_glass_ramping_and_springs_back_into_it() {
+        let mut shell = shell();
+        let island = shell.island_rect();
+        shell.key(Key::Ctrl('\n'));
+        frames(&mut shell, 3, FRAME);
+        let bar = shell.spotlight.glass(&shell.gfx, island);
+        assert!(bar.strength > 0.0 && bar.strength < 1.0 || shell.spotlight.shown() < 0.6, "it materializes: {}", bar.strength);
+        assert!(bar.rect.w > island.w && bar.rect.w < W, "growing out of the island: {:?}", bar.rect);
+        assert!(shell.spotlight_under.is_some(), "the screen behind is held still");
+        frames(&mut shell, 60, FRAME);
+        let rest = shell.spotlight.glass(&shell.gfx, island);
+        assert!((rest.strength - 1.0).abs() < 0.01 && rest.rect.x <= island.x && rest.rect.y == island.y);
+        // Esc: it shrinks back into the island; its glass lingers a moment, then goes.
+        shell.key(Key::Back);
+        frames(&mut shell, 4, FRAME);
+        let shrinking = shell.spotlight.glass(&shell.gfx, island);
+        assert!(shrinking.rect.w < rest.rect.w && shrinking.strength > 0.99, "{shrinking:?}");
+        frames(&mut shell, 30, FRAME);
+        assert!(shell.spotlight.glass(&shell.gfx, island).strength < 0.5);
+        frames(&mut shell, 60, FRAME);
+        assert!(!shell.spotlight.visible());
+        assert!(!shell.moving(), "and everything comes to rest");
+    }
+
+    #[test]
+    fn turned_round_on_its_way_back_it_keeps_what_was_typed() {
+        let mut shell = shell();
+        shell.key(Key::Ctrl('\n'));
+        frames(&mut shell, 30, FRAME);
+        type_in(&mut shell, "git");
+        shell.key(Key::Back);
+        frames(&mut shell, 5, FRAME);
+        let part_way = shell.spotlight.shown();
+        assert!(part_way > 0.05 && part_way < 0.99, "{part_way}");
+        shell.key(Key::Ctrl('\n'));
+        frames(&mut shell, 1, FRAME);
+        assert!((shell.spotlight.shown() - part_way).abs() < 0.15, "no jump: {part_way} then {}", shell.spotlight.shown());
+        assert_eq!(shell.spotlight.query(), "git");
+        // Any other key while it goes: gone at once, and the key is the screen's.
+        shell.key(Key::Back);
+        frames(&mut shell, 3, FRAME);
+        shell.key(Key::Right);
+        assert!(!shell.spotlight.visible());
+    }
+
+    #[test]
+    fn enter_opens_a_result_out_of_its_row_and_esc_comes_back_to_where_it_was() {
+        let mut shell = shell();
+        index_read();
+        // From an app: a setting, deep-linked to its row.
+        open_app(&mut shell, "Robot", "Logs");
+        shell.key(Key::Ctrl('\n'));
+        frames(&mut shell, 30, FRAME);
+        type_in(&mut shell, "brightness");
+        frames(&mut shell, 30, FRAME);
+        assert_eq!(shell.spotlight.hits().first().map(|h| h.item.title.as_str()), Some("Brightness"));
+        shell.key(Key::Enter);
+        assert!(!shell.spotlight.visible(), "it becomes what it opens");
+        let Some(Transition { path: Path::Grow(from), .. }) = &shell.transition else { panic!("it grows out of its row") };
+        assert!(from.y > 20.0 && from.w > 200.0, "the row: {from:?}");
+        frames(&mut shell, 90, FRAME);
+        assert_eq!(titles_of(&shell), ["Catalyst", "Logs", "Display"]);
+        shell.key(Key::Back);
+        frames(&mut shell, 90, FRAME);
+        assert_eq!(titles_of(&shell), ["Catalyst", "Logs"], "back where Spotlight came up");
+        // From Home: an app, by a misspelling.
+        back_home(&mut shell);
+        shell.key(Key::Ctrl('\n'));
+        type_in(&mut shell, "calculatr");
+        frames(&mut shell, 30, FRAME);
+        shell.key(Key::Enter);
+        frames(&mut shell, 90, FRAME);
+        assert_eq!(title(&shell), "Calculator");
+        shell.key(Key::Back);
+        frames(&mut shell, 90, FRAME);
+        assert_eq!(title(&shell), "Catalyst");
+        // A sum: the calculator, the sum typed in it.
+        shell.key(Key::Ctrl('\n'));
+        type_in(&mut shell, "12*7");
+        assert_eq!(shell.spotlight.hits().first().map(|h| h.item.title.as_str()), Some("= 84"), "worked out at once");
+        shell.key(Key::Enter);
+        frames(&mut shell, 90, FRAME);
+        assert_eq!(title(&shell), "Calculator");
+        back_home(&mut shell);
+        // An Action: the confirm page first, never straight to running it.
+        shell.key(Key::Ctrl('\n'));
+        type_in(&mut shell, "disk space");
+        shell.key(Key::Enter);
+        frames(&mut shell, 90, FRAME);
+        assert_eq!(title(&shell), "Confirm");
+        shell.key(Key::Back);
+        frames(&mut shell, 90, FRAME);
+        assert_eq!(title(&shell), "Catalyst", "not run");
+        // Asked again, and Enter: it only looks, so "Run it" is first, and the
+        // page becomes the command's terminal in place.
+        shell.key(Key::Ctrl('\n'));
+        type_in(&mut shell, "disk space");
+        shell.key(Key::Enter);
+        frames(&mut shell, 90, FRAME);
+        shell.key(Key::Enter);
+        frames(&mut shell, 30, FRAME);
+        assert_eq!(titles_of(&shell), ["Catalyst", "Command"]);
+        assert!(shell.stack[1].0.wants_text(), "a terminal now");
+        shell.key(Key::Ctrl('q'));
+        frames(&mut shell, 90, FRAME);
+        assert_eq!(title(&shell), "Catalyst");
+    }
+
+    #[test]
+    fn the_arrows_move_through_the_results_and_tab_previews_one() {
+        let mut shell = shell();
+        index_read();
+        shell.key(Key::Ctrl('\n'));
+        frames(&mut shell, 30, FRAME);
+        type_in(&mut shell, "volts");
+        frames(&mut shell, 30, FRAME);
+        let hits: Vec<String> = shell.spotlight.hits().iter().map(|h| h.item.title.clone()).collect();
+        assert!(hits.len() >= 3, "{hits:?}");
+        assert_eq!(hits.last().map(String::as_str), Some("Ask the Assistant “volts”"), "the assistant last");
+        assert!(hits[hits.len() - 2].starts_with("Search the web"), "the web before it");
+        // Down and back up, and Tab: a value's preview, from memory at once.
+        shell.key(Key::Down);
+        shell.key(Key::Up);
+        let first = shell.spotlight.hits()[0].clone();
+        assert_eq!(first.item.weight, crate::spotlight::weight::VALUE, "{:?}", first.item.title);
+        shell.key(Key::Tab);
+        assert!(shell.spotlight.previewing());
+        frames(&mut shell, 30, FRAME);
+        assert!(shell.spotlight.previewing());
+        // Left back to the list; typing goes on from there.
+        shell.key(Key::Left);
+        assert!(!shell.spotlight.previewing());
+        shell.key(Key::Backspace);
+        assert_eq!(shell.spotlight.query(), "volt");
+        // Up past the top stays on the top.
+        for _ in 0..4 {
+            shell.key(Key::Up);
+        }
+        frames(&mut shell, 30, FRAME);
+        shell.key(Key::Back);
+        frames(&mut shell, 90, FRAME);
+        assert_eq!(shell.stack.len(), 1);
+    }
+
+    /// A screen that locks the handheld, as a lock screen would.
+    struct Lock;
+
+    impl Screen for Lock {
+        fn title(&self) -> &str {
+            "Locked"
+        }
+        fn key(&mut self, _key: Key, _cx: &mut Cx) -> Nav {
+            Nav::Stay
+        }
+        fn draw(&mut self, _g: &mut Gfx, _robot: &Robot) {}
+        fn locks(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn it_never_opens_over_a_lock_nor_over_setup() {
+        let mut shell = shell();
+        shell.key(Key::Ctrl('\n'));
+        assert!(shell.spotlight_open());
+        // Locked while it shows: it goes at once.
+        shell.stack.push((Box::new(Lock), Path::Slide));
+        frames(&mut shell, 1, FRAME);
+        assert!(!shell.spotlight.visible());
+        assert!(shell.locked());
+        shell.key(Key::Ctrl('\n'));
+        assert!(!shell.spotlight_open(), "not over the lock");
+        shell.stack.pop();
+        assert!(!shell.locked());
+        // First-boot setup takes the whole panel: not over it either.
+        shell.start_setup();
+        frames(&mut shell, 5, FRAME);
+        shell.key(Key::Ctrl('\n'));
+        assert!(!shell.spotlight_open());
+    }
+
+    #[test]
+    fn typing_fast_never_waits_for_the_results() {
+        let mut shell = shell();
+        index_read();
+        shell.key(Key::Ctrl('\n'));
+        frames(&mut shell, 30, FRAME);
+        let mut slowest = std::time::Duration::ZERO;
+        for c in "elevator current".chars() {
+            let began = std::time::Instant::now();
+            shell.key(Key::Char(c));
+            slowest = slowest.max(began.elapsed());
+            frames(&mut shell, 1, 0.025);
+            assert!(!shell.spotlight.hits().is_empty(), "results from the first key");
+        }
+        // A frame's beat on the handheld is 25 ms; a key here is a sliver of
+        // one even on a debug build of a slow computer.
+        assert!(slowest < std::time::Duration::from_millis(40), "slowest key {slowest:?}");
+        for _ in 0..16 {
+            let began = std::time::Instant::now();
+            shell.key(Key::Backspace);
+            slowest = slowest.max(began.elapsed());
+        }
+        assert_eq!(shell.spotlight.query(), "");
+        assert!(slowest < std::time::Duration::from_millis(40), "slowest key {slowest:?}");
     }
 }
