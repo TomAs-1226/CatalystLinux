@@ -140,7 +140,16 @@ pub fn prepare(disk: &Disk) -> Result<(), String> {
         // A blank card has nothing to clear, which is not a failure.
         let err = String::from_utf8_lossy(&out.stderr);
         if !out.status.success() && !err.contains("RAW") && !err.contains("not initialized") {
-            return Err(format!("could not clear the card: {}", err.lines().next().unwrap_or("").trim()));
+            // Some USB card readers refuse Clear-Disk (error 40004) but take
+            // diskpart's clean, which drops the partition table the same way.
+            let script = std::env::temp_dir().join(format!("catalyst-flasher-clean-{n}.txt"));
+            std::fs::write(&script, format!("select disk {n}\r\nattributes disk clear readonly noerr\r\nclean\r\n")).map_err(|e| e.to_string())?;
+            let cleaned = Command::new("diskpart").arg("/s").arg(&script).output();
+            std::fs::remove_file(&script).ok();
+            let ok = cleaned.as_ref().is_ok_and(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).to_lowercase().contains("succeeded in cleaning"));
+            if !ok {
+                return Err(format!("could not clear the card: {}", err.lines().next().unwrap_or("").trim()));
+            }
         }
     } else if disk.path.starts_with("/dev") {
         for point in disk.mounted.split_whitespace() {

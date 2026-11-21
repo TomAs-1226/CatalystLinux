@@ -388,7 +388,13 @@ fn write_headless(image: &str, disk: Option<String>, yes: bool) -> Result<(), St
         let offered: Vec<String> = disks.iter().map(|d| format!("{} ({}, {:.1} GB)", d.path.display(), d.name, d.size as f64 / 1e9)).collect();
         return Err(format!("say which card with --disk; offered: {}", if offered.is_empty() { "none".into() } else { offered.join(", ") }));
     };
-    let disk = disks.into_iter().find(|d| d.path.display().to_string().eq_ignore_ascii_case(&path)).ok_or_else(|| format!("{path} is not a card this writes (removable, not the system's, at most 300 GB)"))?;
+    // `\\.\PhysicalDrive3`, `PhysicalDrive3` or Windows' number alone, `3`
+    // (some shells eat a leading backslash); `/dev/sdb` elsewhere.
+    let bare = |s: &str| s.trim_start_matches(['\\', '.', '/']).to_ascii_lowercase();
+    let disk = disks
+        .into_iter()
+        .find(|d| bare(&d.path.display().to_string()) == bare(&path) || path.parse::<u32>().ok().is_some_and(|n| d.number == Some(n)))
+        .ok_or_else(|| format!("{path} is not a card this writes (removable, not the system's, at most 300 GB)"))?;
     println!("card: {} · {} · {:.1} GB{}", disk.path.display(), disk.name, disk.size as f64 / 1e9, if disk.mounted.is_empty() { String::new() } else { format!(" · mounted at {}", disk.mounted) });
     if !yes {
         return Err("everything on it is erased: add --yes to go ahead".into());
