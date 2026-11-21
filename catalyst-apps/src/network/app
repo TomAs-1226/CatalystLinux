@@ -1,6 +1,12 @@
+id = network
 name = Network
 icon = lan
 about = addresses, routes, name servers
+description = The handheld's addresses on each link, its routes and the name servers it asks, in the terminal.
 version = 1.0.0
 run = sh ./run.sh
 screen = terminal
+permissions = network
+credit = Catalyst Linux
+licence = MIT
+source = https://github.com/TomAs-1226/CatalystLinux/tree/main/catalyst-apps/src/network

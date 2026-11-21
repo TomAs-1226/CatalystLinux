@@ -1626,8 +1626,9 @@ impl Shell {
             && self.curtain.is_none()
             && self.standby.state() == crate::standby::State::Awake
             // Never while locked (or StandBy shows): an app handed the panel
-            // would take the keys from under the lock.
-            && !self.lock.engaged()
+            // would take the keys from under the lock. `locked` also counts
+            // a lock Spotlight holds and a screen that locks.
+            && !self.locked()
             && !self.faces.visible();
         if !alone {
             return None;
