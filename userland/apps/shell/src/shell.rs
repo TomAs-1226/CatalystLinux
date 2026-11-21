@@ -5049,7 +5049,9 @@ pub(crate) mod tests {
             assert_eq!(shell.lock.wait(), 0, "{wrong}: no wait yet");
         }
         type_code(&mut shell, "4444");
-        assert_eq!(shell.lock.wait(), 30, "the fifth wrong one: half a minute");
+        // Half a minute, counting down on the real clock (a busy computer
+        // can take a second or two over the check).
+        assert!((27..=30).contains(&shell.lock.wait()), "the fifth wrong one: half a minute, not {}", shell.lock.wait());
         // During the wait no try is taken, the right one included.
         type_code(&mut shell, "2468");
         assert!(shell.locked() && !shell.lock.checking());
