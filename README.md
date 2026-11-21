@@ -146,7 +146,11 @@ from the lower left and strikes the middle, the bolt ignites white-hot and
 cools to crimson with a flash and a ring going out, then rises to make room
 as "Catalyst" (bold) and "Linux" (thin) set themselves under it and the
 crimson rule draws across. It gives way to Home as the tiles cascade in.
-Every part arrives on Detent's springs by Bezel's roles; the trail alone
+Before it, the panel stays dark. The backlight is not lit until the first
+frame is on the panel, and then it rises to the brightness kept in the
+settings. The kernel's console is not drawn on the panel; it goes to the
+serial port only. So nothing the panel held from power-on, and no boot
+text, ever shows. Every part arrives on Detent's springs by Bezel's roles; the trail alone
 accelerates, since it is thrown rather than placed. Any key skips it.
 `catalyst-shell --start-movie file.png` renders it as an animated PNG
 (`shots/start/`).
@@ -156,9 +160,12 @@ a computer's own setup does: no island, no status, the brand's ground, each
 page's title, words and rows rising in one after another from the side the
 page came from. "Hi." offers three ways on:
 
-- **Set up here**: the hardware check (below), the keyboard lesson (below),
-  the team number (the robot's address follows from it), the handheld's name
-  and time zone, Wi-Fi, keys for online services, a page of choices (open
+- **Set up here**: Wi-Fi first (its radio is switched on as the page
+  arrives, so the networks are listed by the time they are asked for, and
+  off again if the page is passed by without joining one), the hardware
+  check (below), the keyboard lesson (below), the team number (the robot's
+  address follows from it), the handheld's name and time zone, keys for
+  online services, a page of choices (open
   Robot on link, the match report, SSH, the calm version), battery and power
   (the screen-off time, the battery saver at 20%, Wi-Fi in standby, and lift
   to wake where there is a motion sensor), and the look (accent, mode, text size,
@@ -172,7 +179,9 @@ page came from. "Hi." offers three ways on:
   except while that page is offered, for ten minutes at most; five wrong
   codes close it. It is plain HTTP on the local network, so keys cross it
   unencrypted: use it on the robot's cable or a network you trust. Settings ›
-  Set up from a computer offers it again later.
+  Set up from a computer offers it again later. With no network yet, the
+  page offers to join Wi-Fi there (or take a cable), and opens by itself
+  once there is an address.
 - **Set up later**: straight to Home; everything is in Settings.
 
 `/data/catalyst/setup-done` marks setup as done.
@@ -935,6 +944,11 @@ Space holds the picture. It checks what the robot's vision should be seeing.
   only while it is open; rpicam-apps needs kernel headers newer than this
   toolchain's, and Boost. The detector is AprilRobotics' (as PhotonVision
   uses), on two of the four cores, looking at the picture halved.
+- libcamera's Raspberry Pi pipeline needs the firmware's image processor (the
+  ISP) as well as the sensor. The ISP is reached through `vchiq`, which the
+  image does not load at start, so the reader loads `vchiq`, `vc-sm-cma` and
+  `bcm2835-isp` the first time it opens. Without them the sensor is found
+  (the hardware check's tick) but libcamera sees no camera.
 - In the simulator a simulated camera shows tags 7 and 13 in a grey room,
   tag 7 drifting and turning, drawn as the nominal lens would see them and
   read by the same detector; its distance and turn come back within a few
