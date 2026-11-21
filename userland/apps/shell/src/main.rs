@@ -431,6 +431,11 @@ fn main() {
     if let Some(path) = value("--start-movie") {
         return start_movie(shell, std::path::Path::new(&path));
     }
+    // The app catalogue's screens, from its demo catalogue.
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--catalogue-shots") {
+        return catalogue::shots(std::path::Path::new(&dir));
+    }
 
     if flag("--bench") || flag("--about") {
         // What draws is part of the answer: let the GPU finish opening.

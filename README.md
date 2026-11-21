@@ -21,7 +21,10 @@ windows that grow out of tiles whenever it is there.
 | `userland/assets/app-icon` | Catalyst's icon (the FrcCatalyst bolt) at each size Windows uses, built into the simulator; `assets/` holds it for Raspberry Pi Imager's listing. |
 | `os/` | The Buildroot external tree: board config, kernel and BusyBox fragments, M5Stack driver package, OpenRC services, image layout. |
 | `scripts/` | Build-machine setup, shell cross-build, kernel and image builds, image checks, the emulator harness, the simulator, the catalogue packer. |
-| `catalyst-apps/` | The app catalogue, meant to become its own repository (`TomAs-1226/catalyst-apps`): three example apps, their packed archives and the index. |
+| `userland/crates/kit` | Catalyst Kit: write an app that looks and moves like the shell's own (pages, rows, the island, the focus ring, springs, the keys, the look in use, the panel taken and given back), and `catalyst-ui`, the same screens for shell scripts. |
+| `userland/crates/appkg` | App packages: the app file, the signed and repeatable packages, the catalogue's index; and `catalyst-pack`, which makes and signs them. |
+| `userland/catalogue/` | The catalogue's apps written with Catalyst Kit: Sudoku, Battleship, Typing and Orbits (rebuilt from the CardputerZero app store) and Hello, the example. |
+| `catalyst-apps/` | The app catalogue, meant to become its own repository (`TomAs-1226/catalyst-apps`): each app's folder (app file, icon, licence), and `STORE.md`, M5Stack's app store surveyed. Packed and signed into `dist/`, published as a release. |
 | `work/FrcCatalyst` | A clone of FrcCatalyst carrying the Agent log routes, uncommitted (not part of this repo). |
 | `shots/start/` | The start animation as an animated PNG, and stills of it. |
 | `shots/tour/` | Screenshots of every screen, rendered by `catalyst-shell --shots`. |
@@ -1071,18 +1074,36 @@ An app is a folder under `/data/apps` (your own) or `/usr/share/catalyst/apps`
 
 ```text
 name = Processes
-icon = memory            one of the built-in symbols; optional
+icon = memory            one of the built-in symbols, or icon.svg; optional
 about = what is running  the line under the name; optional
 run = top                a shell command line, run from the app's folder
 screen = terminal        or "own"
 ```
+
+(The catalogue's apps say more: an id, a version, what they use, their
+credit and licence; see `catalyst-apps/README.md`.) An app can carry its own
+icon, `icon.svg`: a Material Symbol in its 960-unit box, drawn on Home as
+the shell's own are.
 
 - `screen = terminal` runs the program in the handheld's terminal, which is
   all a script or a text program needs.
 - `screen = own` hands it the panel and keys outright. It draws to the
   framebuffer named in `CATALYST_FB` and reads the keyboard itself, and is
   told the look in use (`CATALYST_LIGHT`, `CATALYST_ACCENT`, `CATALYST_TEXT`,
-  `CATALYST_CALM`). The shell draws nothing until it ends.
+  `CATALYST_CALM`, `CATALYST_THEME`, `CATALYST_WALLPAPER`,
+  `CATALYST_CORNERS`, `CATALYST_LETTERS`, `CATALYST_WIDTH`,
+  `CATALYST_CLOCK24`, `CATALYST_ISLAND`), who it is (`CATALYST_APP_ID`,
+  `CATALYST_APP_NAME`, `CATALYST_PERMISSIONS`) and its own folder for what
+  it keeps (`CATALYST_APP_DATA`, `/data/catalyst/app-data/<id>`, which
+  outlives updates). The shell draws nothing until it ends, and never hands
+  the panel over while the handheld is locked.
+
+**Writing one.** [Catalyst Kit](userland/crates/kit/README.md) draws an app
+as the shell draws its own screens, in whatever look the handheld wears:
+`userland/catalogue/hello` is the app to copy. A shell script gets the same
+screens one at a time from `catalyst-ui` (`menu`, `input`, `confirm`,
+`message`, `view`), and `ai app <what it should do>` in the Terminal writes
+such an app for you, shows it whole, and puts it on Home on a yes.
 
 A script dropped straight into `/data/apps` (`check.sh`) is an app too, with
 no folder needed: write one in the editor and it has a tile.
@@ -1435,17 +1456,28 @@ commits behind, built from uncommitted changes, or not in this repository.
 
 ## App catalogue
 
-The Catalogue app lists the apps in the index of a GitHub repository
-(`TomAs-1226/catalyst-apps`; this project's `catalyst-apps/` folder is meant
-to become it), and gets, updates and removes them over Wi-Fi. Each app is a
-gzipped tar of an app folder with its SHA-256 in the index; before one goes
-in, its hash is checked, every path in it must stay inside its folder, and it
-must unpack to an `app` file that names something to run. A failure at any
-step leaves what was installed as it was, and only apps the catalogue
-installed can be removed from it. `scripts/pack-catalogue.sh` packs the apps
-under `catalyst-apps/src/` and writes the index; packing is repeatable. The
-three example apps ping the robot and its radio, show what is using the card,
-and show the handheld's addresses and routes.
+The Catalogue app lists the apps of the `catalogue` release of
+`TomAs-1226/catalyst-apps` (this project's `catalyst-apps/` folder is meant
+to become that repository), and gets, updates and removes them over the
+air, into `/data`: nothing of the system is touched. Each app has a page:
+what it is, its version, size and licence, what it uses (network, files,
+camera…), its credit, and Get, Update or Remove. An update that would use
+more than the version on Home says so and asks again; `u` updates every app
+with an update, one after another. Spotlight finds what the catalogue
+offers, from the last index read.
+
+Every package is signed (Ed25519, as system updates are) and the handheld
+installs only what a key it trusts signed: the image's
+`/etc/catalyst/apps.pub`, or one added under `/data/catalyst/app-keys`.
+Then its hash is checked, every path in it must stay inside its folder,
+nothing in it may be a link, and it must unpack to the app the index named,
+at that version. A failure at any step leaves what was installed as it was,
+and only apps the catalogue installed can be removed from it. The apps:
+Sudoku, Battleship, Typing and Orbits (rebuilt from M5Stack's CardputerZero
+app store, which `catalyst-apps/STORE.md` surveys), Hello, and three pit
+scripts (ping the robot, what is using the card, addresses and routes).
+`scripts/pack-catalogue.sh` packs and signs them, `publish-catalogue.sh`
+publishes them; `catalyst-apps/README.md` has the whole of it.
 
 ## Memory, size and boot
 
@@ -2168,17 +2200,15 @@ the infrared LED and receiver, the motion sensor and compass and their axes),
 the NT4 client against a real
 Systemcore, the log reader against a log from a real robot, the schedule
 against the live Blue Alliance and Nexus services, setup from a computer over
-a real network, and the catalogue against its repository (which does not
-exist yet; its install path is tested with a stand-in download). Not yet
+a real network, and the catalogue against its release (which is not
+published yet; its packing and signing are tested end to end, its install
+path with a stand-in download). Not yet
 built: the agent's machine pages (CPU, CAN buses, cameras), audio. (The
 camera and the assistant, which reads the match logs, came later.)
 
 ## Roadmap
 
-Chosen so far, not yet built: scripting with a kit for writing Bezel apps (so
-an external app can draw like a built-in one).
-
-Added since, also not yet built:
+Added since, not yet built:
 
 - For the robot: alerts (rules that watch the robot and flag it on the
   island with a tone). The link stays read-only: a tuner that writes to the
@@ -2218,3 +2248,10 @@ written by libjpeg-turbo (IJG, BSD-3-Clause and zlib licences) in
 2.0) and ISC) and photos are decoded by jpeg-decoder (MIT or Apache 2.0). The
 simulator alone writes its photos with jpeg-encoder ((MIT or Apache 2.0) and
 IJG).
+
+Four of the catalogue's apps are rebuilt from MIT-licensed apps in M5Stack's
+CardputerZero app store, following their rules, levels and algorithms:
+Sudoku from sudokuzero (dbrhspyjkf-code), Battleship from Battleship
+(yutacar), Typing from taM5CZTyping / key-dash (yuk1-kondo; its English and
+code word lists), Orbits from AstroBox (eggfly, kur1k0). Each app's
+`LICENSE` carries the original's copyright line beside Catalyst's.

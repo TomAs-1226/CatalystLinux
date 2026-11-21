@@ -1,0 +1,21 @@
+[package]
+name = "catalyst-appkg"
+description = "Catalyst Linux's app packages: the app file, the archive, the catalogue's index and its signatures; and catalyst-pack, which makes them."
+version = "1.0.0"
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "appkg"
+
+[[bin]]
+name = "catalyst-pack"
+path = "src/bin/catalyst-pack.rs"
+
+[dependencies]
+serde_json = "1"
+# Signatures: Ed25519, as system updates are signed.
+ed25519-compact = { version = "2", default-features = false }
+sha2 = "0.10"
+# The archives: gzip, pure Rust.
+flate2 = "1"

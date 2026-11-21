@@ -10,6 +10,23 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.5.5
+
+### Apps
+- Get apps over the air from the Catalogue: Sudoku, Battleship, Typing and Orbits, rebuilt from M5Stack's CardputerZero store, plus Hello.
+- Every catalogue app is signed, and the handheld installs only what the catalogue's key signed.
+- Each app has its own page: what it uses, its credit and licence, Get, Update or Remove. u updates them all.
+- Spotlight finds apps in the catalogue you haven't got yet.
+- Apps keep what they save across updates, and can bring their own icon.
+
+### For developers
+- Catalyst Kit: write apps that look and move like the handheld's own.
+- catalyst-ui gives shell scripts the handheld's own screens: menus, input, confirm and messages.
+- ai app in the Terminal writes an app for you, shows it whole, and puts it on Home only on a yes.
+
+### System
+- Compressed swap in memory (zram): idle memory is squeezed to about a third and kept in RAM, so the on-device model and big pages have more room. Nothing is written to the card.
+
 ## 0.5.4
 
 ### StandBy and the lock screen

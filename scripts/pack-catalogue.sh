@@ -1,43 +1,38 @@
 #!/bin/bash
-# Pack the app catalogue: each folder under catalyst-apps/src (an app as
-# /data/apps holds it, with a `version =` line in its `app` file) becomes
-# catalyst-apps/apps/<id>-<version>.tar.gz, and catalyst-apps/index.json
-# lists them with their SHA-256, which the handheld checks before installing.
+# Pack and sign the app catalogue: each app under catalyst-apps/src (an app
+# folder as /data/apps holds it, with its app file, licence and icon)
+# becomes catalyst-apps/dist/<id>-<version>.tar.gz, signed with the
+# catalogue's key, and catalyst-apps/dist/index.json lists them. Apps
+# written with Catalyst Kit carry their program, built for the handheld by
+# scripts/build-shell.sh into ~/catalyst-linux-build/out/apps.
 #
-# Run it after changing an app, then commit and push catalyst-apps/ as its
-# own repository (TomAs-1226/catalyst-apps by default). Packing is
-# repeatable: the same sources make the same archives.
+# The first run makes the catalogue's signing key (kept with the update
+# key, in ~/catalyst-linux-build/keys/apps.key: keep a copy somewhere safe)
+# and puts its public half in the image's overlay
+# (os/board/cardputer-zero/rootfs-overlay/etc/catalyst/apps.pub): commit it,
+# and the next system update teaches every handheld to trust it.
+#
+# Packing is repeatable: the same files make the same packages. Then
+# scripts/publish-catalogue.sh puts dist/ on the catalogue's release.
+# Run in WSL (or any Linux).
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)/catalyst-apps"
-cd "$ROOT"
-mkdir -p apps
-rm -f apps/*.tar.gz
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+BUILD="${CATALYST_BUILD:-$HOME/catalyst-linux-build}"
+KEY="${CATALYST_APPS_KEY:-$BUILD/keys/apps.key}"
+PUB="$HERE/os/board/cardputer-zero/rootfs-overlay/etc/catalyst/apps.pub"
+export PATH="$HOME/.cargo/bin:$PATH"
 
-field() { sed -n "s/^$1[[:space:]]*=[[:space:]]*//p" "$2" | head -1; }
+# catalyst-pack, for this computer, in a folder of its own.
+export CARGO_TARGET_DIR="${CATALYST_PACK_TARGET:-$HOME/.cache/catalyst-pack}"
+cargo build --quiet --release --manifest-path "$HERE/userland/Cargo.toml" -p catalyst-appkg
+PACK="$CARGO_TARGET_DIR/release/catalyst-pack"
 
-entries=()
-for dir in src/*/; do
-	id=$(basename "$dir")
-	manifest="$dir/app"
-	[ -f "$manifest" ] || { echo "skipped $id: no app file" >&2; continue; }
-	version=$(field version "$manifest")
-	[ -n "$version" ] || { echo "skipped $id: no version" >&2; continue; }
-	archive="apps/$id-$version.tar.gz"
-	# Fixed owner, times and order, so packing again changes nothing.
-	tar --sort=name --owner=0 --group=0 --numeric-owner --mtime='2026-01-01 00:00:00' \
-		-C "$dir" -cf - . | gzip -n -9 > "$archive"
-	entries+=("$id	$(field name "$manifest")	$(field about "$manifest")	$(field icon "$manifest")	$version	$archive	$(sha256sum "$archive" | cut -d' ' -f1)	$(stat -c %s "$archive")")
-	echo "packed $archive"
-done
+if [ ! -s "$KEY" ]; then
+	mkdir -p "$(dirname "$KEY")"
+	"$PACK" keygen "$KEY" "$PUB"
+	echo "commit $PUB: handheld images built from now on trust this key"
+fi
 
-printf '%s\n' "${entries[@]}" | python3 -c '
-import json, sys
-apps = []
-for line in sys.stdin:
-    id, name, about, icon, version, archive, sha256, size = line.rstrip("\n").split("\t")
-    apps.append({"id": id, "name": name, "about": about, "icon": icon or "apps", "version": version,
-                 "archive": archive, "sha256": sha256, "bytes": int(size)})
-json.dump({"catalogue": 1, "apps": apps}, open("index.json", "w"), indent=2, ensure_ascii=False)
-print("index.json lists", len(apps), "apps")
-'
+"$PACK" build "$HERE/catalyst-apps/src" --out "$HERE/catalyst-apps/dist" --key "$KEY" --bin "$BUILD/out/apps" --name "Catalyst apps"
+"$PACK" verify "$HERE/catalyst-apps/dist" --public "$PUB"

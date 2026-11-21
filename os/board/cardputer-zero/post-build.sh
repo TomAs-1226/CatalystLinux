@@ -6,14 +6,22 @@ BUILD="${CATALYST_BUILD:-$HOME/catalyst-linux-build}"
 SHELL_BIN="$BUILD/out/catalyst-shell"
 UPDATE_BIN="$BUILD/out/catalyst-update"
 AI_BIN="$BUILD/out/ai"
+UI_BIN="$BUILD/out/catalyst-ui"
 
-if [ ! -x "$SHELL_BIN" ] || [ ! -x "$UPDATE_BIN" ] || [ ! -x "$AI_BIN" ]; then
+if [ ! -x "$SHELL_BIN" ] || [ ! -x "$UPDATE_BIN" ] || [ ! -x "$AI_BIN" ] || [ ! -x "$UI_BIN" ]; then
 	echo "catalyst-shell has not been built: run scripts/build-image.sh toolchain, then scripts/build-shell.sh" >&2
 	exit 1
 fi
 install -D -m 0755 "$SHELL_BIN" "$TARGET_DIR/usr/bin/catalyst-shell"
 install -D -m 0755 "$UPDATE_BIN" "$TARGET_DIR/usr/bin/catalyst-update"
 install -D -m 0755 "$AI_BIN" "$TARGET_DIR/usr/bin/ai"
+# The handheld's own screens for apps that are shell scripts.
+install -D -m 0755 "$UI_BIN" "$TARGET_DIR/usr/bin/catalyst-ui"
+# The key the app catalogue is signed with: without it the catalogue
+# installs nothing (scripts/pack-catalogue.sh makes one).
+if [ ! -s "$TARGET_DIR/etc/catalyst/apps.pub" ]; then
+	echo "post-build: no app catalogue key in the image (scripts/pack-catalogue.sh makes one): the catalogue will install nothing" >&2
+fi
 
 # llama.cpp's tools: only llama-server is used (the on-device model, 7 MB
 # with its libraries, libmtmd among them); the rest (cli, bench, quantize,
@@ -45,7 +53,8 @@ for f in etc/init.d/catalyst-early etc/init.d/catalyst-shell etc/init.d/catalyst
 	etc/init.d/catalyst-wifi etc/init.d/catalyst-ssh etc/init.d/catalyst-update etc/init.d/catalyst-usb \
 	usr/sbin/catalyst-ssh-toggle usr/sbin/catalyst-net usr/sbin/catalyst-grow-data usr/sbin/catalyst-wifi-toggle \
 	usr/sbin/catalyst-usb usr/sbin/catalyst-power usr/sbin/catalyst-time usr/share/udhcpc/default.script.d/50-catalyst-time \
-	usr/libexec/catalyst/git-credential etc/init.d/catalyst-tailscale usr/sbin/catalyst-tailscale; do
+	usr/libexec/catalyst/git-credential etc/init.d/catalyst-tailscale usr/sbin/catalyst-tailscale \
+	etc/init.d/catalyst-zram; do
 	chmod 0755 "$TARGET_DIR/$f"
 done
 mkdir -p "$TARGET_DIR/data"
@@ -93,6 +102,7 @@ link default catalyst-ssh
 link default catalyst-update
 link default catalyst-usb
 link default catalyst-tailscale
+link default catalyst-zram
 link default agetty.ttyAMA0
 link shutdown killprocs
 link shutdown mount-ro
