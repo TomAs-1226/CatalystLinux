@@ -171,6 +171,26 @@ pub fn history() -> Vec<Release> {
     parse(&text)
 }
 
+/// The last version without update logs: a handheld that never marked any
+/// notes shown came from it (or before), so everything since is new to it.
+const BEFORE_LOGS: &str = "0.4.0";
+
+/// "0.4.2" as numbers, for comparing.
+fn numbers(version: &str) -> Vec<u32> {
+    base(version).split('.').map(|n| n.parse().unwrap_or(0)).collect()
+}
+
+/// The notes new to a handheld now on `running` that last showed those of
+/// `shown` (nothing: it came from before update logs): every version after
+/// that one, up to the running one, newest first, each with something to say.
+fn since_last_shown(all: Vec<Release>, running: &str, shown: &str) -> Vec<Release> {
+    let from = numbers(if shown.is_empty() { BEFORE_LOGS } else { shown });
+    let to = numbers(running);
+    let mut new: Vec<Release> = all.into_iter().filter(|r| !r.notes.is_empty() && numbers(&r.version) > from && numbers(&r.version) <= to).collect();
+    new.sort_by_key(|r| std::cmp::Reverse(numbers(&r.version)));
+    new
+}
+
 /// One version's notes, from the changelog.
 pub fn of(version: &str) -> Option<Release> {
     history().into_iter().find(|r| r.version == base(version))
@@ -323,10 +343,15 @@ impl WhatsNew {
         Self::new("What's new", vec![release], 0, Some(caption), then, false)
     }
 
-    /// The notes of the version just updated to, shown once after it starts.
+    /// The notes of the version just updated to, shown once after it starts,
+    /// and of any it skipped on the way (←→ turn to them), newest first.
     pub fn after_update(version: &str) -> Option<Self> {
-        let release = of(version).filter(|r| !r.notes.is_empty())?;
-        Some(Self::single(release, "now on this handheld".into(), Then::Done))
+        let releases = since_last_shown(history(), version, &crate::sysupdate::pref(SHOWN_KEY, ""));
+        match releases.len() {
+            0 => None,
+            1 => Some(Self::single(releases.into_iter().next()?, "now on this handheld".into(), Then::Done)),
+            _ => Some(Self::new("What's new", releases, 0, None, Then::Done, true)),
+        }
     }
 
     /// The update history, open at one version.
@@ -381,6 +406,7 @@ impl WhatsNew {
         match self.then {
             Then::Install => "enter: install · esc: back",
             Then::Restart => "enter: restart to update · esc: back",
+            Then::Done if self.history && self.releases.len() > 1 => "←→: the versions before · enter: done",
             Then::Done => "enter: done",
             Then::Back if self.history && self.releases.len() > 1 => "←→: another version · esc: back",
             Then::Back => "esc: back",
@@ -723,6 +749,19 @@ mod tests {
         // Newest first: each version above the one before it.
         let numbers: Vec<Vec<u32>> = all.iter().map(|r| r.version.split('.').filter_map(|p| p.parse().ok()).collect()).collect();
         assert!(numbers.windows(2).all(|w| w[0] > w[1]), "{numbers:?}");
+    }
+
+    #[test]
+    fn after_an_update_the_versions_skipped_on_the_way_come_too() {
+        let all = parse("## 0.4.3\n- c\n\n## 0.4.2\n- b\n\n## 0.4.1\n- a\n\n## 0.4.0\n- old\n\n## 0.3.0\n- older\n");
+        let versions = |r: Vec<Release>| r.into_iter().map(|r| r.version).collect::<Vec<_>>();
+        // From 0.4.0, which had no update logs: both since, newest first.
+        assert_eq!(versions(since_last_shown(all.clone(), "0.4.2", "")), ["0.4.2", "0.4.1"]);
+        // From one whose notes were shown: only what came after it.
+        assert_eq!(versions(since_last_shown(all.clone(), "0.4.3", "0.4.1")), ["0.4.3", "0.4.2"]);
+        assert_eq!(versions(since_last_shown(all.clone(), "0.4.2", "0.4.1")), ["0.4.2"]);
+        // A nightly shares its base version's notes.
+        assert_eq!(versions(since_last_shown(all, "0.4.2-nightly.20261121.0400", "0.4.1")), ["0.4.2"]);
     }
 
     #[test]

@@ -20,9 +20,17 @@ impl Release {
 
 const AGENT: &str = "catalyst-update";
 
+/// The certificates servers are checked against. Named outright rather than
+/// left to curl's built-in default: a curl built without one (as on mbedTLS
+/// before 0.4.2) trusts nothing, and then no update could ever be fetched.
+const CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
+
 fn curl() -> Command {
     let mut c = Command::new("curl");
     c.args(["-fsSL", "--retry", "3", "--connect-timeout", "20", "-A", AGENT]);
+    if std::path::Path::new(CA_BUNDLE).exists() {
+        c.args(["--cacert", CA_BUNDLE]);
+    }
     c
 }
 

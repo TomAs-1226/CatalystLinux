@@ -357,6 +357,17 @@ def tools(vm):
     check("catalyst-usb says how it stands", out.startswith("off"), out)
     out = vm.run("busybox --list | grep -x udhcpd")
     check("BusyBox has its DHCP server for USB networking", out.strip() == "udhcpd", out)
+    # HTTPS with curl's own defaults, as Weather, the schedule and the
+    # assistant ask (the emulator's network reaches the internet): a curl
+    # with no certificate list fails every request (60), as 0.4.1's did.
+    out = vm.run("curl -sS -o /dev/null -w '%{http_code}' --max-time 20 https://api.github.com/ 2>&1; echo \" exit $?\"", 40)
+    online = not any(f" exit {code}" in out for code in (6, 7, 28))
+    if online:
+        check("curl checks certificates with its own defaults (HTTPS to GitHub)", out.startswith("200"), out)
+        out = vm.run("lynx -dump -nolist https://example.com/ 2>&1 | head -n 3", 40)
+        check("lynx reads a page over HTTPS", "Example Domain" in out, out[:120])
+    else:
+        print(f"   skip  HTTPS (no internet here): {out}")
     # The emulator has no IR parts (no overlays), but the drivers can still be
     # loaded and let go by name, as the Remote app does; at start, neither is in.
     out = vm.run("lsmod | grep -c '^gpio_ir'; modprobe gpio_ir_tx; modprobe gpio_ir_recv; lsmod | grep -c '^gpio_ir'; "

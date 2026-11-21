@@ -100,13 +100,15 @@ BR2_PACKAGE_CATALYST_CAMERA=y
 # resize2fs, to grow /data over the whole card on first boot.
 BR2_PACKAGE_E2FSPROGS=y
 BR2_PACKAGE_E2FSPROGS_RESIZE2FS=y
-# HTTPS for the event schedule, the app catalogue and git: curl on mbedTLS,
-# one small TLS library shared by all three, with the certificates to check
-# the servers by. Nothing of it runs until something asks for a download.
+# HTTPS for updates, the event schedule, Weather, the assistant, the app
+# catalogue and git: curl on OpenSSL, which Python's ssl brings anyway, with
+# the certificates to check the servers by. (Not mbedTLS: Buildroot gives
+# curl a certificate list only with OpenSSL or wolfSSL, so on mbedTLS it
+# trusted nothing and every HTTPS request failed, 0.4.1 and before.) Nothing
+# of it runs until something asks for a download.
 BR2_PACKAGE_LIBCURL=y
 BR2_PACKAGE_LIBCURL_CURL=y
-BR2_PACKAGE_LIBCURL_MBEDTLS=y
-BR2_PACKAGE_MBEDTLS=y
+BR2_PACKAGE_LIBCURL_OPENSSL=y
 BR2_PACKAGE_CA_CERTIFICATES=y
 # Git on the handheld: a repository's status, log and diffs, and pulling.
 BR2_PACKAGE_GIT=y

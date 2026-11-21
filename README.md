@@ -41,7 +41,9 @@ when it draws them as the processor does · core apps built into one
 shell, extra apps as separate full-screen programs · SSH in the image but off
 until switched on · the kernel trimmed of what costs memory, with every USB
 driver kept as a loadable file · Latin-only fonts · HTTPS through curl on
-mbedTLS, shared by git, the schedule and the catalogue · keys for online
+OpenSSL (from 0.4.2; mbedTLS before, which left curl with no certificates
+to trust), shared by updates, git, the schedule, Weather, the assistant and
+the catalogue · keys for online
 services set in first-boot setup (from the handheld or a computer), in
 Settings, or read from a file.
 
@@ -1024,8 +1026,9 @@ the board's own drivers are loaded but idle in these figures, and emulator
 seconds are not handheld seconds (about six of the 24 are spent waiting for a
 panel that is not there): the table compares one build with another.
 
-Since then, HTTPS and git came in: curl, mbedTLS and the certificates add
-about 2 MB, and git about 8 MB once its server, mail, Perl and SVN/CVS tools
+Since then, HTTPS and git came in: curl, mbedTLS and the certificates added
+about 2 MB (in 0.4.2 curl moved to the OpenSSL that Python already brings),
+and git about 8 MB once its server, mail, Perl and SVN/CVS tools
 (which need Perl, or carry their own 2.3 MB copy of git's library each) are
 left out. The root filesystem then used 47 MB, and the download was 33.6 MB.
 None of it is in memory until something runs it.

@@ -10,6 +10,14 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.4.2
+
+### Fixed
+- HTTPS works: updates, Weather, the event schedule, the assistant, the app catalogue and git all reach their servers. curl had been built without a list of certificates to trust, so every secure connection failed.
+- The clock is set from the web when a network blocks the time servers, and never starts earlier than the system was built.
+- Settings › Name & time › Clock: Enter asks the network for the time now.
+- When an update check cannot be made, Settings › Updates says why.
+
 ## 0.4.1
 
 ### New
