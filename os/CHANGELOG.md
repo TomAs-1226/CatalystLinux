@@ -12,6 +12,14 @@ the first section (this introduction) is not shown.
 
 ## 0.5.4
 
+### StandBy and the lock screen
+- StandBy: on the charger and left alone, the handheld shows a clock, the charge, the next match, the weather, photos or a little of everything instead of going dark. ↑↓ change the face, ←→ its style. At night it turns red and dims.
+- Set it down on the charger with the screen off and StandBy comes up at once. Deep standby never starts on the charger.
+- Lock screen: set a passcode in Settings › Lock screen and the handheld asks for it once the screen has been off. No passcode is needed; without one, a key wakes it straight to where it was.
+- Customise the lock screen (its clock, its colour, and what shows with the time) with the lock screen itself as the preview.
+- A wrong passcode shakes the field; after five in a row, each try waits longer.
+- Notices and reminders that arrive while it's locked show as a count, and are said once it opens.
+
 ### Spotlight
 - Search is now Spotlight: press Ctrl-Enter on any screen, even in the Terminal, and a glass search bar grows out of the island. Space and / on Home open it too.
 - Results appear from the first key: apps, any setting, Actions, notes, reminders, files, photos, repositories, SSH hosts, robot values, match logs and the schedule. Type a match or team number to jump to it.
