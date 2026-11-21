@@ -353,8 +353,9 @@ pub trait Screen {
     fn update(&mut self, _cx: &mut Cx) -> Nav {
         Nav::Stay
     }
-    /// An external app this screen wants the panel handed to. Asked once the
-    /// screen has finished arriving; answered once.
+    /// An external app this screen wants the panel handed to. Asked whenever
+    /// the screen has landed and shows alone; the shell closes the screen
+    /// once the app ends.
     fn launch(&mut self) -> Option<crate::apps::App> {
         None
     }
@@ -460,34 +461,167 @@ struct Transition {
     /// it: the recent apps as they showed, for a card to grow out of, or
     /// Home, for an app brought back several pages deep.
     backdrop: Option<Vec<u32>>,
-    /// A page pushed while the one before it was still sliding in: that
-    /// slide goes on playing beneath this one (the page it covered drifting
-    /// off, the page it brought finishing its way in) rather than the page
-    /// being put down at rest at once.
+    /// A screen that arrives while another transition was still under way
+    /// (a page pushed as the last slides in, an app opened as another goes
+    /// back into its tile): that motion goes on playing beneath this one,
+    /// from where it was and at its speed, rather than landing at once.
     beneath: Option<Box<Transition>>,
+    /// A screen that leaves while the one above it was still leaving (Esc
+    /// pressed again before a page had gone): that motion goes on playing
+    /// within this one's picture.
+    within: Option<Box<Transition>>,
+    /// Pictures only: what it moves has already been let go (an app put
+    /// among the recent apps, a page done with), or it plays on beneath or
+    /// within another transition.
+    ghost: bool,
+    /// Room for what plays beneath and within, drawn as one picture each.
+    scratch: [Vec<u32>; 2],
+    /// Arriving: how deep the stack was before it, so the screens above that
+    /// are the ones it brings in (an app brought back can bring several).
+    over: usize,
+    /// It grew over its backdrop (the recent apps as they showed), not the
+    /// screen beneath: turned back, it lands on a picture that is not that
+    /// screen, which then fades into it.
+    backdropped: bool,
 }
 
 impl Transition {
     fn new(path: Path, from: f32, to: f32, leaving: Option<Box<dyn Screen>>, backdrop: Option<Vec<u32>>) -> Self {
         let mut progress = Animated::new(from, path.spring()).with_rest(0.002);
         progress.set(to);
-        Transition { path, progress, pictures: None, made: 0, leaving, backdrop, beneath: None }
+        Transition { path, progress, pictures: None, made: 0, leaving, backdrop, beneath: None, within: None, ghost: false, scratch: Default::default(), over: 0, backdropped: false }
     }
 
-    /// A page sliding in, with its pictures taken: one that can go on
-    /// beneath a page pushed over it.
-    fn can_go_beneath(&self) -> bool {
-        self.path == Path::Slide && self.leaving.is_none() && self.pictures.is_some()
+    /// A screen on its way in (not one leaving, nor a ghost).
+    fn arriving(&self) -> bool {
+        self.leaving.is_none() && !self.ghost
     }
 
-    /// Advance the slide beneath, if there is one; true while it moves. Once
-    /// it has landed it is let go: the picture of the page at rest is the same.
-    fn tick_beneath(&mut self, dt: f32) -> bool {
-        let moving = self.beneath.as_mut().is_some_and(|b| b.progress.tick(dt));
-        if !moving {
-            self.beneath = None;
+    /// Arriving and never yet drawn, from where it starts: nothing of what it
+    /// brings has shown. (Closed and asked back before a frame, a screen is
+    /// undrawn too, but it was showing whole all along.)
+    fn unseen(&self) -> bool {
+        self.arriving() && self.pictures.is_none() && self.progress.value() < 0.5 && self.within.is_none()
+    }
+
+    /// On its way out: a screen leaving, or the ghost of one.
+    fn closing(&self) -> bool {
+        self.progress.target() < 0.5
+    }
+
+    /// It moves over its backdrop (a picture of what showed), not over the
+    /// screen beneath, or would once drawn.
+    fn over_backdrop(&self) -> bool {
+        self.backdropped || self.backdrop.is_some()
+    }
+
+    /// Advance what plays beneath and within, if anything; true while any
+    /// of it moves. Each is let go once it has landed: the picture it then
+    /// makes is the one it plays beneath or within.
+    fn tick_nested(&mut self, dt: f32) -> bool {
+        let mut moving = false;
+        for nested in [&mut self.beneath, &mut self.within] {
+            // Both must be advanced, so no short-circuit.
+            if nested.as_mut().is_some_and(|t| t.progress.tick(dt) | t.tick_nested(dt)) {
+                moving = true;
+            } else {
+                *nested = None;
+            }
         }
         moving
+    }
+
+    /// The two pictures it moves (what it was taken over, and the screen it
+    /// brings or takes away), with what plays beneath or within it drawn
+    /// into them as it now stands. None until its pictures are taken.
+    fn layers(&mut self, background: &[u32], radius: f32, edge: Color) -> Option<(&[u32], &[u32])> {
+        let Transition { pictures, beneath, within, scratch, .. } = self;
+        let [(under, _), (over, _)] = pictures.as_ref()?;
+        let [under_scratch, over_scratch] = scratch;
+        let under = match beneath.as_mut().filter(|b| b.pictures.is_some()) {
+            Some(b) => {
+                b.compose(background, radius, edge, under_scratch);
+                under_scratch.as_slice()
+            }
+            None => under.as_slice(),
+        };
+        let over = match within.as_mut().filter(|w| w.pictures.is_some()) {
+            Some(w) => {
+                w.compose(background, radius, edge, over_scratch);
+                over_scratch.as_slice()
+            }
+            None => over.as_slice(),
+        };
+        Some((under, over))
+    }
+
+    /// Draw this transition as it now stands into `out`, on the processor
+    /// (it plays beneath or within another). `radius` is a tile's corner.
+    fn compose(&mut self, background: &[u32], radius: f32, edge: Color, out: &mut Vec<u32>) {
+        let (path, p) = (self.path, self.progress.value());
+        out.clear();
+        let Some((under, over)) = self.layers(background, radius, edge) else {
+            return out.extend_from_slice(background);
+        };
+        match path {
+            Path::Slide => {
+                out.extend_from_slice(background);
+                compose_slide(out, under, over, p);
+            }
+            Path::Grow(from) => {
+                // As the top transition draws it (`draw_frame`).
+                let grown = p.clamp(0.0, 1.0);
+                out.extend_from_slice(under);
+                let window = from.lerp(&Rect::new(0.0, 0.0, W, H), grown);
+                let morph = Morph { under, tile: from, screen: Morph::screen_at(grown) };
+                scale_into(out, (W as i32, H as i32), over, window, radius * (1.0 - grown), edge, Some(&morph));
+            }
+        }
+    }
+
+    /// Its pictures just taken: a closing motion playing beneath or within
+    /// it goes on over what it now shows there (Home as it is now, not as it
+    /// was when that motion began), so it lands on exactly that picture.
+    fn rebase(&mut self) {
+        let Transition { pictures: Some([(under, _), (over, _)]), beneath, within, .. } = self else { return };
+        for (nested, base) in [(beneath, &*under), (within, &*over)] {
+            if let Some(Transition { pictures: Some([(was, _), _]), .. }) = nested.as_deref_mut().filter(|t| t.closing()) {
+                was.clone_from(base);
+            }
+        }
+    }
+
+    /// The opening of the screen arriving by `path`, still playing somewhere
+    /// beneath this one (a page was pushed as it grew): taken out, with
+    /// whatever plays beneath it in turn, for that screen's closing to turn
+    /// it round.
+    fn take_opening(&mut self, path: Path) -> Option<Box<Transition>> {
+        let below = self.beneath.as_mut()?;
+        if below.path == path && !below.closing() {
+            return self.beneath.take();
+        }
+        below.take_opening(path)
+    }
+
+    /// No more than `depth` motions played inside one another below this one
+    /// (each is a picture drawn every frame): any deeper is drawn into the
+    /// picture it plays in as it stands now, and holds still there, rather
+    /// than vanishing.
+    fn prune(&mut self, depth: usize, background: &[u32], radius: f32, edge: Color) {
+        let Transition { pictures, beneath, within, .. } = self;
+        for (nested, at) in [(beneath, 0), (within, 1)] {
+            let Some(t) = nested else { continue };
+            if depth > 0 {
+                t.prune(depth - 1, background, radius, edge);
+                continue;
+            }
+            if let Some(pictures) = pictures.as_mut() {
+                let mut held = Vec::new();
+                t.compose(background, radius, edge, &mut held);
+                pictures[at].0 = held;
+            }
+            *nested = None;
+        }
     }
 }
 
@@ -562,8 +696,6 @@ pub struct Shell {
     pub spent: (std::time::Duration, std::time::Duration),
     /// Room for a page rising in, kept between frames.
     rise_scratch: Vec<u32>,
-    /// A slide still playing beneath a page pushed over it, drawn as one picture.
-    beneath_scratch: Vec<u32>,
     /// System updates: what the updater last said, when it was read, when
     /// the shell started, the last key, and the last check started.
     update: crate::sysupdate::Status,
@@ -722,7 +854,6 @@ impl Shell {
             status: Status { age: f32::MAX, ..Status::default() },
             last_screen: (Vec::new(), None),
             rise_scratch: Vec::new(),
-            beneath_scratch: Vec::new(),
             update: crate::sysupdate::Status::default(),
             update_age: 0.0,
             started: std::time::Instant::now(),
@@ -831,6 +962,10 @@ impl Shell {
         if open && !self.control.visible() {
             // Taken afresh on the next frame.
             self.control_under = None;
+            // Over a screen drawn live: recent apps on their way out go at once.
+            if self.switcher.as_ref().is_some_and(|s| s.leaving()) {
+                (self.switcher, self.switcher_under) = (None, None);
+            }
         }
         self.control.set_open(open, &self.settings);
         self.dirty = true;
@@ -970,13 +1105,12 @@ impl Shell {
             self.moving = true;
             return;
         }
-        // The recent apps take the keys while they show; one on its way out
-        // goes at once, and the key lands on the screen beneath.
+        // The recent apps take the keys while they show. On their way out
+        // they go on going, over the screen drawn live, and the key lands
+        // on that screen.
         if self.switcher.as_ref().is_some_and(|s| !s.leaving()) {
             return self.switcher_key(key);
         }
-        self.switcher = None;
-        self.switcher_under = None;
         // Ctrl-Tab brings them up over any screen, a terminal included: no
         // program in a terminal can be sent Ctrl-Tab, so it takes nothing.
         if key == Key::Ctrl('\t') {
@@ -1178,83 +1312,204 @@ impl Shell {
         if let Some(t) = &mut self.transition {
             if t.path == path && t.leaving.as_ref().is_some_and(|leaving| leaving.title() == screen.title()) {
                 let returning = t.leaving.take().expect("checked above");
+                t.over = self.stack.len();
                 self.stack.push((returning, path));
                 t.progress.set(1.0);
                 return;
             }
         }
+        // A page pushed before the screen arriving was ever drawn (the keys
+        // came before a frame): it comes in with that screen, in its window,
+        // rather than sliding over a screen that never showed.
+        if path == Path::Slide && self.transition.as_ref().is_some_and(Transition::unseen) && !self.settings.calm {
+            self.push(screen, path);
+            self.gfx.reveal_start();
+            return;
+        }
+        // Whatever was still on its way in or out goes on beneath the screen
+        // arriving, from where it was and at its speed: a page pushed as the
+        // last slides in, an app opened as another goes back into its tile.
+        let beneath = self.interrupt();
         // An app opened from Home that was left a moment ago comes back as it
         // was (its pages, its place): the new copy is not needed. It closes
         // into the tile it was opened from this time.
-        if let (Path::Grow(from), 1, None) = (path, self.stack.len(), &self.transition) {
+        if let (Path::Grow(from), 1) = (path, self.stack.len()) {
             if let Some(mut recent) = self.recents.find(screen.title()).and_then(|at| self.recents.take(at)) {
                 drop(screen);
                 recent.stack[0].1 = path;
                 // Pages deep, it grows over Home rather than over its own first page.
                 let home = (recent.stack.len() > 1 && self.last_depth == 1).then(|| self.last_screen.0.clone());
-                return self.bring_back(recent, from, home);
+                self.bring_back(recent, from, home);
+                if let Some(t) = &mut self.transition {
+                    t.beneath = beneath;
+                }
+                return;
             }
         }
-        self.stack.push((screen, path));
+        let over = self.stack.len();
+        self.push(screen, path);
         self.gfx.reveal_start();
         if self.settings.calm {
             self.transition = None;
             return;
         }
-        // Pushed while the page before was still sliding in: that slide goes
-        // on beneath this one, from where it was and at its speed. (One deep:
-        // whatever was beneath it lands at once.)
         let mut transition = Transition::new(path, 0.0, 1.0, None, None);
-        if path == Path::Slide {
-            if let Some(mut before) = self.transition.take().filter(|t| t.can_go_beneath()) {
-                before.beneath = None;
-                transition.beneath = Some(Box::new(before));
-            }
-        }
+        (transition.beneath, transition.over) = (beneath, over);
         self.transition = Some(transition);
     }
 
+    /// A screen onto the stack. A picture kept of the screen last drawn at
+    /// its depth (or deeper) is of another screen now, and is not used again.
+    fn push(&mut self, screen: Box<dyn Screen>, path: Path) {
+        if self.last_depth > self.stack.len() {
+            self.last_depth = usize::MAX;
+        }
+        self.stack.push((screen, path));
+    }
+
+    /// The transition under way gives way to a new one. What it was taking
+    /// away is let go now (an app goes among the recent apps); its motion,
+    /// if it has been seen and still has somewhere to go, is handed back as
+    /// a ghost to play on beneath or within the new one. Called before the
+    /// stack changes for the new one.
+    fn interrupt(&mut self) -> Option<Box<Transition>> {
+        let mut t = self.transition.take()?;
+        if let Some(mut screen) = t.leaving.take() {
+            // Turned back as it rose: what is left of its rise goes with it.
+            self.gfx.reveal_stop();
+            // Not drawn leaving yet (the keys came before a frame): it goes
+            // from the picture it last showed, over the screen it leaves for.
+            if t.pictures.is_none() {
+                let over = self.leaving_picture(screen.as_mut());
+                t.pictures = Some([self.top_picture(), over]);
+                t.made = PICTURES_MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            }
+            let picture = t.pictures.as_ref().map(|[_, (over, _)]| over.clone());
+            self.left(screen, t.path, picture);
+        } else if t.pictures.is_none() && !t.unseen() && !t.ghost {
+            // Arriving, undrawn, but showing all the same (asked back before
+            // a frame, from where its last motion had it): its pictures now.
+            let base = if (1..self.stack.len()).contains(&t.over) { t.over } else { self.stack.len() - 1 };
+            let under = match self.last_depth == base {
+                true => self.last_screen.clone(),
+                false => Self::picture_of(&mut self.gfx, &self.background, &self.robot, self.stack[base - 1].0.as_mut(), base == 1),
+            };
+            t.pictures = Some([under, self.top_picture()]);
+        }
+        // Over a picture of what showed rather than the screen beneath (an
+        // app from the recent apps): no other motion can go on over that,
+        // so the panel as it showed fades into what comes next instead.
+        if t.over_backdrop() {
+            self.fade_out_shown();
+            return None;
+        }
+        let still = t.progress.is_settled() && t.beneath.is_none() && t.within.is_none();
+        if t.pictures.is_none() || still {
+            return None;
+        }
+        t.ghost = true;
+        t.prune(2, &self.background, self.gfx.tile_radius(), self.gfx.tokens.ground);
+        // Its pictures may have changed: the GPU takes them up afresh.
+        t.made = PICTURES_MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        Some(Box::new(t))
+    }
+
     fn close(&mut self) {
-        if self.stack.len() <= 1 {
+        let depth = self.stack.len();
+        if depth <= 1 {
             return;
         }
         self.gfx.focus_reset();
+        if let Some(t) = self.transition.as_mut().filter(|t| t.arriving() && !self.settings.calm) {
+            let (screen, path) = self.stack.pop().expect("more than one screen");
+            if let Some((below, _)) = self.stack.last_mut() {
+                below.resume();
+            }
+            // Still arriving: turn it round where it is, keeping its speed.
+            // Its rows go on rising as it goes, so asked back it still has them.
+            if self.stack.len() == t.over {
+                t.leaving = Some(screen);
+                t.progress.set(0.0);
+                return;
+            }
+            self.gfx.reveal_stop();
+            // Not the screen it brings in but a page over it (an app brought
+            // back pages deep): the app goes on arriving, and the page slides
+            // away inside its window. Not yet seen, the page simply goes.
+            if let Some([_, (over, _)]) = &mut t.pictures {
+                let depth = self.stack.len();
+                let (under, dots) = Self::picture_of(&mut self.gfx, &self.background, &self.robot, self.stack[depth - 1].0.as_mut(), depth == 1);
+                let mut page = Transition::new(path, 1.0, 0.0, None, None);
+                page.ghost = true;
+                page.pictures = Some([(under.clone(), dots), (std::mem::replace(over, under), None)]);
+                // A page above it still going (Esc again): on, over this one.
+                page.within = t.within.take();
+                t.within = Some(Box::new(page));
+                t.made = PICTURES_MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            }
+            return self.left(screen, path, None);
+        }
+        // Anything else under way (a page still on its way out as Esc comes
+        // again) goes on within the picture of the screen now leaving.
         self.gfx.reveal_stop();
+        let mut within = self.interrupt();
         let (screen, path) = self.stack.pop().expect("more than one screen");
         if let Some((below, _)) = self.stack.last_mut() {
             below.resume();
         }
         if self.settings.calm {
-            self.transition = None;
             let picture = (self.last_depth == self.stack.len() + 1).then(|| self.last_screen.0.clone());
             return self.left(screen, path, picture);
         }
-        match &mut self.transition {
-            // Still arriving: turn it round where it is, keeping its speed.
-            Some(t) if t.leaving.is_none() => {
-                t.leaving = Some(screen);
-                t.progress.set(0.0);
-            }
-            _ => self.transition = Some(Transition::new(path, 1.0, 0.0, Some(screen), None)),
+        let mut transition = Transition::new(path, 1.0, 0.0, Some(screen), None);
+        // Its own opening, still playing beneath the page it was leaving
+        // for: that is turned round from where it is, with its speed, over
+        // whatever went on beneath it.
+        if let Some(opening) = within.as_mut().and_then(|w| w.take_opening(path)) {
+            transition.progress = opening.progress;
+            transition.progress.set(0.0);
+            transition.beneath = opening.beneath;
         }
+        transition.within = within;
+        self.transition = Some(transition);
     }
 
-    /// An external app to hand the panel to: the top screen asks for one, and
-    /// has finished arriving (so the app starts on a settled picture).
+    /// An external app to hand the panel to: the top screen asks for one.
+    /// Only once its page has landed and shows alone (nothing on its way in
+    /// or out, no recent apps, control centre, tour or fade over it, the
+    /// screen awake), so the app starts on a settled picture and no key
+    /// meant for something over it reaches the app.
     pub fn take_launch(&mut self) -> Option<crate::apps::App> {
-        if self.transition.is_some() {
+        let alone = self.transition.is_none()
+            && self.switcher.is_none()
+            && !self.control.visible()
+            && self.tour.is_none()
+            && self.intro.is_none()
+            && self.curtain.is_none()
+            && self.standby.state() == crate::standby::State::Awake;
+        if !alone {
             return None;
         }
         self.stack.last_mut().and_then(|(screen, _)| screen.launch())
     }
 
     /// The app that had the panel is done: say so if it failed, and close
-    /// the page it was opened from.
-    pub fn launch_ended(&mut self, result: Result<(), String>) {
+    /// the page it was opened from. `last` is what the app left on the
+    /// panel, where it can be read back: the window closes from that
+    /// picture into its tile, rather than from the page it was opened over.
+    pub fn launch_ended(&mut self, result: Result<(), String>, last: Option<Vec<u32>>) {
         if let Err(why) = result {
             self.say(why);
         }
+        if let Some(picture) = last.filter(|px| px.len() == self.gfx.canvas.px.len()) {
+            self.gfx.canvas.px.copy_from_slice(&picture);
+            self.last_screen = (picture, None);
+            self.last_depth = self.stack.len();
+        }
         self.close();
+        // Drawn at once: the app's last picture does not stay on the panel
+        // while the shell waits out an idle spell.
+        self.moving = true;
         self.dirty = true;
     }
 
@@ -1479,14 +1734,25 @@ impl Shell {
         }
         if let Some(t) = &mut self.transition {
             // Both must be advanced, so no short-circuit.
-            if t.progress.tick(motion_dt) | t.tick_beneath(motion_dt) || motion_dt == 0.0 {
+            if t.progress.tick(motion_dt) | t.tick_nested(motion_dt) || motion_dt == 0.0 {
                 moving = true;
             } else {
                 let ended = self.transition.take().expect("in flight");
+                // Turned back and gone: whatever was left of its rise goes
+                // with it (the screen it lands on is not rising).
+                if ended.closing() {
+                    self.gfx.reveal_stop();
+                }
+                // Gone back into its card (or back before it ever showed
+                // growing out of it): the picture of the cards fades into
+                // the screen that is really beneath.
+                if ended.closing() && ended.over_backdrop() {
+                    moving |= self.fade_out_shown();
+                }
                 // The living wallpaper: once a screen has come or gone, its
                 // light drifts the way it went, and settles still.
                 if !self.settings.calm && !self.settings.battery.saver {
-                    let closing = ended.leaving.is_some();
+                    let closing = ended.closing();
                     let push = match (ended.path, closing) {
                         (Path::Slide, false) => (DRIFT_PUSH * 0.7, 0.0),
                         (Path::Slide, true) => (-DRIFT_PUSH * 0.7, 0.0),
@@ -1497,10 +1763,14 @@ impl Shell {
                     self.drift.1.nudge(push.1);
                     moving = true;
                 }
-                // An app gone back to Home is kept among the recent apps.
-                if let Some(screen) = ended.leaving {
-                    let picture = ended.pictures.map(|[_, (over, _)]| over);
-                    self.left(screen, ended.path, picture);
+                // An app gone back to Home is kept among the recent apps,
+                // with its picture (one never drawn leaving: as it showed).
+                if let Some(mut screen) = ended.leaving {
+                    let picture = match ended.pictures {
+                        Some([_, (over, _)]) => over,
+                        None => self.leaving_picture(screen.as_mut()).0,
+                    };
+                    self.left(screen, ended.path, Some(picture));
                 }
             }
         }
@@ -1678,11 +1948,22 @@ impl Shell {
     fn draw_under_intro(&mut self) {
         // The recent apps, over the wallpaper alone (no screen's words show
         // through between the cards): the screen in front fades into it as
-        // they come, and back as they go. Both are held still meanwhile.
-        if self.switcher.is_some() {
-            if self.switcher_under.is_none() {
+        // they come, and back as they go. Both are held still while nothing
+        // beneath moves; drawn live while a screen is still on its way in or
+        // out behind the cards, and as the cards go (a key may already have
+        // reached the screen), so nothing beneath freezes or jumps.
+        if let Some(leaving) = self.switcher.as_ref().map(|s| s.leaving()) {
+            let live = self.transition.is_some() || leaving;
+            if self.switcher_under.is_none() || live {
                 self.draw_frame();
-                self.switcher_under = Some((self.background.clone(), self.gfx.canvas.px.clone()));
+                let (wall, frame) = (&self.background, &self.gfx.canvas.px);
+                match &mut self.switcher_under {
+                    Some((held_wall, front)) if held_wall.len() == wall.len() && front.len() == frame.len() => {
+                        held_wall.copy_from_slice(wall);
+                        front.copy_from_slice(frame);
+                    }
+                    held => *held = Some((wall.clone(), frame.clone())),
+                }
             }
             if let (Some(switcher), Some((wall, front))) = (&mut self.switcher, &self.switcher_under) {
                 switcher.draw(&mut self.gfx, wall, front);
@@ -1757,6 +2038,12 @@ impl Shell {
             self.background_for = Some(at);
             if let Some(transition) = &mut self.transition {
                 transition.pictures = None;
+                // Motion played beneath or within it was drawn over the old
+                // wallpaper, and cannot be drawn again: it lands.
+                (transition.beneath, transition.within) = (None, None);
+            }
+            if self.transition.as_ref().is_some_and(|t| t.ghost) {
+                self.transition = None;
             }
         }
         g.canvas.px.copy_from_slice(&self.background);
@@ -1785,28 +2072,48 @@ impl Shell {
                 // picture means a transition's first frame draws one screen,
                 // not two, so it starts without a stall.
                 let kept = |depth_then: usize| (self.last_depth == depth_then).then(|| self.last_screen.clone());
+                transition.backdropped |= transition.backdrop.is_some();
                 transition.pictures = Some(match &mut transition.leaving {
                     Some(leaving) => {
                         let over = kept(depth + 1).unwrap_or_else(|| picture(g, leaving.as_mut(), false, false));
-                        [picture(g, self.stack[depth - 1].0.as_mut(), depth == 1, false), over]
+                        // Turned back before it was drawn growing out of its
+                        // card: it goes back over the cards as they showed.
+                        let under = match transition.backdrop.take() {
+                            Some(backdrop) => (backdrop, None),
+                            None => picture(g, self.stack[depth - 1].0.as_mut(), depth == 1, false),
+                        };
+                        [under, over]
                     }
                     None => {
-                        let (under, over) = self.stack.split_at_mut(depth - 1);
+                        // Over the screen it arrived over, which is not the
+                        // one just beneath the top when it brings several
+                        // (an app brought back pages deep, a page pushed
+                        // before the app's window was first drawn).
+                        let base = if (1..depth).contains(&transition.over) { transition.over } else { depth - 1 };
                         let backdrop = transition.backdrop.take().map(|px| (px, None));
-                        let under = backdrop.or_else(|| kept(depth - 1)).or_else(|| under.last_mut().map(|(s, _)| picture(g, s.as_mut(), depth == 2, false)));
-                        [under.unwrap_or_else(|| (self.background.clone(), None)), picture(g, over[0].0.as_mut(), false, true)]
+                        let under = match backdrop.or_else(|| kept(base)) {
+                            Some(under) => under,
+                            None => picture(g, self.stack[base - 1].0.as_mut(), base == 1, false),
+                        };
+                        [under, picture(g, self.stack[depth - 1].0.as_mut(), false, true)]
                     }
                 });
+                transition.rebase();
                 self.last_depth = usize::MAX;
                 g.focus_static = false;
                 g.canvas.px.copy_from_slice(&self.background);
                 transition.made = PICTURES_MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            } else if transition.leaving.is_none() && g.revealing() {
-                // The page on its way in is still rising: draw it again.
+            } else if !transition.ghost && g.revealing() {
+                // The page on its way in (or turned back on its way) is
+                // still rising: draw it again.
                 g.focus_static = true;
                 g.pager = None;
-                Self::draw_screen(g, self.stack[depth - 1].0.as_mut(), &self.robot, false);
-                if !self.stack[depth - 1].0.full_screen() {
+                let screen = match &mut transition.leaving {
+                    Some(leaving) => leaving.as_mut(),
+                    None => self.stack[depth - 1].0.as_mut(),
+                };
+                Self::draw_screen(g, screen, &self.robot, false);
+                if !screen.full_screen() {
                     rise_in(g, &self.background, &mut self.rise_scratch);
                 }
                 let dots = g.pager.take().map(|(pages, current, _)| (pages, current));
@@ -1818,22 +2125,21 @@ impl Shell {
                 g.focus_static = false;
                 g.canvas.px.copy_from_slice(&self.background);
             }
-            let p = transition.progress.value();
-            let [(under, under_dots), (over, over_dots)] = transition.pictures.as_ref().expect("taken above");
-            match transition.path {
+            let (p, path) = (transition.progress.value(), transition.path);
+            let (under_dots, over_dots) = match &transition.pictures {
+                Some([(_, under), (_, over)]) => (*under, *over),
+                None => unreachable!("taken above"),
+            };
+            // Motion still playing beneath or within it is drawn afresh each
+            // frame, as one picture each: the GPU takes the pictures up again.
+            if transition.beneath.is_some() || transition.within.is_some() {
+                transition.made = PICTURES_MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            }
+            let made = transition.made;
+            let (under, over) = transition.layers(&self.background, g.tile_radius(), t.ground).expect("taken above");
+            match path {
                 Path::Slide => {
-                    // The one underneath drifts a third as far as the one on top
-                    // travels. If it was itself still sliding in, that slide
-                    // plays on beneath, as one picture.
-                    let beneath = transition.beneath.as_ref().and_then(|b| Some((b.progress.value(), b.pictures.as_ref()?)));
-                    let under: &[u32] = match beneath {
-                        Some((bp, [(b_under, _), (b_over, _)])) => {
-                            self.beneath_scratch.clone_from(&self.background);
-                            compose_slide(&mut self.beneath_scratch, b_under, b_over, bp);
-                            &self.beneath_scratch
-                        }
-                        None => under,
-                    };
+                    // The one underneath drifts a third as far as the one on top travels.
                     let (under_x, over_x) = compose_slide(&mut g.canvas.px, under, over, p);
                     g.pager = under_dots.map(|(pages, current)| (pages, current, under_x)).or(over_dots.map(|(pages, current)| (pages, current, over_x)));
                 }
@@ -1846,7 +2152,7 @@ impl Shell {
                     let morph = Morph { under, tile: from, screen: Morph::screen_at(grown) };
                     // On the GPU when it is drawing; otherwise, or if it fails, here.
                     let on_gpu = match &mut g.gpu {
-                        Some(gpu) => gpu.grow(&mut g.canvas, under, over, transition.made, window, corner, t.ground, Some(&morph)),
+                        Some(gpu) => gpu.grow(&mut g.canvas, under, over, made, window, corner, t.ground, Some(&morph)),
                         None => Ok(false),
                     };
                     if let Err(why) = &on_gpu {
@@ -2104,7 +2410,12 @@ impl Morph<'_> {
 }
 
 pub(crate) fn blit_scaled(canvas: &mut Canvas, src: &[u32], window: Rect, radius: f32, edge: Color, morph: Option<&Morph>) {
-    let (w, h) = (canvas.w, canvas.h);
+    scale_into(&mut canvas.px, (canvas.w, canvas.h), src, window, radius, edge, morph);
+}
+
+/// The same into a bare picture `w` × `h`: what plays beneath or within a
+/// transition is drawn into one.
+fn scale_into(out: &mut [u32], (w, h): (i32, i32), src: &[u32], window: Rect, radius: f32, edge: Color, morph: Option<&Morph>) {
     if window.w < 1.0 || window.h < 1.0 {
         return;
     }
@@ -2112,7 +2423,7 @@ pub(crate) fn blit_scaled(canvas: &mut Canvas, src: &[u32], window: Rect, radius
     let morph = morph.filter(|m| m.screen < 1.0 && m.tile.w >= 1.0 && m.tile.h >= 1.0 && m.under.len() == src.len());
     // The whole panel: a straight copy.
     if morph.is_none() && window.w >= w as f32 - 0.5 && window.h >= h as f32 - 0.5 {
-        canvas.px.copy_from_slice(src);
+        out.copy_from_slice(src);
         return;
     }
     // Well inside the window, where no edge needs working out.
@@ -2135,7 +2446,7 @@ pub(crate) fn blit_scaled(canvas: &mut Canvas, src: &[u32], window: Rect, radius
             if d > 0.0 && d < REACH {
                 let fall = 1.0 - d / REACH;
                 let at = (y * w + x) as usize;
-                canvas.px[at] = blend(canvas.px[at], Color::BLACK, 0.22 * fall * fall);
+                out[at] = blend(out[at], Color::BLACK, 0.22 * fall * fall);
             }
         }
     }
@@ -2193,7 +2504,7 @@ pub(crate) fn blit_scaled(canvas: &mut Canvas, src: &[u32], window: Rect, radius
             let at = row + x as usize;
             let fx = x as f32 + 0.5;
             if inside(fx, fy) {
-                canvas.px[at] = px;
+                out[at] = px;
                 continue;
             }
             let d = sd_rrect(fx, fy, &window, radius);
@@ -2204,7 +2515,7 @@ pub(crate) fn blit_scaled(canvas: &mut Canvas, src: &[u32], window: Rect, radius
             let rim = if d > -1.0 && radius > 0.5 { (90.0 * (d + 1.0).clamp(0.0, 1.0)) as u32 } else { 0 };
             let px = mix_px(px, edge_px, rim);
             let cover = ((0.5 - d).clamp(0.0, 1.0) * 256.0) as u32;
-            canvas.px[at] = mix_px(canvas.px[at], px, cover);
+            out[at] = mix_px(out[at], px, cover);
         }
     }
 }
@@ -2227,28 +2538,78 @@ impl Shell {
         }
     }
 
-    /// A screen still on its way in or out lands where it was going, at once.
-    fn settle_transition(&mut self) {
-        if let Some(t) = self.transition.take() {
-            if let Some(screen) = t.leaving {
-                let picture = t.pictures.map(|[_, (over, _)]| over);
-                self.left(screen, t.path, picture);
-            }
+    /// The screen in front as it last showed at rest, or as it arrives if it
+    /// is still on its way in; drawn now if it has been neither.
+    fn top_picture(&mut self) -> Picture {
+        let depth = self.stack.len();
+        if self.last_depth == depth {
+            return self.last_screen.clone();
         }
+        if let Some(Transition { pictures: Some([_, over]), .. }) = self.transition.as_ref().filter(|t| t.arriving()) {
+            return over.clone();
+        }
+        Self::picture_of(&mut self.gfx, &self.background, &self.robot, self.stack[depth - 1].0.as_mut(), depth == 1)
+    }
+
+    /// The panel as it last showed fades out over whatever is drawn next,
+    /// where what is drawn next could not carry on from it. True if it does
+    /// (not in the calm version).
+    fn fade_out_shown(&mut self) -> bool {
+        if self.settings.calm {
+            return false;
+        }
+        let mut fade = Animated::new(1.0, role::smooth()).with_rest(0.004);
+        fade.set(0.0);
+        self.curtain = Some((self.gfx.canvas.px.clone(), fade));
+        self.moving = true;
+        true
+    }
+
+    /// A screen just taken off the top, as it last showed at rest there, or
+    /// drawn now if it never did.
+    fn leaving_picture(&mut self, screen: &mut dyn Screen) -> Picture {
+        match self.last_depth == self.stack.len() + 1 {
+            true => self.last_screen.clone(),
+            false => Self::picture_of(&mut self.gfx, &self.background, &self.robot, screen, false),
+        }
+    }
+
+    /// `screen` drawn now as it rests, over the wallpaper, with the page
+    /// dots it asks for; the panel's picture is left as it was.
+    fn picture_of(g: &mut Gfx, background: &[u32], robot: &Robot, screen: &mut dyn Screen, home: bool) -> Picture {
+        let shown = g.canvas.px.clone();
+        if background.len() == shown.len() {
+            g.canvas.px.copy_from_slice(background);
+        }
+        (g.focus_static, g.pager) = (true, None);
+        Self::draw_screen(g, screen, robot, home);
+        let dots = g.pager.take().map(|(pages, current, _)| (pages, current));
+        g.focus_static = false;
+        (std::mem::replace(&mut g.canvas.px, shown), dots)
     }
 
     /// The recent apps. The card of the app in front shows it as it was last
     /// drawn, or `under`, the picture the control centre came down over.
     pub fn open_recents(&mut self, under: Option<Vec<u32>>) {
         use crate::recents::{icon_for, thumbnail, Card, Switcher};
-        self.settle_transition();
+        // A screen on its way out is let go now (an app among the recent
+        // apps, so it has its card), and its motion plays on behind the
+        // cards as they come; one on its way in goes on arriving.
+        if self.transition.as_ref().is_some_and(|t| t.leaving.is_some()) {
+            self.transition = self.interrupt().map(|t| *t);
+        }
         let current = self.app_start().map(|start| {
             let title = self.stack[start].0.title().to_owned();
-            let picture = under.as_deref().or_else(|| (self.last_depth == self.stack.len()).then_some(self.last_screen.0.as_slice()));
-            Card { icon: icon_for(&title), title, thumb: picture.map_or_else(Vec::new, thumbnail), current: true }
+            let picture = under.unwrap_or_else(|| self.top_picture().0);
+            Card { icon: icon_for(&title), title, thumb: thumbnail(&picture), current: true }
         });
         let kept = self.recents.iter().map(|r| Card { title: r.title().to_owned(), icon: icon_for(r.title()), thumb: r.thumb.clone(), current: false });
-        self.switcher = Some(Switcher::new(current.into_iter().chain(kept).collect(), self.settings.calm));
+        let mut switcher = Switcher::new(current.into_iter().chain(kept).collect(), self.settings.calm);
+        // Brought up again as they went: from where they were.
+        if let Some(old) = &self.switcher {
+            switcher.carry_on_from(old);
+        }
+        self.switcher = Some(switcher);
         self.switcher_under = None;
         self.moving = true;
         self.dirty = true;
@@ -2325,6 +2686,10 @@ impl Shell {
         if let Some(words) = recent.stack.last().and_then(|(s, _)| s.greeting()) {
             self.say(words);
         }
+        if self.last_depth > self.stack.len() {
+            self.last_depth = usize::MAX;
+        }
+        let over = self.stack.len();
         self.stack.extend(recent.stack);
         if let Some((top, _)) = self.stack.last_mut() {
             top.resume();
@@ -2335,7 +2700,9 @@ impl Shell {
             self.transition = None;
             return;
         }
-        self.transition = Some(Transition::new(Path::Grow(from), 0.0, 1.0, None, backdrop));
+        let mut transition = Transition::new(Path::Grow(from), 0.0, 1.0, None, backdrop);
+        transition.over = over;
+        self.transition = Some(transition);
     }
 
     /// Save `picture`, the panel as it showed, as a screenshot: a flash says
@@ -2655,6 +3022,9 @@ impl Shell {
         }
     }
 }
+
+#[cfg(test)]
+mod fast_keys;
 
 #[cfg(test)]
 pub(crate) mod tests {
