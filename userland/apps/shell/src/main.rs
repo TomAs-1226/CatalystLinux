@@ -1742,4 +1742,30 @@ mod tests {
         beat.rest();
         assert_eq!(beat.level, 2);
     }
+
+    #[test]
+    fn the_battery_saver_holds_the_beat_at_thirty() {
+        // The handheld's 40 a second drops to 30 at once, and stays however
+        // much room the frames leave.
+        let mut beat = Beat::new();
+        beat.set_floor(Some(power::SAVER_FRAME_MS));
+        assert_eq!(beat.level, 1);
+        assert!((beat.interval().as_secs_f32() * 1000.0 - 33.3).abs() < 0.1);
+        for _ in 0..100 {
+            beat.frame_took(ms(5.0));
+        }
+        beat.rest();
+        assert_eq!(beat.level, 1, "never quicker than 30 a second");
+        // The simulator's 60 a second: two of its steps down, to 33 ms.
+        let mut sim = Beat::every(1000.0 / 60.0);
+        sim.set_floor(Some(power::SAVER_FRAME_MS));
+        assert_eq!(sim.level, 2);
+        // Lifted: it quickens again at rest, after a run with room to spare.
+        beat.set_floor(None);
+        for _ in 0..40 {
+            beat.frame_took(ms(5.0));
+        }
+        beat.rest();
+        assert_eq!(beat.level, 0);
+    }
 }

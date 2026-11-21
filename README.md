@@ -819,10 +819,13 @@ about 20 MB. The root filesystem now uses 67 MB of its 96 MB, the download is
 the shell finds the GPU's device, so under emulation, which has none, the
 memory figures above are unchanged by it.
 
-With A/B updates the card image is 513 MB: the boot partition (128 MB, room
-for two kernels), two 160 MB systems (68 MB used of each), and /data. System B
-is empty in the image, so the download is still 40.8 MB (gzip); an update
-from one version to the next is a patch of a few megabytes.
+With A/B updates the card image was 513 MB: the boot partition (128 MB, room
+for two kernels), two 160 MB systems (68 MB used of each), and /data. System
+B is empty in the image, so the download stayed small (40.8 MB, gzip), and
+an update from one version to the next is a patch of a few megabytes. From
+0.4.0 the systems are 1 GB each and the image 2.2 GB. Most of that is empty,
+so the file holds 191 MB of real data, and the download is about what the
+system holds.
 
 What changed:
 
@@ -944,8 +947,8 @@ curses, sqlite3, xml and the xz and bzip2 archives), vim (with its syntax
 files) and nano, htop, tmux, rsync, jq, strace, i2c-tools, picocom for serial
 ports, and Dropbear's SSH client (`dbclient`, with `dropbearkey`), beside
 BusyBox's own small tools and git. Nothing of them runs until called;
-together they take about 50 MB of the 160 MB system partition, which has
-18 MB to spare.
+together they take about 50 MB. Since 0.4.0 each system partition is 1 GB
+(it was 160 MB, 18 MB of it spare): about 830 MB is free for more.
 
 ## Updates, over the air
 
@@ -955,8 +958,12 @@ systems on the card:
 | Partition | |
 | --- | --- |
 | 1 boot (FAT, 128 MB) | the firmware, `config.txt`, and each system's kernel, device trees and overlays in its own folder (`slot-a/`, `slot-b/`) |
-| 2 system A, 3 system B (ext4, 160 MB each) | one runs (read-only); the other takes the next update |
-| 4 data (ext4) | settings, logs, keys, downloads; grows to fill the card |
+| 2 system A, 3 system B (ext4, 1 GB each) | one runs (read-only); the other takes the next update |
+| 4 data (ext4) | settings, logs, keys, downloads; grows to fill the card (4 KB blocks, an inode per 64 KB, room in its tables to grow online to 256 GB) |
+
+A card flashed before 0.4.0 has 160 MB system partitions, too small for
+0.4.0's systems: its updater says so before downloading anything, and the
+card is flashed afresh.
 
 - **Found.** Once a day when online (and from Settings › System update ›
   Check now) it looks for the newest release on its channel, *stable* or
