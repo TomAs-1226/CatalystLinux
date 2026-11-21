@@ -1,0 +1,215 @@
+From: Catalyst Linux
+Subject: [PATCH] cardputerzero-audio: switches and levels in the jack's settings
+
+The settings applied as headphones come and go took choices only (an
+enum's text). Switches ("on", "off") and levels (a number in range) now
+work too, so the jack can mix the right channel into the left for the
+speaker, which hangs off the left output alone, and give that sum its
+headroom.
+
+They are also applied again once the card is up. At probe, and at a jack
+report before the card is registered, the codec's controls do not exist
+yet (and a DAPM switch set before then never reaches its register), so
+the settings for the jack as it stood at boot were lost until it moved.
+
+--- a/modules/CardputerZero/cardputerzero-audio.c	2026-11-21 11:33:13.620134501 -0800
++++ b/modules/CardputerZero/cardputerzero-audio.c	2026-11-21 11:35:58.857661281 -0800
+@@ -5,12 +5,17 @@
+  * This is intentionally close to simple-audio-card, with one board policy:
+  * when headphones are inserted, disable the DAPM pins listed in
+  * m5stack,hp-mute-pins; when removed, enable them again.
++ *
++ * Catalyst Linux: m5stack,hp-absent-controls and hp-present-controls take
++ * switches and levels too ("name=on", "name=179"), not only choices, and
++ * are applied again once the card is up.
+  */
+ 
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
+ #include <linux/version.h>
++#include <linux/workqueue.h>
+ #include <sound/control.h>
+ #include <sound/jack.h>
+ #include <sound/simple_card_utils.h>
+@@ -32,6 +37,14 @@
+ 	struct simple_util_priv simple;
+ 	struct notifier_block hp_notifier;
+ 	bool hp_notifier_registered;
++	/*
++	 * Catalyst Linux: the jack's settings applied again once the card is
++	 * up. At probe, and at a jack report that comes before the card is
++	 * registered, the codec's controls (the DAPM ones above all) do not
++	 * exist yet, or a DAPM switch set then never reaches the register.
++	 */
++	struct delayed_work sync_work;
++	unsigned int sync_tries;
+ 	const char **hp_mute_pins;
+ 	unsigned int num_hp_mute_pins;
+ 	struct cardputerzero_control_setting *hp_absent_controls;
+@@ -93,6 +106,48 @@
+ 	cz->hp_notifier_registered = false;
+ }
+ 
++/*
++ * Catalyst Linux: a switch or a level, as well as a choice. "on" and "off"
++ * for a switch, else a number within the control's range, set on every
++ * channel it has. The speaker mixes the right channel into the left (it
++ * plays the left alone) and is given the headroom for it.
++ */
++static int cardputerzero_integer_value(struct snd_kcontrol *kcontrol,
++				       const char *value,
++				       struct snd_ctl_elem_value *ucontrol)
++{
++	struct snd_ctl_elem_info *uinfo;
++	unsigned int i;
++	long v;
++	int ret;
++
++	if (!strcmp(value, "on"))
++		v = 1;
++	else if (!strcmp(value, "off"))
++		v = 0;
++	else if (kstrtol(value, 0, &v))
++		return -EINVAL;
++
++	uinfo = kzalloc(sizeof(*uinfo), GFP_KERNEL);
++	if (!uinfo)
++		return -ENOMEM;
++
++	ret = kcontrol->info(kcontrol, uinfo);
++	if (!ret && uinfo->type != SNDRV_CTL_ELEM_TYPE_INTEGER &&
++	    uinfo->type != SNDRV_CTL_ELEM_TYPE_BOOLEAN)
++		ret = -EINVAL;
++	if (!ret && (v < uinfo->value.integer.min ||
++		     v > uinfo->value.integer.max))
++		ret = -ERANGE;
++	if (!ret)
++		for (i = 0; i < uinfo->count &&
++			    i < ARRAY_SIZE(ucontrol->value.integer.value); i++)
++			ucontrol->value.integer.value[i] = v;
++
++	kfree(uinfo);
++	return ret;
++}
++
+ static int cardputerzero_set_enum_control_locked(struct snd_soc_card *card,
+ 						 const char *control,
+ 						 const char *value)
+@@ -107,23 +162,31 @@
+ 	if (!kcontrol || !kcontrol->put)
+ 		return -ENOENT;
+ 
+-	if (kcontrol->info != snd_soc_info_enum_double)
+-		return -EINVAL;
+-
+-	e = (struct soc_enum *)kcontrol->private_value;
+-	for (i = 0; i < e->items; i++) {
+-		if (!strcmp(e->texts[i], value))
+-			break;
+-	}
+-
+-	if (i == e->items)
+-		return -EINVAL;
+-
+ 	ucontrol = kzalloc(sizeof(*ucontrol), GFP_KERNEL);
+ 	if (!ucontrol)
+ 		return -ENOMEM;
+ 
+-	ucontrol->value.enumerated.item[0] = i;
++	if (kcontrol->info == snd_soc_info_enum_double) {
++		e = (struct soc_enum *)kcontrol->private_value;
++		for (i = 0; i < e->items; i++) {
++			if (!strcmp(e->texts[i], value))
++				break;
++		}
++
++		if (i == e->items) {
++			kfree(ucontrol);
++			return -EINVAL;
++		}
++
++		ucontrol->value.enumerated.item[0] = i;
++	} else {
++		ret = cardputerzero_integer_value(kcontrol, value, ucontrol);
++		if (ret) {
++			kfree(ucontrol);
++			return ret;
++		}
++	}
++
+ 	ret = kcontrol->put(kcontrol, ucontrol);
+ 	if (ret > 0)
+ 		snd_ctl_notify_one(card->snd_card, SNDRV_CTL_EVENT_MASK_VALUE,
+@@ -173,6 +236,36 @@
+ 	}
+ }
+ 
++#define CARDPUTERZERO_SYNC_EVERY_MS	200
++#define CARDPUTERZERO_SYNC_TRIES	50
++
++static void cardputerzero_sync(struct work_struct *work)
++{
++	struct cardputerzero_audio *cz =
++		container_of(to_delayed_work(work), struct cardputerzero_audio,
++			     sync_work);
++	struct simple_util_priv *priv = &cz->simple;
++	struct snd_soc_card *card = simple_priv_to_card(priv);
++	struct snd_soc_jack *jack = &priv->hp_jack.jack;
++	bool hp_inserted = false;
++
++	if (!snd_soc_card_is_instantiated(card)) {
++		if (++cz->sync_tries < CARDPUTERZERO_SYNC_TRIES)
++			schedule_delayed_work(&cz->sync_work,
++				msecs_to_jiffies(CARDPUTERZERO_SYNC_EVERY_MS));
++		return;
++	}
++
++	/* Held as a jack report holds it: one at a time with the notifier. */
++	if (jack->jack)
++		mutex_lock(&jack->mutex);
++	hp_inserted = jack->status & SND_JACK_HEADPHONE;
++	if (!cardputerzero_set_hp_mute_pins(cz, !hp_inserted))
++		cardputerzero_apply_controls(cz, hp_inserted);
++	if (jack->jack)
++		mutex_unlock(&jack->mutex);
++}
++
+ static int cardputerzero_hp_event(struct notifier_block *nb,
+ 				  unsigned long event, void *data)
+ {
+@@ -516,6 +609,10 @@
+ 	if (ret < 0)
+ 		goto err_unregister_hp_notifier;
+ 
++	cz->sync_tries = 0;
++	schedule_delayed_work(&cz->sync_work,
++			      msecs_to_jiffies(CARDPUTERZERO_SYNC_EVERY_MS));
++
+ 	return 0;
+ 
+ err_unregister_hp_notifier:
+@@ -537,6 +634,7 @@
+ 		return -ENOMEM;
+ 
+ 	priv = &cz->simple;
++	INIT_DELAYED_WORK(&cz->sync_work, cardputerzero_sync);
+ 	card = simple_priv_to_card(priv);
+ 	card->owner = THIS_MODULE;
+ 	card->dev = dev;
+@@ -593,6 +691,7 @@
+ 	return 0;
+ 
+ err_clean_ref:
++	cancel_delayed_work_sync(&cz->sync_work);
+ 	simple_util_clean_reference(card);
+ err_free_li:
+ 	kfree(li);
+@@ -605,6 +704,7 @@
+ 	struct simple_util_priv *priv = snd_soc_card_get_drvdata(card);
+ 	struct cardputerzero_audio *cz = cardputerzero_from_priv(priv);
+ 
++	cancel_delayed_work_sync(&cz->sync_work);
+ 	cardputerzero_unregister_hp_notifier(cz);
+ 	simple_util_remove(pdev);
+ }

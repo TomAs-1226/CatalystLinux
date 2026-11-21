@@ -140,6 +140,28 @@ BR2_PACKAGE_MESA3D_OPENGL_EGL=y
 BR2_PACKAGE_MESA3D_OPENGL_ES=y
 BR2_PACKAGE_MESA3D_GBM=y
 BR2_PACKAGE_M5STACK_CARDPUTER_ZERO=y
+# Sound: the ES8389 codec's drivers come with M5Stack's package above; ALSA
+# here (its library, with the mixing, sharing and volume plugins
+# /usr/share/catalyst/asound.conf uses), and its tools: amixer and aplay
+# for catalyst-audio and the shell, arecord with them, speaker-test, and
+# alsamixer for the Terminal. alsactl is left out: catalyst-audio keeps the
+# few settings itself.
+BR2_PACKAGE_ALSA_LIB=y
+BR2_PACKAGE_ALSA_UTILS=y
+# BR2_PACKAGE_ALSA_UTILS_ALSACTL is not set
+BR2_PACKAGE_ALSA_UTILS_AMIXER=y
+BR2_PACKAGE_ALSA_UTILS_APLAY=y
+BR2_PACKAGE_ALSA_UTILS_SPEAKER_TEST=y
+# Bluetooth headphones and speakers, off unless switched on in Settings:
+# BlueZ (bluetoothd, and bluetoothctl, which catalyst-bluetooth drives) and
+# bluez-alsa (A2DP straight to ALSA; SBC), on D-Bus's system bus. About
+# 7 MB of memory while on, nothing while off. (PipeWire with WirePlumber
+# would be some 25 MB for the same headphones.) The radio's firmware
+# (brcm/BCM4343A2.hcd for the CM0's CYW43439) comes with the Wi-Fi's.
+BR2_PACKAGE_BRCMFMAC_SDIO_FIRMWARE_RPI_BT=y
+BR2_PACKAGE_BLUEZ5_UTILS=y
+BR2_PACKAGE_BLUEZ5_UTILS_CLIENT=y
+BR2_PACKAGE_BLUEZ_ALSA=y
 BR2_TARGET_ROOTFS_EXT2=y
 BR2_TARGET_ROOTFS_EXT2_4=y
 # Each system slot is 1 GB: room for more tools and apps than the first

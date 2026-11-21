@@ -991,6 +991,98 @@ shared with the `tailscale` command, given back under pressure), so about
 page's Memory row reads the real figure on the handheld. On a PC, a made-up
 tailnet stands in and signs in by itself a few seconds after its code shows.
 
+## Sound
+
+The CardputerZero's codec is an Everest ES8389 on I2C1 at 0x10, with the
+CM0's I2S on GPIO18 (bit clock), 19 (frame clock), 20 (into the CM0) and 21
+(out of it). The board has no master clock: the codec's MCLK pin is wired to
+the I2S data line (R160), so the codec takes its clock from the bit clock.
+The left output drives the AW8737A speaker amplifier (enabled by GPIO24) and
+the headphone jack's left; the right goes to the jack alone. The jack is a
+TRRS with detection on GPIO17 (high while a plug is in, which also cuts the
+amplifier in hardware). The handheld's own microphone is an analog MEMS one
+on MIC1 (MIC1P, against its ground on MIC1N); a headset's comes in on MIC2.
+
+- **Drivers:** M5Stack's codec driver (`es8389_m5stack`, which clocks the
+  codec from the bit clock), their amplifier switch and their board's
+  machine driver, from `m5stack-linux-dtoverlays` (`cardputerzero-v5-overlay`
+  already describes it all). Two patches of ours: without headphones the
+  right channel is mixed into the left for the speaker (6 dB down, so the
+  sum does not clip), and the jack no longer switches the microphone, since
+  plain headphones would leave every recording silent.
+- **The amplifier** is on only while something plays: the kernel switches
+  GPIO24 with the playback path and off again five seconds after the last
+  sound. Idle it would draw 9 mA and hiss. A program that keeps the device
+  open while silent keeps it on, so players close it when they pause.
+- **`default`** (ALSA) is what every program uses: playback at any rate and
+  format, mixed (dmix) at the system volume and played at 48 kHz, 16-bit,
+  stereo; capture from the microphone, shared (dsnoop). The configuration is
+  `/usr/share/catalyst/asound.conf`; `catalyst-audio` writes it to
+  `/run/catalyst-audio/asound.conf` at boot, where `/etc/asound.conf` leads,
+  with Bluetooth headphones in front while they are the output.
+- **Volume:** Fn + S and Fn + D (quieter, louder) and Fn + A (mute) over any
+  screen, the bar beside the brightness in the control centre, and Settings ›
+  Sound. One volume for everything ("Master" on the card, a software volume
+  from -50 dB to 0 dB, linear in decibels), kept on `/data/catalyst`.
+- **Settings › Sound:** the volume, mute, where sound is playing (speaker,
+  headphones, or Bluetooth), a test chime, the microphone (the handheld's or
+  a headset's) with its level live while the row is chosen, and its gain.
+
+`catalyst-audio status|volume|mute|test-tone|mic|mic-gain|output|route|amp`
+does the same from the Terminal; `amixer -c ES8389Audio` shows every control.
+
+### Recording, for programs that listen
+
+Open ALSA's `default` for capture. Ask for what the program wants: 16 kHz,
+16-bit, mono is fine and is what speech recognisers expect.
+
+- **Underneath:** the codec records at 48 kHz, 16-bit, stereo, in 1024-frame
+  periods (21 ms), shared, so several programs (a wake word and a recorder)
+  can listen at once. The microphone is on the left channel; `default` gives
+  it on every channel a program asks for. Other rates are converted by
+  ALSA's own (linear) resampler; for the best quality at other rates, take
+  48 kHz and resample in the program.
+- **Gain:** the microphone's amplifier is at setting 8, 18.5 dB by the
+  ES8389's datasheet (the driver's own scale calls it 24 dB), then the ADC
+  at 0 dB. `catalyst-audio mic-gain 0..14` changes it (4 and 5 are not
+  allowed: 6 is 12.5 dB, each step after about 3 dB, 14 is 36.5 dB), kept
+  across restarts. The codec's automatic level control is off.
+- **Which microphone:** the handheld's own unless `catalyst-audio mic
+  headset` (or Settings › Sound) chooses the jack's; the choice stays when
+  headphones come and go.
+- Recording runs the codec's input side only: the speaker's amplifier stays
+  off while nothing plays.
+
+## Bluetooth
+
+Settings › Bluetooth plays to Bluetooth headphones and speakers (A2DP, SBC
+at its high quality). It is off until switched on there, and while it is
+off the radio is not powered and nothing of it runs.
+
+- **The radio and the console.** The CM0's radio (a CYW43439) is wired to
+  the processor's PL011 UART, which the serial console uses on GPIO14/15
+  (`ttyAMA0`, the Grove port and the EXT header), so the image starts with
+  `disable-bt`. Switching Bluetooth on adds a block to `config.txt` (as the
+  developer options' trials do) with our `catalyst-bt` overlay, which moves
+  the radio to the mini UART (`ttyS0`) at 921600 baud with its flow control,
+  and `core_freq=250`: the mini UART's baud rate is divided from the VPU's
+  clock, which must not change under it. The console stays on `ttyAMA0`:
+  `cmdline.txt` and the serial login do not change. This takes one restart
+  (the page offers it); switching off takes the block out again.
+- **The software:** BlueZ (`bluetoothd`, driven through `bluetoothctl` by
+  `catalyst-bluetooth`), bluez-alsa (A2DP straight to ALSA) and D-Bus's
+  system bus, started by the `catalyst-bluetooth` service only while
+  Bluetooth is on. Pairings are kept in `/data/bluetooth`.
+- **Pairing** asks nothing ("just works", as headphones do it); paired
+  devices are trusted, so they connect again by themselves. While the device
+  chosen is connected, `default` plays to it at the same system volume;
+  when it goes, sound comes back to the speaker. One program at a time plays
+  to Bluetooth (bluez-alsa does not mix).
+- **Why not PipeWire:** for the same headphones PipeWire needs WirePlumber
+  (and its Lua) beside BlueZ and D-Bus: about 20 to 25 MB resident against
+  about 7 MB for bluez-alsa, BlueZ and D-Bus together, and the speaker is
+  already shared by ALSA's dmix.
+
 ## Match logs
 
 The handheld pulls `.wpilog` files from the robot over the Ethernet cable,

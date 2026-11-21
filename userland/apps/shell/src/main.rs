@@ -33,6 +33,7 @@
 mod about;
 mod agent;
 mod ai;
+mod bluetooth;
 mod browse;
 mod apps;
 mod apriltags;
@@ -68,6 +69,7 @@ mod local;
 mod logs;
 mod look;
 mod monitor;
+mod music;
 mod nettools;
 mod notes;
 mod panel;
@@ -86,6 +88,7 @@ mod search;
 mod setup;
 mod share;
 mod shell;
+mod sound;
 mod standby;
 mod sys;
 mod tailscale;
@@ -2273,11 +2276,103 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     press(&mut shell, &[Enter], 60);
     save(&mut shell, "120b-files-hex-found");
     std::fs::remove_dir_all(&notes_dir).ok();
+    sound_shots(&mut shell, &press, &save, &settle);
     let written =std::fs::read_dir(dir).map_or(0, |d| d.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "png")).count());
     println!("{written} screens in {}, {frames} frames at {:.2} ms each", dir.display(), started.elapsed().as_secs_f64() * 1e3 / frames as f64);
     // An icon asked for and never built in draws as nothing: a blank where
     // a symbol should be. Any in the tour fails it.
     let missing = shell.gfx.missing_icons();
+    if !missing.is_empty() {
+        eprintln!("icons asked for that are not built in: {}", missing.iter().cloned().collect::<Vec<_>>().join(", "));
+        std::process::exit(1);
+    }
+}
+
+/// The tour's sound: the volume beside the brightness in the control centre,
+/// Settings › Sound with the microphone listening, and Bluetooth from off,
+/// through its one restart, to headphones found, paired and playing.
+#[cfg(not(target_arch = "aarch64"))]
+fn sound_shots(shell: &mut Shell, press: &dyn Fn(&mut Shell, &[Key], usize), save: &dyn Fn(&mut Shell, &str), settle: &dyn Fn(&mut Shell, usize)) {
+    use Key::*;
+    let real_time = |shell: &mut Shell, seconds: f32| {
+        let until = Instant::now() + Duration::from_secs_f32(seconds);
+        while Instant::now() < until {
+            settle(shell, 6);
+            std::thread::sleep(Duration::from_millis(40));
+        }
+    };
+    sound::set_level(sound::Level { volume: 65, muted: false });
+    bluetooth::demo_reset();
+    *shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(shell, 100);
+    // The control centre, the volume bar chosen and turned up a step.
+    press(shell, &[Ctrl(' ')], 90);
+    press(shell, &[Right, Down, Down], 30);
+    press(shell, &[Right], 60);
+    save(shell, "121-control-centre-volume");
+    // The volume keys over Home: the island says it.
+    press(shell, &[Back], 90);
+    press(shell, &[Media(platform::Media::VolumeDown)], 20);
+    save(shell, "121b-volume-key");
+    settle(shell, 200);
+    // Settings › Sound.
+    press(shell, &vec![Right; steps_to("Settings")], 12);
+    press(shell, &[Enter], 90);
+    press(shell, &vec![Down; screens::settings_row("Sound")], 20);
+    save(shell, "122-settings-sound-row");
+    press(shell, &[Enter], 90);
+    real_time(shell, 0.4);
+    settle(shell, 40);
+    save(shell, "122b-sound");
+    // Down to the microphone: its level, live.
+    press(shell, &[Down, Down, Down, Down], 20);
+    real_time(shell, 0.6);
+    save(shell, "122c-sound-microphone");
+    // Bluetooth: off, then on (it asks for a restart), then the simulator's
+    // "restart", the room found, and headphones paired and playing.
+    press(shell, &[End], 20);
+    press(shell, &[Enter], 90);
+    real_time(shell, 0.4);
+    settle(shell, 40);
+    save(shell, "123-bluetooth-off");
+    press(shell, &[Enter], 20);
+    real_time(shell, 0.9);
+    settle(shell, 40);
+    save(shell, "123b-bluetooth-restart");
+    press(shell, &[Down, Enter, Enter], 20);
+    real_time(shell, 0.8);
+    real_time(shell, 2.6);
+    settle(shell, 60);
+    save(shell, "123c-bluetooth-found");
+    press(shell, &[Down, Down, Down], 20);
+    press(shell, &[Enter], 20);
+    real_time(shell, 0.3);
+    save(shell, "123d-bluetooth-pairing");
+    real_time(shell, 2.2);
+    settle(shell, 60);
+    save(shell, "123e-bluetooth-playing");
+    // Back on Sound: playing on the speaker just paired.
+    press(shell, &[Back], 90);
+    real_time(shell, 0.4);
+    settle(shell, 40);
+    press(shell, &[Home], 20);
+    save(shell, "122d-sound-bluetooth");
+    // Light, large text: the same page must still fit.
+    let mut light = Shell::new(Robot::demo());
+    (light.settings.theme, light.settings.light, light.settings.text) = (look::Theme::Bezel, true, gfx::TextSize::Large);
+    light.apply_settings();
+    settle(&mut light, 100);
+    light.show(Box::new(bluetooth::BluetoothScreen::new()));
+    real_time(&mut light, 2.6);
+    settle(&mut light, 60);
+    save(&mut light, "123f-bluetooth-bezel-light-large");
+    light.show(Box::new(sound::SoundScreen::new()));
+    real_time(&mut light, 0.5);
+    settle(&mut light, 60);
+    save(&mut light, "122e-sound-bezel-light-large");
+    bluetooth::demo_reset();
+    let missing = light.gfx.missing_icons();
     if !missing.is_empty() {
         eprintln!("icons asked for that are not built in: {}", missing.iter().cloned().collect::<Vec<_>>().join(", "));
         std::process::exit(1);

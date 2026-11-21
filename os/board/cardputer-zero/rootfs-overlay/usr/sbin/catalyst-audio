@@ -1,0 +1,333 @@
+#!/bin/sh
+# catalyst-audio: the handheld's sound, for the shell, the Terminal and
+# anything else that wants it.
+#
+#   catalyst-audio start                  at boot (the catalyst-audio service)
+#   catalyst-audio status                 how it stands, as name=value lines
+#   catalyst-audio volume [N|+N|-N]       the volume, 0 to 100 (0 is silent;
+#                                         +N unmutes, N and -N leave mute be)
+#   catalyst-audio mute [on|off|toggle]   silence, the volume kept for after
+#   catalyst-audio test-tone              a short chime through what plays now
+#   catalyst-audio mic [builtin|headset]  which microphone records
+#   catalyst-audio mic-gain [N]           its amplifier, 0 to 14 (see below)
+#   catalyst-audio output speaker|bluetooth ADDRESS
+#   catalyst-audio route                  sound to the output chosen, if it is there
+#   catalyst-audio amp                    whether the speaker's amplifier is on
+#
+# The codec is an ES8389 on I2S, its card "ES8389Audio". Programs play to
+# ALSA's "default", which mixes them (dmix) at the system volume (the
+# "Master" control on the card) and goes to the speaker, or the headphones
+# when they are plugged in (the kernel switches, and mutes the speaker), or
+# Bluetooth headphones while they are chosen and connected. "default"
+# records from the microphone, shared (dsnoop), at whatever rate and
+# channels a program asks for. /usr/share/catalyst/asound.conf says how.
+#
+# The choices are kept in /data/catalyst (audio-volume, audio-muted,
+# audio-mic, audio-mic-gain, audio-output) and set again at every start.
+
+CARD=${CATALYST_AUDIO_CARD:-ES8389Audio}
+STATE=${CATALYST_AUDIO_STATE:-/data/catalyst}
+RUN=${CATALYST_AUDIO_RUN:-/run/catalyst-audio}
+SHARE=${CATALYST_AUDIO_SHARE:-/usr/share/catalyst}
+PROC=${CATALYST_AUDIO_PROC:-/proc/asound}
+GPIOMEM=${CATALYST_AUDIO_GPIOMEM:-/dev/gpiomem}
+
+# Where it starts: loud enough for the small speaker, well short of full.
+DEFAULT_VOLUME=65
+# The microphone's amplifier: 8 is M5Stack's level (18.5 dB by the
+# datasheet; the driver's own scale calls it 24 dB). The codec takes 0-3
+# and 6-14; 4 and 5 are not allowed, so they become 6.
+DEFAULT_MIC_GAIN=8
+
+# The sound drivers, in the order they are needed: the Pi's I2S, the codec,
+# the speaker's amplifier switch, and the board's machine driver.
+MODULES="snd-soc-bcm2835-i2s es8389_m5stack simple-amplifier cardputerzero-audio"
+
+have_card() { [ -e "$PROC/$CARD" ]; }
+
+# amixer on the card, quietly.
+mixer() { amixer -q -c "$CARD" "$@" >/dev/null 2>&1; }
+
+# A control's values, as amixer cget prints them after ": values=".
+get_control() {
+	amixer -c "$CARD" cget name="$1" 2>/dev/null | sed -n 's/^ *: values=//p' | head -n1
+}
+
+read_state() {
+	value=$(cat "$STATE/$1" 2>/dev/null)
+	echo "${value:-$2}"
+}
+
+write_state() {
+	mkdir -p "$STATE"
+	echo "$2" >"$STATE/$1.new" && mv "$STATE/$1.new" "$STATE/$1"
+}
+
+clamp() {
+	n=$1
+	case "$n" in '' | *[!0-9]*) n=$2 ;; esac
+	[ "$n" -gt "$3" ] && n=$3
+	echo "$n"
+}
+
+is_muted() { [ -e "$STATE/audio-muted" ]; }
+
+# The volume as the card plays it: the saved level, or 0 while muted.
+apply_volume() {
+	have_card || return 0
+	level=$(read_state audio-volume $DEFAULT_VOLUME)
+	is_muted && level=0
+	# The control is made by the first sound; make it now if it is not there.
+	if [ -z "$(get_control 'Master Playback Volume')" ]; then
+		aplay -q -D catalyst_volume_init -t raw -f S16_LE -r 48000 -c 2 /dev/null >/dev/null 2>&1
+	fi
+	mixer cset name='Master Playback Volume' "$level,$level"
+}
+
+apply_mic() {
+	have_card || return 0
+	case "$(read_state audio-mic builtin)" in
+	# The headset's microphone (MIC2P) on the left ADC, which "default" records.
+	headset) mixer cset name='PGAL Select' 'Line 2P' ;;
+	# The handheld's own: the MEMS microphone, MIC1P against its ground, MIC1N.
+	*) mixer cset name='PGAL Select' 'DifferentialL' ;;
+	esac
+	mixer cset name='ADCL PGA Volume' "$(read_state audio-mic-gain $DEFAULT_MIC_GAIN)"
+}
+
+# The Bluetooth address chosen, if the output is Bluetooth.
+bluetooth_choice() {
+	set -- $(read_state audio-output speaker)
+	[ "$1" = bluetooth ] && echo "$2"
+}
+
+# Connected: bluealsa offers an A2DP stream for it.
+bluetooth_connected() {
+	[ -n "$1" ] || return 1
+	dev=dev_$(echo "$1" | tr ':' '_')
+	bluealsa-cli list-pcms 2>/dev/null | grep -qi "/$dev/a2dp"
+}
+
+# ALSA's configuration for the output chosen: the speaker's, with Bluetooth
+# put in front while its headphones are connected. Written whole, then put
+# in place, so a program starting meanwhile never reads half of it.
+route() {
+	mkdir -p "$RUN"
+	{
+		cat "$SHARE/asound.conf"
+		address=$(bluetooth_choice)
+		if bluetooth_connected "$address"; then
+			cat <<EOF
+
+# Bluetooth: $address, connected (catalyst-audio route).
+pcm.!default {
+	type asym
+	playback.pcm "catalyst_bluetooth"
+	capture.pcm "catalyst_capture"
+}
+
+pcm.catalyst_bluetooth {
+	type plug
+	slave.pcm "catalyst_bluetooth_volume"
+	hint.description "Catalyst: Bluetooth $address, at the system volume"
+}
+
+pcm.catalyst_bluetooth_volume {
+	type softvol
+	slave.pcm "bluealsa:DEV=$address,PROFILE=a2dp"
+	control {
+		name "Master Playback Volume"
+		card $CARD
+	}
+	min_dB -50.0
+	max_dB 0.0
+	resolution 101
+}
+EOF
+			echo bluetooth >"$RUN/output.new"
+		else
+			echo local >"$RUN/output.new"
+		fi
+	} >"$RUN/asound.conf.new"
+	mv "$RUN/asound.conf.new" "$RUN/asound.conf"
+	mv "$RUN/output.new" "$RUN/output"
+}
+
+# The headphones' jack, as the kernel sees it.
+headphones_in() {
+	case "$(get_control 'Headphones Jack')" in on) return 0 ;; esac
+	return 1
+}
+
+playing() {
+	grep -qs 'state: RUNNING' "$PROC/$CARD"/pcm0p/sub*/status
+}
+
+# GPIO24, which enables the speaker's amplifier, read from the GPIO block's
+# level register (GPLEV0, bit 24) through /dev/gpiomem.
+amp() {
+	[ -e "$GPIOMEM" ] || { echo unknown; return; }
+	python3 -c '
+import mmap, os, struct, sys
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_SYNC)
+m = mmap.mmap(fd, 4096, mmap.MAP_SHARED, mmap.PROT_READ)
+print("on" if struct.unpack_from("<I", m, 0x34)[0] >> 24 & 1 else "off")
+' "$GPIOMEM" 2>/dev/null || echo unknown
+}
+
+status() {
+	if have_card; then echo "card=$CARD"; else echo "card=none"; fi
+	address=$(bluetooth_choice)
+	if [ "$(cat "$RUN/output" 2>/dev/null)" = bluetooth ]; then
+		echo "output=bluetooth"
+	elif headphones_in; then
+		echo "output=headphones"
+	else
+		echo "output=speaker"
+	fi
+	[ -n "$address" ] && echo "bluetooth=$address"
+	echo "volume=$(read_state audio-volume $DEFAULT_VOLUME)"
+	if is_muted; then echo "muted=yes"; else echo "muted=no"; fi
+	echo "mic=$(read_state audio-mic builtin)"
+	echo "mic_gain=$(read_state audio-mic-gain $DEFAULT_MIC_GAIN)"
+	if playing; then echo "playing=yes"; else echo "playing=no"; fi
+}
+
+wait_card() {
+	i=0
+	while ! have_card && [ "$i" -lt 50 ]; do
+		sleep 0.1
+		i=$((i + 1))
+	done
+	have_card
+}
+
+case "$1" in
+start)
+	route
+	# shellcheck disable=SC2086
+	modprobe -a $MODULES 2>/dev/null
+	if ! wait_card; then
+		echo "catalyst-audio: no sound card ($CARD)" >&2
+		exit 1
+	fi
+	apply_volume
+	apply_mic
+	;;
+status)
+	status
+	;;
+volume)
+	case "$2" in
+	'') read_state audio-volume $DEFAULT_VOLUME ;;
+	+* | -*)
+		now=$(read_state audio-volume $DEFAULT_VOLUME)
+		step=${2#?}
+		case "$step" in '' | *[!0-9]*) echo "usage: $0 volume [N|+N|-N]" >&2; exit 2 ;; esac
+		case "$2" in +*) now=$((now + step)) ;; *) now=$((now - step)) ;; esac
+		[ "$now" -lt 0 ] && now=0
+		[ "$now" -gt 100 ] && now=100
+		write_state audio-volume "$now"
+		# Turning it up says "I want to hear it": unmuted.
+		case "$2" in +*) rm -f "$STATE/audio-muted" ;; esac
+		apply_volume
+		echo "$now"
+		;;
+	*[!0-9]*)
+		echo "usage: $0 volume [N|+N|-N]" >&2
+		exit 2
+		;;
+	*)
+		# A level, muted or not: muting is its own (the shell sets the two
+		# apart, so a level chosen while muted is not heard on the way).
+		now=$(clamp "$2" $DEFAULT_VOLUME 100)
+		write_state audio-volume "$now"
+		apply_volume
+		echo "$now"
+		;;
+	esac
+	;;
+mute)
+	case "$2" in
+	on) mkdir -p "$STATE" && touch "$STATE/audio-muted" ;;
+	off) rm -f "$STATE/audio-muted" ;;
+	toggle | '')
+		if is_muted; then rm -f "$STATE/audio-muted"; else mkdir -p "$STATE" && touch "$STATE/audio-muted"; fi
+		;;
+	*)
+		echo "usage: $0 mute [on|off|toggle]" >&2
+		exit 2
+		;;
+	esac
+	apply_volume
+	if is_muted; then echo on; else echo off; fi
+	;;
+test-tone)
+	aplay -q -D default "$SHARE/sounds/chime.wav"
+	;;
+mic)
+	case "$2" in
+	'') read_state audio-mic builtin ;;
+	builtin | headset)
+		write_state audio-mic "$2"
+		apply_mic
+		;;
+	*)
+		echo "usage: $0 mic [builtin|headset]" >&2
+		exit 2
+		;;
+	esac
+	;;
+mic-gain)
+	case "$2" in
+	'') read_state audio-mic-gain $DEFAULT_MIC_GAIN ;;
+	*[!0-9]*)
+		echo "usage: $0 mic-gain [0-14]" >&2
+		exit 2
+		;;
+	*)
+		gain=$(clamp "$2" $DEFAULT_MIC_GAIN 14)
+		case "$gain" in 4 | 5) gain=6 ;; esac
+		write_state audio-mic-gain "$gain"
+		apply_mic
+		echo "$gain"
+		;;
+	esac
+	;;
+output)
+	case "$2" in
+	speaker) write_state audio-output speaker ;;
+	bluetooth)
+		case "$3" in
+		[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f])
+			write_state audio-output "bluetooth $(echo "$3" | tr 'a-f' 'A-F')"
+			;;
+		*)
+			echo "usage: $0 output bluetooth AA:BB:CC:DD:EE:FF" >&2
+			exit 2
+			;;
+		esac
+		;;
+	'')
+		read_state audio-output speaker
+		exit 0
+		;;
+	*)
+		echo "usage: $0 output speaker|bluetooth ADDRESS" >&2
+		exit 2
+		;;
+	esac
+	route
+	;;
+route)
+	route
+	cat "$RUN/output"
+	;;
+amp)
+	amp
+	;;
+*)
+	echo "usage: $0 start|status|volume|mute|test-tone|mic|mic-gain|output|route|amp" >&2
+	exit 2
+	;;
+esac

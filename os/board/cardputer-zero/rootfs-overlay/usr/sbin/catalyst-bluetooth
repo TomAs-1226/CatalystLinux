@@ -1,0 +1,271 @@
+#!/bin/sh
+# catalyst-bluetooth: Bluetooth headphones and speakers. Off unless switched
+# on in Settings > Bluetooth.
+#
+#   catalyst-bluetooth on              switch on (says "restart" if one is needed)
+#   catalyst-bluetooth off             switch off: the radio off at once
+#   catalyst-bluetooth start|stop      the daemons (the catalyst-bluetooth service)
+#   catalyst-bluetooth status          how it stands, as name=value lines
+#   catalyst-bluetooth scan [SECONDS]  look for headphones and speakers nearby
+#   catalyst-bluetooth devices         those known and found, one a line (below)
+#   catalyst-bluetooth pair ADDRESS    pair, trust and connect; sound goes there
+#   catalyst-bluetooth connect ADDRESS
+#   catalyst-bluetooth disconnect ADDRESS
+#   catalyst-bluetooth forget ADDRESS
+#
+# `devices` prints ADDRESS, paired|new, connected|-, the kind (BlueZ's icon:
+# audio-headphones, audio-headset, audio-card for a speaker) and the name,
+# separated by tabs: audio devices only, paired ones first.
+#
+# The radio: the CM0's CYW43439 shares the PL011 with the serial console,
+# which keeps it (ttyAMA0 on GPIO14/15). Switched on, the radio is moved to
+# the mini UART instead (the catalyst-bt overlay, with the core clock held
+# at 250 MHz for its baud rate) in a block of config.txt, as catalyst-power
+# keeps its trials; that takes a restart, once. Switched off, the radio is
+# powered down at once and the block taken out for the next start.
+#
+# The daemons, only while it is on: D-Bus's system bus, bluetoothd (BlueZ;
+# pairings kept in /data/bluetooth) and bluealsa (A2DP to ALSA; catalyst-
+# audio puts it in front of the speaker while the device chosen is connected).
+
+BOOT_DEV=/dev/mmcblk0p1
+MNT=/run/catalyst-boot
+CONFIG=config.txt
+FLAG=/data/catalyst/bluetooth-enabled
+HCI=/sys/class/bluetooth/hci0
+BLUETOOTHD=/usr/libexec/bluetooth/bluetoothd
+DBUS_SOCKET=/run/dbus/system_bus_socket
+BEGIN="# catalyst-bluetooth: Bluetooth (Settings > Bluetooth)"
+END="# catalyst-bluetooth: end"
+SLOTS="# Which system starts:"
+
+# --- config.txt -----------------------------------------------------------
+
+# Run "$@" with the boot partition mounted read-write at $MNT.
+with_boot() {
+	mkdir -p "$MNT"
+	mount -t vfat -o rw "$BOOT_DEV" "$MNT" || return 1
+	"$@"
+	status=$?
+	sync
+	umount "$MNT"
+	return $status
+}
+
+# config.txt without the block (and the blank line after it).
+strip_block() {
+	awk -v begin="$BEGIN" -v end="$END" '
+		skip == 1 { if ($0 == end) skip = 2; next }
+		skip == 2 { skip = 0; if ($0 == "") next }
+		$0 == begin { skip = 1; next }
+		{ print }
+	' "$MNT/$CONFIG" >"$MNT/$CONFIG.new" && mv "$MNT/$CONFIG.new" "$MNT/$CONFIG"
+}
+
+# The block just before the system block: after disable-bt, which it undoes
+# for the radio alone.
+add_block() {
+	strip_block || return 1
+	block=$(printf '%s\ndtoverlay=catalyst-bt\ncore_freq=250\n%s' "$BEGIN" "$END")
+	awk -v block="$block" -v slots="$SLOTS" '
+		!done && index($0, slots) == 1 { print block; print ""; done = 1 }
+		{ print }
+		END { if (!done) print block }
+	' "$MNT/$CONFIG" >"$MNT/$CONFIG.new" && mv "$MNT/$CONFIG.new" "$MNT/$CONFIG"
+}
+
+# --- the daemons ----------------------------------------------------------
+
+bluealsa_bin() {
+	command -v bluealsa 2>/dev/null || command -v bluealsad 2>/dev/null
+}
+
+# Wait up to $2 tenths of a second for "$1" to succeed.
+wait_for() {
+	i=0
+	while ! eval "$1" 2>/dev/null; do
+		i=$((i + 1))
+		[ "$i" -gt "$2" ] && return 1
+		sleep 0.1
+	done
+}
+
+start_daemons() {
+	[ -e "$FLAG" ] || return 0
+	# The radio's driver loads with the rest at boot (catalyst-late) and
+	# loads its firmware: a second or two.
+	modprobe -q hci_uart 2>/dev/null
+	if ! wait_for "[ -e $HCI ]" 80; then
+		echo "the radio is not there yet: restart to start it" >&2
+		return 1
+	fi
+	mkdir -p /data/bluetooth /run/dbus /tmp/dbus
+	chmod 0700 /data/bluetooth
+	dbus-uuidgen --ensure 2>/dev/null
+	start-stop-daemon -S -q -b -m -p /run/catalyst-dbus.pid -x /usr/bin/dbus-daemon -- --system --nofork --nopidfile
+	wait_for "[ -S $DBUS_SOCKET ]" 50 || { echo "D-Bus did not start" >&2; return 1; }
+	start-stop-daemon -S -q -b -m -p /run/catalyst-bluetoothd.pid -x "$BLUETOOTHD" -- -n
+	wait_for "bluetoothctl show >/dev/null" 50 || { echo "bluetoothd did not start" >&2; return 1; }
+	# A2DP to headphones and speakers (the handheld is the source). Logs to syslog.
+	start-stop-daemon -S -q -b -m -p /run/catalyst-bluealsa.pid -x "$(bluealsa_bin)" -- -S -p a2dp-source
+	bluetoothctl power on >/dev/null 2>&1
+	catalyst-audio route >/dev/null 2>&1
+	return 0
+}
+
+stop_daemons() {
+	bluetoothctl power off >/dev/null 2>&1
+	for name in bluealsa bluetoothd dbus; do
+		pid=/run/catalyst-$name.pid
+		[ -e "$pid" ] && start-stop-daemon -K -q -p "$pid" -R TERM/5/KILL/2
+		rm -f "$pid"
+	done
+	catalyst-audio route >/dev/null 2>&1
+	return 0
+}
+
+running() {
+	[ -s /run/catalyst-bluetoothd.pid ] && kill -0 "$(cat /run/catalyst-bluetoothd.pid)" 2>/dev/null
+}
+
+# --- devices --------------------------------------------------------------
+
+valid_address() {
+	case "$1" in
+	[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]) return 0 ;;
+	esac
+	echo "not a Bluetooth address: $1" >&2
+	return 1
+}
+
+need_running() {
+	running || { echo "Bluetooth is off" >&2; exit 1; }
+}
+
+# One line a device (see the top), audio ones only, paired first.
+devices() {
+	bluetoothctl devices 2>/dev/null | while read -r word address name; do
+		[ "$word" = Device ] || continue
+		info=$(bluetoothctl info "$address" 2>/dev/null)
+		icon=$(echo "$info" | sed -n 's/^[[:space:]]*Icon: //p' | head -n1)
+		paired=$(echo "$info" | sed -n 's/^[[:space:]]*Paired: //p' | head -n1)
+		connected=$(echo "$info" | sed -n 's/^[[:space:]]*Connected: //p' | head -n1)
+		case "$icon" in audio-*) ;; *) [ "$paired" = yes ] || continue ;; esac
+		# A device that never said its name is shown by its address, with dashes.
+		[ "$name" = "$(echo "$address" | tr ':' '-')" ] && continue
+		[ "$paired" = yes ] && p=paired || p=new
+		[ "$connected" = yes ] && c=connected || c=-
+		printf '%s\t%s\t%s\t%s\t%s\n' "$address" "$p" "$c" "${icon:-audio-card}" "$name"
+	done | sort -t "$(printf '\t')" -k2,2r -k5,5
+}
+
+# The first connected audio device, if any.
+connected_device() {
+	devices | awk -F '\t' '$3 == "connected" { print $1; exit }'
+}
+
+status() {
+	if [ -e "$FLAG" ]; then echo "enabled=yes"; else echo "enabled=no"; fi
+	if [ -e "$HCI" ]; then
+		echo "radio=on"
+	elif [ -e "$FLAG" ]; then
+		echo "radio=restart"
+	else
+		echo "radio=off"
+	fi
+	if running; then
+		show=$(bluetoothctl show 2>/dev/null)
+		echo "powered=$(echo "$show" | sed -n 's/^[[:space:]]*Powered: //p' | head -n1)"
+		echo "name=$(echo "$show" | sed -n 's/^[[:space:]]*Alias: //p' | head -n1)"
+		echo "connected=$(connected_device)"
+	fi
+}
+
+case "$1" in
+on)
+	mkdir -p /data/catalyst
+	touch "$FLAG"
+	sync
+	with_boot add_block || { echo "config.txt could not be changed" >&2; exit 1; }
+	if [ -e "$HCI" ]; then
+		start_daemons
+	else
+		echo restart
+	fi
+	;;
+off)
+	rm -f "$FLAG"
+	sync
+	stop_daemons
+	with_boot strip_block || { echo "config.txt could not be changed" >&2; exit 1; }
+	;;
+start)
+	start_daemons
+	;;
+stop)
+	stop_daemons
+	;;
+status)
+	status
+	;;
+scan)
+	need_running
+	seconds=${2:-8}
+	case "$seconds" in '' | *[!0-9]*) seconds=8 ;; esac
+	bluetoothctl --timeout "$seconds" scan on >/dev/null 2>&1
+	devices
+	;;
+devices)
+	need_running
+	devices
+	;;
+pair)
+	need_running
+	valid_address "$2" || exit 2
+	# Headphones pair with nothing to confirm ("just works"): no screen, no keys.
+	out=$(bluetoothctl --agent NoInputNoOutput --timeout 30 pair "$2" 2>&1)
+	case "$out" in
+	*"Pairing successful"* | *AlreadyExists*) ;;
+	*)
+		echo "$out" | grep -i "fail\|error" | tail -n1 | sed 's/^.*Failed to pair: *//' >&2
+		exit 1
+		;;
+	esac
+	bluetoothctl trust "$2" >/dev/null 2>&1
+	"$0" connect "$2"
+	;;
+connect)
+	need_running
+	valid_address "$2" || exit 2
+	out=$(bluetoothctl --timeout 20 connect "$2" 2>&1)
+	case "$out" in
+	*"Connection successful"*) ;;
+	*)
+		echo "$out" | grep -i "fail\|error" | tail -n1 >&2
+		exit 1
+		;;
+	esac
+	catalyst-audio output bluetooth "$2" >/dev/null
+	# bluealsa offers the device's stream a moment after it connects.
+	wait_for "[ \"\$(catalyst-audio route)\" = bluetooth ]" 50
+	;;
+disconnect)
+	need_running
+	valid_address "$2" || exit 2
+	bluetoothctl --timeout 10 disconnect "$2" >/dev/null 2>&1
+	catalyst-audio route >/dev/null
+	;;
+forget)
+	need_running
+	valid_address "$2" || exit 2
+	bluetoothctl remove "$2" >/dev/null 2>&1
+	case "$(catalyst-audio output)" in
+	"bluetooth $2" | "bluetooth $(echo "$2" | tr 'a-f' 'A-F')") catalyst-audio output speaker >/dev/null ;;
+	esac
+	catalyst-audio route >/dev/null
+	;;
+*)
+	echo "usage: $0 on|off|start|stop|status|scan|devices|pair|connect|disconnect|forget" >&2
+	exit 2
+	;;
+esac

@@ -646,6 +646,7 @@ fn key_name(key: Key) -> String {
         Key::F(n) => format!("f{n}"),
         Key::BrightnessDown => "bright −".into(),
         Key::BrightnessUp => "bright +".into(),
+        Key::Media(m) => crate::sound::key_name(m).into(),
         Key::Char(' ') => "space".into(),
         Key::Char(c) => c.to_string(),
         Key::Ctrl(' ') => "ctrl space".into(),
@@ -903,6 +904,14 @@ impl Shell {
     pub fn key(&mut self, key: Key) {
         self.dirty = true;
         self.last_key = std::time::Instant::now();
+        // The sound and music keys work with the screen off (music in a
+        // pocket) without waking it, and without a word for nobody to read.
+        if let Key::Media(media) = key {
+            if self.standby.state() == crate::standby::State::Off {
+                crate::sound::media_key(media);
+                return;
+            }
+        }
         // A key while the screen is dimmed or off wakes it, and is spent doing so.
         if self.standby.key() {
             self.moving = true;
@@ -955,6 +964,15 @@ impl Shell {
                 _ => "the backlight is on the handheld".to_owned(),
             };
             return self.say(said);
+        }
+        // Fn + A, S, D (mute, quieter, louder) and Fn + Q, W, E (play or
+        // pause, previous, next), over any screen (sound.rs, music.rs).
+        if let Key::Media(media) = key {
+            if let Some(said) = crate::sound::media_key(media) {
+                self.say(said);
+            }
+            self.moving = true;
+            return;
         }
         // Whoever is pressing keys is busy: a robot that arrived a moment
         // ago does not take the screen from under them.

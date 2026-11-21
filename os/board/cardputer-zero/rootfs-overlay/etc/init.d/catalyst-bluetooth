@@ -1,0 +1,29 @@
+#!/sbin/openrc-run
+# Bluetooth is off unless it was switched on in Settings > Bluetooth, which
+# runs "catalyst-bluetooth on". Then D-Bus, bluetoothd and bluealsa run, and
+# headphones paired before connect by themselves; pairings are kept on
+# /data/bluetooth. Off, none of it runs and the radio is not even powered.
+
+description="Bluetooth headphones and speakers, only when enabled"
+
+depend() {
+	need catalyst-early
+	after catalyst-late catalyst-audio
+}
+
+start() {
+	if [ ! -e /data/catalyst/bluetooth-enabled ]; then
+		einfo "Bluetooth is switched off"
+		return 0
+	fi
+	ebegin "Starting Bluetooth"
+	# The radio's firmware takes a moment to load: not on the boot's time.
+	/usr/sbin/catalyst-bluetooth start >/dev/null 2>&1 &
+	eend 0
+}
+
+stop() {
+	ebegin "Stopping Bluetooth"
+	/usr/sbin/catalyst-bluetooth stop
+	eend 0
+}
