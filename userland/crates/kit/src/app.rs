@@ -24,16 +24,29 @@ pub trait Page {
     /// C are the arrows and Backspace is Back.
     fn key(&mut self, key: Key, cx: &mut Cx) -> Flow;
     fn draw(&mut self, ui: &mut Ui);
-    /// Advance in time. True while the page moves on its own and should be
-    /// drawn again (a timer running, a simulation).
+    /// Advance in time. True when the page should be drawn again: while it
+    /// moves on its own (a simulation), or when what it shows changed.
     fn tick(&mut self, _dt: f32) -> bool {
         false
+    }
+    /// True while the page keeps time (a timer) even when nothing it shows
+    /// moves: frames keep coming at the beat with the real time passing,
+    /// but the panel is only drawn when `tick` says so.
+    fn running(&self) -> bool {
+        false
+    }
+    /// Asked each frame, after `tick`, with what a key would reach: for what
+    /// happens without a key (a round's time running out says so in the
+    /// island and shows its results).
+    fn update(&mut self, _cx: &mut Cx) -> Flow {
+        Flow::Stay
     }
     /// True while letters should reach the page as letters (a text field).
     fn wants_text(&self) -> bool {
         false
     }
-    /// The page draws the whole panel: no title, island or status over it.
+    /// The page draws the whole panel: no title or status over it (the
+    /// island still comes down over it to say something).
     fn full_screen(&self) -> bool {
         false
     }
@@ -54,6 +67,12 @@ impl Page for Box<dyn Page> {
     fn tick(&mut self, dt: f32) -> bool {
         self.as_mut().tick(dt)
     }
+    fn running(&self) -> bool {
+        self.as_ref().running()
+    }
+    fn update(&mut self, cx: &mut Cx) -> Flow {
+        self.as_mut().update(cx)
+    }
     fn wants_text(&self) -> bool {
         self.as_ref().wants_text()
     }
@@ -70,6 +89,9 @@ pub enum Flow {
     Stay,
     /// A page slides in on top.
     Push(Box<dyn Page>),
+    /// A page slides in in this one's place (a round's results after the
+    /// round): going back from it goes to the page beneath this one.
+    Replace(Box<dyn Page>),
     /// This page goes; the first page going ends the app.
     Pop,
     /// The app ends, and the shell comes back.
@@ -227,16 +249,25 @@ impl Runner {
             self.say(words);
         }
         self.dirty = true;
+        self.follow(flow);
+    }
+
+    fn follow(&mut self, flow: Flow) {
         match flow {
             Flow::Stay => {}
             Flow::Quit => self.quit = true,
-            Flow::Push(page) => self.push(page),
+            Flow::Push(page) => self.push(page, false),
+            Flow::Replace(page) => self.push(page, true),
             Flow::Pop => self.pop(),
         }
     }
 
-    fn push(&mut self, page: Box<dyn Page>) {
+    /// A page slides in on top, or in place of the one in front.
+    fn push(&mut self, page: Box<dyn Page>, replacing: bool) {
         let under = self.last_page.clone();
+        if replacing {
+            self.pages.pop();
+        }
         self.pages.push(page);
         self.ui.focus_reset();
         self.ui.reveal_start();
@@ -285,8 +316,9 @@ impl Runner {
     /// Advance time by `dt`. True if the panel needs drawing again.
     pub fn tick(&mut self, dt: f32) -> bool {
         let mut changed = std::mem::take(&mut self.dirty);
-        let was_moving = self.moving;
-        // Time only passes for motion already under way.
+        let was_moving = self.moving || self.pages.last().is_some_and(|p| p.running());
+        // Time only passes for motion already under way (and for a page
+        // keeping time).
         let dt = if was_moving { dt } else { dt.min(1.0 / 60.0) };
         let mut moving = self.ui.tick(dt) | self.island_w.tick(dt);
         if let Some(slide) = &mut self.slide {
@@ -298,6 +330,19 @@ impl Runner {
         }
         if let Some(page) = self.pages.last_mut() {
             moving |= page.tick(dt);
+            // What happens with no key: said, or a page moved.
+            let look = self.ui.look;
+            let mut said = None;
+            let flow = page.update(&mut Cx { look: &look, said: &mut said, data: &self.data });
+            if let Some(words) = said {
+                self.say(words);
+                changed = true;
+            }
+            if !matches!(flow, Flow::Stay) {
+                self.follow(flow);
+                changed = true;
+                moving = true;
+            }
         }
         if let Some((_, left)) = &mut self.message {
             *left -= dt;
@@ -321,7 +366,7 @@ impl Runner {
 
     /// Whether frames should keep coming at the beat.
     pub fn animating(&self) -> bool {
-        self.moving || self.slide.is_some() || self.message.is_some()
+        self.moving || self.slide.is_some() || self.message.is_some() || self.pages.last().is_some_and(|p| p.running())
     }
 
     fn draw_page(&mut self) {
@@ -369,30 +414,34 @@ impl Runner {
             self.last_page.clone_from(&self.ui.canvas.px);
         }
         let full = self.pages.last().is_some_and(|p| p.full_screen()) && self.slide.is_none();
-        if !full {
-            self.draw_chrome();
+        // A page that takes the whole panel still hears the island speak.
+        if !full || self.message.is_some() {
+            self.draw_chrome(full);
         }
         if self.ui.take_motion_started() {
             self.moving = true;
         }
     }
 
-    /// The status at the top right and the glass island in the middle.
-    fn draw_chrome(&mut self) {
+    /// The status at the top right and the glass island in the middle (the
+    /// island alone over a page that takes the whole panel).
+    fn draw_chrome(&mut self, island_only: bool) {
         let ui = &mut self.ui;
         let (t, ty) = (ui.tokens, ui.ty);
         let look = ui.look;
         let bar_cy = 4.0 + ui.island_h() * 0.5;
         let mut x = W - PAD - 2.0;
-        if look.island != IslandRest::Clock {
+        if island_only {
+            // Nothing at the right: the page's own corner.
+        } else if look.island != IslandRest::Clock {
             x -= ui.text_at(x, bar_cy, Align::Right, &self.status.clock, ty.caption, t.dim) + 7.0;
         }
-        if let (Some(percent), false) = (self.status.battery, look.island == IslandRest::Battery) {
+        if let (Some(percent), false) = (self.status.battery, look.island == IslandRest::Battery || island_only) {
             let ink = if percent <= 15 { ui.fault() } else { t.dim };
             x -= ui.text_at(x, bar_cy, Align::Right, &format!("{percent}%"), ty.caption, ink) + 7.0;
         }
         for (up, icon) in [(self.status.wifi, "wifi"), (self.status.wired, "lan")] {
-            if up {
+            if up && !island_only {
                 ui.icon(icon, false, x - 6.0, bar_cy, 13.0, t.dim);
                 x -= 17.0;
             }
@@ -537,6 +586,10 @@ pub fn run(first: impl Page + 'static) {
 /// from the scene before.
 pub type Scene<'a> = (&'a str, &'a [Key]);
 
+/// The seed every gallery deals with (`CATALYST_SEED`), so an app can work
+/// out ahead what it will deal and script the keys for it.
+pub const GALLERY_SEED: &str = "5805";
+
 /// Draw an app's screens to PNGs, one per scene, as the shell's gallery
 /// does: each key followed by a second and a half of frames, so springs
 /// have settled. Fails on an icon that is not built in.
@@ -578,7 +631,15 @@ pub fn launch<P: Page + 'static>(make: impl Fn() -> P, scenes: &[Scene]) {
     let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--shots") {
-        std::env::set_var("CATALYST_SEED", "5805");
+        std::env::set_var("CATALYST_SEED", GALLERY_SEED);
+        // A fresh folder of its own, so a gallery never reads or writes the
+        // app's real one, and draws the same every time.
+        if std::env::var_os("CATALYST_APP_DATA").is_none() {
+            let stem = std::env::current_exe().ok().and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned())).unwrap_or_else(|| "app".into());
+            let fresh = std::env::temp_dir().join(format!("catalyst-gallery-{stem}"));
+            std::fs::remove_dir_all(&fresh).ok();
+            std::env::set_var("CATALYST_APP_DATA", fresh);
+        }
         let flag = |name: &str| args.iter().any(|a| a == name);
         let mut look = Look::from_env();
         look.light |= flag("--light");
@@ -605,4 +666,89 @@ pub fn launch<P: Page + 'static>(make: impl Fn() -> P, scenes: &[Scene]) {
     }
     let _ = value;
     run(make());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A round that keeps time without drawing, ends by itself, says so
+    /// and puts its results in its own place.
+    struct Round {
+        left: f32,
+        drawn: usize,
+    }
+
+    struct Results;
+
+    impl Page for Results {
+        fn title(&self) -> &str {
+            "Results"
+        }
+        fn key(&mut self, _key: Key, _cx: &mut Cx) -> Flow {
+            Flow::Pop
+        }
+        fn draw(&mut self, _ui: &mut Ui) {}
+    }
+
+    impl Page for Round {
+        fn title(&self) -> &str {
+            "Round"
+        }
+        fn key(&mut self, _key: Key, _cx: &mut Cx) -> Flow {
+            Flow::Stay
+        }
+        fn draw(&mut self, _ui: &mut Ui) {
+            self.drawn += 1;
+        }
+        fn running(&self) -> bool {
+            self.left > 0.0
+        }
+        fn tick(&mut self, dt: f32) -> bool {
+            self.left -= dt;
+            false
+        }
+        fn update(&mut self, cx: &mut Cx) -> Flow {
+            if self.left <= 0.0 {
+                cx.say("time");
+                return Flow::Replace(Box::new(Results));
+            }
+            Flow::Stay
+        }
+    }
+
+    struct Menu;
+
+    impl Page for Menu {
+        fn title(&self) -> &str {
+            "Menu"
+        }
+        fn key(&mut self, key: Key, _cx: &mut Cx) -> Flow {
+            match key {
+                Key::Enter => Flow::Push(Box::new(Round { left: 1.0, drawn: 0 })),
+                _ => Flow::Quit,
+            }
+        }
+        fn draw(&mut self, _ui: &mut Ui) {}
+    }
+
+    #[test]
+    fn a_page_keeping_time_ends_by_itself_and_is_replaced() {
+        let mut app = Runner::new(Box::new(Menu), Look { calm: true, ..Look::default() });
+        app.tick(0.0);
+        app.draw();
+        app.key(Key::Enter);
+        app.tick(0.0);
+        app.draw();
+        assert_eq!(app.top_title(), "Round");
+        // Real time passes for it although nothing it shows moves.
+        assert!(app.animating());
+        for _ in 0..30 {
+            app.tick(0.05);
+        }
+        assert_eq!(app.top_title(), "Results", "its time ran out and its results took its place");
+        assert_eq!(app.message.as_ref().map(|(m, _)| m.as_str()), Some("time"));
+        app.key(Key::Enter);
+        assert_eq!(app.top_title(), "Menu", "back from the results is the page beneath the round");
+    }
 }

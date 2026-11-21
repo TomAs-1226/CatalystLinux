@@ -57,7 +57,7 @@ pub mod store;
 pub mod sys;
 pub mod ui;
 
-pub use app::{launch, run, Cx, Flow, Page, Runner, Scene};
+pub use app::{launch, run, Cx, Flow, Page, Runner, Scene, GALLERY_SEED};
 pub use bezel;
 pub use bezel::{Accent, Align, Color, Rect, TextStyle, Tokens, Tone};
 pub use detent;

@@ -234,6 +234,26 @@ impl Ui {
         self.canvas.rrect(r.offset(self.ox, 0.0), radius, color, 1.0);
     }
 
+    /// A surface at an opacity, for something fading in or out.
+    pub fn surface_alpha(&mut self, r: Rect, radius: f32, color: Color, alpha: f32) {
+        self.canvas.rrect(r.offset(self.ox, 0.0), radius, color, alpha.clamp(0.0, 1.0));
+    }
+
+    /// Text placed by its left, centre or right on `cy`, at an opacity.
+    #[allow(clippy::too_many_arguments)]
+    pub fn text_alpha_at(&mut self, anchor: f32, cy: f32, align: Align, s: &str, style: TextStyle, color: Color, alpha: f32) -> f32 {
+        self.text.draw_aligned(&mut self.canvas, anchor + self.ox, baseline_for(&style, cy), align, s, &style, color, alpha.clamp(0.0, 1.0))
+    }
+
+    /// The first of `choices` (longest first) that fits `width`, centred in
+    /// it on `cy`: a hint for part of a page (beside a board).
+    pub fn hint_in(&mut self, x: f32, width: f32, cy: f32, choices: &[&str]) {
+        let (style, color) = (self.ty.caption, self.tokens.dim);
+        let line = choices.iter().copied().find(|c| self.measure(c, style) <= width).or(choices.last().copied()).unwrap_or("");
+        let line = self.text.fit(line, &style, width);
+        self.text_at(x + width * 0.5, cy, Align::Center, &line, style, color);
+    }
+
     /// Text from its left edge on a baseline. Returns its width.
     pub fn text(&mut self, x: f32, baseline: f32, s: &str, style: TextStyle, color: Color) -> f32 {
         self.text.draw(&mut self.canvas, x + self.ox, baseline, s, &style, color, 1.0)
