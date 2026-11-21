@@ -71,6 +71,13 @@ pub fn hostname() -> Option<String> {
     read("/proc/sys/kernel/hostname")
 }
 
+/// Running on the handheld itself, in Catalyst Linux (not the simulator,
+/// and not a test on a Linux computer): only then is the system's own
+/// state (its name, its clock) changed.
+pub fn on_handheld() -> bool {
+    cfg!(target_os = "linux") && std::path::Path::new("/etc/catalyst/version").is_file()
+}
+
 pub fn uptime() -> Option<String> {
     let seconds = read("/proc/uptime")?.split_whitespace().next()?.parse::<f64>().ok()? as u64;
     Some(match seconds {

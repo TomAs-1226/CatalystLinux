@@ -309,6 +309,15 @@ impl Buffer {
         self.modified = true;
     }
 
+    /// Delete: the character after the cursor, or join the next line on.
+    pub fn delete_forward(&mut self) {
+        let before = self.cursor;
+        self.step(0, 1);
+        if self.cursor != before {
+            self.delete_back();
+        }
+    }
+
     /// Remove the whole line the cursor is on.
     pub fn delete_line(&mut self) {
         let line = self.cursor.0;
@@ -424,9 +433,12 @@ impl Screen for Editor {
             Key::Right => b.step(0, 1),
             Key::PageUp => b.step(-(self.rows as isize - 1), 0),
             Key::PageDown => b.step(self.rows as isize - 1, 0),
+            Key::Home => b.cursor.1 = 0,
+            Key::End => b.cursor.1 = b.line_len(b.cursor.0),
+            Key::Delete => b.delete_forward(),
             // Esc does nothing here, so a slip does not close an unsaved file.
             // Neither does holding it: the way out is Ctrl-Q, which asks first.
-            Key::Back | Key::Leave | Key::Ctrl(_) => {}
+            Key::Back | Key::Leave | Key::Ctrl(_) | Key::F(_) | Key::BrightnessDown | Key::BrightnessUp => {}
         }
         Nav::Stay
     }

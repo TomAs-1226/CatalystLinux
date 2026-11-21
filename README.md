@@ -111,8 +111,20 @@ one large unit, which Rust 1.92 on Windows fails to compile.
   Enter goes on, Left goes back, Esc skips it.
 - **Shortcuts.** `?` held for five seconds over any screen not taking text,
   or Settings › Help › Keyboard shortcuts: every key by where it works,
-  drawn as keycaps. Where text is typed (search, a text field, the
-  terminal), `?` is only ever typed.
+  drawn as keycaps, ending with the keyboard itself (the modifiers, and
+  Fn's keys). Where text is typed (search, a text field, the terminal), `?`
+  is only ever typed.
+- **The keys of the handheld.** There are no arrow keys: F, X, Z and C are
+  up, down, left and right wherever text is not being typed, and Backspace
+  is Back. In a text field (and the terminal) they type, and Fn with them
+  gives the arrows. Sym's layer types the symbols printed on the keys: its
+  key codes are ones the keyboard's driver borrows from keys the CardputerZero
+  does not have, so the shell maps them back, as M5Stack's own system does with
+  a console keymap (only for the built-in keyboard: a USB keyboard's keys
+  are their own). Fn + Backspace is Delete, Fn + K and N are Home and End
+  (the first and last row of a list), Fn + L and M are Page Up and Down, Fn
+  with the number row is F1 to F10 (O and P are F11 and F12: htop's F10
+  quits it), and Fn + U and I set the brightness over any screen.
 - **About**, laid out as Android's "About phone": the handheld's name large
   at the top with Catalyst's icon (the header folds away as the list goes
   down), its model, the Catalyst Linux version (a page of its own: channel,
@@ -144,11 +156,13 @@ a computer's own setup does: no island, no status, the brand's ground, each
 page's title, words and rows rising in one after another from the side the
 page came from. "Hi." offers three ways on:
 
-- **Set up here**: the team number (the robot's address follows from it),
-  Wi-Fi, keys for online services, a page of choices (open Robot on link,
-  the match report, SSH, the calm version), and the look (accent, mode, text
-  size, Home's style, with a live picture of Home), then "Just a moment…",
-  "You're all set." and Home.
+- **Set up here**: the keyboard lesson (below), the team number (the
+  robot's address follows from it), the handheld's name and time zone, Wi-Fi,
+  keys for online services, a page of choices (open Robot on link, the match
+  report, SSH, the calm version), and the look (accent, mode, text size,
+  Home's style, with a live picture of Home), then "Just a moment…", "You're
+  all set." and Home. The pages are one list in `setup.rs` (`FLOW`): Next goes
+  one along, Esc one back, Tab skips one, and the progress marks count them.
 - **Set up from a computer**: the handheld shows its address, as text and a
   QR code, and a six-digit code. Any browser on the same network (the
   Ethernet cable, or Wi-Fi) gets one page asking for all of the above plus an
@@ -160,6 +174,33 @@ page came from. "Hi." offers three ways on:
 - **Set up later**: straight to Home; everything is in Settings.
 
 `/data/catalyst/setup-done` marks setup as done.
+
+**The keyboard lesson** is five short cards, each with a little practice
+that ticks off as it is done (Enter always goes on, so nobody is held up, and
+Tab skips the lesson): Shift, Fn and Sym, and their three ways (tapped: for
+the next key only, its light blinking slowly; tapped twice: locked on until
+tapped again, its light flickering; held: while held, its light on), as the
+keyboard's driver does them; F X Z C as the arrows outside typing, with a
+ring to move; a capital with Shift and a symbol with Sym; in a text field
+the letters type and Fn turns F X Z C into arrows that move the cursor; and
+Fn's other keys (Delete, Home and End, the pages, F1 to F10, brightness). On
+a computer the PC's own arrows and Shift do the same. Settings › Help ›
+Keyboard lesson has it again.
+
+**Name and time zone.** The name is offered with the team in it
+(`catalyst-5805`); it is typed as a network takes one (lower case, a hyphen
+for a space) and becomes the handheld's hostname, sent with every DHCP
+request so a router lists it by name, and shown in About. The time zone is
+picked from a list by part of the world (Left and Right jump a region; Space
+or / searches every zone the handheld has rules for, by city, zone or
+region). Both are kept on `/data` (`/data/catalyst/hostname`, `timezone`, and
+`localtime`, a link to the zone's rules that `/etc/localtime` points at) and
+come back after a restart or an update; both are in Settings › Name & time,
+with where the clock's time came from. The clock sets itself from the
+network whenever DHCP gives an address with a router (`catalyst-time`, BusyBox's
+`ntpd`, giving up after 25 s on a network with no way out, and asking at most
+every six hours), then writes the RX8130 clock chip, which keeps the time
+while the handheld is off and gives it back at the next start.
 
 ## Home, the glance page and the control centre
 
@@ -1084,6 +1125,7 @@ it without a device:
 ```bash
 bash scripts/inspect-image.sh        # boot files, drivers, services, libraries, sizes
 bash scripts/test-image-services.sh  # first-boot partition growth and its retries, the network address rule
+sh scripts/test-catalyst-time.sh     # the clock set from the network, with stand-ins for ntpd and hwclock
 bash scripts/test-arm.sh             # the shell's, renderer's and updater's tests as the ARM build
 bash scripts/wsl-qemu.sh             # once: fetch the machine emulator
 python3 scripts/vm.py --tour shots/vm  # boot the image, measure it, drive the UI
@@ -1125,7 +1167,9 @@ Not yet checked: anything on a real CardputerZero (the panel and how fast it
 takes frames, the GPU on a real VideoCore and whether reading its frames back
 costs less than drawing them, the firmware's one-time try of an updated
 system (the emulator starts kernels itself), the flasher writing a real card
-(its writing and reading back are tested on a file), the keyboard, Ethernet, Wi-Fi, the fuel gauge and clock chip,
+(its writing and reading back are tested on a file), the keyboard (Sym's
+symbols and Fn's keys are mapped from the driver's keymap, not yet pressed),
+the clock set from the network and kept in the clock chip, Ethernet, Wi-Fi, the fuel gauge,
 idle memory with the board's drivers at work), the NT4 client against a real
 Systemcore, the log reader against a log from a real robot, the schedule
 against the live Blue Alliance and Nexus services, setup from a computer over

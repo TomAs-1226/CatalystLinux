@@ -39,6 +39,7 @@ mod catalogue;
 mod commands;
 mod connect;
 mod control;
+mod device;
 mod files;
 mod gfx;
 mod git;
@@ -409,6 +410,8 @@ fn main() {
     }
 
     let mut platform: Box<dyn Platform> = open_platform(flag("--sim"));
+    // The time zone chosen, in use for every clock this draws (on the handheld).
+    device::apply_saved();
     // The first start sets the handheld up; `--setup` shows that again.
     if flag("--setup") || !setup_done() {
         shell.start_setup();
@@ -607,6 +610,13 @@ fn open_platform(sim: bool) -> Box<dyn Platform> {
 /// Files for the Files app and apps for Home to show in the tour.
 #[cfg(not(target_arch = "aarch64"))]
 fn tour_fixtures() {
+    // What the tour saves (the team, a name, a time zone, its settings) goes
+    // to a folder of its own, fresh each run: never the computer's `/etc`,
+    // and never a simulator's own state.
+    let state = std::env::temp_dir().join("catalyst-tour-state");
+    std::fs::remove_dir_all(&state).ok();
+    std::fs::create_dir_all(&state).ok();
+    std::env::set_var("CATALYST_CONF", state.join("robot"));
     let files = std::env::temp_dir().join("catalyst-tour-files");
     std::fs::remove_dir_all(&files).ok();
     std::fs::create_dir_all(files.join("logs")).ok();
@@ -888,6 +898,12 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     // From Files to Settings, however many apps lie between.
     let files_to_settings: Vec<Key> =
         [Ctrl('q'), Back].into_iter().chain(std::iter::repeat_n(Right, steps_to("Settings") - steps_to("Files"))).chain([Enter]).collect();
+    // From the Wi-Fi password back out to Settings' list (on Network), and on to About.
+    let network_to_about: Vec<Key> = [Back, Back, Back]
+        .into_iter()
+        .chain(std::iter::repeat_n(Down, screens::settings_row("About this handheld") - screens::settings_row("Network")))
+        .chain([Enter])
+        .collect();
     let tour: &[(&str, &[Key])] = &[
         ("01-home", &[]),
         ("02-robot", &[Enter]),
@@ -913,7 +929,7 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
         ("09d-network", &[Back, Down, Down, Down, Down, Enter]),
         ("09e-wifi", &[Enter, Down, Down, Down]),
         ("09f-wifi-password", &[Enter, Char('c'), Char('a'), Char('t'), Char('a'), Char('l'), Char('y'), Char('s'), Char('t'), Char('7')]),
-        ("09g-about", &[Back, Back, Back, Down, Down, Down, Down, Down, Enter]),
+        ("09g-about", &network_to_about),
         ("10-home-page-3-light", &[Back, Back]),
     ];
     let frame = |shell: &mut Shell| {
@@ -1037,8 +1053,19 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     let pages: &[(&str, &[Key])] = &[
         ("23-setup-welcome", &[]),
         ("24-setup-computer", &[Down, Enter]),
-        ("25-setup-team", &[Back, Enter, Char('5'), Char('8'), Char('0'), Char('5')]),
-        ("26-setup-wifi", &[Enter]),
+        // The keyboard lesson: its five cards, each practised a little.
+        ("85-setup-lesson-modifiers", &[Back, Enter]),
+        ("85b-setup-lesson-moving", &[Enter, Char('x'), Char('c')]),
+        ("85c-setup-lesson-capitals", &[Enter, Char('G'), Char('o'), Char('!')]),
+        ("85d-setup-lesson-text-arrows", &[Enter, Left, Left, Left]),
+        ("85e-setup-lesson-fn-keys", &[Enter, End, F(5)]),
+        ("25-setup-team", &[Enter, Char('5'), Char('8'), Char('0'), Char('5')]),
+        // The name (offered with the team in it) and the time zone, chosen by search.
+        ("86-setup-name-and-time", &[Enter]),
+        ("87-time-zones", &[Enter, Enter]),
+        ("87b-time-zone-search", &[Char(' '), Char('n'), Char('e'), Char('w')]),
+        ("86b-setup-name-and-time-chosen", &[Enter]),
+        ("26-setup-wifi", &[Tab]),
         ("27-setup-keys", &[Down, Enter, Down]),
         ("28-setup-choices", &[Tab, Down]),
         ("29-setup-look", &[Tab, Right, Right]),
@@ -1054,6 +1081,26 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     }
     settle(&mut shell, 70);
     save(&mut shell, "31-setup-all-set");
+    // Settings › Name & time, as setup left it; then the shortcut list's
+    // part on the keyboard, its last.
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    let (name_row, help_row) = (screens::settings_row("Name & time"), screens::settings_row("Help"));
+    for key in std::iter::repeat_n(Right, steps_to("Settings")).chain([Enter]).chain(std::iter::repeat_n(Down, name_row)).chain([Enter]) {
+        shell.key(key);
+        settle(&mut shell, 30);
+    }
+    settle(&mut shell, 60);
+    save(&mut shell, "88-settings-name-and-time");
+    // On to Help; its second row, the shortcuts; End, their last part.
+    let keys = [Back].into_iter().chain(std::iter::repeat_n(Down, help_row - name_row)).chain([Enter, Down, Enter, End]);
+    for key in keys {
+        shell.key(key);
+        settle(&mut shell, 40);
+    }
+    settle(&mut shell, 60);
+    save(&mut shell, "89-shortcuts-keyboard");
     // Search, from Home: Space, then a few letters.
     let mut shell = Shell::new(Robot::demo());
     shell.apply_settings();
@@ -1084,7 +1131,7 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     };
     press(&mut shell, &vec![Right; steps_to("Settings")], 30);
     press(&mut shell, &[Enter], 90);
-    press(&mut shell, &[Down; 10], 20);
+    press(&mut shell, &vec![Down; screens::settings_row("About this handheld")], 20);
     press(&mut shell, &[Enter], 90);
     save(&mut shell, "34-about");
     press(&mut shell, &[Down; 5], 30);

@@ -11,7 +11,12 @@ depend() {
 
 start() {
 	ebegin "Bringing up the rest of the system"
-	hostname -F /etc/hostname
+	# The name chosen in setup or Settings (kept on /data), else the image's own.
+	if [ -s /data/catalyst/hostname ]; then
+		hostname -F /data/catalyst/hostname
+	else
+		hostname -F /etc/hostname
+	fi
 	ip link set lo up
 
 	# The system log, kept as a 64 KB ring in memory: read it with `logread`.

@@ -1,0 +1,74 @@
+#!/bin/sh
+# The clock, set from the network. Run after DHCP gives an address with a
+# router to go through (/usr/share/udhcpc/default.script.d/50-catalyst-time),
+# on Wi-Fi or Ethernet. Once the network has set it, the RX8130 clock chip is
+# set from it too, so the next start has the right time from its first frame
+# even with no network (catalyst-early reads the chip back).
+#
+#   catalyst-time sync        ask the time servers, unless they answered in
+#                             the last six hours
+#   catalyst-time sync now    ask them whatever
+#   catalyst-time status      when the network last set the clock
+#
+# A network with no way out (a robot's radio, a cable into the Systemcore)
+# simply never answers: the attempt gives up after WAIT seconds.
+set -u
+
+# (The folder and the wait can be moved for a test.)
+STATE="${CATALYST_RUN:-/run/catalyst}"
+SYNCED="$STATE/time-synced"
+LOCK="$STATE/time-sync.lock"
+SERVERS="pool.ntp.org time.cloudflare.com time.google.com"
+WAIT="${CATALYST_TIME_WAIT:-25}"
+FRESH=21600
+
+case "${1:-}" in
+sync)
+	mkdir -p "$STATE"
+	if [ "${2:-}" != now ] && [ -s "$SYNCED" ]; then
+		age=$(($(date +%s) - $(cat "$SYNCED")))
+		[ "$age" -ge 0 ] && [ "$age" -lt "$FRESH" ] && exit 0
+	fi
+	# One at a time: a second lease while one is asking is not asked again.
+	mkdir "$LOCK" 2>/dev/null || exit 0
+	trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+	peers=""
+	for server in $SERVERS; do
+		peers="$peers -p $server"
+	done
+	# BusyBox's ntpd: -n stays in front, -q quits once the clock is set. With
+	# no server answering it would keep trying, so it is given WAIT seconds.
+	# shellcheck disable=SC2086
+	ntpd -n -q $peers >/dev/null 2>&1 &
+	pid=$!
+	(
+		sleep "$WAIT"
+		kill "$pid" 2>/dev/null
+	) &
+	timer=$!
+	if wait "$pid"; then
+		kill "$timer" 2>/dev/null
+		date +%s >"$SYNCED"
+		[ -e /dev/rtc0 ] && hwclock -w -u 2>/dev/null
+		logger -t catalyst-time "clock set from the network" 2>/dev/null
+	else
+		kill "$timer" 2>/dev/null
+		logger -t catalyst-time "no time server answered" 2>/dev/null
+		exit 1
+	fi
+	;;
+status)
+	if [ -s "$SYNCED" ]; then
+		echo "set from the network $(($(date +%s) - $(cat "$SYNCED"))) s ago"
+	elif [ -e /dev/rtc0 ]; then
+		echo "kept by the clock chip since the start"
+	else
+		echo "not set"
+	fi
+	;;
+*)
+	echo "usage: $0 sync [now] | status" >&2
+	exit 2
+	;;
+esac
+exit 0
