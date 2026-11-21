@@ -255,7 +255,12 @@ impl Control {
             let r = Rect::new(inner.x + (i % 2) as f32 * (tw + gap), inner.y + (i / 2) as f32 * (th + gap), tw, th);
             let on = knob.value().clamp(0.0, 1.0);
             g.canvas.rrect(r, 12.0, t.surface1, 0.72);
-            g.icon(icon, on > 0.5, r.x + 16.0, r.cy(), 16.0, if on > 0.5 { t.ink } else { t.dim });
+            // Light: a coin with the sun on its face and the moon on its
+            // back, turning over with the switch's knob.
+            let coin = *name == "Light" && g.object("sunmoon", "s", r.x + 15.0, r.cy(), crate::object3d::View::yaw((1.0 - knob.value()) * 180.0), 1.0, 1.0);
+            if !coin {
+                g.icon(icon, on > 0.5, r.x + 16.0, r.cy(), 16.0, if on > 0.5 { t.ink } else { t.dim });
+            }
             g.text_fit(r.x + 30.0, r.cy(), name, ty.body, t.ink, r.w - 66.0);
             // The switch: its track takes colour as the knob crosses.
             let track = Rect::new(r.right() - 34.0, r.cy() - 7.0, 26.0, 14.0);

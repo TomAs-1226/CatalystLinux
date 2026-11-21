@@ -222,14 +222,21 @@ impl About {
         // Folding away, it slides up under the title as it fades.
         let y = top - (1.0 - shown) * HERO_H * 0.5;
         g.canvas.set_clip(Rect::new(0.0, top, W, h));
-        // Catalyst's icon: the bolt on its own dark ground.
+        // The handheld itself, in three dimensions, its screen lit with
+        // Catalyst's bolt; folding away, it turns as it goes. Where there is
+        // no object, Catalyst's icon: the bolt on its own dark ground.
         let side = 36.0;
         let icon = Rect::new(PAD + 2.0, y + (HERO_H - 6.0 - side) * 0.5, side, side);
-        g.canvas.rrect(icon, side * 114.0 / 512.0, Color::hex(0x15161b), shown);
-        g.canvas.circle(icon.cx(), icon.cy(), side * 0.36, brand::CRIMSON, 0.14 * shown);
-        brand::mark(g, icon.cx(), icon.cy(), side * 0.58, brand::CRIMSON, shown);
+        let turned = crate::object3d::View::yaw(if g.calm { 0.0 } else { (1.0 - shown) * 40.0 });
+        let x = if g.object("handheld", "m", icon.x + 24.0, icon.cy() - 2.0, turned, 1.0, shown) {
+            icon.x + 58.0
+        } else {
+            g.canvas.rrect(icon, side * 114.0 / 512.0, Color::hex(0x15161b), shown);
+            g.canvas.circle(icon.cx(), icon.cy(), side * 0.36, brand::CRIMSON, 0.14 * shown);
+            brand::mark(g, icon.cx(), icon.cy(), side * 0.58, brand::CRIMSON, shown);
+            icon.right() + 10.0
+        };
         let name = device_name();
-        let x = icon.right() + 10.0;
         let big = ty.display(20.0);
         let name = g.text.fit(&name, &big, W - x - PAD - 6.0);
         g.text_alpha(x, icon.cy() - 6.0, &name, big, t.ink, shown);

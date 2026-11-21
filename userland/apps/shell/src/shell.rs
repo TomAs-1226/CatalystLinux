@@ -2987,12 +2987,19 @@ pub(crate) mod tests {
         shell.key(Key::Enter);
         shell.key(Key::Tab);
         shell.key(Key::Tab);
+        // Choices start on Next (Enter goes on): up to the first, switched off.
         assert!(shell.settings.open_robot);
+        for _ in 0..4 {
+            shell.key(Key::Up);
+        }
         shell.key(Key::Enter);
         assert!(!shell.settings.open_robot, "the first choice switched off");
         shell.key(Key::Tab);
         shell.key(Key::Tab);
-        // The look: the next accent, light mode, then Finish.
+        // The look, also on Next: up to the accent, the next one, light mode, then Finish.
+        for _ in 0..4 {
+            shell.key(Key::Up);
+        }
         shell.key(Key::Right);
         shell.key(Key::Down);
         shell.key(Key::Enter);

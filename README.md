@@ -29,6 +29,8 @@ windows that grow out of tiles whenever it is there.
 | `shots/flasher/` | Catalyst Flasher's screens (`catalyst-flasher --shot`). |
 | `shots/motion/` | Each kind of motion as a strip of frames 50 ms apart and an animated PNG, and the Home settings (`--motion`). |
 | `shots/vm/` | The same shell as the ARM build on the image's own kernel, in the emulator. |
+| `tools/bake3d/` | The 3D objects: their models, the Blender bake and the packer (see *Objects in three dimensions*). |
+| `shots/3d-preview/` | The 3D objects to look at before they ship: `index.html`. |
 
 ## Decisions
 
@@ -161,7 +163,19 @@ accelerates, since it is thrown rather than placed. Any key skips it.
 The first start continues into **setup**, which owns the whole panel the way
 a computer's own setup does: no island, no status, the brand's ground, each
 page's title, words and rows rising in one after another from the side the
-page came from. "Hi." offers three ways on:
+page came from. Setup is a way through a space: each page has its object in
+three dimensions standing on a pool of light to the right of its words (the
+handheld to welcome, the network, the team's robot, a globe, a key, a
+switch, the battery), and moving on carries the camera along to the next
+one, the last page's object passing nearer and off to the left as the next
+turns in from further off (`object3d`, below). The objects answer what is
+done: a network joined turns the Wi-Fi once round and setup carries on by
+itself, a key kept turns the key, a digit of the team number turns the robot
+a little, a time zone chosen turns the globe by its offset. Pages of choices
+already made (keys, choices, power, the look, the hardware found) start on
+Next, so Enter goes straight on and Up goes into them. The calm version
+keeps the objects still and the pages where they are. "Hi." offers three
+ways on (the handheld turns over into a laptop for the second):
 
 - **Set up here**: Wi-Fi first (its radio is switched on as the page
   arrives, so the networks are listed by the time they are asked for, and
@@ -762,6 +776,68 @@ The boot configuration turns on the VideoCore's kernel driver
 The panel is found by its size, so the second graphics device this brings does
 not confuse it. `scripts/test-arm.sh` runs the GPU test through Mesa's
 software renderer under emulation, which stands in for the VideoCore there.
+
+## Objects in three dimensions
+
+Home's app icons, setup's objects, the empty pages, About's header and the
+control centre's Light switch are objects in three dimensions, rendered
+beforehand. The handheld renders nothing in 3D: it lays down pictures,
+chosen by springs (`apps/shell/src/object3d.rs`).
+
+- **Rendered in Blender** (5.2, Cycles), headless, by `tools/bake3d`:
+  `blender -b --factory-startup -P tools/bake3d/bake.py -- OUT [names]`.
+  The same Blender, seed and samples give the same pictures. Each object is
+  rendered from every angle it is shown at under Bezel's one light, resting
+  above and to the left (an area light fixed to the camera, so it stays
+  there however the object turns), large enough for soft shadows, over a
+  soft sky that gives ambient occlusion, with a shadow catcher keeping its
+  contact shadow down and to the right.
+- **Two sources.** Most are built in code (`tools/bake3d/models.py`, out of
+  rounded boxes, cylinders, tubes, extruded outlines and type in the
+  shell's own fonts). Five were generated with Higgsfield (text to 3D,
+  Tripo: the team's robot, the globe, the laptop, the trophy and the
+  rocket), reduced to 30,000 faces and kept in `tools/bake3d/glb/`
+  (Draco-compressed, about 200 kB each) by `glb_prep.py`, which reads their
+  textures into our materials: lightness, and their orange as the accent.
+- **Colour at run time.** Objects are rendered in neutral greys that say
+  what a surface is (the shell, white, graphite, dark glass, metal) and
+  which parts take a tint, not what colour they are. Each view is kept as
+  four planes (lightness; how much is tint A and tint B; how much of the
+  pixel the object covers; how dark its shadow makes what is under it).
+  The shell relights the lightness with the palette in use: the shell parts
+  with a tone of the palette's neutrals, tint A with the signal, tint B
+  with ice or amber, overexposure bleeding to white. So one bake serves dark
+  and light, every accent and your own colour, and the colour changes
+  blend as everything else does. Baking every palette would have been
+  154 bakes (77 accents in two modes).
+- **What turns them.** A focused icon on Home turns after the focus ring as
+  it moves (and nods going up or down), on the ring's own spring, and every
+  icon is turned a little by where its tile sits, so the icons turn as the
+  pages slide. The carousel's objects turn to face the middle as their
+  cards come round. Setup's objects stand beside each page's words and the
+  camera travels between them (see *Starting up*). An empty page's object
+  swings round into place as the page rises in. The control centre's Light
+  is a coin with the sun on its face and the moon on its back, turning over
+  with the switch. The calm version keeps them all at rest.
+- **What it costs.** The pack is 3.3 MB in the program file, read in place:
+  46 objects, each view a small PNG of its four planes (icons at 30 px with
+  27 views and 52 px with 9, setup's objects at 92 px all the way round
+  every 15°). Frames are decoded and coloured only when first wanted, and
+  kept in a cache of at most 384 kB, the least recently used let go first:
+  Home's first page at rest holds 24 kB, the focus moving 73 kB, setup end
+  to end at most the full 384 kB. On the development PC a frame takes 17 µs
+  (an icon) to 90 µs (a setup object) to decode and colour, 17 µs to lay
+  down, and 102 µs to blend two angles and move them off the pixel grid;
+  about 1.8, 0.34 and 2 ms on the handheld by the simulator's factor of 20,
+  which only the device can confirm.
+- **Previews.** `tools/bake3d/previews.sh BAKED` packs a bake and runs
+  `catalyst-shell --objects shots/3d-preview`: contact sheets in dark and
+  light and in other accents, turntables, the objects in place on the panel
+  (at its size and three times it) and their motion, and what they cost, all
+  drawn by the shell's own code, with `shots/3d-preview/index.html` showing
+  everything. `tools/bake3d/shipped.txt` lists the objects the shell
+  carries; the rocket, the moon, the processor, the keycaps and the
+  swatches are made but not carried until something shows them.
 
 ## External apps
 

@@ -195,12 +195,13 @@ fn pulse_spring() -> Animated {
 /// and in the mono voice at the top, its icon at the top right (unless a
 /// dot or a star is there), and what it reports below, in the display voice
 /// and large when it is a reading.
-fn bezel_tile(g: &mut Gfx, r: Rect, icon: &str, name: &str, status: &str, focused: bool, corner_taken: bool) {
+#[allow(clippy::too_many_arguments)]
+fn bezel_tile(g: &mut Gfx, r: Rect, icon: &str, object: Option<(&str, crate::object3d::View)>, name: &str, status: &str, focused: bool, corner_taken: bool) {
     let (t, ty) = (g.tokens, g.ty);
     let quiet = if focused { t.ink } else { t.dim };
     let label_cy = r.y + 7.0 + ty.caption.size * 0.5;
     g.text_fit(r.x + 9.0, label_cy, &name.to_lowercase(), ty.caption, quiet, r.w - 34.0);
-    if !corner_taken {
+    if !corner_taken && !object.is_some_and(|(o, view)| g.object(o, "s", r.right() - 15.0, label_cy + 3.0, view, 1.0, 1.0)) {
         g.icon(icon, focused, r.right() - 13.0, label_cy, 14.0, quiet);
     }
     let baseline = r.bottom() - 8.0;
@@ -238,6 +239,24 @@ fn split_reading(status: &str) -> Option<(&str, &str)> {
     let numeric = lead.is_ascii_digit() || first == "–";
     let label = lead.is_ascii_uppercase() && first.len() <= 4 && first.len() > 1 && chars.all(|c| c.is_ascii_digit());
     (numeric || label).then_some((first, rest))
+}
+
+/// How a tile's 3D icon is turned. By where the tile sits across the panel,
+/// as a camera in its middle would see it: the outer columns 12° either way
+/// (an angle the icons were rendered at, so at rest each shows a frame as it
+/// was rendered), in between as the pages slide. The focused one also turns
+/// after the focus ring as it moves (and nods with it going up or down),
+/// coming back to rest as the ring lands; the ring's own spring carries it,
+/// overshoot and all. Calm, only where it sits.
+fn tile_view(g: &Gfx, r: Rect, tw: f32, columns: usize, focused: bool) -> crate::object3d::View {
+    let half = (columns.max(2) - 1) as f32 * 0.5 * (tw + GAP);
+    let mut view = crate::object3d::View::yaw(-12.0 * (r.cx() - W * 0.5) / half);
+    if focused {
+        let (vx, vy) = g.ring_velocity();
+        view.yaw += (vx * 0.022).clamp(-36.0, 36.0);
+        view.pitch = (vy * 0.012).clamp(-12.0, 12.0);
+    }
+    view
 }
 
 /// How long a tile is pressed in before its app grows out of it: long enough
@@ -703,7 +722,9 @@ impl Home {
             // the top, what the app reports large below it.
             if g.theme == crate::look::Theme::Bezel {
                 let corner_taken = attention.is_some() || self.favourite(i);
-                bezel_tile(g, r, &icon, &name, &status, focused, corner_taken);
+                let object = matches!(self.tiles.get(i), Some(Tile::Builtin(_))).then(|| crate::object3d::for_app(&name)).filter(|o| g.objects.has(o));
+                let view = tile_view(g, r, tw, columns, lifted);
+                bezel_tile(g, r, &icon, object.as_deref().map(|o| (o, view)), &name, &status, focused, corner_taken);
                 if let Some(severity) = attention {
                     let c = severity_color(g, severity);
                     g.dot(r.right() - 12.0, r.y + 12.0, 3.5 + 1.5 * pulse, c);
@@ -719,16 +740,26 @@ impl Home {
             }
             // A selected item's icon fills in.
             let icon_color = if focused { t.ink } else { t.dim };
+            // A built-in app's icon is its object, in three dimensions: turned
+            // a little by where its tile sits (as a camera in the middle sees
+            // it), so it turns as the pages slide, and the focused one by the
+            // focus ring's motion. Calm, they rest.
+            let object = matches!(self.tiles.get(i), Some(Tile::Builtin(_))).then(|| crate::object3d::for_app(&name)).filter(|o| g.objects.has(o));
+            let view = tile_view(g, r, tw, columns, lifted);
             let (text_x, name_cy, status_cy, text_w);
             if tw > 120.0 {
                 // A wide tile: the icon beside two lines.
-                g.icon(&icon, focused, r.x + 23.0, r.cy(), 24.0, icon_color);
+                if !object.as_ref().is_some_and(|o| g.object(o, "s", r.x + 24.0, r.cy(), view, 1.0 - 0.06 * pressed, 1.0)) {
+                    g.icon(&icon, focused, r.x + 23.0, r.cy(), 24.0, icon_color);
+                }
                 text_x = r.x + 44.0;
                 text_w = r.w - 52.0;
                 name_cy = r.cy() - ty.caption.size * 0.5 - 1.0;
                 status_cy = r.cy() + ty.name.size * 0.5 + 1.0;
             } else {
-                g.icon(&icon, focused, r.x + 18.0, r.y + 15.0, 18.0, icon_color);
+                if !object.as_ref().is_some_and(|o| g.object(o, "s", r.x + 19.0, r.y + 15.0, view, 1.0 - 0.06 * pressed, 1.0)) {
+                    g.icon(&icon, focused, r.x + 18.0, r.y + 15.0, 18.0, icon_color);
+                }
                 text_x = r.x + 10.0;
                 text_w = r.w - 16.0;
                 status_cy = r.bottom() - 6.0 - ty.caption.size * 0.5;
@@ -784,7 +815,14 @@ impl Home {
             // once per size, and a size that changed every frame would be
             // drawn afresh every frame.
             let icon_cy = (r.cy() - 16.0 * near).round();
-            g.icon_alpha(&icon, near > 0.5, r.cx().round(), icon_cy, 30.0, if near > 0.5 { t.ink } else { t.dim }, 0.55 + 0.45 * near);
+            // A built-in app's object turns to face the middle as its card
+            // comes round, as on a real turntable; nearer, it is whole.
+            let object = matches!(self.tiles.get(i), Some(Tile::Builtin(_))).then(|| crate::object3d::for_app(&name)).filter(|o| g.objects.has(o));
+            let view = crate::object3d::View::yaw((-away * 36.0).clamp(-48.0, 48.0));
+            let drawn = object.as_ref().is_some_and(|o| g.object(o, "l", r.cx(), icon_cy - 5.0 * near, view, scale, 0.55 + 0.45 * near));
+            if !drawn {
+                g.icon_alpha(&icon, near > 0.5, r.cx().round(), icon_cy, 30.0, if near > 0.5 { t.ink } else { t.dim }, 0.55 + 0.45 * near);
+            }
             if near > 0.02 {
                 let name = g.text.fit(&name, &ty.title, cw - 18.0);
                 let status = g.text.fit(&status, &ty.caption, cw - 18.0);

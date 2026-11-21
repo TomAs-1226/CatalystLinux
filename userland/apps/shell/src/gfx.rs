@@ -104,6 +104,8 @@ pub struct Gfx {
     pub canvas: Canvas,
     pub text: Text,
     pub icons: Icons,
+    /// The objects rendered beforehand in three dimensions (`object3d`).
+    pub objects: crate::object3d::Objects,
     /// Icon names asked for that were never built in: drawn as nothing, so
     /// kept to be caught (the gallery and the tests fail on any).
     missing_icons: std::collections::BTreeSet<String>,
@@ -302,6 +304,7 @@ impl Gfx {
             canvas: Canvas::new(W as i32, H as i32),
             text: Text::new(),
             icons: Icons::new(),
+            objects: crate::object3d::Objects::shipped(),
             missing_icons: Default::default(),
             glass: Glass::new(),
             tokens,
@@ -475,6 +478,24 @@ impl Gfx {
     /// The icon names asked for that are not built in.
     pub fn missing_icons(&self) -> &std::collections::BTreeSet<String> {
         &self.missing_icons
+    }
+
+    /// A 3D object (`object3d`), centred on (`cx`, `cy`), turned to `view`,
+    /// `scale` times the size it was rendered at. False if there is none of
+    /// that name, so the caller can draw its icon instead.
+    #[allow(clippy::too_many_arguments)]
+    pub fn object(&mut self, name: &str, size: &str, cx: f32, cy: f32, view: crate::object3d::View, scale: f32, alpha: f32) -> bool {
+        let fault = self.fault();
+        self.objects.draw(&mut self.canvas, &self.tokens, fault, name, size, cx + self.ox, cy, view, scale, alpha)
+    }
+
+    /// How fast the focus ring is moving just now, px a second (0 when calm
+    /// or drawn as a still picture): what turns the focused object with it.
+    pub fn ring_velocity(&self) -> (f32, f32) {
+        if self.calm || self.focus_static || !self.focus.placed {
+            return (0.0, 0.0);
+        }
+        self.focus.velocity()
     }
 
     /// Drawing set something moving: frames should follow at once.
@@ -748,13 +769,28 @@ impl Gfx {
         }
     }
 
-    /// What a page says when it has nothing to show.
+    /// What a page says when it has nothing to show: its object in three
+    /// dimensions where there is one (`object3d::for_empty`), turning into
+    /// place as the page arrives, otherwise its icon; and the line under it,
+    /// cut short rather than run off the panel.
     pub fn empty(&mut self, icon: &str, line: &str) {
         let t = self.tokens;
         let cy = (self.top() + H) * 0.5;
-        self.icon(icon, false, W * 0.5, cy - 12.0, 24.0, t.faint);
         let style = self.ty.caption;
-        self.text_at(W * 0.5, cy + 12.0, Align::Center, line, style, t.dim);
+        let line = self.text.fit(line, &style, W - 2.0 * PAD);
+        if let Some((object, size)) = crate::object3d::for_empty(icon, &self.objects) {
+            // Swinging round from a quarter turn away as the page rises in.
+            let turn = match self.reveal {
+                Some(since) if !self.calm => 40.0 * role::release().solve(1.0, 0.0, since).0,
+                _ => 0.0,
+            };
+            if self.object(object, size, W * 0.5, cy - 13.0, crate::object3d::View::yaw(turn), 1.0, 1.0) {
+                self.text_at(W * 0.5, cy + 24.0, Align::Center, &line, style, t.dim);
+                return;
+            }
+        }
+        self.icon(icon, false, W * 0.5, cy - 12.0, 24.0, t.faint);
+        self.text_at(W * 0.5, cy + 12.0, Align::Center, &line, style, t.dim);
     }
 
     /// Run the glass pass over everything drawn so far: on the GPU when it

@@ -1,0 +1,50 @@
+# The objects the shell carries (pack.py packs these when given no names).
+# Made but not carried yet, so they cost nothing until something shows them:
+# rocket (System update), moon (deep standby), chip (the hardware check),
+# keycaps (the keyboard lesson), palette (the look).
+handheld
+laptop
+wifi
+robot
+globe
+key
+toggle
+battery
+trophy
+tray
+sunmoon
+app-robot
+app-health
+app-logs
+app-schedule
+app-tables
+app-loop
+app-motors
+app-console
+app-terminal
+app-files
+app-git
+app-catalogue
+app-monitor
+app-nettools
+app-connect
+app-actions
+app-camera
+app-photos
+app-apriltag
+app-graphs
+app-pit
+app-remote
+app-level
+app-compass
+app-weather
+app-browse
+app-calculator
+app-clock
+app-notes
+app-units
+app-http
+app-share
+app-assistant
+app-web
+app-settings

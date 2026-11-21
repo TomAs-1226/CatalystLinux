@@ -364,6 +364,44 @@ impl Canvas {
         }
     }
 
+    /// Lay a premultiplied picture over what is drawn (a pre-rendered 3D
+    /// object): each source pixel is `0xKKRRGGBB`, its colour already
+    /// multiplied by its cover, and `KK` how much of what is under it is
+    /// left (its shadow can darken it more than its cover alone would).
+    /// `alpha` fades the whole picture.
+    pub fn blit_premultiplied(&mut self, x: i32, y: i32, w: i32, h: i32, src: &[u32], alpha: f32) {
+        let x0 = x.max(self.clip.0);
+        let y0 = y.max(self.clip.1);
+        let x1 = (x + w).min(self.clip.2);
+        let y1 = (y + h).min(self.clip.3);
+        let a = (alpha.clamp(0.0, 1.0) * 256.0) as u32;
+        if a == 0 {
+            return;
+        }
+        for yy in y0..y1 {
+            let s = ((yy - y) * w) as usize;
+            let d = (yy * self.w) as usize;
+            for xx in x0..x1 {
+                let p = src[s + (xx - x) as usize];
+                let keep = p >> 24;
+                if keep == 255 {
+                    continue;
+                }
+                let dst = &mut self.px[d + xx as usize];
+                let q = *dst;
+                // What is left of the pixel under it: all of it where the
+                // picture is faded out, `keep` where it is whole.
+                let left = ((256 - a) * 255 + a * keep) >> 8;
+                let ch = |shift: u32| -> u32 {
+                    let under = (q >> shift) & 0xff;
+                    let over = (p >> shift) & 0xff;
+                    ((under * left + over * a * 255 / 256) / 255).min(255)
+                };
+                *dst = ch(16) << 16 | ch(8) << 8 | ch(0);
+            }
+        }
+    }
+
     /// Pack the frame as RGB565 for the panel, without dithering.
     pub fn to_rgb565(&self, out: &mut [u16]) {
         for (o, p) in out.iter_mut().zip(&self.px) {

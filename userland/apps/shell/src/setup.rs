@@ -18,7 +18,7 @@
 //! computer left unanswered.
 
 use bezel::{Accent, Color, Rect, TextStyle, Tokens, Tone};
-use detent::role;
+use detent::{role, Animated};
 
 use crate::brand::{self, CRIMSON, INK_FAINT, INK_STRONG, INK_THIN};
 use crate::gfx::{Gfx, W};
@@ -78,35 +78,78 @@ const WORDS_CY: f32 = 51.0;
 const ROWS_TOP: f32 = 64.0;
 const BAR_CY: f32 = 157.0;
 
-/// The line under each page's title. Each fits the panel's width at its
+/// A page with an object beside it keeps its words and rows to the left of
+/// it, this wide; the object stands on its own spot to the right.
+const COLUMN: f32 = 200.0;
+const SPOT_X: f32 = 262.0;
+const SPOT_Y: f32 = 70.0;
+/// The last page's object, in the middle.
+const MIDDLE_X: f32 = W * 0.5;
+const MIDDLE_Y: f32 = 60.0;
+/// How far apart the pages' objects stand along the way through setup: one
+/// page on, the last page's object has gone this far to the left (and come
+/// nearer, and turned, as a camera moving past it would see it).
+const SPACING: f32 = 150.0;
+/// After Wi-Fi joins, how long its page stays (its object turning round)
+/// before setup carries on by itself.
+const JOINED_HOLD: f32 = 1.1;
+
+/// The line under each page's title. Each fits the width it has at its
 /// size (a test measures them): nothing on this screen is cut short.
-const WORDS_WELCOME: &str = "Let's get this handheld ready for your robot.";
 const WORDS_COMPUTER: &str = "On a computer on the same network, open:";
-const WORDS_NO_NETWORK: &str = "First the handheld needs a network.";
+const WORDS_NO_NETWORK: &str = "First it needs a network.";
 const WORDS_OR_CABLE: &str = "Or plug in an Ethernet cable.";
-const WORDS_OPENS_ITSELF: &str = "The page opens here once there is one.";
-const WORDS_TEAM: &str = "The robot's address follows from it: 10.TE.AM.2";
-const WORDS_PLACE: &str = "Its name on the network, and the time it keeps.";
-const WORDS_WIFI: &str = "For the clock, updates and the event schedule.";
-const WORDS_KEYS: &str = "For the event schedule and the assistant.";
-const WORDS_TYPING: &str = "Enter keeps it; esc leaves it as it was.";
+const WORDS_OPENS_ITSELF: &str = "Then this page opens itself.";
+const WORDS_TEAM: &str = "Its robot's address follows from it.";
+const WORDS_PLACE: &str = "Its name, and the time it keeps.";
+const WORDS_WIFI: &str = "For the clock and updates.";
+const WORDS_KEYS: &str = "For the schedule and assistant.";
+const WORDS_TYPING: &str = "Enter keeps it; esc leaves it.";
 const WORDS_LOOK: &str = "Change any of these later in Settings.";
+const WORDS_DEFAULTS: &str = "Fine as they are: enter goes on.";
 const WORDS_HARDWARE: &str = "Each part, looked for. Enter on Keys to type a line.";
+/// The welcome's three ways on: the row, and the line under "Hi." while it
+/// is focused.
+const WAYS: [(&str, &str); 3] = [
+    ("Set up here", "On the keys, a page at a time."),
+    ("From a computer", "Type it all on a real keyboard."),
+    ("Set up later", "To Home; all of it is in Settings."),
+];
 /// The power page's rows: a name, and the line under the title while it is focused.
 const POWER: [(&str, &str); 4] = [
-    ("Screen off after", "With no key for this long, the screen goes off."),
-    ("Battery saver at 20%", "Fewer frames and a slower processor from 20%."),
-    ("Wi-Fi off in standby", "After ten minutes with the screen off."),
-    ("Lift to wake", "Picking it up turns the screen on for a look."),
+    ("Screen off", "No key this long: it goes dark."),
+    ("Saver at 20%", "Fewer frames, a slower processor."),
+    ("Wi-Fi sleeps", "Off ten minutes after the screen."),
+    ("Lift to wake", "Pick it up and it wakes."),
 ];
 /// The hardware page's chips: three across.
 const CHIPS_ACROSS: usize = 3;
 const CHOICES: [(&str, &str); 4] = [
-    ("Open Robot when one is plugged in", "Its page opens when a robot links on Home."),
-    ("Show how the last match went", "A match's summary opens once its log is in."),
-    ("SSH access", "A computer may sign in with a key. Off is safest."),
-    ("Calm version", "Less motion, and no transparency."),
+    ("Open Robot on link", "Robot opens when one links."),
+    ("Match report", "A summary once its log is in."),
+    ("SSH access", "A computer may sign in by key."),
+    ("Calm version", "Less motion, no transparency."),
 ];
+
+/// The globe's turn for UTC itself, read off its renders (its land facing
+/// front for the Americas at a turn of 0, six hours west); a zone east of it
+/// turns the globe on by 15° an hour. Its continents are stylised, so this
+/// is a gesture toward the zone rather than a map of it.
+const GLOBE_FACING: f32 = -90.0;
+
+/// Hours east of UTC, from an offset as it is written: "UTC−5", "UTC+5:30", "UTC".
+fn offset_hours(label: &str) -> f32 {
+    let rest = label.trim_start_matches("UTC");
+    let (sign, rest) = if let Some(r) = rest.strip_prefix('−').or_else(|| rest.strip_prefix('-')) {
+        (-1.0, r)
+    } else if let Some(r) = rest.strip_prefix('+') {
+        (1.0, r)
+    } else {
+        return 0.0;
+    };
+    let (h, m) = rest.split_once(':').unwrap_or((rest, "0"));
+    sign * (h.parse::<f32>().unwrap_or(0.0) + m.parse::<f32>().unwrap_or(0.0) / 60.0)
+}
 
 /// How long "just a moment" stays, then "all set", before Home.
 const WORKING: f32 = 1.5;
@@ -361,6 +404,27 @@ pub struct Setup {
     /// A computer sent the answers on first start: setup goes on from what
     /// it received, and never back to the welcome.
     sent_from_computer: bool,
+    /// The way through setup as a space: each page's object stands at its
+    /// own place along it, and `travel` is where the camera is (in pages),
+    /// gliding to the page in front. The object of the page just left is
+    /// carried off as the next one comes.
+    travel: Animated,
+    leaving: Option<(&'static str, f32)>,
+    /// A turn of the object in front on top of where it rests: a whole one
+    /// when something is done (a network joined, a key kept), a nudge when
+    /// something changes (a digit typed, a choice switched).
+    spin: Animated,
+    /// The object in front changing on the same page (the welcome's ways,
+    /// the last page): the old one turns away and the new one turns in.
+    flip: Animated,
+    flip_from: Option<&'static str>,
+    shown: Option<&'static str>,
+    /// Wi-Fi joined from its page: when, so setup carries on by itself.
+    joined: Option<f32>,
+    /// Where the object in front rests, turning there when it changes (the
+    /// globe to a time zone chosen).
+    look: Animated,
+    calm: bool,
 }
 
 /// What is left to do on the handheld once a computer has sent its answers
@@ -412,6 +476,15 @@ impl Setup {
             received_scroll: detent::Animated::new(0.0, role::release()).with_rest(0.01),
             flow: FLOW.to_vec(),
             sent_from_computer: false,
+            travel: Animated::new(0.0, crate::gfx::spatial::slow()).with_rest(0.002),
+            leaving: None,
+            spin: Animated::new(0.0, role::release()).with_rest(0.2),
+            flip: Animated::new(1.0, crate::gfx::spatial::default()).with_rest(0.004),
+            flip_from: None,
+            shown: Some("handheld"),
+            joined: None,
+            look: Animated::new(0.0, crate::gfx::spatial::slow()).with_rest(0.05),
+            calm: false,
         }
     }
 
@@ -506,12 +579,14 @@ impl Setup {
     }
 
     fn go(&mut self, page: Page, forward: bool) {
+        let (before, from_slot) = (self.hero(), self.slot());
         self.page = page;
         self.focus = 0;
         self.entered = 0.0;
         self.from = if forward { 1.0 } else { -1.0 };
         self.typing = None;
         self.note = None;
+        self.joined = None;
         // The radio takes seconds to start: on as the page arrives, so the
         // networks are listed by the time "Choose a network" is pressed.
         if page == Page::Wifi && !crate::wifi::switched_on() {
@@ -527,6 +602,91 @@ impl Setup {
             Page::Place => self.name = crate::device::suggested_name(&self.team),
             Page::Hardware if self.hardware.is_none() => self.hardware = Some(crate::hwcheck::Check::run()),
             _ => {}
+        }
+        // Pages that offer what is already chosen (fine as it is) start on
+        // Next, so Enter goes on and setup goes quickly; Up goes into them.
+        // So does Wi-Fi once there is a network.
+        let online = || crate::sys::address("wlan0").is_some_and(|a| a.contains('.'));
+        if matches!(page, Page::Hardware | Page::Keys | Page::Choices | Page::Power | Page::Look) || (page == Page::Wifi && online()) {
+            self.focus = self.rows();
+        }
+        // The camera moves on to this page's place, carrying the last page's
+        // object off as this one's comes in. Calm, it is simply there.
+        let to = self.slot();
+        if self.calm {
+            self.travel.jump(to);
+            self.leaving = None;
+        } else if to != from_slot {
+            self.leaving = before.map(|o| (o, from_slot));
+            self.travel.set(to);
+        }
+        self.spin.jump(0.0);
+        self.flip.jump(1.0);
+        self.flip_from = None;
+        self.shown = self.hero();
+        self.look.jump(self.rest_yaw());
+    }
+
+    /// Where a page stands along the way through setup, in pages.
+    fn slot(&self) -> f32 {
+        match self.page {
+            Page::Welcome => 0.0,
+            Page::Computer | Page::Receiving => 1.0,
+            Page::Finishing => self.flow.len() as f32 + 1.0,
+            page => self.flow.iter().position(|p| *p == page).map_or(1.0, |i| i as f32 + 1.0),
+        }
+    }
+
+    /// The object a page shows, if it has room for one beside its words:
+    /// the handheld to welcome (the laptop while "From a computer" is
+    /// focused), the network, the team's robot, the globe for the time
+    /// zone, a key, a switch, the battery; the handheld at work on the last
+    /// page, then a trophy. The pages laid out across the whole panel (the
+    /// hardware's parts, the lesson's cards, the look and its picture of
+    /// Home, the code for a computer) have none.
+    fn hero(&self) -> Option<&'static str> {
+        Some(match self.page {
+            Page::Welcome if self.focus == 1 => "laptop",
+            Page::Welcome => "handheld",
+            Page::Computer if self.remote.is_none() => "laptop",
+            Page::Wifi => "wifi",
+            Page::Team => "robot",
+            Page::Place => "globe",
+            Page::Keys => "key",
+            Page::Choices => "toggle",
+            Page::Power => "battery",
+            Page::Finishing if self.entered >= WORKING => "trophy",
+            Page::Finishing => "handheld",
+            _ => return None,
+        })
+    }
+
+    /// Something done: the object in front turns once round.
+    fn celebrate(&mut self) {
+        if !self.calm {
+            self.spin.jump(self.spin.value() - 360.0);
+            self.spin.set(0.0);
+        }
+    }
+
+    /// Something changed: the object in front gives a little turn that way.
+    fn nudge(&mut self, way: f32) {
+        if !self.calm {
+            self.spin.nudge(way * 220.0);
+        }
+    }
+
+    /// Where the object in front rests, turned: the globe by the time zone
+    /// chosen (its offset from UTC, an hour to 15°, see `GLOBE_FACING`), so
+    /// choosing one turns it; the handheld at work turning.
+    fn rest_yaw(&self) -> f32 {
+        match self.page {
+            Page::Place => {
+                let offset = crate::device::zone_offset(&crate::device::zone()).unwrap_or_default();
+                GLOBE_FACING - 15.0 * offset_hours(&offset)
+            }
+            Page::Finishing if self.entered < WORKING && !self.calm => self.entered * 70.0,
+            _ => 0.0,
         }
     }
 
@@ -755,8 +915,9 @@ impl Setup {
         if self.from_settings || (at.is_none() && self.page != Page::Finishing) {
             return;
         }
-        let (w, gap) = (14.0, 4.0);
-        let x0 = W - LEFT - self.flow.len() as f32 * (w + gap) + gap;
+        // Beside the mark, at the left: the right is the objects' place.
+        let (w, gap) = (12.0, 4.0);
+        let x0 = LEFT + 16.0;
         for i in 0..self.flow.len() {
             let color = match at {
                 Some(at) if i == at => CRIMSON,
@@ -768,13 +929,56 @@ impl Setup {
         }
     }
 
+    /// How wide the page's words and rows may be: to the left of its object, or across.
+    fn column(&self) -> f32 {
+        if self.hero().is_some() && self.page != Page::Finishing {
+            COLUMN
+        } else {
+            W - 2.0 * LEFT
+        }
+    }
+
     fn heading(&self, g: &mut Gfx, title: &str, words: &str) {
+        let width = self.column();
         let (a, dx, dy) = self.reveal(0);
-        g.text_alpha(LEFT + dx, TITLE_CY + dy, title, TextStyle::sans(18.0, 600.0), INK_STRONG, a);
+        let style = TextStyle::sans(18.0, 600.0);
+        let title = g.text.fit(title, &style, width);
+        g.text_alpha(LEFT + dx, TITLE_CY + dy, &title, style, INK_STRONG, a);
         let (a, dx, dy) = self.reveal(1);
         let words = self.note.as_deref().unwrap_or(words);
-        let fitted = g.text.fit(words, &TextStyle::sans(11.0, 400.0), W - 2.0 * LEFT);
+        let fitted = g.text.fit(words, &TextStyle::sans(11.0, 400.0), width);
         g.text_alpha(LEFT + dx, WORDS_CY + dy, &fitted, TextStyle::sans(11.0, 400.0), if self.note.is_some() { RING } else { INK_THIN }, a);
+    }
+
+    /// The page's objects: the one in front on its spot, and the last page's
+    /// on its way off. Each stands where the camera now sees it: a page
+    /// ahead is further off to the right (smaller, turned away), a page
+    /// passed has come nearer and gone left; each fades as it leaves the
+    /// middle of the way. A pool of light in the accent lies under each.
+    fn draw_objects(&mut self, g: &mut Gfx) {
+        let travel = self.travel.value();
+        let middle = self.page == Page::Finishing;
+        let spot = if middle { (MIDDLE_X, MIDDLE_Y) } else { (SPOT_X, SPOT_Y) };
+        if let Some((object, slot)) = self.leaving {
+            let d = slot - travel;
+            if d.abs() < 0.999 && !g.calm {
+                stand(g, object, (SPOT_X, SPOT_Y), d, 0.0, 1.0);
+            } else {
+                self.leaving = None;
+            }
+        }
+        let Some(object) = self.hero() else { return };
+        let d = self.slot() - travel;
+        let yaw = self.look.value() + self.spin.value();
+        // Changing on its page: the old one turns away edge on, the new one
+        // turns in from the other side and settles; a little smaller in
+        // between, as a card flipped.
+        let f = self.flip.value();
+        let dip = 1.0 - 0.08 * (std::f32::consts::PI * f.clamp(0.0, 1.0)).sin();
+        match self.flip_from {
+            Some(old) if f < 0.5 && !g.calm => stand(g, old, spot, d, yaw + f * 180.0, dip),
+            _ => stand(g, object, spot, d, yaw - (1.0 - f) * 180.0, dip),
+        }
     }
 
     /// A row: a label at the left and a value at the right, `h` tall.
@@ -790,9 +994,13 @@ impl Setup {
         let label_style = TextStyle::sans(11.5, if focused { 600.0 } else { 500.0 });
         g.text_alpha(r.x + 11.0, r.cy(), label, label_style, INK_STRONG, a);
         if !value.is_empty() {
+            // Beside its name, cut short rather than run into it (a long
+            // time zone in the column beside an object).
             let style = TextStyle::code(9.5);
-            let vw = g.measure(value, style);
-            g.text_alpha(r.right() - 11.0 - vw, r.cy(), value, style, if on { INK_STRONG } else { INK_THIN }, a);
+            let room = r.w - 33.0 - g.measure(label, label_style);
+            let value = g.text.fit(value, &style, room.max(24.0));
+            let vw = g.measure(&value, style);
+            g.text_alpha(r.right() - 11.0 - vw, r.cy(), &value, style, if on { INK_STRONG } else { INK_THIN }, a);
         }
         if focused {
             g.canvas.stroke_rrect(r.inset(-2.0), h * 0.5 + 2.0, 1.5, RING, 0.9 * a);
@@ -1068,7 +1276,7 @@ impl Setup {
                 g.canvas.stroke_rrect(r.inset(-2.0), 11.0, 1.5, RING, 0.9 * a);
             }
         }
-        self.bar(g, "arrows move · enter on keys · tab skip");
+        self.bar(g, if self.focus >= self.rows() { "enter: next · arrows: the parts" } else { "arrows move · enter on keys · tab skip" });
     }
 
     /// How many of what was received have arrived on the page so far.
@@ -1123,17 +1331,46 @@ impl Setup {
 
     fn draw_place(&self, g: &mut Gfx) {
         self.heading(g, "Name and time zone", WORDS_PLACE);
-        let row_w = W - 2.0 * LEFT;
+        let row_w = self.column();
         let shown = if self.focus == 0 { format!("{}▏", self.name) } else { self.name.clone() };
         self.row(g, 0, ROWS_TOP + 6.0, row_w, 21.0, "Name", &shown, true);
-        let value = crate::device::zone_label(&crate::device::zone());
+        // The place on the row (it shares the column with the globe); its
+        // offset on the line under the rows, with the time.
+        let zone = crate::device::zone();
+        let city = crate::device::zone_city(&zone);
+        let value = format!("{} ›", city.split(" · ").next().unwrap_or(&city));
         self.row(g, 1, ROWS_TOP + 30.0, row_w, 21.0, "Time zone", &value, true);
         let (a, dx, dy) = self.reveal(4);
         let now = chrono::Local::now().format(if g.clock.0 { "%H:%M" } else { "%-I:%M %p" }).to_string().to_lowercase();
-        let line = format!("now {now} · clock: {}", crate::device::clock_note());
+        let offset = crate::device::zone_offset(&zone).map(|o| format!(" {o}")).unwrap_or_default();
+        let line = format!("now {now}{offset} · clock: {}", crate::device::clock_note());
+        let line = g.text.fit(&line, &TextStyle::code(9.5), row_w - 11.0);
         g.text_alpha(LEFT + 11.0 + dx, ROWS_TOP + 64.0 + dy, &line, TextStyle::code(9.5), INK_THIN, a);
         self.bar(g, "esc back · tab skip");
     }
+}
+
+/// An object on its spot, `d` pages along the way from the camera (ahead
+/// positive), turned `yaw` and scaled `k` besides. (The spacing, the turn of
+/// 55° a page and the growing are our own tuning.)
+fn stand(g: &mut Gfx, object: &str, spot: (f32, f32), d: f32, yaw: f32, k: f32) {
+    let x = spot.0 + d * SPACING;
+    let near = if d > 0.0 { 1.0 - 0.25 * d } else { 1.0 - 0.3 * d };
+    let scale = (near * k).clamp(0.5, 1.4);
+    // Whole on its spot, gone a page away; one passed goes sooner, before
+    // it crosses the words of the page arriving.
+    let alpha = (1.0 - if d < 0.0 { -1.5 * d } else { d }).clamp(0.0, 1.0);
+    if alpha <= 0.01 {
+        return;
+    }
+    // Setup's ground is dark in either mode, so its objects take the dark
+    // palette (with the accent chosen).
+    let tokens = g.tokens;
+    g.tokens = Tokens::of(g.accent, Tone::Dark);
+    let signal = g.tokens.signal;
+    g.canvas.glow(x, spot.1 + 30.0 * scale, 52.0 * scale, signal, 0.08 * alpha);
+    g.object(object, "hero", x, spot.1, crate::object3d::View::yaw(yaw - d * 55.0), scale, alpha);
+    g.tokens = tokens;
 }
 
 impl Default for Setup {
@@ -1173,10 +1410,15 @@ impl Screen for Setup {
     fn resume(&mut self) {
         // Back from choosing a network or a time zone: say how it went.
         self.entered = 0.0;
-        // Back from joining a network: the next step is Next.
+        // Back from joining a network: the network turns once round, and
+        // setup carries on by itself (see `update`).
         let online = self.wifi.as_ref().is_some_and(|w| w.state().online()) || crate::sys::address("wlan0").is_some_and(|a| a.contains('.'));
         if self.page == Page::Wifi && online {
             self.focus = self.rows();
+            if self.joined.is_none() {
+                self.joined = Some(0.0);
+                self.celebrate();
+            }
         }
         // Back from typing the line: the keys' chip says how it went.
         if let Some(check) = &mut self.hardware {
@@ -1196,6 +1438,10 @@ impl Screen for Setup {
                     let (service, text) = (*service, text.clone());
                     self.keys.set(SERVICES[service].0, &text);
                     self.typing = None;
+                    // A key kept: the key turns once round.
+                    if !text.is_empty() {
+                        self.celebrate();
+                    }
                 }
                 Key::Back => self.typing = None,
                 _ => {}
@@ -1222,9 +1468,15 @@ impl Screen for Setup {
             Key::Down if self.focus + 1 < last => self.focus += 1,
             // The Next button.
             Key::Enter if self.has_next() && self.focus == rows => return self.next(cx),
-            Key::Char(c) if self.page == Page::Team && self.focus == 0 && c.is_ascii_digit() && self.team.len() < 5 => self.team.push(c),
+            // Each digit typed turns the robot a little, as if it looked up.
+            Key::Char(c) if self.page == Page::Team && self.focus == 0 && c.is_ascii_digit() && self.team.len() < 5 => {
+                self.team.push(c);
+                self.nudge(1.0);
+            }
             Key::Backspace if self.page == Page::Team => {
-                self.team.pop();
+                if self.team.pop().is_some() {
+                    self.nudge(-1.0);
+                }
             }
             Key::Enter if self.page == Page::Team => return self.next(cx),
             // The name: typed as a network will take it (lower case, a hyphen
@@ -1260,24 +1512,41 @@ impl Screen for Setup {
                 }
                 (Page::Wifi, _) => return self.next(cx),
                 (Page::Keys, row) => self.typing = Some((row, String::new())),
-                (Page::Choices, row) => self.toggle_choice(row, cx),
-                (Page::Power, row) => self.change_power(row, 1, cx),
+                (Page::Choices, row) => {
+                    self.toggle_choice(row, cx);
+                    self.nudge(1.0);
+                }
+                (Page::Power, row) => {
+                    self.change_power(row, 1, cx);
+                    self.nudge(1.0);
+                }
                 (Page::Look, row) => self.change_look(row, 1, cx),
                 _ => {}
             },
             Key::Left | Key::Right if self.page == Page::Power && self.focus < rows => {
-                self.change_power(self.focus, if key == Key::Left { -1 } else { 1 }, cx);
+                let step = if key == Key::Left { -1 } else { 1 };
+                self.change_power(self.focus, step, cx);
+                self.nudge(step as f32);
             }
             Key::Left | Key::Right if self.page == Page::Look && self.focus < rows => {
                 self.change_look(self.focus, if key == Key::Left { -1 } else { 1 }, cx);
             }
-            Key::Left | Key::Right if self.page == Page::Choices && self.focus < rows => self.toggle_choice(self.focus, cx),
+            Key::Left | Key::Right if self.page == Page::Choices && self.focus < rows => {
+                self.toggle_choice(self.focus, cx);
+                self.nudge(if key == Key::Left { -1.0 } else { 1.0 });
+            }
             _ => {}
         }
         Nav::Stay
     }
 
     fn update(&mut self, cx: &mut Cx) -> Nav {
+        // A network joined: on to the next page by itself, once its object
+        // has turned round.
+        if self.page == Page::Wifi && self.joined.is_some_and(|at| self.entered - at >= JOINED_HOLD) {
+            self.joined = None;
+            return self.next(cx);
+        }
         let Some(answers) = self.remote.as_mut().and_then(|r| r.take()) else { return Nav::Stay };
         self.take_answers(answers, cx);
         Nav::Stay
@@ -1286,12 +1555,36 @@ impl Screen for Setup {
     fn tick(&mut self, dt: f32) -> bool {
         self.entered += dt;
         self.clock += dt;
+        // The object in front changed on its page: it flips to the new one.
+        let hero = self.hero();
+        if hero != self.shown {
+            if self.calm || self.shown.is_none() || hero.is_none() {
+                self.flip.jump(1.0);
+                self.flip_from = None;
+            } else {
+                self.flip_from = self.shown;
+                self.flip.jump(0.0);
+                self.flip.set(1.0);
+            }
+            self.shown = hero;
+        }
+        // Where it rests, the short way round to it.
+        let now = self.look.value();
+        let want = now + ((self.rest_yaw() - now + 180.0).rem_euclid(360.0) - 180.0);
+        if (self.look.target() - want).abs() > 0.01 {
+            if self.calm {
+                self.look.jump(want);
+            } else {
+                self.look.set(want);
+            }
+        }
+        let objects = self.travel.tick(dt) | self.spin.tick(dt) | self.flip.tick(dt) | self.look.tick(dt) | (self.page == Page::Finishing) | self.joined.is_some();
         // A page's elements have all arrived within about half a second, and
         // the last page runs on its own; otherwise it is drawn again only
         // when what it shows has changed: the computer page's status, the
         // Wi-Fi page's connection. The lesson's first card blinks its
         // lights, and a key just pressed on the second fades.
-        let mut changed = self.entered < 0.8 || self.page == Page::Finishing;
+        let mut changed = self.entered < 0.8 || objects;
         if self.page == Page::Lesson {
             changed |= self.lesson.card() == Card::Modifiers || self.lesson.pressed.iter().any(|p| self.clock - p < 0.4);
         }
@@ -1346,23 +1639,26 @@ impl Screen for Setup {
     }
 
     fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
+        self.calm = g.calm;
         g.canvas.px.copy_from_slice(&self.ground);
+        self.draw_objects(g);
         self.header(g);
-        let row_w = W - 2.0 * LEFT;
+        let row_w = self.column();
         match self.page {
             Page::Welcome => {
                 let (a, dx, dy) = self.reveal(0);
                 g.text_alpha(LEFT + dx, TITLE_CY + 2.0 + dy, "Hi.", TextStyle::display(26.0), INK_STRONG, a);
+                // The line under it says where the focused way leads.
                 let (a, dx, dy) = self.reveal(1);
-                g.text_alpha(LEFT + dx, WORDS_CY + 4.0 + dy, WORDS_WELCOME, TextStyle::sans(11.0, 400.0), INK_THIN, a);
-                let rows = [("Set up here", "on the keys"), ("Set up from a computer", "faster typing"), ("Set up later", "go to Home")];
-                for (i, (label, value)) in rows.iter().enumerate() {
-                    self.row(g, i, ROWS_TOP + 6.0 + i as f32 * 24.0, row_w, 21.0, label, value, false);
+                let words = WAYS.get(self.focus).map_or("", |w| w.1);
+                g.text_alpha(LEFT + dx, WORDS_CY + 4.0 + dy, words, TextStyle::sans(11.0, 400.0), INK_THIN, a);
+                for (i, (label, _)) in WAYS.iter().enumerate() {
+                    self.row(g, i, ROWS_TOP + 6.0 + i as f32 * 24.0, row_w, 21.0, label, "", false);
                 }
                 self.bar(g, "enter chooses");
             }
             Page::Computer => {
-                self.heading(g, "Set up from a computer", if self.remote.is_some() { WORDS_COMPUTER } else { WORDS_NO_NETWORK });
+                self.heading(g, "From a computer", if self.remote.is_some() { WORDS_COMPUTER } else { WORDS_NO_NETWORK });
                 let (a, dx, dy) = self.reveal(2);
                 match &self.remote {
                     Some(remote) => {
@@ -1401,7 +1697,8 @@ impl Screen for Setup {
                 }
                 if let Ok(team) = self.team.parse::<u32>() {
                     let (a, dx, dy) = self.reveal(3);
-                    g.text_alpha(field.right() + 14.0 + dx, field.cy() + dy, &format!("robot at {}", crate::screens::resolve_address(&team.to_string())), TextStyle::code(9.5), INK_THIN, a);
+                    let line = format!("robot at {}", crate::screens::resolve_address(&team.to_string()));
+                    g.text_alpha(LEFT + 2.0 + dx, field.bottom() + 14.0 + dy, &line, TextStyle::code(9.5), INK_THIN, a);
                 }
                 self.bar(g, "esc back · tab skip");
             }
@@ -1416,10 +1713,20 @@ impl Screen for Setup {
             }
             Page::Keys => {
                 let words = if self.typing.is_some() { WORDS_TYPING } else { WORDS_KEYS };
-                self.heading(g, "Keys for online services", words);
+                self.heading(g, "Keys for services", words);
                 for (i, (name, label)) in SERVICES.iter().take(crate::keys::SETUP_SERVICES).enumerate() {
                     let value = match &self.typing {
-                        Some((row, text)) if *row == i => format!("{}▏", text.chars().rev().take(18).collect::<Vec<_>>().into_iter().rev().collect::<String>()),
+                        // The end of what is typed, as much as fits beside the service's name.
+                        Some((row, text)) if *row == i => {
+                            let room = row_w - 33.0 - g.measure(label, TextStyle::sans(11.5, 600.0));
+                            let chars: Vec<char> = text.chars().collect();
+                            let mut take = chars.len().min(18);
+                            let tail = |n: usize| format!("{}▏", chars[chars.len() - n..].iter().collect::<String>());
+                            while take > 0 && g.measure(&tail(take), TextStyle::code(9.5)) > room {
+                                take -= 1;
+                            }
+                            tail(take)
+                        }
                         _ => self.keys.shown(name),
                     };
                     // Four rows, spaced as Choices' four are.
@@ -1430,17 +1737,17 @@ impl Screen for Setup {
             Page::Choices => {
                 let on = [g.open_robot, g.match_report, crate::ssh_enabled(), g.calm];
                 // The line under the title explains whichever choice is focused.
-                let words = CHOICES.get(self.focus).map_or(WORDS_LOOK, |c| c.1);
+                let words = CHOICES.get(self.focus).map_or(WORDS_DEFAULTS, |c| c.1);
                 self.heading(g, "Choose your settings", words);
                 for (i, ((label, _), on)) in CHOICES.iter().zip(on).enumerate() {
                     self.row(g, i, ROWS_TOP + i as f32 * 20.0, row_w, 17.0, label, if on { "on" } else { "off" }, on);
                 }
-                self.bar(g, "enter switches · esc back");
+                self.bar(g, if self.focus == self.rows() { "enter: next · ↑ to change" } else { "enter switches · esc back" });
             }
             Page::Hardware => self.draw_hardware(g),
             Page::Receiving => self.draw_receiving(g),
             Page::Power => {
-                let words = POWER.get(self.focus).map_or(WORDS_LOOK, |p| p.1);
+                let words = POWER.get(self.focus).map_or(WORDS_DEFAULTS, |p| p.1);
                 self.heading(g, "Battery and power", words);
                 let on = [g.screen_off != 0, g.battery.saver_auto, g.battery.wifi_sleeps, g.lift_wake];
                 for (i, ((label, _), on)) in POWER.iter().zip(on).enumerate().take(self.power_rows()) {
@@ -1450,7 +1757,7 @@ impl Screen for Setup {
                     };
                     self.row(g, i, ROWS_TOP + i as f32 * 20.0, row_w, 17.0, label, &value, on);
                 }
-                self.bar(g, "enter switches · ← → time · esc back");
+                self.bar(g, if self.focus == self.rows() { "enter: next · ↑ to change" } else { "enter switches · ← → time · esc back" });
             }
             Page::Look => {
                 self.heading(g, "Make it yours", WORDS_LOOK);
@@ -1482,24 +1789,24 @@ impl Screen for Setup {
                     }
                 }
                 self.draw_look_preview(g, (accent, light, g.home));
-                self.bar(g, "← → change · esc back");
+                self.bar(g, if self.focus == self.rows() { "enter: finish · ↑ to change" } else { "← → change · esc back" });
             }
             Page::Finishing => {
                 let done = self.entered >= WORKING;
                 let next = if self.from_settings { "Back to Settings." } else { "Home is next." };
                 let (title, words) = if done { ("You're all set.", next) } else { ("Just a moment…", "Putting your choices in place.") };
-                // The mark in the middle, and under it a turning arc while it works.
-                brand::mark(g, W * 0.5, 58.0, 30.0, CRIMSON, 1.0);
-                g.canvas.glow(W * 0.5, 58.0, 44.0, CRIMSON, 0.22);
+                // The handheld in the middle, turning while it works; then
+                // the trophy turns in (`draw_objects`). Calm, the handheld
+                // stands still, so a small arc says it is working.
                 let style = TextStyle::sans(17.0, 600.0);
                 let tw = g.measure(title, style);
-                g.text_alpha((W - tw) * 0.5, 100.0, title, style, INK_STRONG, 1.0);
+                g.text_alpha((W - tw) * 0.5, 120.0, title, style, INK_STRONG, 1.0);
                 let small = TextStyle::sans(11.0, 400.0);
                 let ww = g.measure(words, small);
-                g.text_alpha((W - ww) * 0.5, 118.0, words, small, INK_THIN, 1.0);
-                if !done {
+                g.text_alpha((W - ww) * 0.5, 137.0, words, small, INK_THIN, 1.0);
+                if !done && g.calm {
                     let spin = self.entered * 5.2;
-                    g.canvas.arc(W * 0.5, 145.0, 7.0, 2.0, spin, 1.4 + 0.8 * (self.entered * 3.1).sin(), CRIMSON, 1.0);
+                    g.canvas.arc(W * 0.5, 156.0, 6.0, 2.0, spin, 1.4 + 0.8 * (self.entered * 3.1).sin(), CRIMSON, 1.0);
                 }
             }
         }
@@ -1514,35 +1821,53 @@ mod tests {
     fn every_line_of_setup_fits_the_panel_whole() {
         let mut g = Gfx::new(Tokens::dark());
         let words = TextStyle::sans(11.0, 400.0);
-        let lines = [
-            WORDS_WELCOME,
-            WORDS_COMPUTER,
-            WORDS_NO_NETWORK,
-            WORDS_OR_CABLE,
-            WORDS_OPENS_ITSELF,
-            WORDS_TEAM,
-            WORDS_PLACE,
-            WORDS_WIFI,
-            WORDS_KEYS,
-            WORDS_TYPING,
-            WORDS_LOOK,
-            WORDS_HARDWARE,
-        ];
-        for line in lines.iter().chain(CHOICES.iter().map(|c| &c.1)).chain(POWER.iter().map(|p| &p.1)) {
+        // Pages laid out across the panel.
+        for line in [WORDS_COMPUTER, WORDS_LOOK, WORDS_HARDWARE] {
             let w = g.measure(line, words);
             assert!(w <= W - 2.0 * LEFT, "{line:?} is {w:.0} px, wider than {}", W - 2.0 * LEFT);
         }
+        // Pages with their object beside them: the words, and every title, in the column left of it.
+        let beside = [WORDS_NO_NETWORK, WORDS_OR_CABLE, WORDS_OPENS_ITSELF, WORDS_TEAM, WORDS_PLACE, WORDS_WIFI, WORDS_KEYS, WORDS_TYPING, WORDS_DEFAULTS];
+        // (Every one too wide is listed, not just the first.)
+        let mut wide = Vec::new();
+        let ways = WAYS.iter().map(|w| w.1);
+        for line in beside.into_iter().chain(ways).chain(CHOICES.iter().map(|c| c.1)).chain(POWER.iter().map(|p| p.1)) {
+            let w = g.measure(line, words);
+            if w > COLUMN {
+                wide.push(format!("{line:?} is {w:.0} px"));
+            }
+        }
+        let title = TextStyle::sans(18.0, 600.0);
+        for t in ["Connect to Wi-Fi?", "Which team is it for?", "Name and time zone", "Keys for services", "Choose your settings", "Battery and power", "From a computer"] {
+            let w = g.measure(t, title);
+            if w > COLUMN {
+                wide.push(format!("{t:?} is {w:.0} px"));
+            }
+        }
         // The choices' names fit their rows beside "off", the power page's
-        // beside its longest value.
+        // beside its longest value, the welcome's ways on their own.
         let label = TextStyle::sans(11.5, 600.0);
-        for (name, _) in CHOICES {
+        for (name, _) in CHOICES.iter().chain(WAYS.iter()) {
             let w = g.measure(name, label) + 22.0 + g.measure("off", TextStyle::code(9.5)) + 11.0;
-            assert!(w <= W - 2.0 * LEFT, "{name:?} crowds its row: {w:.0} px");
+            if w > COLUMN {
+                wide.push(format!("{name:?} crowds its row: {w:.0} px"));
+            }
         }
+        let longest = crate::standby::SCREEN_OFF_CHOICES.iter().map(|v| g.measure(&format!("‹ {} ›", crate::standby::screen_off_name(*v)), TextStyle::code(9.5))).fold(0.0, f32::max);
         for (name, _) in POWER {
-            let w = g.measure(name, label) + 22.0 + g.measure("‹ never ›", TextStyle::code(9.5)) + 11.0;
-            assert!(w <= W - 2.0 * LEFT, "{name:?} crowds its row: {w:.0} px");
+            let w = g.measure(name, label) + 22.0 + longest + 11.0;
+            if w > COLUMN {
+                wide.push(format!("{name:?} crowds its row: {w:.0} px"));
+            }
         }
+        // The keys' rows: each service beside a key shown by its end.
+        for (_, service) in SERVICES.iter().take(crate::keys::SETUP_SERVICES) {
+            let w = g.measure(service, label) + 22.0 + g.measure("set · …abcd", TextStyle::code(9.5)) + 11.0;
+            if w > COLUMN {
+                wide.push(format!("{service:?} crowds its row: {w:.0} px"));
+            }
+        }
+        assert!(wide.is_empty(), "wider than the column's {COLUMN}: {wide:#?}");
         // Each part's chip on the hardware page, and what the line says of it.
         let cw = (W - 2.0 * LEFT - 5.0 * (CHIPS_ACROSS - 1) as f32) / CHIPS_ACROSS as f32;
         for part in crate::hwcheck::PARTS {
@@ -1679,6 +2004,96 @@ mod tests {
         }
         press(&mut setup, &mut settings, &mut robot, Key::Back);
         assert_eq!(setup.page, Page::Welcome);
+    }
+
+    #[test]
+    fn pages_of_choices_already_made_start_on_next_so_enter_goes_on() {
+        let (mut setup, mut settings, mut robot) = on_the_lesson();
+        for page in [Page::Keys, Page::Choices, Page::Power, Page::Look, Page::Hardware] {
+            setup.go(page, true);
+            assert_eq!(setup.focus, setup.rows(), "{page:?} starts on Next");
+        }
+        // Enter, Enter, Enter: through keys, choices and power to the look.
+        setup.go(Page::Keys, true);
+        for _ in 0..3 {
+            press(&mut setup, &mut settings, &mut robot, Key::Enter);
+        }
+        assert_eq!(setup.page, Page::Look);
+        // Up goes into the rows.
+        press(&mut setup, &mut settings, &mut robot, Key::Up);
+        assert_eq!(setup.focus, setup.rows() - 1);
+        // A page asking for something starts on it.
+        setup.go(Page::Team, true);
+        assert_eq!(setup.focus, 0);
+    }
+
+    #[test]
+    fn once_wi_fi_joins_setup_carries_on_by_itself() {
+        let (mut setup, mut settings, mut robot) = on_the_lesson();
+        setup.go(Page::Wifi, true);
+        // Joined, back from the list of networks.
+        setup.joined = Some(0.0);
+        setup.celebrate();
+        assert!(setup.spin.value() < -300.0, "its object turns once round: {}", setup.spin.value());
+        let mut say = None;
+        let mut cx = Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true };
+        setup.tick(0.5);
+        assert!(matches!(setup.update(&mut cx), Nav::Stay));
+        assert_eq!(setup.page, Page::Wifi, "while it turns, the page stays");
+        setup.tick(JOINED_HOLD);
+        setup.update(&mut cx);
+        assert_eq!(setup.page, Page::Hardware, "then on by itself");
+    }
+
+    #[test]
+    fn each_page_has_its_object_and_the_way_through_moves_between_them() {
+        let (mut setup, ..) = on_the_lesson();
+        setup.go(Page::Welcome, true);
+        assert_eq!(setup.hero(), Some("handheld"));
+        setup.focus = 1;
+        assert_eq!(setup.hero(), Some("laptop"), "from a computer");
+        setup.tick(0.01);
+        assert_eq!(setup.flip_from, Some("handheld"), "the handheld turns away for it");
+        setup.focus = 0;
+        let pages = [(Page::Wifi, "wifi"), (Page::Team, "robot"), (Page::Place, "globe"), (Page::Keys, "key"), (Page::Choices, "toggle"), (Page::Power, "battery")];
+        for (page, object) in pages {
+            setup.go(page, true);
+            assert_eq!(setup.hero(), Some(object), "{page:?}");
+            assert!(crate::object3d::Objects::shipped().has(object), "{object} is in the pack");
+        }
+        for page in [Page::Hardware, Page::Lesson, Page::Look] {
+            setup.go(page, true);
+            assert_eq!(setup.hero(), None, "{page:?} is laid out across the panel");
+        }
+        // On from the team to the place: the robot is carried off, the camera glides on.
+        setup.go(Page::Team, true);
+        for _ in 0..80 {
+            setup.tick(0.025);
+        }
+        let at = setup.travel.value();
+        setup.go(Page::Place, true);
+        assert_eq!(setup.leaving.map(|l| l.0), Some("robot"));
+        setup.tick(0.05);
+        assert!(setup.travel.value() > at && setup.travel.value() < at + 1.0, "on its way");
+        // Calm: there at once, nothing carried.
+        setup.calm = true;
+        setup.go(Page::Keys, true);
+        assert_eq!(setup.travel.value(), setup.slot());
+        assert!(setup.leaving.is_none());
+        // The last page: the handheld at work, then the trophy.
+        setup.go(Page::Finishing, true);
+        assert_eq!(setup.hero(), Some("handheld"));
+        setup.tick(WORKING + 0.1);
+        assert_eq!(setup.hero(), Some("trophy"));
+    }
+
+    #[test]
+    fn the_globe_turns_to_the_time_zone() {
+        assert_eq!(offset_hours("UTC"), 0.0);
+        assert_eq!(offset_hours("UTC−5"), -5.0);
+        assert_eq!(offset_hours("UTC+8"), 8.0);
+        assert_eq!(offset_hours("UTC+5:30"), 5.5);
+        assert_eq!(offset_hours("UTC-3:30"), -3.5);
     }
 
     #[test]
