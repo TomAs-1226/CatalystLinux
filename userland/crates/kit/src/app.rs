@@ -613,7 +613,7 @@ pub fn gallery(first: Box<dyn Page>, look: Look, scenes: &[Scene], dir: &Path) -
         }
         runner.draw();
         let path = dir.join(format!("{name}.png"));
-        crate::panel::sim::save_png(&runner.ui.canvas, &path, 3)?;
+        crate::panel::picture::save_png(&runner.ui.canvas, &path, 3)?;
         saved.push(path);
     }
     if let Some(name) = runner.ui.missing_icons().iter().next() {
@@ -664,7 +664,8 @@ pub fn launch<P: Page + 'static>(make: impl Fn() -> P, scenes: &[Scene]) {
         }
         return;
     }
-    let _ = value;
+    // (On the handheld there is no gallery to draw.)
+    let _ = (value, scenes);
     run(make());
 }
 

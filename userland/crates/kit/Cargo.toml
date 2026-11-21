@@ -22,8 +22,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
-# On a computer: a window to run an app in, and PNGs of its screens. Not
-# built for the handheld.
+# On a computer: PNGs of an app's screens (its gallery), and on Windows and
+# macOS a window to run it in (on Linux it runs on a framebuffer, or with
+# nothing to show). Not built for the handheld.
 [target.'cfg(not(target_arch = "aarch64"))'.dependencies]
-minifb = { version = "0.29", default-features = false }
 png = "0.18"
+[target.'cfg(not(any(target_arch = "aarch64", target_os = "linux")))'.dependencies]
+minifb = { version = "0.29", default-features = false }

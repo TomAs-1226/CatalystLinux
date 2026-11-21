@@ -846,17 +846,17 @@ impl crate::spotlight::Provider for Finder {
 // ----------------------------------------------------------------- demo ---
 
 /// The catalogue as the simulator's gallery shows it, with no network:
-/// this project's own apps, as packed (sizes as packed on the build machine).
+/// this project's own apps, at the sizes they pack to for the handheld.
 fn demo() -> Vec<Listing> {
     let apps: [(&str, &str, Option<&str>, u64); 8] = [
-        (include_str!("../../../../catalyst-apps/src/sudoku/app"), "sudoku", None, 742_000),
-        (include_str!("../../../../catalyst-apps/src/battleship/app"), "battleship", Some(include_str!("../../../../catalyst-apps/src/battleship/icon.svg")), 761_000),
-        (include_str!("../../../../catalyst-apps/src/typing/app"), "typing", Some(include_str!("../../../../catalyst-apps/src/typing/icon.svg")), 748_000),
-        (include_str!("../../../../catalyst-apps/src/orbits/app"), "orbits", Some(include_str!("../../../../catalyst-apps/src/orbits/icon.svg")), 755_000),
-        (include_str!("../../../../catalyst-apps/src/hello/app"), "hello", None, 731_000),
-        (include_str!("../../../../catalyst-apps/src/ping-robot/app"), "ping-robot", None, 1_000),
-        (include_str!("../../../../catalyst-apps/src/network/app"), "network", None, 1_000),
-        (include_str!("../../../../catalyst-apps/src/storage/app"), "storage", None, 1_000),
+        (include_str!("../../../../catalyst-apps/src/sudoku/app"), "sudoku", None, 1_382 * 1024),
+        (include_str!("../../../../catalyst-apps/src/battleship/app"), "battleship", Some(include_str!("../../../../catalyst-apps/src/battleship/icon.svg")), 1_393 * 1024),
+        (include_str!("../../../../catalyst-apps/src/typing/app"), "typing", Some(include_str!("../../../../catalyst-apps/src/typing/icon.svg")), 1_375 * 1024),
+        (include_str!("../../../../catalyst-apps/src/orbits/app"), "orbits", Some(include_str!("../../../../catalyst-apps/src/orbits/icon.svg")), 1_387 * 1024),
+        (include_str!("../../../../catalyst-apps/src/hello/app"), "hello", None, 1_363 * 1024),
+        (include_str!("../../../../catalyst-apps/src/ping-robot/app"), "ping-robot", None, 2 * 1024),
+        (include_str!("../../../../catalyst-apps/src/network/app"), "network", None, 2 * 1024),
+        (include_str!("../../../../catalyst-apps/src/storage/app"), "storage", None, 2 * 1024),
     ];
     let listings: Vec<Listing> = apps
         .iter()

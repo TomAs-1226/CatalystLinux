@@ -66,11 +66,11 @@ pub fn open() -> Box<dyn Panel> {
             }
         }
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(any(target_arch = "aarch64", target_os = "linux")))]
     {
         Box::new(sim::Window::open())
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "aarch64", target_os = "linux"))]
     {
         Box::new(Headless::default())
     }
@@ -310,7 +310,7 @@ pub mod device {
 
 // ---------------------------------------------------------------- window ---
 
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(not(any(target_arch = "aarch64", target_os = "linux")))]
 pub mod sim {
     use super::*;
     use crate::keys::{Hold, Repeat};
@@ -426,6 +426,13 @@ pub mod sim {
             self.window.update_with_buffer(&self.panel, w, canvas.h as usize).ok();
         }
     }
+}
+
+// --------------------------------------------------------------- picture ---
+
+#[cfg(not(target_arch = "aarch64"))]
+pub mod picture {
+    use super::*;
 
     /// The panel as a PNG, each pixel `scale` pixels square, as the shell's
     /// own screenshots are taken (the frame as drawn, before the panel's
