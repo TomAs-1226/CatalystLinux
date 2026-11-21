@@ -45,20 +45,51 @@ pub fn get(url: &str) -> Result<Vec<u8>, String> {
 
 /// Download a URL to a file, carrying on from wherever an earlier download
 /// stopped. `progress` is told the bytes so far, now and then.
+///
+/// A connection that drops part-way (Wi-Fi blinking, a server closing early:
+/// curl's "end of response with … bytes missing") is picked up again from
+/// where it stopped, for as long as each try gets further; only one that
+/// makes no headway STALLS times running is given up on.
 pub fn download(url: &str, to: &Path, size: u64, progress: &mut dyn FnMut(u64)) -> Result<(), String> {
-    if std::fs::metadata(to).is_ok_and(|m| m.len() == size) {
-        return Ok(());
-    }
-    if std::fs::metadata(to).is_ok_and(|m| m.len() > size) {
+    const STALLS: u32 = 6;
+    let have = |to: &Path| std::fs::metadata(to).map_or(0, |m| m.len());
+    if have(to) > size {
         std::fs::remove_file(to).ok();
     }
+    let mut stalls = 0;
+    let mut last = None;
+    loop {
+        if have(to) == size {
+            progress(size);
+            return Ok(());
+        }
+        let before = have(to);
+        let status = run_once(url, to, &mut *progress)?;
+        // 33: the file was already whole, so there was nothing to resume.
+        if (status.success() || status.code() == Some(33)) && have(to) == size {
+            progress(size);
+            return Ok(());
+        }
+        if have(to) > size {
+            std::fs::remove_file(to).ok();
+        }
+        stalls = if have(to) > before { 0 } else { stalls + 1 };
+        last = Some(status);
+        if stalls >= STALLS {
+            return Err(format!("the download stopped ({})", last.map_or_else(String::new, |s| s.to_string())));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2 + 3 * u64::from(stalls)));
+    }
+}
+
+/// One go at a download with curl, resuming the file as it stands.
+fn run_once(url: &str, to: &Path, progress: &mut dyn FnMut(u64)) -> Result<std::process::ExitStatus, String> {
     let mut child = curl().args(["-C", "-", "-o"]).arg(to).arg(url).spawn().map_err(|e| format!("could not run curl: {e}"))?;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
                 progress(std::fs::metadata(to).map_or(0, |m| m.len()));
-                // 33: the file was already whole, so there was nothing to resume.
-                return if status.success() || status.code() == Some(33) { Ok(()) } else { Err(format!("the download stopped ({status})")) };
+                return Ok(status);
             }
             Ok(None) => {
                 progress(std::fs::metadata(to).map_or(0, |m| m.len()));
@@ -101,4 +132,33 @@ pub fn latest(source: &str, channel: &str) -> Result<Release, String> {
 /// A file of a release by name: listed, or (a plain folder) under its base.
 pub fn file_url(release: &Release, name: &str) -> Option<String> {
     release.url(name).map(str::to_owned).or_else(|| release.url("*").map(|base| format!("{base}{name}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_download_cut_short_carries_on_from_where_it_stopped() {
+        if !std::process::Command::new("curl").arg("--version").output().is_ok_and(|o| o.status.success()) {
+            eprintln!("no curl here: skipped");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("catalyst-download-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let whole: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        let source = dir.join("source.bin");
+        std::fs::write(&source, &whole).unwrap();
+        // What an earlier try got before the connection dropped.
+        let to = dir.join("got.bin");
+        std::fs::write(&to, &whole[..120_000]).unwrap();
+        let url = format!("file:///{}", source.to_string_lossy().replace('\\', "/").trim_start_matches('/'));
+        let mut seen = Vec::new();
+        download(&url, &to, whole.len() as u64, &mut |n| seen.push(n)).unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), whole, "picked up where it stopped, whole and in order");
+        assert_eq!(seen.last(), Some(&(whole.len() as u64)));
+        // Whole already: nothing to fetch.
+        download(&url, &to, whole.len() as u64, &mut |_| {}).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
