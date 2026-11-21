@@ -52,7 +52,7 @@ struct App {
     open: fn(&Robot) -> Box<dyn Screen>,
 }
 
-const APPS: [App; 35] = [
+const APPS: [App; 36] = [
     App { icon: "smart_toy", name: "Robot", open: |_| Box::new(RobotScreen::default()) },
     App { icon: "monitor_heart", name: "Health", open: |_| Box::new(Health::default()) },
     App { icon: "description", name: "Logs", open: |_| Box::new(LogsScreen::default()) },
@@ -94,6 +94,8 @@ const APPS: [App; 35] = [
         name: "Web",
         open: |_| Box::new(crate::terminal::Terminal::running("Web", "lynx -accept_all_cookies -nopause file:///usr/share/catalyst/web.html", crate::connect::session_dir())),
     },
+    // YouTube Music, playing on behind every other app (music.rs).
+    App { icon: "music_note", name: "Music", open: |_| Box::new(crate::music::MusicScreen::new()) },
     App { icon: "settings", name: "Settings", open: |_| Box::new(SettingsApp::new()) },
 ];
 
@@ -469,6 +471,7 @@ impl Home {
             "Assistant" => crate::ai::tile(),
             "Browse" => ("read the web".into(), None),
             "Web" => ("pages as text".into(), None),
+            "Music" => crate::music::tile(),
             "Logs" => {
                 let rows = robot.logs.list();
                 let worst = rows.iter().filter_map(|r| r.digest.as_ref()).map(|d| d.headline().0).min();
@@ -3379,7 +3382,7 @@ mod tests {
         pretend(Some(Found::Nothing));
         let shown = builtin(&Home::new());
         assert!(!shown.iter().any(|n| n == "Level" || n == "Compass"), "{shown:?}");
-        assert_eq!(shown.len(), 33, "the thirty-three the emulator's run counts on (all but Level and Compass are on every unit)");
+        assert_eq!(shown.len(), 34, "the thirty-four the emulator's run counts on (all but Level and Compass are on every unit)");
         assert_eq!(shown.last().map(String::as_str), Some("Settings"), "Settings stays last");
         assert_eq!(builtin_apps().position(|(_, _, n)| n == "Terminal"), Some(8), "Terminal where it was");
         assert!(!builtin_apps().any(|(_, _, n)| n == "Level"), "nor in search");

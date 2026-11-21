@@ -2277,6 +2277,7 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     save(&mut shell, "120b-files-hex-found");
     std::fs::remove_dir_all(&notes_dir).ok();
     sound_shots(&mut shell, &press, &save, &settle);
+    music_shots(&mut shell, &press, &save, &settle);
     let written =std::fs::read_dir(dir).map_or(0, |d| d.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "png")).count());
     println!("{written} screens in {}, {frames} frames at {:.2} ms each", dir.display(), started.elapsed().as_secs_f64() * 1e3 / frames as f64);
     // An icon asked for and never built in draws as nothing: a blank where
@@ -2376,6 +2377,83 @@ fn sound_shots(shell: &mut Shell, press: &dyn Fn(&mut Shell, &[Key], usize), sav
     if !missing.is_empty() {
         eprintln!("icons asked for that are not built in: {}", missing.iter().cloned().collect::<Vec<_>>().join(", "));
         std::process::exit(1);
+    }
+}
+
+/// The tour's Music: the start page's quick picks, a search typed and found,
+/// a song playing with its cover and the queue after it, paused from Home's
+/// keys, and the account page.
+#[cfg(not(target_arch = "aarch64"))]
+fn music_shots(shell: &mut Shell, press: &dyn Fn(&mut Shell, &[Key], usize), save: &dyn Fn(&mut Shell, &str), settle: &dyn Fn(&mut Shell, usize)) {
+    use Key::*;
+    let real_time = |shell: &mut Shell, seconds: f32| {
+        let until = Instant::now() + Duration::from_secs_f32(seconds);
+        while Instant::now() < until {
+            settle(shell, 6);
+            std::thread::sleep(Duration::from_millis(40));
+        }
+    };
+    *shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(shell, 100);
+    press(shell, &vec![Right; steps_to("Music")], 12);
+    settle(shell, 60);
+    save(shell, "124-home-music");
+    press(shell, &[Enter], 30);
+    real_time(shell, 0.9);
+    settle(shell, 60);
+    save(shell, "124b-music-start");
+    // Typing searches.
+    for c in "juniper".chars() {
+        shell.key(Char(c));
+    }
+    settle(shell, 30);
+    save(shell, "124c-music-search-typing");
+    press(shell, &[Enter], 20);
+    real_time(shell, 1.1);
+    settle(shell, 60);
+    save(shell, "124d-music-search-found");
+    // Played: the song and its radio after it.
+    press(shell, &[Enter], 30);
+    real_time(shell, 0.2);
+    save(shell, "124e-music-loading");
+    real_time(shell, 3.2);
+    settle(shell, 30);
+    save(shell, "124f-music-playing");
+    press(shell, &[Down], 60);
+    save(shell, "124g-music-up-next");
+    // Over Home: the tile says what plays, and Fn + Q pauses it.
+    press(shell, &[Back, Back], 60);
+    press(shell, &[Media(platform::Media::PlayPause)], 20);
+    save(shell, "124h-music-paused-from-home");
+    settle(shell, 200);
+    press(shell, &[Enter], 60);
+    press(shell, &[Up], 60);
+    save(shell, "124i-music-start-playing");
+    press(shell, &[End], 30);
+    press(shell, &[Enter], 60);
+    real_time(shell, 0.6);
+    settle(shell, 30);
+    save(shell, "124j-music-account");
+    // Light, large text: the now-playing page must still fit.
+    let mut light = Shell::new(Robot::demo());
+    (light.settings.theme, light.settings.light, light.settings.text) = (look::Theme::Bezel, true, gfx::TextSize::Large);
+    light.apply_settings();
+    settle(&mut light, 100);
+    light.show(Box::new(music::MusicScreen::new()));
+    real_time(&mut light, 0.5);
+    settle(&mut light, 60);
+    save(&mut light, "124k-music-paused-bezel-light-large");
+    // Its account page: the warning always whole.
+    press(&mut light, &[Up, End, Enter], 40);
+    real_time(&mut light, 0.4);
+    settle(&mut light, 40);
+    save(&mut light, "124l-music-account-bezel-light-large");
+    for missing in [light.gfx.missing_icons(), shell.gfx.missing_icons()] {
+        if !missing.is_empty() {
+            eprintln!("icons asked for that are not built in: {}", missing.iter().cloned().collect::<Vec<_>>().join(", "));
+            std::process::exit(1);
+        }
     }
 }
 

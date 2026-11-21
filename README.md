@@ -15,7 +15,7 @@ windows that grow out of tiles whenever it is there.
 | `userland/crates/bezel` | Bezel on the CPU: tonal surfaces, the two type voices, Material Symbols, and the full glass pass (refraction, frost, edge light, groups, shadow). |
 | `userland/crates/nt4` | A NetworkTables 4.1 client: one thread, read-only, reconnects on its own. |
 | `userland/crates/apriltag` | AprilTag detection: AprilRobotics' C library (3.4.5, BSD 2-Clause, vendored with the 36h11 family FRC uses) behind a small flat shim, with each tag's pose. |
-| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, Camera, Photos, AprilTag, Graphs, Pit, Remote, Level, Compass, Weather, Calculator, Clock, Notes, Units, HTTP, Share, Browse, Assistant, Web, Settings) and the launcher for external ones. |
+| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, Camera, Photos, AprilTag, Graphs, Pit, Remote, Level, Compass, Weather, Calculator, Clock, Notes, Units, HTTP, Share, Browse, Assistant, Web, Music, Settings) and the launcher for external ones. |
 | `userland/apps/update` | `catalyst-update`: system updates on the handheld (A/B, tried once, rolled back if it does not come up), and the release tool that makes and signs them. |
 | `userland/apps/flasher` | Catalyst Flasher: the newest release onto an SD card in one go. |
 | `userland/assets/app-icon` | Catalyst's icon (the FrcCatalyst bolt) at each size Windows uses, built into the simulator; `assets/` holds it for Raspberry Pi Imager's listing. |
@@ -301,8 +301,9 @@ two together: no robot at first, then the demo one, back from a match.
 
 The **control centre** is a sheet of glass that drops from the top over
 whatever is showing: Wi-Fi, SSH, light or dark, the battery saver, and
-brightness, with two actions along its foot, Recents and Screenshot (R and S
-while it is down). Ctrl-Space brings it down from any screen, a terminal
+brightness and volume side by side (Left and Right set them; Enter on the
+volume mutes), with two actions along its foot, Recents and Screenshot (R and
+S while it is down). Ctrl-Space brings it down from any screen, a terminal
 included (so does the Opt key, if the keyboard reports one), and Up from the
 top of Home pulls it down too. Esc, Ctrl-Space again, or Up from its top row
 puts it away. The screen behind is held still while it is out, so the glass
@@ -1082,6 +1083,50 @@ off the radio is not powered and nothing of it runs.
   (and its Lua) beside BlueZ and D-Bus: about 20 to 25 MB resident against
   about 7 MB for bluez-alsa, BlueZ and D-Bus together, and the speaker is
   already shared by ALSA's dmix.
+
+## Music
+
+Music plays YouTube Music: search, the start page (the home page's quick
+picks, or its first playlist; your likes when signed in), a song and its
+radio after it, the queue (play next, take out, jump to), and a now-playing
+page with the cover, where the song is, and the transport. It plays on
+behind every other app and with the screen off: Fn + Q (play or pause),
+Fn + W and Fn + E (previous, next) work from anywhere, Home's tile says what
+is playing, and the volume keys and Bluetooth headphones apply as for
+anything else.
+
+- **Finding songs:** YouTube Music's own web API (InnerTube, as its web
+  page, `WEB_REMIX`), through curl.
+- **Playing:** yt-dlp (`/usr/libexec/catalyst/yt-dlp`, its single-file
+  release) finds the audio-only stream, Opus where there is one (else AAC),
+  answering YouTube's player challenge in QuickJS (`qjs`); ffmpeg fetches it
+  over HTTPS, decodes it, resamples it to 48 kHz and plays it to ALSA's
+  `default`. Pausing stops ffmpeg, so the speaker's amplifier goes off;
+  playing again starts it where it was. The next song's stream is found
+  while one plays. Account › Stream finder brings the newest yt-dlp to
+  `/data/music` when YouTube changes under the one in the image.
+- **Signed out by default:** nothing is sent but searches and the songs
+  asked for. To sign in, put a browser's `cookies.txt` for
+  music.youtube.com at `/data/music/cookies.txt`; the page says that
+  third-party players like this one can break YouTube's terms. The cookies
+  go to curl and yt-dlp in files, never on a command line, and Sign out
+  deletes them.
+- **What it costs:** nothing at rest. While a song plays, ffmpeg is about
+  10 to 15 MB (most of it its libraries' pages, shared and given back under
+  pressure) and a few per cent of one core: Opus at 128 to 160 kbit/s
+  decodes in well under 5%, and the HTTPS stream is 16 to 20 KB/s, which
+  OpenSSL's NEON code deciphers without the AES instructions the CM0 lacks.
+  Finding a stream is the costly part: YouTube's player challenge is its
+  2.5 MB player script run in QuickJS. On a PC (WSL) yt-dlp takes about 6 s
+  for a song, 3 s of it QuickJS, and QuickJS peaks at about 200 MB
+  (Python alone, 70 MB); on the A53, an estimated 15 to 25 s. So streams
+  are found one at a time (never two QuickJS at once), the next song's
+  while one plays (a song ends into the next without that wait), and each
+  is kept for four hours. The first song after opening the app waits for
+  its own ("finding it…").
+
+On a computer (the simulator) a made-up catalogue stands in, with covers
+drawn from each song's name, and songs play silently.
 
 ## Match logs
 
@@ -2012,3 +2057,11 @@ written by libjpeg-turbo (IJG, BSD-3-Clause and zlib licences) in
 2.0) and ISC) and photos are decoded by jpeg-decoder (MIT or Apache 2.0). The
 simulator alone writes its photos with jpeg-encoder ((MIT or Apache 2.0) and
 IJG).
+
+Sound, Bluetooth and Music use, from the image: ALSA's library and tools
+(LGPL-2.1 and GPL-2.0), BlueZ (GPL-2.0 and LGPL-2.1), bluez-alsa (MIT),
+D-Bus (AFL-2.1 or GPL-2.0), FFmpeg built without its GPL parts (LGPL-2.1),
+QuickJS (MIT) and yt-dlp's release (Unlicense, with astring (MIT) and
+meriyah (ISC) inside). The codec, amplifier and machine drivers are
+M5Stack's (GPL-2.0), with our patches. The shell signs YouTube requests
+with sha1 (RustCrypto, MIT or Apache 2.0).
