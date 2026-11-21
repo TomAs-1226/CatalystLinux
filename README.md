@@ -15,7 +15,7 @@ windows that grow out of tiles whenever it is there.
 | `userland/crates/bezel` | Bezel on the CPU: tonal surfaces, the two type voices, Material Symbols, and the full glass pass (refraction, frost, edge light, groups, shadow). |
 | `userland/crates/nt4` | A NetworkTables 4.1 client: one thread, read-only, reconnects on its own. |
 | `userland/crates/apriltag` | AprilTag detection: AprilRobotics' C library (3.4.5, BSD 2-Clause, vendored with the 36h11 family FRC uses) behind a small flat shim, with each tag's pose. |
-| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, Camera, Photos, AprilTag, Graphs, Pit, Remote, Level, Compass, Weather, Settings) and the launcher for external ones. |
+| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, Camera, Photos, AprilTag, Graphs, Pit, Remote, Level, Compass, Weather, Calculator, Clock, Notes, Units, HTTP, Share, Browse, Assistant, Web, Settings) and the launcher for external ones. |
 | `userland/apps/update` | `catalyst-update`: system updates on the handheld (A/B, tried once, rolled back if it does not come up), and the release tool that makes and signs them. |
 | `userland/apps/flasher` | Catalyst Flasher: the newest release onto an SD card in one go. |
 | `userland/assets/app-icon` | Catalyst's icon (the FrcCatalyst bolt) at each size Windows uses, built into the simulator; `assets/` holds it for Raspberry Pi Imager's listing. |
@@ -821,6 +821,13 @@ types one in a file indented with them), Windows line endings stay, a missing
 final newline is not added, a script keeps its permissions, and saving
 through a link changes the file it points at.
 
+`h` on a file shows it as bytes, however large it is (only the rows on
+screen are read): eight to a row with the offset and the characters beside
+them. `g` goes to an offset (`0x1f0` or `496`), `/` finds bytes, written as
+hex (`de ad be ef`, `0x7f454c46`) or as text, and `n` the next match, which
+is shaded under its bytes. A file too large for the editor says so and
+points at `h`. (Not `x`: outside typing, bare X is the down arrow.)
+
 On a PC the terminal is a small stand-in shell, since there is no
 pseudo-terminal to use the same way. The real one is exercised by
 `scripts/test-arm.sh`, which runs the tests as the ARM build under emulation
@@ -838,9 +845,15 @@ page goes), so none of them costs anything once closed.
   bar, the load), memory in use and in all, the processor's temperature
   (amber from 70 °C, red from 80) with the time since start, and network
   traffic in and out; each with the last half minute as a graph. Right (or
-  Enter) turns to the processes using the most of the processor, Enter
-  sorting them by memory instead. On a computer there is no `/proc`, so a
-  simulated handheld stands in and says so.
+  Enter) turns to the processes using the most of the processor, `s`
+  sorting them by memory instead. Enter on one opens it: its pid and
+  parent, state and threads, memory, priority, how long it has run and its
+  command line, read each second. `k` pressed twice asks it to end
+  (SIGTERM), `K` twice makes it (SIGKILL); `+` and `-` change its nice value
+  (lowering it below where it was needs root, which the shell has on the
+  handheld). The shell itself, init and kernel threads are not offered to
+  end. On a computer there is no `/proc`, so a simulated handheld stands in
+  and says so.
 - **Net tools**: the robot finder looks everywhere a team's robot can be at
   once (its address 10.TE.AM.2, the roboRIO by name and over USB at
   172.22.11.2, the radio) and says what answered: NetworkTables (5810), the
@@ -865,6 +878,71 @@ page goes), so none of them costs anything once closed.
   the busiest processes, the kernel's messages, the system log. `n` adds
   one, `e` edits, `d` twice removes; `{robot}` and `{team}` in a command are
   filled in when it runs. They are kept in `commands` beside the settings.
+
+## Tools: Calculator, Clock, Notes, Units, HTTP, Share
+
+Six everyday tools, each on Home and in search, all by keyboard.
+
+**Calculator.** An expression typed in full, its value shown faintly as it
+is typed and for good with Enter (or `=`). `ans` is the last answer, and an
+operator typed first carries on from it (`/7` is `ans/7`); ↑ and ↓ bring
+back earlier lines, the last forty kept beside the settings. Tab switches
+between two modes:
+
+- *standard*: `+ - * / %`, `^` (or `**`) for powers, brackets, `sqrt abs
+  sin cos tan asin acos atan ln log log2 exp floor ceil round min max
+  hypot`, `pi`, `tau` and `e`; Ctrl-R switches degrees and radians.
+- *programmer*: whole numbers at 8, 16, 32 or 64 bits (Ctrl-W), in two's
+  complement, written in any base (`0x1f`, `0b1010`, `0o17`, decimal) with
+  `& | ^ ~ << >>` as C binds them. The answer is shown in hex, with its
+  signed and unsigned decimal, octal and every bit below (what does not
+  fit at a larger text size gives way to the bits).
+
+**Clock.** Three pages, turned with ← and →. *Stopwatch*: Enter starts and
+stops, `l` (or ↓) takes a lap, `r` resets it once stopped; laps show newest
+first, the fastest in blue and the slowest in amber. *Timers*: `n` starts
+one (`5` is five minutes; `2:30`, `90s`, `1h20` as written), Enter pauses
+and resumes one (or starts a finished one again), `r` restarts it, `d`
+removes it. Timers and the stopwatch belong to the shell, not the page:
+they run on when Clock is left, Home's tile shows the nearest one, and a
+timer running out is said in the island with the keyboard lit, wherever
+the handheld is. *World*: the time here and in the places kept (UTC, Los
+Angeles, Chicago, New York, London and Taipei to start with), each with
+how far ahead or behind; `a` adds a city or zone (`berlin`,
+`America/Denver`), `d` twice removes one.
+
+**Notes.** Plain-text notes, one file each in `/data/notes`, written in the
+editor Files uses; a note's first line is its title. A new one (Enter on
+New note, or `n`) is stamped at its foot with when it was started and, when
+the event schedule knows it, the match coming up (`— Q27 · nov 21 09:45`),
+so pit notes find their match. `p` pins one to the top, `d` twice deletes,
+`/` searches titles and text as it is typed. A new note left empty is not
+kept.
+
+**Units.** One amount in every unit of its kind at once, for the units a
+robot is measured in: length, mass, force, torque (N·m, in·lb, ft·lb,
+in·oz, kgf·cm, mN·m), speed, turning speed (rpm, rad/s, deg/s, rps),
+angle, acceleration, power, energy, charge (mAh, Ah), current, voltage,
+pressure (psi, kPa, bar), temperature, data and time. Type a number
+against the unit it is in and every other row follows; ↑ and ↓ move to
+another unit taking its value along; `-` flips the sign.
+
+**HTTP.** A web request by hand: a method (Enter, ← or → cycle GET, POST,
+PUT, PATCH, DELETE, HEAD), an address (`{robot}` is the robot's
+own, as in Actions), headers (`Name: value; Name: value`) and a body (sent
+as JSON when it looks like JSON). Send, or Ctrl-S from any row, shows the
+status coloured by what it means, the time and size, then the body (JSON
+laid out) or, with Tab, the headers; ↑ and ↓ scroll. The last twenty
+requests are kept and sent again from Earlier requests. Sent with curl, at
+most twenty seconds, redirects shown rather than followed. With the demo
+robot it answers as the Catalyst Agent would.
+
+**Share.** Something on the handheld as a QR code, large and dark on white,
+for a phone to scan: this Wi-Fi network (a phone joins it; the password is
+read from wpa_supplicant's own file, and one saved only as a derived key
+says it cannot be shared), typed text, a link, SSH to this handheld, and
+the team's page on The Blue Alliance. The screen stays on while a code is
+up.
 
 ## Wi-Fi
 
