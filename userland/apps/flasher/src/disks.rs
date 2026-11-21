@@ -135,7 +135,8 @@ pub fn elevate(args: &[String]) -> Result<(), String> {
 pub fn prepare(disk: &Disk) -> Result<(), String> {
     if disk.path.to_string_lossy().starts_with(r"\\.\") {
         let n = disk.number.ok_or("no disk number")?;
-        let script = format!("$ErrorActionPreference = 'Stop'; Set-Disk -Number {n} -IsReadOnly $false -ErrorAction SilentlyContinue; Clear-Disk -Number {n} -RemoveData -RemoveOEM -Confirm:$false");
+        // Online first: a disk another tool took offline (WSL's mount does) cannot be cleared.
+        let script = format!("$ErrorActionPreference = 'Stop'; Set-Disk -Number {n} -IsOffline $false -ErrorAction SilentlyContinue; Set-Disk -Number {n} -IsReadOnly $false -ErrorAction SilentlyContinue; Clear-Disk -Number {n} -RemoveData -RemoveOEM -Confirm:$false");
         let out = Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &script]).output().map_err(|e| e.to_string())?;
         // A blank card has nothing to clear, which is not a failure.
         let err = String::from_utf8_lossy(&out.stderr);
