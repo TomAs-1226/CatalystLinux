@@ -610,10 +610,43 @@ pub struct Shell {
     /// Matches already warned about for queueing: (match, 0 soon / 1 now).
     queue_warned: Vec<(String, u8)>,
     queue_age: f32,
+    /// When the queue alert would next speak, worked out ahead: deep
+    /// standby's minute tick looks only at this (the schedule is parked).
+    queue_due: Option<i64>,
+    /// Reminders: when the next is due, worked out ahead the same way.
+    reminders: crate::reminders::Watch,
+    /// Deep standby woke for one of those: nobody was looking.
+    woke_for_alert: bool,
 }
+
+/// How long the island holds a reminder coming due (a message holds 2.4 s).
+const REMINDER_SECONDS: f32 = 6.0;
 
 /// How long before the time to queue the island says it is coming.
 const QUEUE_AHEAD: i64 = 300;
+
+/// When `watch_queue` would next speak as things stand (from Nexus's queue
+/// times): worked out ahead for deep standby, where the schedule is parked
+/// and cannot change. The five-minute warning, then the time itself, for
+/// whichever match is the next one by then.
+fn queue_alert_at(view: &crate::schedule::View, now: i64, warned: &[(String, u8)]) -> Option<i64> {
+    view.matches
+        .iter()
+        .filter(|m| m.score.is_none())
+        .filter_map(|m| {
+            let at = m.queue_at?;
+            let said = |stage: u8| warned.iter().any(|(key, s)| *key == m.key && *s >= stage);
+            let when = if !said(0) && now < at {
+                (at - QUEUE_AHEAD).max(now)
+            } else if !said(1) && now <= at + 900 {
+                at.max(now)
+            } else {
+                return None;
+            };
+            (view.next(when).map(|n| n.key.as_str()) == Some(m.key.as_str())).then_some(when)
+        })
+        .min()
+}
 
 /// A Clock timer is running: deep standby waits for it to be said.
 #[cfg(not(test))]
@@ -752,6 +785,9 @@ impl Shell {
             woke_by: None,
             queue_warned: Vec::new(),
             queue_age: 0.0,
+            queue_due: None,
+            reminders: crate::reminders::Watch::new(),
+            woke_for_alert: false,
         }
     }
 
@@ -2432,6 +2468,7 @@ impl Shell {
         }
         self.lights.tick(dt);
         self.watch_queue(dt);
+        self.watch_reminders(dt);
         // A Clock timer run out, wherever the handheld is: said, and the
         // keyboard's lights blink (with the screen off, Fn until it wakes).
         if let Some(said) = crate::clock::due() {
@@ -2516,6 +2553,61 @@ impl Shell {
         if let Some(on) = self.deep.reminder(reading.as_ref()) {
             crate::lights::red_reminder(on);
         }
+        // A reminder or the queue come due: awake, to say it. Only the times
+        // worked out before it went deep are looked at; nothing is polled.
+        let now = crate::reminders::now();
+        if [self.reminders.due(), self.queue_due].into_iter().flatten().any(|at| now >= at) {
+            self.standby.wake_now();
+            self.queue_age = 5.0;
+            self.woke_for_alert = true;
+        }
+    }
+
+    /// The main loop's wait for a key in deep standby: a minute, or less
+    /// when a reminder or the queue alert comes first. That wait ends in
+    /// place of the minute's, so no wakeup is added.
+    pub fn deep_wait(&self) -> std::time::Duration {
+        let now = crate::reminders::now();
+        match [self.reminders.due(), self.queue_due].into_iter().flatten().min() {
+            Some(at) => crate::deep::WAIT.min(std::time::Duration::from_secs(at.saturating_sub(now).max(0) as u64)),
+            None => crate::deep::WAIT,
+        }
+    }
+
+    /// Reminders come due: the island holds what is due, the keyboard's
+    /// lights blink, and the chime plays (once there is a speaker). With
+    /// the screen off or dimmed it wakes, and Reminders opens on them; on a
+    /// screen in use, only the island and the lights say it.
+    fn watch_reminders(&mut self, dt: f32) {
+        // Not under the start animation: what came due while the handheld
+        // was off is said once Home is there to see it said.
+        if self.intro.is_some() {
+            return;
+        }
+        let woke_for_alert = std::mem::take(&mut self.woke_for_alert);
+        let rang = self.reminders.tick(dt, &self.robot.schedule, self.settings.clock24);
+        if rang.is_empty() {
+            return;
+        }
+        let woke = self.standby.state() != crate::standby::State::Awake || woke_for_alert;
+        self.standby.wake_now();
+        let top = self.stack.last().map(|(s, _)| (s.title() == "Reminders", s.full_screen()));
+        let free = self.transition.is_none() && self.intro.is_none() && self.tour.is_none() && self.switcher.is_none() && !self.control.is_open();
+        if woke && free && top == Some((false, false)) {
+            self.open(Box::new(crate::reminders::Reminders::new()), Path::Slide);
+            // One that opens something (its note, the checklist): that too,
+            // over Reminders, so leaving it lands on the reminder to tick off.
+            if let [one] = rang.as_slice() {
+                if let Ok(screen) = crate::reminders::opens(&one.link) {
+                    self.open(screen, Path::Slide);
+                }
+            }
+        }
+        self.message = Some((crate::reminders::island(&rang), REMINDER_SECONDS));
+        self.lights.warning();
+        crate::reminders::chime(&rang);
+        self.dirty = true;
+        self.moving = true;
     }
 
     /// Woken from deep standby: its steps undone in the reverse order. The
@@ -2577,8 +2669,12 @@ impl Shell {
             return;
         }
         self.queue_age = 0.0;
-        let Some(view) = self.robot.schedule.view() else { return };
+        let Some(view) = self.robot.schedule.view() else {
+            self.queue_due = None;
+            return;
+        };
         let now = chrono::Utc::now().timestamp();
+        self.queue_due = queue_alert_at(&view, now, &self.queue_warned);
         let Some(m) = view.next(now) else { return };
         let queuing = m.status.as_deref().is_some_and(|s| s.to_lowercase().contains("queu"));
         let stage = match (queuing, m.queue_at) {
@@ -2591,7 +2687,11 @@ impl Shell {
             return;
         }
         self.queue_warned.push((m.key.clone(), stage));
+        self.queue_due = queue_alert_at(&view, now, &self.queue_warned);
         let label = m.label.clone();
+        // With the screen off, it wakes to say it (deep standby's minute
+        // tick wakes it for this too).
+        self.standby.wake_now();
         self.lights.warning();
         self.say(if stage == 1 { format!("time to queue for {label}") } else { format!("queue for {label} in 5 min") });
     }
@@ -3696,6 +3796,128 @@ pub(crate) mod tests {
         shell.deep_for(3600.0, Reading { flow: Flow::Charging, ..night });
         shell.key(Key::Char('c'));
         assert_eq!(shell.message.as_ref().map(|(m, _)| m.as_str()), Some("slept 1 h 0 m · charging"));
+    }
+
+    /// A shell with an empty book of reminders (each test's thread has its own).
+    fn reminding() -> Shell {
+        crate::reminders::with(|s| s.book = crate::reminders::Book::memory());
+        shell()
+    }
+
+    #[test]
+    fn a_reminder_due_with_the_screen_off_wakes_it_and_opens_reminders() {
+        use crate::lights::Mode;
+        let mut shell = reminding();
+        shell.settings.screen_off = 30;
+        crate::reminders::remind("swap battery in 1 min");
+        for _ in 0..40 {
+            shell.tick(1.0);
+        }
+        assert_eq!(shell.standby_state(), crate::standby::State::Off);
+        assert_eq!(shell.lights.showing(), [None; 3], "nothing yet");
+        crate::reminders::later(60);
+        shell.tick(0.25);
+        assert_eq!(shell.standby_state(), crate::standby::State::Awake);
+        assert_eq!(says(&shell), "swap battery");
+        assert_eq!(shell.lights.showing(), [Some(Mode::Fast); 3], "the keyboard's lights blink");
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(title(&shell), "Reminders", "opened on what is due");
+        assert!(shell.message.is_some(), "held longer than a message");
+    }
+
+    #[test]
+    fn a_note_coming_due_opens_the_note_over_reminders() {
+        use crate::reminders::{parse::Parsed, plan, Link, Repeat, When};
+        let mut shell = reminding();
+        shell.settings.screen_off = 30;
+        let file = "reminded-note.txt";
+        std::fs::create_dir_all(crate::notes::dir()).unwrap();
+        std::fs::write(crate::notes::dir().join(file), "Elevator belt\nretension the follower\n").unwrap();
+        crate::reminders::with(|s| {
+            let n = plan::Now { at: crate::reminders::now(), zone: &plan::Here, view: None };
+            s.book.add(Parsed { text: "Elevator belt".into(), when: When::In(n.at + 60), repeat: Repeat::Never, list: None, link: Link::Note(file.into()) }, &n);
+        });
+        for _ in 0..40 {
+            shell.tick(1.0);
+        }
+        crate::reminders::later(60);
+        frames(&mut shell, 90, FRAME);
+        let titles: Vec<String> = shell.stack.iter().map(|(s, _)| s.title().to_owned()).collect();
+        assert_eq!(titles.len(), 3, "Home, Reminders and the note: {titles:?}");
+        assert_eq!(titles[1], "Reminders");
+        // Out of the note (Ctrl-Q, as the editor is left): Reminders, on it, to tick it off.
+        shell.key(Key::Ctrl('q'));
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(title(&shell), "Reminders");
+    }
+
+    #[test]
+    fn on_a_screen_in_use_a_reminder_is_only_said() {
+        let mut shell = reminding();
+        crate::reminders::remind("check bumpers in 1 min");
+        frames(&mut shell, 10, FRAME);
+        crate::reminders::later(61);
+        shell.key(Key::Right);
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(says(&shell), "check bumpers");
+        assert_eq!(shell.stack.len(), 1, "Home stays: whoever is using it is not interrupted");
+    }
+
+    #[test]
+    fn in_deep_standby_a_reminder_wakes_it_on_time_with_no_wakeup_added() {
+        let mut shell = reminding();
+        shell.settings.screen_off = 30;
+        shell.settings.battery.deep_after = 10;
+        crate::reminders::remind("check bumpers in 20 min");
+        until_deep(&mut shell, 700).expect("deep standby");
+        let due = shell.reminders.due().expect("worked out before it went deep");
+        // The minute's wait as ever, until the reminder is less than a minute off.
+        assert_eq!(shell.deep_wait(), crate::deep::WAIT);
+        crate::reminders::later(due - crate::reminders::now() - 25);
+        let wait = shell.deep_wait().as_secs();
+        assert!((24..=25).contains(&wait), "the wait ends as it comes due: {wait} s");
+        // That wait's tick, a moment early: still deep.
+        assert!(!shell.tick(20.0));
+        assert!(shell.deep_asleep());
+        crate::reminders::later(25);
+        shell.tick(5.0);
+        assert!(!shell.deep_asleep(), "woken");
+        assert_eq!(says(&shell), "check bumpers", "the reminder, not how long it slept");
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(title(&shell), "Reminders");
+    }
+
+    #[test]
+    fn deep_standby_wakes_for_the_time_to_queue() {
+        let mut shell = reminding();
+        shell.settings.screen_off = 30;
+        shell.settings.battery.deep_after = 10;
+        until_deep(&mut shell, 700).expect("deep standby");
+        shell.queue_due = Some(crate::reminders::now() + 90);
+        assert!(shell.deep_wait() <= crate::deep::WAIT);
+        shell.tick(60.0);
+        assert!(shell.deep_asleep(), "not yet");
+        crate::reminders::later(90);
+        shell.tick(30.0);
+        assert!(!shell.deep_asleep());
+        assert_eq!(shell.standby_state(), crate::standby::State::Awake);
+    }
+
+    #[test]
+    fn the_queue_alert_is_worked_out_ahead_for_each_match() {
+        use crate::schedule::{Match, View};
+        let t = 1_800_000_000;
+        let m = |label: &str, at: i64| Match { key: label.to_lowercase(), label: label.into(), time: Some(at), queue_at: Some(at - 900), ..Match::default() };
+        let mut view = View { team: 5805, matches: vec![m("Q31", t), m("Q40", t + 3000)], ..View::default() };
+        let now = t - 2000;
+        assert_eq!(queue_alert_at(&view, now, &[]), Some(t - 900 - QUEUE_AHEAD), "five minutes before queueing for Q31");
+        assert_eq!(queue_alert_at(&view, now, &[("q31".into(), 0)]), Some(t - 900), "then the time itself");
+        // Both said for Q31: Q40's warning, once Q31 is no longer the next.
+        assert_eq!(queue_alert_at(&view, now, &[("q31".into(), 1)]), Some(t + 2100 - QUEUE_AHEAD));
+        // Already in its window: due now.
+        assert_eq!(queue_alert_at(&view, t - 1000, &[]), Some(t - 1000));
+        view.matches[1].queue_at = None;
+        assert_eq!(queue_alert_at(&view, now, &[("q31".into(), 1)]), None, "no queue time: nothing to work out");
     }
 
     /// A plain page for pushing.
