@@ -520,7 +520,9 @@ fn main() {
         // the panel is its own until it ends or is left.
         if let Some(app) = shell.take_launch() {
             let result = apps::run(&app, &shell.settings, platform.as_mut(), &shell.gfx.canvas);
-            shell.launch_ended(result);
+            // What it left on the panel: its window closes from that picture.
+            let left = platform.capture();
+            shell.launch_ended(result, left);
             beat.rest();
             last = Instant::now();
             next_frame = last;
@@ -943,6 +945,38 @@ fn motion(dir: &std::path::Path) {
     shell.key(Enter);
     let frames = film(&mut shell, 0.8);
     strip(&frames, &beats, dir, "5d-recent-app-back");
+
+    // Keys faster than the motion. Health closing, and Logs opened 100 ms
+    // in: Health goes on into its tile beneath Logs growing out of its own.
+    let mut shell = fresh(Robot::demo());
+    press(&mut shell, &[Right, Enter]);
+    shell.key(Back);
+    let mut frames = film(&mut shell, 0.1);
+    shell.key(Right);
+    shell.key(Enter);
+    frames.extend(film(&mut shell, 0.8));
+    strip(&frames, &[0, 2, 4, 6, 8, 10, 13, 17, 30], dir, "5e-close-then-open-another");
+    // Esc twice, 50 ms apart, over a Settings page: the page slides away
+    // inside the window as Settings goes back into its tile.
+    let mut shell = fresh(Robot::demo());
+    press(&mut shell, &to_settings);
+    press(&mut shell, &[Enter, Enter]);
+    shell.key(Back);
+    let mut frames = film(&mut shell, 0.05);
+    shell.key(Back);
+    frames.extend(film(&mut shell, 0.8));
+    strip(&frames, &[0, 2, 4, 6, 8, 10, 13, 17, 30], dir, "5f-esc-twice");
+    // Ctrl-Tab 75 ms into opening Logs: it goes on growing behind the cards,
+    // and is there, whole, when Esc puts them away.
+    let mut shell = fresh(Robot::demo());
+    press(&mut shell, &[Right, Right]);
+    shell.key(Enter);
+    let mut frames = film(&mut shell, 0.2);
+    shell.key(Ctrl('\t'));
+    frames.extend(film(&mut shell, 0.3));
+    shell.key(Back);
+    frames.extend(film(&mut shell, 0.6));
+    strip(&frames, &[6, 8, 10, 13, 16, 20, 22, 26, 40], dir, "5g-ctrl-tab-mid-zoom");
 
     // A robot back from a match: the Logs tile pulses as the match's log
     // arrives and its warning comes with it.
