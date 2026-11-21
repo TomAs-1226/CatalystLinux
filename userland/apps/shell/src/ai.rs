@@ -2078,7 +2078,8 @@ impl Screen for Assistant {
             self.countdown = Some(AUTO_SEND);
             *cx.say = Some("sending · any key edits".into());
         } else {
-            *cx.say = Some("still answering · enter sends it after".into());
+            // It waits in the line; Enter sends it once this answer is in.
+            *cx.say = Some("still answering".into());
         }
         Nav::Stay
     }

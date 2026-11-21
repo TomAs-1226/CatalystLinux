@@ -232,9 +232,37 @@ impl Prefs {
 const DEVICE: &str = "default";
 
 /// Words with which to say the microphone heard nothing but the room.
-pub const NOTHING_HEARD: &str = "heard nothing · is the microphone on?";
-/// No key to write it down with.
-pub const NO_KEY: &str = "talking needs an openai key · settings › keys";
+pub const NOTHING_HEARD: &str = "heard nothing · mic on?";
+/// No key to write it down with (Settings › Keys).
+pub const NO_KEY: &str = "add an openai key to talk";
+
+/// Trouble as the island says it: a few words, short enough to sit in it
+/// whole at the largest text size. (The full reason, from OpenAI or ALSA,
+/// is what `ai --listen` prints in the Terminal.)
+pub fn brief(why: &str) -> String {
+    let lower = why.to_lowercase();
+    let said = [
+        ("refused the key", "openai refused the key"),
+        ("out of credit", "openai: no credit, or busy"),
+        ("no internet", "no internet"),
+        ("could not reach", "could not reach openai"),
+        ("no answer in time", "openai did not answer"),
+        ("secure connection", "secure connection failed"),
+        ("is busy", "openai is busy · try again"),
+        ("cannot use its voice", "this key has no voice models"),
+        ("too long to send", "that was too long to send"),
+        ("microphone", "the microphone did not open"),
+        ("arecord", "the microphone did not open"),
+        ("aplay", "the speaker did not open"),
+        ("speaker", "the speaker did not open"),
+        ("espeak", "espeak did not start"),
+    ];
+    match said.iter().find(|(seen, _)| lower.contains(seen)) {
+        Some((_, short)) => (*short).to_owned(),
+        None if why.chars().count() <= 26 => why.to_owned(),
+        None => "openai could not do it".to_owned(),
+    }
+}
 
 enum Heard {
     Sound(Vec<i16>),
@@ -474,6 +502,10 @@ pub struct Talk {
     /// The calm version: no wave while the words are written down (the
     /// meter still follows the voice: that is what it says, not decoration).
     pub calm: bool,
+    /// What the island shows, set by the gallery to check each state over
+    /// each screen without talking.
+    #[cfg(not(target_arch = "aarch64"))]
+    pub staged: Option<Island>,
 }
 
 impl Talk {
@@ -488,6 +520,8 @@ impl Talk {
             clock: 0.0,
             note: None,
             calm: false,
+            #[cfg(not(target_arch = "aarch64"))]
+            staged: None,
         }
     }
 
@@ -499,6 +533,13 @@ impl Talk {
     /// Listening, or writing down what was heard: someone is at the keys.
     pub fn listening(&self) -> bool {
         !matches!(self.phase, Phase::Idle)
+    }
+
+    /// The key, held down now, has been used for something else (it woke
+    /// the handheld from deep standby): nothing until it comes up.
+    pub fn spend(&mut self) {
+        self.was_down = true;
+        self.spent = true;
     }
 
     /// The key, and time. `awake`: the screen is on; `here`: where what is
@@ -523,7 +564,7 @@ impl Talk {
             Phase::Listening { listener, since, let_go, target } => {
                 listener.take_in();
                 level = listener.level();
-                if let Some(why) = listener.failed().map(str::to_owned) {
+                if let Some(why) = listener.failed().map(brief) {
                     self.phase = Phase::Idle;
                     self.spent = down;
                     return Some(Event::Say(why));
@@ -551,21 +592,21 @@ impl Talk {
                     let target = target.clone();
                     self.phase = Phase::Idle;
                     let text = text.trim().to_owned();
-                    return Some(if text.is_empty() { Event::Say("did not catch that · try again".into()) } else { Event::Heard(text, target) });
+                    return Some(if text.is_empty() { Event::Say("did not catch that".into()) } else { Event::Heard(text, target) });
                 }
                 Ok(Err(why)) => {
                     self.phase = Phase::Idle;
-                    return Some(Event::Say(why));
+                    return Some(Event::Say(brief(&why)));
                 }
                 Err(TryRecvError::Disconnected) => {
                     self.phase = Phase::Idle;
-                    return Some(Event::Say("it could not be written down".into()));
+                    return Some(Event::Say("could not write it down".into()));
                 }
                 Err(TryRecvError::Empty) => {}
             },
         }
         if let Some(why) = speaking_failed() {
-            event = event.or(Some(Event::Say(why)));
+            event = event.or(Some(Event::Say(brief(&why))));
         }
         self.meter(dt, level);
         event
@@ -644,6 +685,10 @@ impl Talk {
 
     /// What the island shows, while there is something to.
     pub fn island(&self) -> Option<Island> {
+        #[cfg(not(target_arch = "aarch64"))]
+        if let Some(staged) = &self.staged {
+            return Some(staged.clone());
+        }
         let bars = self.bars.each_ref().map(|b| b.value().clamp(0.0, 1.0));
         match &self.phase {
             Phase::Listening { target, .. } => Some(Island {
@@ -669,6 +714,7 @@ impl Talk {
 }
 
 /// The island while talking: an icon, words, the meter.
+#[derive(Clone, Debug)]
 pub struct Island {
     pub icon: &'static str,
     /// The microphone is live: its icon is the signal colour.
@@ -833,9 +879,9 @@ fn speaker(voice: Voice) -> Result<Speaker, String> {
     match voice {
         Voice::OpenAi(name) => match Keys::load().get("openai") {
             Some(key) => Ok(Speaker::OpenAi { key: key.to_owned(), voice: name }),
-            None => espeak().ok_or_else(|| "spoken answers need an openai key · settings › keys".into()),
+            None => espeak().ok_or_else(|| "add an openai key to speak".into()),
         },
-        Voice::Device => espeak().ok_or_else(|| "espeak is not on this handheld".into()),
+        Voice::Device => espeak().ok_or_else(|| "espeak is not installed".into()),
     }
 }
 
@@ -1039,9 +1085,18 @@ pub fn gallery(shell: &mut crate::shell::Shell, dir: &std::path::Path) {
     set_talk_key(false);
     run(shell, 0.3);
     save(shell, "121b-talk-writing");
-    run(shell, 1.9);
+    // Waited for, not timed: a busy computer runs the script slower.
+    let run_until = |shell: &mut crate::shell::Shell, done: &dyn Fn(&crate::shell::Shell) -> bool| {
+        let until = Instant::now() + Duration::from_secs(20);
+        while !done(shell) && Instant::now() < until {
+            run(shell, 0.05);
+        }
+    };
+    run_until(shell, &|s| s.top_title() == "Assistant");
+    run(shell, 1.0);
     save(shell, "121c-talk-question");
-    run(shell, 4.2);
+    run_until(shell, &|_| speaking());
+    run(shell, 1.3);
     save(shell, "121d-talk-answer-spoken");
     shell.key(Back);
     run(shell, 0.4);
@@ -1057,8 +1112,9 @@ pub fn gallery(shell: &mut crate::shell::Shell, dir: &std::path::Path) {
     run(shell, 0.4);
     shell.key(Back);
     run(shell, 0.8);
-    // A note, dictated into where the cursor is.
-    let notes = crate::config_dir().join("notes");
+    // A note, dictated into where the cursor is (in a folder of this run's
+    // own: other galleries running at the same time clear the tour's).
+    let notes = std::env::temp_dir().join(format!("catalyst-voice-gallery-{}", std::process::id()));
     std::fs::create_dir_all(&notes).ok();
     let note = notes.join("2026-11-21-gallery.txt");
     std::fs::write(&note, "Intake\n\n— Q31 · nov 21 10:12\n").ok();
@@ -1077,9 +1133,88 @@ pub fn gallery(shell: &mut crate::shell::Shell, dir: &std::path::Path) {
         shell.key(Ctrl('q'));
         run(shell, 0.6);
     }
-    std::fs::remove_file(&note).ok();
+    std::fs::remove_dir_all(&notes).ok();
     prefs.save();
     held.save().ok();
+}
+
+/// Every island push-to-talk shows (and the longest of its messages), over
+/// the title of every screen it is most often over (Home, the assistant,
+/// Notes, and a note named by its date, the longest title), in both looks
+/// at all three text sizes: one sheet per look and size, a strip of the
+/// panel's top for each. Returns, for each strip, whether the title was
+/// whole and beside the island, or had given way (faded out) under it:
+/// never cut short by the island.
+#[cfg(not(target_arch = "aarch64"))]
+pub fn island_sheets(dir: &std::path::Path) -> Vec<(String, bool)> {
+    use crate::gfx::TextSize;
+    use crate::look::Theme;
+    let bars = [0.45, 0.75, 1.0, 0.7, 0.4];
+    let talk = |icon: &'static str, hot: bool, words: &str| Some(Island { icon, hot, words: words.into(), bars });
+    let states: Vec<(&str, Option<Island>, Option<&str>)> = vec![
+        ("at rest", None, None),
+        ("asking", talk("mic", true, "let go to ask"), None),
+        ("typing", talk("mic", true, "let go to type"), None),
+        ("writing", talk("mic", false, "writing it down"), None),
+        ("speaking", talk("volume_up", false, "ai voice · any key stops"), None),
+        ("sending", None, Some("sending · any key edits")),
+        ("typed", None, Some("typed 15 words")),
+        ("no key", None, Some(NO_KEY)),
+        // The longest thing push-to-talk says.
+        ("trouble", None, Some("the microphone did not open")),
+    ];
+    // A folder of this run's own: other galleries running at the same time
+    // clear the tour's shared one.
+    let notes = std::env::temp_dir().join(format!("catalyst-island-sheets-{}", std::process::id()));
+    let note = notes.join("2026-11-21-101200.txt");
+    let frames = |shell: &mut crate::shell::Shell, n: usize| {
+        for _ in 0..n {
+            if shell.tick(1.0 / 60.0) {
+                shell.draw();
+            }
+        }
+    };
+    let mut results = Vec::new();
+    for theme in [Theme::Catalyst, Theme::Bezel] {
+        for size in [TextSize::Compact, TextSize::Standard, TextSize::Large] {
+            const SCREENS: usize = 4;
+            let strip = 30usize;
+            let mut sheet = bezel::Canvas::new(crate::gfx::W as i32, (strip * SCREENS * states.len()) as i32);
+            for screen in 0..SCREENS {
+                let mut shell = crate::shell::Shell::new(crate::robot::Robot::demo());
+                shell.settings.theme = theme;
+                (shell.settings.wallpaper, shell.settings.accent) = theme.defaults();
+                shell.settings.text = size;
+                shell.apply_settings();
+                frames(&mut shell, 100);
+                match screen {
+                    1 => shell.show(Box::new(crate::ai::Assistant::new())),
+                    2 => shell.show(Box::new(crate::notes::Notes::new())),
+                    3 => match std::fs::create_dir_all(&notes).and_then(|_| std::fs::write(&note, "Intake\n\n— Q31 · nov 21 10:12\n")).map_err(|e| e.to_string()).and_then(|_| crate::files::Editor::open(&note)) {
+                        Ok(editor) => shell.show(Box::new(editor)),
+                        Err(why) => eprintln!("the note did not open: {why}"),
+                    },
+                    _ => {}
+                }
+                frames(&mut shell, 90);
+                for (k, (name, island, message)) in states.iter().enumerate() {
+                    shell.stage_island(island.clone(), *message);
+                    frames(&mut shell, 60);
+                    shell.draw();
+                    let row = (screen * states.len() + k) * strip;
+                    let w = crate::gfx::W as usize;
+                    sheet.px[row * w..(row + strip) * w].copy_from_slice(&shell.gfx.canvas.px[..strip * w]);
+                    let alpha = shell.title_alpha();
+                    results.push((format!("{}/{}/{}/{name}", theme.name(), size.name(), shell.top_title()), alpha > 0.99 || alpha < 0.01));
+                    shell.stage_island(None, None);
+                    frames(&mut shell, 60);
+                }
+            }
+            crate::platform::sim::save_png(&sheet, &dir.join(format!("island-{}-{}.png", theme.name(), size.name())), 2);
+        }
+    }
+    std::fs::remove_dir_all(&notes).ok();
+    results
 }
 
 #[cfg(test)]
@@ -1205,6 +1340,77 @@ mod tests {
         std::thread::sleep(Duration::from_millis(1800));
         assert!(!speaking());
         assert_eq!(talk.tick(0.02, false, true, None), None, "and nothing to say about it");
+    }
+
+    #[test]
+    fn alt_wakes_it_from_deep_standby_and_that_press_is_spent() {
+        let mut shell = home();
+        for _ in 0..240 {
+            shell.tick(0.5);
+        }
+        assert_eq!(shell.standby_state(), crate::standby::State::Off, "two minutes untouched: the screen is off");
+        shell.deep_for(600.0, crate::power::Reading::default());
+        shell.tick(60.0);
+        assert!(shell.deep_asleep(), "a minute more: still deep");
+        set_talk_key(true);
+        shell.tick(60.0);
+        assert!(!shell.deep_asleep(), "alt wakes it, as any key does");
+        run(&mut shell, 0.6);
+        assert_ne!(shell.island_words().as_deref(), Some("let go to ask"), "the waking press does not listen");
+        set_talk_key(false);
+        run(&mut shell, 0.1);
+    }
+
+    #[test]
+    fn a_title_gives_way_to_an_island_grown_over_it_and_comes_back_whole() {
+        let mut shell = home();
+        let frames = |shell: &mut crate::shell::Shell, n: usize| {
+            for _ in 0..n {
+                if shell.tick(1.0 / 60.0) {
+                    shell.draw();
+                }
+            }
+        };
+        frames(&mut shell, 30);
+        assert!(shell.title_alpha() > 0.99, "at rest, the title shows");
+        // Beside "let go to ask", "Catalyst" still fits; beside an answer
+        // being said it does not, and fades out rather than being cut.
+        let island = |words: &str| Some(Island { icon: "mic", hot: true, words: words.into(), bars: [0.5; BARS] });
+        shell.stage_island(island("let go to ask"), None);
+        frames(&mut shell, 60);
+        assert!(shell.title_alpha() > 0.99);
+        shell.stage_island(island("ai voice · any key stops"), None);
+        frames(&mut shell, 3);
+        let fading = shell.title_alpha();
+        assert!(fading < 0.99 && fading > 0.01, "on a spring, not at once: {fading}");
+        frames(&mut shell, 60);
+        assert!(shell.title_alpha() < 0.01, "gone under the island");
+        shell.stage_island(None, None);
+        frames(&mut shell, 90);
+        assert!(shell.title_alpha() > 0.99, "and back once it has shrunk clear");
+    }
+
+    #[test]
+    fn trouble_is_said_in_words_the_island_holds_whole() {
+        let reasons = [
+            "OpenAI refused the key · check it in Settings › Keys",
+            "too many requests, or the account is out of credit",
+            "no internet: the service's name did not resolve",
+            "the secure connection failed · is the clock right?",
+            "the microphone did not open: no such file or directory",
+            "arecord is not on this handheld",
+            "aplay is not on this handheld",
+            "A very long message from the service that nobody planned for at all",
+            "did not catch that",
+        ];
+        for why in reasons {
+            assert!(brief(why).chars().count() <= 27, "{why} → {}", brief(why));
+        }
+        assert_eq!(brief("the microphone did not open: no such device"), "the microphone did not open");
+        assert_eq!(brief("did not catch that"), "did not catch that", "short ones stay as they are");
+        for said in [NO_KEY, NOTHING_HEARD, "hold alt while you talk", "stopped listening", "could not write it down", "add an openai key to speak", "espeak is not installed"] {
+            assert!(said.chars().count() <= 27, "{said}");
+        }
     }
 
     #[test]

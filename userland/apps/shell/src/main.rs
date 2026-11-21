@@ -371,6 +371,14 @@ fn main() {
     if flag("--shots") || flag("--voice-shots") {
         tour_fixtures();
     }
+    // The voice screens keep their state in a folder of their own: a tour
+    // run at the same time clears the shared one as it starts.
+    #[cfg(not(target_arch = "aarch64"))]
+    if flag("--voice-shots") {
+        let own = std::env::temp_dir().join(format!("catalyst-voice-shots-{}", std::process::id()));
+        std::fs::create_dir_all(&own).ok();
+        std::env::set_var("CATALYST_CONF", own.join("robot"));
+    }
     // The motion sensor starts on a thread of its own (its program takes
     // most of a second over the bus), so Home knows what it offers.
     imu::start();
@@ -414,7 +422,16 @@ fn main() {
                 shell.draw();
             }
         }
-        return voice::gallery(&mut shell, std::path::Path::new(&dir));
+        voice::gallery(&mut shell, std::path::Path::new(&dir));
+        // And every voice island over every title it meets, in both looks
+        // at each text size: a sheet each.
+        for (what, settled) in voice::island_sheets(std::path::Path::new(&dir)) {
+            if !settled {
+                eprintln!("the title had not settled whole or gone: {what}");
+            }
+        }
+        std::fs::remove_dir_all(config_dir()).ok();
+        return;
     }
 
     if flag("--bench") || flag("--about") {

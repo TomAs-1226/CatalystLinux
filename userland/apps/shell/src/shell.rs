@@ -607,6 +607,13 @@ pub struct Shell {
     flash: Option<Animated>,
     /// Push-to-talk (Alt held, anywhere) and answers said aloud.
     voice: crate::voice::Talk,
+    /// The island's width at rest (no message), which the title keeps its
+    /// room beside; and how much of the title shows, as an island grown
+    /// wider than that passes over it.
+    island_rest: f32,
+    title_shown: Animated,
+    /// The same for the status at the top right (links, battery, time).
+    status_shown: Animated,
     /// Standby: after a while with no key the screen dims, then goes off.
     standby: crate::standby::Standby,
     /// The battery: its readings, the saver's rules, low-battery care, and
@@ -759,6 +766,11 @@ impl Shell {
             saving: None,
             flash: None,
             voice: crate::voice::Talk::new(),
+            island_rest: 60.0,
+            // The island's words cross-fade on Bezel's effect spring; the title
+            // giving way to it does too.
+            title_shown: Animated::new(1.0, role::effect()).with_rest(0.004),
+            status_shown: Animated::new(1.0, role::effect()).with_rest(0.004),
             standby: crate::standby::Standby::new(),
             care: crate::power::Care::new(),
             lights: crate::lights::Lights::new(),
@@ -1444,6 +1456,11 @@ impl Shell {
         let mut dt = dt;
         if self.deep.on() {
             self.clock += dt;
+            // The talk key (Alt) wakes it as any key does, and is spent doing so.
+            if crate::voice::talk_key_down() {
+                self.standby.key();
+                self.voice.spend();
+            }
             self.tick_deep(dt);
             if self.standby.asleep() {
                 return false;
@@ -1526,6 +1543,7 @@ impl Shell {
         }
         moving |= self.tick_recents_and_standby(dt, motion_dt);
         moving |= self.tick_voice(dt);
+        moving |= self.title_shown.tick(motion_dt) | self.status_shown.tick(motion_dt);
         self.tick_power(dt);
         if let Some(intro) = &mut self.intro {
             moving |= intro.tick(motion_dt);
@@ -1782,8 +1800,11 @@ impl Shell {
         }
         g.canvas.px.copy_from_slice(&self.background);
         g.pager = None;
-        // A title runs up to the island, however wide the island is just now.
-        g.title_room = (W - self.island_w.value().max(g.island_h())) * 0.5 - PAD - 8.0;
+        // A title runs up to the island as it rests. An island grown wider
+        // than that (a message, push-to-talk) passes over the title, which
+        // fades out under its glass and back, rather than being cut shorter.
+        g.title_room = (W - self.island_rest.max(g.island_h())) * 0.5 - PAD - 8.0;
+        g.title_alpha = self.title_shown.value().clamp(0.0, 1.0);
         g.ox = 0.0;
 
         let depth = self.stack.len();
@@ -1902,9 +1923,13 @@ impl Shell {
             return;
         }
 
-        // Status at the top right: links, battery, the time.
+        // Status at the top right: links, battery, the time. Like the title,
+        // it fades out under an island grown over it, and back.
         let ty = g.ty;
         let bar_cy = 4.0 + g.island_h() * 0.5;
+        let strip = (4.0 + g.island_h() + 3.0) as usize * W as usize;
+        let status_alpha = self.status_shown.value().clamp(0.0, 1.0);
+        let under_status = (status_alpha < 0.996).then(|| g.canvas.px[..strip].to_vec());
         let mut x = W - PAD - 2.0;
         // What the island shows at rest is not shown twice.
         let rest = self.settings.island;
@@ -1921,6 +1946,10 @@ impl Shell {
                 x -= 17.0;
             }
         }
+        if let Some(under) = &under_status {
+            bezel::simd::mix_into(&mut g.canvas.px[..strip], Some(under), ((1.0 - status_alpha) * 256.0) as u32);
+        }
+        let status_left = x;
 
         // The island: link status at rest, growing to carry a message.
         let linked = self.robot.linked();
@@ -1942,6 +1971,33 @@ impl Shell {
         let label = g.text.fit(&label, &caption, room);
         let want = g.measure(&label, caption) + 34.0;
         let want = want + talk.as_ref().map_or(0.0, |_| crate::voice::METER_ROOM);
+        if !icon {
+            self.island_rest = want;
+        }
+        // The title and the status give way to the island where they would
+        // meet: out as soon as it is growing over them, back once it has
+        // shrunk clear. (Two pixels' grace for the island's spring running a
+        // touch past the width it grows to.)
+        let title_w = match self.stack.last() {
+            Some((top, _)) if !top.full_screen() => {
+                let title = g.text.fit(&shown_title(g.theme, top.title()), &g.ty.title, g.title_room);
+                g.measure(&title, g.ty.title)
+            }
+            _ => 0.0,
+        };
+        let reach = want.max(self.island_w.value() - 2.0).max(island_h);
+        let beside = (W - reach) * 0.5 - PAD - 8.0;
+        let clear_of = (W + reach) * 0.5 + 2.0;
+        for (shown, fits) in [(&mut self.title_shown, title_w <= beside), (&mut self.status_shown, status_left >= clear_of)] {
+            let to = if fits { 1.0 } else { 0.0 };
+            if shown.target() != to {
+                shown.set(to);
+                self.moving = true;
+            }
+            if self.settings.calm {
+                shown.jump(to);
+            }
+        }
         if label != self.island_words {
             self.island_words = label.clone();
             self.island_from = self.island_w.value();
@@ -2005,14 +2061,19 @@ impl Shell {
         let bar_cy = 4.0 + g.island_h() * 0.5;
         let room = g.title_room;
         if !screen.full_screen() {
-            // Bezel's headings are lowercase, as its panels' are.
-            let title = match g.theme {
-                crate::look::Theme::Bezel => screen.title().to_lowercase(),
-                crate::look::Theme::Catalyst => screen.title().to_owned(),
-            };
-            g.text_fit(PAD + 2.0, bar_cy, &title, ty.title, t.ink, room);
+            let title = g.text.fit(&shown_title(g.theme, screen.title()), &ty.title, room.max(0.0));
+            g.text_alpha(PAD + 2.0, bar_cy, &title, ty.title, t.ink, g.title_alpha);
         }
         screen.draw(g, robot);
+    }
+}
+
+/// A screen's title as the look writes it: Bezel's headings are lowercase,
+/// as its panels' are.
+fn shown_title(theme: crate::look::Theme, title: &str) -> String {
+    match theme {
+        crate::look::Theme::Bezel => title.to_lowercase(),
+        crate::look::Theme::Catalyst => title.to_owned(),
     }
 }
 
@@ -2092,6 +2153,22 @@ impl Shell {
     #[cfg(test)]
     pub(crate) fn island_words(&self) -> Option<String> {
         self.voice.island().map(|i| i.words).or_else(|| self.message.as_ref().map(|(m, _)| m.clone()))
+    }
+
+    /// The island set outright, push-to-talk's or a message (or neither),
+    /// for the gallery to check each over each screen.
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn stage_island(&mut self, talk: Option<crate::voice::Island>, message: Option<&str>) {
+        self.voice.staged = talk;
+        self.message = message.map(|m| (m.to_owned(), f32::INFINITY));
+        self.moving = true;
+        self.dirty = true;
+    }
+
+    /// How much of the title shows just now, 0 to 1.
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn title_alpha(&self) -> f32 {
+        self.title_shown.value()
     }
 }
 
