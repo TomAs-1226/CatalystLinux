@@ -7,7 +7,7 @@
 //! floor, chosen in System, and every layout is measured from it.
 
 use bezel::{Align, Canvas, Color, Glass, GlassShape, Icons, Rect, Text, TextStyle, Tokens};
-use detent::{role, Animated};
+use detent::{role, Animated, Spring};
 
 pub const W: f32 = 320.0;
 pub const H: f32 = 170.0;
@@ -158,6 +158,9 @@ pub struct Gfx {
     pub title_room: f32,
     /// The focus ring, which glides to whatever is focused.
     focus: Focus,
+    /// Where the ring was last drawn (its stroke's outer rectangle's middle
+    /// line), for looking at its motion.
+    pub(crate) last_ring: Rect,
     /// Draw the ring where it is asked for and leave the glide alone: set
     /// while a screen is drawn as a picture for a transition.
     pub focus_static: bool,
@@ -188,22 +191,108 @@ pub struct Gfx {
     ring_shift: f32,
 }
 
-/// The focus ring's place. It follows the focus on Bezel's hold spring (the
-/// one for a value following an input): quick, and with no bounce to speak of.
+/// The focus ring's place, its size and its corners. It glides to whatever is
+/// focused and keeps its speed when the focus moves on again before it lands
+/// (a key held, keys pressed quickly), so it never starts over.
 struct Focus {
     x: Animated,
     y: Animated,
     w: Animated,
     h: Animated,
+    radius: Animated,
     /// False until the ring has been put somewhere on this screen: its first
     /// place is taken at once, with nothing to glide from.
     placed: bool,
+    /// How far what the ring sits on was moved sideways when it was last
+    /// drawn (see [`Gfx::focus_ring_on`]), and whether it was on something
+    /// that moves so (a strip of pages) rather than on the screen itself.
+    along: f32,
+    riding: bool,
+}
+
+/// Material 3 Expressive's spatial springs, as Detent carries them: for
+/// things that move under the keys and should feel it. Bezel's own roles are
+/// for touch, where the finger carries the motion; with keys the spring has
+/// to give it all, so these run a little past and come back. The calm
+/// version damps them critically, as every spring there is.
+pub mod spatial {
+    use detent::Spring;
+
+    /// `m3-expressive-fast-spatial` (stiffness 800, damping ratio 0.6): small
+    /// moves with a visible bounce. About 9% over, peaking at 0.14 s,
+    /// settled within 0.4 s.
+    pub fn fast() -> Spring {
+        Spring::stiffness_ratio(800.0, 0.6)
+    }
+
+    /// `m3-expressive-default-spatial` (380, 0.8): the everyday move. 1.5%
+    /// over (5 px on a page turn), settled within 0.46 s.
+    pub fn default() -> Spring {
+        Spring::stiffness_ratio(380.0, 0.8)
+    }
+
+    /// `m3-expressive-slow-spatial` (200, 0.8): large moves, a whole page
+    /// arriving. 1.5% over, settled within 0.64 s, as Bezel's page turn.
+    pub fn slow() -> Spring {
+        Spring::stiffness_ratio(200.0, 0.8)
+    }
+}
+
+/// Where the ring goes: the fast spatial spring, so it overshoots a row by
+/// about 2 px and draws back.
+pub fn ring_spring() -> Spring {
+    spatial::fast()
+}
+
+/// The ring's size and corners, changing between things of different
+/// sizes: a shape growing with a little give.
+pub fn ring_shape_spring() -> Spring {
+    spatial::default()
+}
+
+/// Moving, the ring stretches along its motion and its tail trails, as
+/// Bezel's dock droplet does: 0.04 × speed, at most 30 of Bezel's 720-wide
+/// panel (13 px here), and never more than a third of its own length.
+const RING_STRETCH: f32 = 0.04;
+const RING_STRETCH_MAX: f32 = 30.0 * W / 720.0;
+
+/// The ring at rest at `r`, stretched by the speed it is moving at (`vx`,
+/// `vy`, px a second). Its leading edge is where the spring has it; the
+/// stretch trails behind, and it thins a little across its motion (half the
+/// stretch, at most 8% of its width). The droplet keeps its volume; a row's
+/// ring is far wider than tall, so keeping its area would pinch it — this
+/// thinning is my own tuning.
+fn stretched(r: Rect, vx: f32, vy: f32) -> Rect {
+    let along = |v: f32, size: f32| (v.abs() * RING_STRETCH).min(RING_STRETCH_MAX).min(size / 3.0);
+    let (sx, sy) = (along(vx, r.w), along(vy, r.h));
+    let (thin_w, thin_h) = ((sy * 0.5).min(r.w * 0.08), (sx * 0.5).min(r.h * 0.08));
+    let x = if vx > 0.0 { r.x - sx } else { r.x } + thin_w * 0.5;
+    let y = if vy > 0.0 { r.y - sy } else { r.y } + thin_h * 0.5;
+    Rect::new(x, y, r.w + sx - thin_w, r.h + sy - thin_h)
 }
 
 impl Focus {
     fn new() -> Self {
-        let spring = || Animated::new(0.0, role::hold()).with_rest(0.05);
-        Focus { x: spring(), y: spring(), w: spring(), h: spring(), placed: false }
+        let at = |spring: Spring| Animated::new(0.0, spring).with_rest(0.05);
+        Focus {
+            x: at(ring_spring()),
+            y: at(ring_spring()),
+            w: at(ring_shape_spring()),
+            h: at(ring_shape_spring()),
+            radius: at(ring_shape_spring()),
+            placed: false,
+            along: 0.0,
+            riding: false,
+        }
+    }
+
+    fn springs(&mut self) -> [&mut Animated; 5] {
+        [&mut self.x, &mut self.y, &mut self.w, &mut self.h, &mut self.radius]
+    }
+
+    /// The speed of the ring's middle, px a second.
+    fn velocity(&self) -> (f32, f32) {
+        (self.x.velocity() + 0.5 * self.w.velocity(), self.y.velocity() + 0.5 * self.h.velocity())
     }
 }
 
@@ -245,6 +334,7 @@ impl Gfx {
             pager: None,
             title_room: 96.0,
             focus: Focus::new(),
+            last_ring: Rect::default(),
             focus_static: false,
             motion_started: false,
             reveal: None,
@@ -388,31 +478,58 @@ impl Gfx {
     }
 
     /// The focus ring: signal, just outside the focused surface. It glides
-    /// from the last thing focused to this one. (Bezel itself lands changes
-    /// made from keys at once; the calm version keeps to that.)
+    /// from the last thing focused to this one with a little overshoot,
+    /// stretching along its way and drawing itself together as it lands; its
+    /// size and corners follow too. (Bezel itself lands changes made from
+    /// keys at once; the calm version keeps to that.)
     pub fn focus_ring(&mut self, r: Rect, radius: f32) {
+        self.ring_at(r, radius, None);
+    }
+
+    /// The focus ring on a strip that slides sideways as a whole (Home's
+    /// pages of tiles): `along` is how far the strip is moved just now. The
+    /// ring glides along the strip and rides with it as it turns, rather than
+    /// chasing a tile that moves every frame.
+    pub fn focus_ring_on(&mut self, r: Rect, radius: f32, along: f32) {
+        self.ring_at(r, radius, Some(along));
+    }
+
+    fn ring_at(&mut self, r: Rect, radius: f32, strip: Option<f32>) {
         let signal = self.ring_color();
         let r = r.offset(0.0, self.ring_shift);
-        let at = if self.focus_static {
-            r
+        let (at, radius) = if self.focus_static {
+            (r, radius)
         } else {
+            let along = strip.unwrap_or(0.0);
+            let rest = r.offset(-along, 0.0);
             let f = &mut self.focus;
+            // Onto a strip from the screen, or off it: the ring's place is
+            // measured from somewhere else now, and where it is drawn stays.
+            if f.placed && f.riding != strip.is_some() {
+                f.x.shift(f.along - along);
+            }
+            f.riding = strip.is_some();
+            f.along = along;
+            let want = [rest.x, rest.y, rest.w, rest.h, radius];
             if !f.placed || self.calm {
-                f.x.jump(r.x);
-                f.y.jump(r.y);
-                f.w.jump(r.w);
-                f.h.jump(r.h);
+                for (spring, to) in f.springs().into_iter().zip(want) {
+                    spring.jump(to);
+                }
                 f.placed = true;
-            } else if (f.x.target(), f.y.target(), f.w.target(), f.h.target()) != (r.x, r.y, r.w, r.h) {
-                f.x.set(r.x);
-                f.y.set(r.y);
-                f.w.set(r.w);
-                f.h.set(r.h);
+            } else if f.springs().iter().zip(want).any(|(spring, to)| spring.target() != to) {
+                for (spring, to) in f.springs().into_iter().zip(want) {
+                    spring.set(to);
+                }
                 self.motion_started = true;
             }
-            Rect::new(f.x.value(), f.y.value(), f.w.value(), f.h.value())
+            let (vx, vy) = f.velocity();
+            let at = Rect::new(f.x.value() + along, f.y.value(), f.w.value(), f.h.value());
+            (if self.calm { at } else { stretched(at, vx, vy) }, f.radius.value())
         };
-        self.canvas.stroke_rrect(at.inset(-2.5).offset(self.ox, 0.0), radius + 2.5, 1.5, signal, 1.0);
+        let ring = at.inset(-2.5);
+        let radius = (radius + 2.5).min(ring.w * 0.5).min(ring.h * 0.5).max(0.0);
+        self.last_ring = ring;
+        self.canvas.stroke_rrect(ring.offset(self.ox, 0.0), radius, 1.5, signal, 1.0);
     }
 
     /// Forget where the ring was: the next screen's focus is placed at once.
@@ -445,9 +562,11 @@ impl Gfx {
 
     /// Advance what moves on its own. True while something still is.
     pub fn tick(&mut self, dt: f32) -> bool {
-        let f = &mut self.focus;
         // Each spring must be advanced, so no short-circuit.
-        let mut moving = f.x.tick(dt) | f.y.tick(dt) | f.w.tick(dt) | f.h.tick(dt) | self.scroll.tick(dt) | self.press.tick(dt);
+        let mut moving = self.scroll.tick(dt) | self.press.tick(dt);
+        for spring in self.focus.springs() {
+            moving |= spring.tick(dt);
+        }
         if let Some(t) = &mut self.reveal {
             *t += dt;
             if *t > REVEAL_OVER {
@@ -762,6 +881,108 @@ mod tests {
         assert_eq!(g.fault(), g.tokens.signal);
         g.tokens = Tokens::of(bezel::Accent::Blue, bezel::Tone::Dark);
         assert_ne!(g.fault(), g.tokens.signal);
+    }
+
+    const FRAME: f32 = 1.0 / 40.0;
+
+    /// Row `i` of a list: 18 px tall, 20 px apart.
+    fn row(i: usize) -> Rect {
+        Rect::new(10.0, 30.0 + 20.0 * i as f32, 280.0, 18.0)
+    }
+
+    /// Frames at the handheld's beat while the ring moves, drawing it on
+    /// `at` each time; the ring as drawn in each.
+    fn glide(g: &mut Gfx, at: Rect) -> Vec<Rect> {
+        let mut seen = Vec::new();
+        while g.tick(FRAME) {
+            g.focus_ring(at, 6.0);
+            seen.push(g.last_ring);
+            assert!(seen.len() < 80, "the ring never came to rest");
+        }
+        g.focus_ring(at, 6.0);
+        seen.push(g.last_ring);
+        seen
+    }
+
+    #[test]
+    fn the_ring_runs_a_little_past_stretches_on_its_way_and_rests_exactly() {
+        let mut g = Gfx::new(Tokens::dark());
+        g.focus_ring(row(0), 6.0);
+        assert_eq!(g.last_ring, row(0).inset(-2.5), "its first place is taken at once");
+        g.focus_ring(row(1), 6.0);
+        assert!(g.take_motion_started());
+        let seen = glide(&mut g, row(1));
+        let rest = row(1).inset(-2.5);
+        // Its leading edge runs past where it rests, a couple of pixels, and comes back.
+        let furthest = seen.iter().map(|r| r.bottom()).fold(f32::MIN, f32::max);
+        assert!(furthest > rest.bottom() + 1.0 && furthest < rest.bottom() + 4.0, "over by {}", furthest - rest.bottom());
+        // On its way it is drawn out along its motion, its tail behind it.
+        let tallest = seen.iter().map(|r| r.h).fold(0.0, f32::max);
+        assert!(tallest > rest.h + 3.0 && tallest <= rest.h + rest.h / 3.0 + 1.0, "{} tall at most, {} at rest", tallest, rest.h);
+        // And it settles exactly, within half a second at the handheld's beat
+        // (to a twentieth of a pixel: the shell then stops drawing).
+        assert_eq!(*seen.last().unwrap(), rest);
+        assert!(seen.len() as f32 * FRAME <= 0.5, "{} frames", seen.len());
+        assert!(!g.tick(FRAME), "and then nothing moves");
+    }
+
+    #[test]
+    fn the_ring_keeps_its_speed_when_the_focus_moves_on_before_it_lands() {
+        let mut g = Gfx::new(Tokens::dark());
+        g.focus_ring(row(0), 6.0);
+        g.focus_ring(row(1), 6.0);
+        for _ in 0..3 {
+            g.tick(FRAME);
+            g.focus_ring(row(1), 6.0);
+        }
+        let (before, at) = (g.focus.velocity().1, g.last_ring.y);
+        assert!(before > 100.0, "well on its way: {before} px/s");
+        // Down again (a key held): it heads on without starting over.
+        g.focus_ring(row(2), 6.0);
+        assert!((g.focus.velocity().1 - before).abs() < 1.0, "same speed: {} then {}", before, g.focus.velocity().1);
+        g.tick(FRAME);
+        g.focus_ring(row(2), 6.0);
+        assert!(g.last_ring.y > at, "still going the same way");
+        let seen = glide(&mut g, row(2));
+        assert_eq!(*seen.last().unwrap(), row(2).inset(-2.5));
+        // Back up mid-glide: it turns round from where it is.
+        g.focus_ring(row(4), 6.0);
+        g.tick(FRAME);
+        g.focus_ring(row(4), 6.0);
+        let turning = g.last_ring;
+        g.focus_ring(row(3), 6.0);
+        g.tick(FRAME);
+        g.focus_ring(row(3), 6.0);
+        assert!((g.last_ring.y - turning.y).abs() < 20.0, "no jump: {} to {}", turning.y, g.last_ring.y);
+    }
+
+    #[test]
+    fn the_ring_rides_a_turning_strip_and_keeps_its_place_coming_on_and_off_it() {
+        let mut g = Gfx::new(Tokens::dark());
+        let tile = Rect::new(112.0, 30.0, 96.0, 60.0);
+        g.focus_ring_on(tile, 10.0, 0.0);
+        // The strip turns a page while the focus stays on the tile: the ring
+        // is on the tile every frame, never behind it.
+        for step in 1..=10 {
+            let along = -32.0 * step as f32;
+            g.tick(FRAME);
+            g.focus_ring_on(tile.offset(along, 0.0), 10.0, along);
+            assert_eq!(g.last_ring, tile.offset(along, 0.0).inset(-2.5), "step {step}");
+        }
+        // Off the strip onto the screen (the glance page's cards): drawn where it was.
+        let before = g.last_ring;
+        g.focus_ring(Rect::new(8.0, 30.0, 150.0, 120.0), 10.0);
+        assert!((g.last_ring.x - before.x).abs() < 1.0, "{} then {}", before.x, g.last_ring.x);
+    }
+
+    #[test]
+    fn the_calm_ring_lands_at_once_without_stretching() {
+        let mut g = Gfx::new(Tokens::dark());
+        g.calm = true;
+        g.focus_ring(row(0), 6.0);
+        g.focus_ring(row(3), 6.0);
+        assert_eq!(g.last_ring, row(3).inset(-2.5));
+        assert!(!g.tick(FRAME));
     }
 
     #[test]

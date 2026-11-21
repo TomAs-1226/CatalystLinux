@@ -179,6 +179,13 @@ impl Animated {
         self.t = 0.0;
     }
 
+    /// Move the value and its target together, keeping the motion between
+    /// them: the same motion, measured from somewhere else.
+    pub fn shift(&mut self, by: f32) {
+        self.target += by;
+        self.value += by;
+    }
+
     /// Add an impulse without changing the target.
     pub fn nudge(&mut self, velocity: f32) {
         self.x0 = self.value - self.target;
@@ -269,6 +276,25 @@ mod tests {
         let mut frames = 0;
         while a.tick(1.0 / 60.0) { frames += 1; assert!(frames < 600); }
         assert_eq!(a.value(), -50.0);
+    }
+
+    #[test]
+    fn a_shift_moves_the_motion_without_changing_it() {
+        let mut a = Animated::new(0.0, role::release());
+        let mut b = a;
+        a.set(100.0);
+        b.set(100.0);
+        for _ in 0..5 {
+            a.tick(1.0 / 60.0);
+            b.tick(1.0 / 60.0);
+        }
+        b.shift(-40.0);
+        assert_eq!((b.target(), b.velocity()), (60.0, a.velocity()));
+        for _ in 0..10 {
+            a.tick(1.0 / 60.0);
+            b.tick(1.0 / 60.0);
+            assert!(close(b.value(), a.value() - 40.0, 1e-3));
+        }
     }
 
     #[test]

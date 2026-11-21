@@ -733,6 +733,36 @@ fn looks(dir: &std::path::Path) {
     println!("{} looks in {}", looks.len(), dir.display());
 }
 
+/// The ring's path over time, plotted: its top and bottom edges (ink), where
+/// they come to rest (faint lines), one dot a frame.
+#[cfg(not(target_arch = "aarch64"))]
+fn plot_ring(path: &[bezel::Rect], beat: f32, file: &std::path::Path) {
+    let (w, h) = (320i32, 170i32);
+    let mut c = bezel::Canvas::new(w, h);
+    c.px.fill(0x0b0b0e);
+    let Some(last) = path.last() else { return };
+    let (lo, hi) = path.iter().fold((f32::MAX, f32::MIN), |(lo, hi), r| (lo.min(r.y), hi.max(r.bottom())));
+    let (lo, hi) = (lo - 4.0, hi + 4.0);
+    let y = |v: f32| 10.0 + (v - lo) / (hi - lo) * (h as f32 - 20.0);
+    let x = |i: usize| 10.0 + i as f32 * (w as f32 - 20.0) / (path.len().max(2) - 1) as f32;
+    let faint = bezel::Color::hex(0x3a3a44);
+    for rest in [last.y, last.bottom()] {
+        c.rrect(bezel::Rect::new(0.0, y(rest) - 0.5, w as f32, 1.0), 0.0, faint, 1.0);
+    }
+    // A tick every 100 ms along the bottom.
+    let mut t = 0.0;
+    while t <= beat * path.len() as f32 {
+        let i = (t / beat).round() as usize;
+        c.rrect(bezel::Rect::new(x(i) - 0.5, h as f32 - 6.0, 1.0, 6.0), 0.0, faint, 1.0);
+        t += 0.1;
+    }
+    for (i, r) in path.iter().enumerate() {
+        c.circle(x(i), y(r.y), 2.0, bezel::Color::hex(0xf2f2f5), 1.0);
+        c.circle(x(i), y(r.bottom()), 2.0, bezel::Color::hex(0xe94560), 1.0);
+    }
+    platform::sim::save_png(&c, file, 3);
+}
+
 /// The motion, to be looked at: each piece as a strip of frames 50 ms apart
 /// (and as an animated PNG at the handheld's 25 ms beat), and the Home
 /// settings as stills.
@@ -816,6 +846,55 @@ fn motion(dir: &std::path::Path) {
     shell.key(Right);
     let frames = film(&mut shell, 0.8);
     strip(&frames, &beats, dir, "4-focus-lift");
+
+    // The ring going down a list, a frame every beat: it stretches on its
+    // way, runs a little past and draws back. Its path is plotted too.
+    let every = [0, 1, 2, 3, 4, 5, 6, 8, 12];
+    let mut shell = fresh(Robot::demo());
+    press(&mut shell, &to_settings);
+    shell.key(Enter);
+    film(&mut shell, 1.2);
+    shell.key(Down);
+    let mut path = Vec::new();
+    let frames: Vec<Vec<u32>> = (0..24)
+        .map(|_| {
+            shell.tick(BEAT);
+            shell.draw();
+            path.push(shell.gfx.last_ring);
+            shell.gfx.canvas.px.clone()
+        })
+        .collect();
+    strip(&frames, &every, dir, "4b-ring-down-a-row");
+    plot_ring(&path, BEAT, &dir.join("4b-ring-path.png"));
+    // Down held: the key repeats every 75 ms and the ring keeps its speed.
+    let mut frames = Vec::new();
+    for _ in 0..4 {
+        shell.key(Down);
+        frames.extend(film(&mut shell, 0.075));
+    }
+    frames.extend(film(&mut shell, 0.5));
+    strip(&frames, &[0, 3, 6, 9, 12, 14, 16, 19, 30], dir, "4c-ring-key-held");
+    // A page pushed, and Back before it has landed: it turns round where it is.
+    press(&mut shell, &[Up, Up, Up, Up, Up]);
+    shell.key(Enter);
+    let mut frames = film(&mut shell, 0.1);
+    shell.key(Back);
+    frames.extend(film(&mut shell, 0.8));
+    strip(&frames, &[0, 2, 4, 6, 8, 10, 14, 20, 34], dir, "4d-back-while-arriving");
+    // Network, then Wi-Fi from it before Network has landed: Network carries on beneath.
+    press(&mut shell, &[Down, Down, Down, Down, Down, Down]);
+    shell.key(Enter);
+    let mut frames = film(&mut shell, 0.1);
+    shell.key(Enter);
+    frames.extend(film(&mut shell, 0.9));
+    strip(&frames, &[0, 2, 4, 6, 8, 10, 14, 20, 38], dir, "4e-push-while-arriving");
+
+    // Home's pages turning: Right past the last tile of the first page.
+    let mut shell = fresh(Robot::demo());
+    press(&mut shell, &[Right, Right, Right, Right, Right]);
+    shell.key(Right);
+    let frames = film(&mut shell, 0.8);
+    strip(&frames, &every, dir, "4f-home-page-turn");
     // Enter on a tile: it presses in as the app grows out of it.
     shell.key(Enter);
     let frames = film(&mut shell, 0.8);

@@ -526,16 +526,33 @@ starts from what is on screen:
   what lands: nothing is swapped at the end. Press Esc while it opens and it
   turns round where it is, keeping its speed; press Enter while it closes
   and the same window returns.
-- A page inside an app slides in from the right and back out (`page`), and
-  turns round the same way. Home's pages and the glance page turn on the same
-  spring; the carousel turns on `detent`.
+- With keys, nothing carries the motion but the spring, so what moves under
+  them runs a little past and comes back, on Material 3 Expressive's spatial
+  springs (as Detent carries them): `m3-expressive-fast-spatial` (stiffness
+  800, damping ratio 0.6) for small moves, `-default-spatial` (380, 0.8) for
+  everyday ones, `-slow-spatial` (200, 0.8) for a whole page. The calm
+  version damps every one critically, as Bezel's does.
+- A page inside an app slides in from the right and back out (slow spatial:
+  as long as Bezel's page turn, but it runs about 5 px past and settles back),
+  and turns round the same way. Pushed while the page before it is still
+  sliding in, that slide plays on beneath the new page rather than landing at
+  once. Home's pages and the glance page turn on default spatial; the
+  carousel turns on `detent`.
 - Lists glide to where they are scrolled rather than jumping a row at a time
   (`hold`), with the focus ring heading for where the focused row will rest.
   A key pressed against the end of a list, the last app or the glance page
   makes it give a little and spring back: "no further", without a word.
-- The focus ring glides to whatever is focused (`hold`). Bezel itself lands
-  changes made from keys at once; this bends that for the sake of flow, and
-  the calm version restores it.
+- **The focus ring** glides to whatever is focused on fast spatial: about 2 px
+  past a row, 10 px past a tile, settled within 0.4 s. Moving, it stretches
+  along its way with its tail behind it, as Bezel's dock droplet does (0.04 ×
+  speed, at most 13 px, never more than a third of its length), thinning a
+  little across, and draws itself together as it lands; its size and corners
+  follow on default spatial. Keys pressed quickly or held retarget it from
+  where it is at the speed it has, so it never starts over. On Home it rides
+  the strip of pages as they turn instead of chasing its tile, and it is
+  drawn over every tile it crosses. Bezel itself lands changes made from keys
+  at once; this bends that for the sake of flow, and the calm version
+  restores it (no glide, no stretch).
 - The control centre comes down on `release` and leaves on `smooth`; its
   switches' knobs slide (`tick`) and the brightness bar follows the keys.
 - Home's tiles cascade into place when it first appears (`release`, spread

@@ -265,9 +265,10 @@ impl Home {
     pub fn new() -> Self {
         Home {
             focus: 0,
-            page: Animated::new(0.0, role::page()).with_rest(0.002),
+            // Pages turned with keys run a few pixels past and come back.
+            page: Animated::new(0.0, crate::gfx::spatial::default()).with_rest(0.002),
             turn: Animated::new(0.0, role::detent()).with_rest(0.002),
-            glance: Animated::new(0.0, role::page()).with_rest(0.002),
+            glance: Animated::new(0.0, crate::gfx::spatial::default()).with_rest(0.002),
             glance_page: 0,
             card: 0,
             cards: Vec::new(),
@@ -612,6 +613,10 @@ impl Home {
             self.seen = vec![None; count];
         }
         let press = g.press();
+        // The pages are one strip, turned by `page`: the ring rides it. It is
+        // drawn last, over every tile, as on its way it crosses others.
+        let strip = -self.page.value() * W;
+        let mut focus_ring = None;
         for i in 0..count {
             let (icon, name) = self.icon_and_name(i);
             let local = i % per_page;
@@ -681,7 +686,7 @@ impl Home {
                     g.icon("star", true, x, r.y + 12.0, 11.0, t.dim);
                 }
                 if lifted {
-                    g.focus_ring(ring, g.tile_radius() + 1.5);
+                    focus_ring = Some(ring);
                 }
                 continue;
             }
@@ -713,8 +718,11 @@ impl Home {
             g.text_fit(text_x, name_cy, &name, ty.name, t.ink, text_w);
             g.text_fit(text_x, status_cy, &status, ty.caption, t.dim, text_w);
             if lifted {
-                g.focus_ring(ring, g.tile_radius() + 1.5);
+                focus_ring = Some(ring);
             }
+        }
+        if let Some(ring) = focus_ring {
+            g.focus_ring_on(ring, g.tile_radius() + 1.5, strip);
         }
     }
 
