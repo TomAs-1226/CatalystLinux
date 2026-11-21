@@ -488,17 +488,15 @@ impl Gfx {
     /// that name, so the caller can draw its icon instead.
     #[allow(clippy::too_many_arguments)]
     pub fn object(&mut self, name: &str, size: &str, cx: f32, cy: f32, view: crate::object3d::View, scale: f32, alpha: f32) -> bool {
-        let fault = self.fault();
-        self.objects.draw(&mut self.canvas, &self.tokens, fault, name, size, cx + self.ox, cy, view, scale, alpha)
+        self.object_looking(name, size, cx, cy, view, scale, alpha, &crate::object3d::Looks::plain())
     }
 
-    /// How fast the focus ring is moving just now, px a second (0 when calm
-    /// or drawn as a still picture): what turns the focused object with it.
-    pub fn ring_velocity(&self) -> (f32, f32) {
-        if self.calm || self.focus_static || !self.focus.placed {
-            return (0.0, 0.0);
-        }
-        self.focus.velocity()
+    /// The same, its parts and the whole as `looks` says (a robot's parts
+    /// by what they report, a battery's cells by its charge).
+    #[allow(clippy::too_many_arguments)]
+    pub fn object_looking(&mut self, name: &str, size: &str, cx: f32, cy: f32, view: crate::object3d::View, scale: f32, alpha: f32, looks: &crate::object3d::Looks) -> bool {
+        let fault = self.fault();
+        self.objects.draw_looking(&mut self.canvas, &self.tokens, fault, name, size, cx + self.ox, cy, view, scale, alpha, looks)
     }
 
     /// Drawing set something moving: frames should follow at once.
@@ -772,6 +770,16 @@ impl Gfx {
         }
     }
 
+    /// An object on a page arriving swings round into place from a quarter
+    /// turn away as the page rises in: how far it still has to turn, in
+    /// degrees (0 once it has, and always in the calm version).
+    pub fn arriving_turn(&self) -> f32 {
+        match self.reveal {
+            Some(since) if !self.calm => 40.0 * role::release().solve(1.0, 0.0, since).0,
+            _ => 0.0,
+        }
+    }
+
     /// What a page says when it has nothing to show: its object in three
     /// dimensions where there is one (`object3d::for_empty`), turning into
     /// place as the page arrives, otherwise its icon; and the line under it,
@@ -781,13 +789,9 @@ impl Gfx {
         let cy = (self.top() + H) * 0.5;
         let style = self.ty.caption;
         let line = self.text.fit(line, &style, W - 2.0 * PAD);
-        if let Some((object, size)) = crate::object3d::for_empty(icon, &self.objects) {
-            // Swinging round from a quarter turn away as the page rises in.
-            let turn = match self.reveal {
-                Some(since) if !self.calm => 40.0 * role::release().solve(1.0, 0.0, since).0,
-                _ => 0.0,
-            };
-            if self.object(object, size, W * 0.5, cy - 13.0, crate::object3d::View::yaw(turn), 1.0, 1.0) {
+        if let Some((object, size, looks)) = crate::object3d::for_empty(icon, &self.objects) {
+            let turn = self.arriving_turn();
+            if self.object_looking(object, size, W * 0.5, cy - 13.0, crate::object3d::View::yaw(turn), 1.0, 1.0, &looks) {
                 self.text_at(W * 0.5, cy + 24.0, Align::Center, &line, style, t.dim);
                 return;
             }

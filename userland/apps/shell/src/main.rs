@@ -91,6 +91,7 @@ mod recents;
 mod reminders;
 mod remote;
 mod robot;
+mod robot3d;
 mod schedule;
 mod screens;
 mod screenshot;

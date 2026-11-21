@@ -957,12 +957,13 @@ impl Setup {
     /// middle of the way. A pool of light in the accent lies under each.
     fn draw_objects(&mut self, g: &mut Gfx) {
         let travel = self.travel.value();
+        let online = self.joined.is_some() || self.wifi.as_ref().is_some_and(|w| w.state().online()) || crate::sys::address("wlan0").is_some_and(|a| a.contains('.'));
         let middle = self.page == Page::Finishing;
         let spot = if middle { (MIDDLE_X, MIDDLE_Y) } else { (SPOT_X, SPOT_Y) };
         if let Some((object, slot)) = self.leaving {
             let d = slot - travel;
             if d.abs() < 0.999 && !g.calm {
-                stand(g, object, (SPOT_X, SPOT_Y), d, 0.0, 1.0);
+                stand(g, object, (SPOT_X, SPOT_Y), d, 0.0, 1.0, online);
             } else {
                 self.leaving = None;
             }
@@ -976,8 +977,8 @@ impl Setup {
         let f = self.flip.value();
         let dip = 1.0 - 0.08 * (std::f32::consts::PI * f.clamp(0.0, 1.0)).sin();
         match self.flip_from {
-            Some(old) if f < 0.5 && !g.calm => stand(g, old, spot, d, yaw + f * 180.0, dip),
-            _ => stand(g, object, spot, d, yaw - (1.0 - f) * 180.0, dip),
+            Some(old) if f < 0.5 && !g.calm => stand(g, old, spot, d, yaw + f * 180.0, dip, online),
+            _ => stand(g, object, spot, d, yaw - (1.0 - f) * 180.0, dip, online),
         }
     }
 
@@ -1357,7 +1358,7 @@ impl Setup {
 /// An object on its spot, `d` pages along the way from the camera (ahead
 /// positive), turned `yaw` and scaled `k` besides. (The spacing, the turn of
 /// 55° a page and the growing are our own tuning.)
-fn stand(g: &mut Gfx, object: &str, spot: (f32, f32), d: f32, yaw: f32, k: f32) {
+fn stand(g: &mut Gfx, object: &str, spot: (f32, f32), d: f32, yaw: f32, k: f32, online: bool) {
     let x = spot.0 + d * SPACING;
     let near = if d > 0.0 { 1.0 - 0.25 * d } else { 1.0 - 0.3 * d };
     let scale = (near * k).clamp(0.5, 1.4);
@@ -1373,7 +1374,9 @@ fn stand(g: &mut Gfx, object: &str, spot: (f32, f32), d: f32, yaw: f32, k: f32) 
     g.tokens = Tokens::of(g.accent, Tone::Dark);
     let signal = g.tokens.signal;
     g.canvas.glow(x + g.ox, spot.1 + 30.0 * scale, 52.0 * scale, signal, 0.08 * alpha);
-    g.object(object, "hero", x, spot.1, crate::object3d::View::yaw(yaw - d * 55.0), scale, alpha);
+    // Wi-Fi's arcs light once there is a network: dark while it looks.
+    let looks = if object == "wifi" { crate::object3d::wifi_looks(Some(if online { 3 } else { 0 })) } else { crate::object3d::Looks::plain() };
+    g.object_looking(object, "hero", x, spot.1, crate::object3d::View::yaw(yaw - d * 55.0), scale, alpha, &looks);
     g.tokens = tokens;
 }
 

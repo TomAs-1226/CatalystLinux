@@ -18,7 +18,7 @@ import math
 import os
 import random
 
-from kit import (box, cyl, empty, import_model, lathe, prism, ring_band, sphere, text, torus, tube)
+from kit import (box, cyl, empty, import_model, lathe, prism, ring_band, sphere, tag, text, torus, tube)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
@@ -33,10 +33,15 @@ CODE = os.path.join(FONTS, "GoogleSansCode.ttf")
 ARC = list(range(-48, 49, 8))
 SMALL_ARC = list(range(-48, 49, 12))
 TURN = list(range(0, 360, 15))
+# The Robot app's robot turns slowly on its stage, two views blended for the
+# angles between: 4 degrees apart, so an edge moves 3 px from one to the next
+# and the blend never shows as a double edge (15 apart, it did).
+SPIN = list(range(0, 360, 4))
 PITCHES = [-12, 0, 12]
 
 
-ICON = dict(sizes=[["s", 30, SMALL_ARC, PITCHES], ["l", 52, SMALL_ARC, [0]]], res=208)
+# An app's object on its own pages (an empty page shows it); Home's icons stay flat.
+ICON = dict(sizes=[["l", 52, SMALL_ARC, [0]]], res=208)
 HERO = dict(sizes=[["hero", 92, TURN, [0]]], res=276)
 THING = dict(sizes=[["m", 60, ARC, [0]]], res=240)
 HERO_AND_THING = dict(sizes=[["hero", 92, TURN, [0]], ["m", 60, ARC, [0]]], res=276)
@@ -138,28 +143,383 @@ def handheld():
 
 
 def wifi():
-    """Wi-Fi: a dot and three arcs (two lit, as when joined) on a round base."""
+    """Wi-Fi: a dot and three arcs on a round base, each a part, so the
+    shell lights as many arcs as the signal is strong (all dark when off)."""
     root = empty("wifi")
-    cyl(0.9, 0.22, (0, 0, 0.11), r=0.08, mat="white", parent=root)
+    base = tag(empty("base", parent=root), "base")
+    cyl(0.9, 0.22, (0, 0, 0.11), r=0.08, mat="white", parent=base)
     face = upright((0, 0, 0.22), root)
-    sphere(0.17, (0, 0.32, 0), "accent", parent=face)
+    dot = tag(empty("dot", parent=face), "dot")
+    sphere(0.17, (0, 0.32, 0), "accent", parent=dot)
     for i, (ri, ro) in enumerate(((0.55, 0.78), (0.98, 1.21), (1.41, 1.64))):
-        ring_band(ri, ro, 0.26, 45, 90, (0, 0.06, 0), mat="accent" if i < 2 else "white", parent=face, r=0.05)
+        arc = tag(empty(f"arc{i + 1}", parent=face), f"arc{i + 1}")
+        ring_band(ri, ro, 0.26, 45, 90, (0, 0.06, 0), mat="accent", parent=arc, r=0.05)
     return root
 
 
 def battery():
     """A battery cell standing up: a white shell, a dark window and its
-    charge glowing inside in the second tint."""
+    charge inside it, five cells (each a part, so the shell lights as many
+    as the charge reaches), the bolt over them lit while it charges."""
     root = empty("battery")
     w, d, h = 1.0, 0.62, 1.7
-    box((w, d, h), (0, 0, h / 2), r=0.2, mat="white", parent=root, segments=6)
-    box((0.42, 0.34, 0.16), (0, 0, h + 0.05), r=0.06, mat="graphite", parent=root)
-    box((0.74, 0.05, 1.42), (0, -d / 2 - 0.005, h / 2), r=0.1, mat="dark", parent=root)
+    shell = tag(empty("shell", parent=root), "shell")
+    box((w, d, h), (0, 0, h / 2), r=0.2, mat="white", parent=shell, segments=6)
+    box((0.42, 0.34, 0.16), (0, 0, h + 0.05), r=0.06, mat="graphite", parent=shell)
+    box((0.74, 0.05, 1.42), (0, -d / 2 - 0.005, h / 2), r=0.1, mat="dark", parent=shell)
+    for i in range(5):
+        cell = tag(empty(f"cell{i + 1}", parent=root), f"cell{i + 1}")
+        box((0.6, 0.05, 0.215), (0, -d / 2 - 0.03, 0.22 + i * 0.26), r=0.05, mat="second_glow", parent=cell)
+    face = tag(upright((0, -d / 2 - 0.07, h / 2), root), "bolt")
+    bolt(0.04, 0.36, (0, 0, 0), mat="accent", parent=face)
+    return root
+
+
+# ================================================================== robot ===
+
+def frc_robot():
+    """A generic FRC robot, the Robot app's until a team bakes its own: a
+    swerve drivetrain, bumpers all round (the alliance's colour), an intake
+    over the front bumper, a two-stage elevator, a shooter on its carriage,
+    and the battery and controller on the belly pan. Each a part, so the
+    shell colours it from what the robot says of it."""
+    root = empty("frc-robot")
+    dt = tag(empty("drivetrain", parent=root), "drivetrain")
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            m = empty("module", (sx * 1.02, sy * 1.02, 0), parent=dt)
+            cyl(0.23, 0.17, (0, 0, 0.23), r=0.05, mat="rubber", rot=(0, 90, 0), parent=m)
+            cyl(0.11, 0.18, (0, 0, 0.23), r=0.02, mat="metal", rot=(0, 90, 0), parent=m)
+            box((0.52, 0.52, 0.2), (0, 0, 0.55), r=0.07, mat="graphite", parent=m)
+            cyl(0.13, 0.36, (0, 0, 0.82), r=0.04, mat="metal", parent=m)
+            cyl(0.09, 0.22, (sx * -0.16, sy * -0.16, 0.76), r=0.03, mat="graphite", parent=m)
+    for y in (-1.2, 1.2):
+        box((2.1, 0.13, 0.2), (0, y, 0.52), r=0.02, mat="metal", parent=dt)
+    for x in (-1.2, 1.2):
+        box((0.13, 2.1, 0.2), (x, 0, 0.52), r=0.02, mat="metal", parent=dt)
+    bump = tag(empty("bumpers", parent=root), "bumpers")
+    t, h, z = 0.34, 0.5, 0.4
+    for y in (-1, 1):
+        box((2.95 + 2 * t, t, h), (0, y * (1.47 + t / 2), z), r=0.15, mat="accent", parent=bump, segments=6)
+    for x in (-1, 1):
+        box((t, 2.95, h), (x * (1.47 + t / 2), 0, z), r=0.15, mat="accent", parent=bump, segments=6)
+    for x in (-0.55, 0.55):
+        box((0.62, 0.05, 0.3), (x, -1.47 - t - 0.005, z), r=0.04, mat="white", parent=bump, segments=3)
+    for x in (-1, 1):
+        box((0.05, 0.9, 0.3), (x * (1.47 + t + 0.005), 0, z), r=0.04, mat="white", parent=bump, segments=3)
+    fr = tag(empty("frame", parent=root), "frame")
+    box((2.3, 2.3, 0.06), (0, 0, 0.45), r=0.02, mat="body", parent=fr)
+    box((0.78, 0.42, 0.52), (0.5, 0.5, 0.74), r=0.06, mat="graphite", parent=fr)
+    box((0.12, 0.3, 0.1), (0.5, 0.5, 1.03), r=0.03, mat="soft", parent=fr)
+    box((0.62, 0.44, 0.14), (-0.55, 0.05, 0.55), r=0.05, mat="white", parent=fr)
+    cyl(0.05, 0.05, (-0.4, -0.1, 0.63), r=0.0, mat="second_glow", parent=fr, verts=16)
+    el = tag(empty("elevator", parent=root), "elevator")
+    for x in (-0.62, 0.62):
+        box((0.15, 0.15, 2.45), (x, 0.82, 1.7), r=0.03, mat="metal", parent=el)
+        box((0.11, 0.11, 2.1), (x * 0.82, 0.68, 2.05), r=0.03, mat="metal", parent=el)
+    box((1.4, 0.15, 0.15), (0, 0.82, 2.95), r=0.03, mat="metal", parent=el)
+    box((1.15, 0.12, 0.62), (0, 0.56, 1.7), r=0.06, mat="white", parent=el)
+    sh = tag(empty("shooter", (0, 0.2, 2.15), (16, 0, 0), root), "shooter")
+    box((1.05, 0.85, 0.44), (0, 0, 0), r=0.12, mat="white", parent=sh)
+    box((1.07, 0.12, 0.07), (0, 0.1, 0.22), r=0.03, mat="accent", parent=sh, segments=3)
+    for x in (-0.26, 0.26):
+        cyl(0.19, 0.24, (x, -0.47, 0), r=0.04, mat="graphite", rot=(0, 90, 0), parent=sh)
+    cyl(0.12, 0.3, (0.38, 0.3, 0.3), r=0.04, mat="metal", parent=sh)
+    it = tag(empty("intake", parent=root), "intake")
+    for x in (-1.05, 1.05):
+        box((0.09, 1.05, 0.2), (x, -1.62, 0.78), r=0.03, mat="white", rot=(-24, 0, 0), parent=it)
+    for y, z in ((-2.06, 0.55), (-1.72, 0.86)):
+        cyl(0.11, 2.05, (0, y, z), r=0.03, mat="graphite", rot=(0, 90, 0), parent=it)
+        for x in (-0.6, 0.0, 0.6):
+            cyl(0.15, 0.1, (x, y, z), r=0.03, mat="soft", rot=(0, 90, 0), parent=it)
+    return root
+
+
+ROBOT_PARTS = ["drivetrain", "intake", "elevator", "shooter", "bumpers", "frame"]
+
+
+def team_robot(model, mapping):
+    """A team's own robot from its CAD (glTF/GLB, or OBJ from step2obj.py;
+    STL, FBX and PLY too), its parts named by the mapping file (see
+    robot.sh): a spec for bake.py.
+
+    A real assembly is large: its fasteners and specks (anything under 1.2%
+    of the robot across, and whatever `hide` names) are left out, and the
+    rest reduced to about 250,000 triangles in all (each solid in proportion,
+    small ones kept whole): plenty for a 112-pixel picture."""
+    rules, turn, up, hide = read_mapping(mapping)
+    parts = [p for p, _ in rules]
+    if "frame" not in parts:
+        parts.append("frame")
+
+    def build():
+        import fnmatch
+
+        import bmesh as bm
+        import bpy
+        import kit
+        from mathutils import Vector
+        before = set(bpy.data.objects)
+        ext = os.path.splitext(model)[1].lower()
+        axis = "Y" if up == "y" else "Z"
+        if ext in (".glb", ".gltf"):
+            bpy.ops.import_scene.gltf(filepath=model)
+        elif ext == ".obj":
+            bpy.ops.wm.obj_import(filepath=model, up_axis=axis)
+        elif ext == ".stl":
+            bpy.ops.wm.stl_import(filepath=model, up_axis=axis)
+        elif ext == ".ply":
+            bpy.ops.wm.ply_import(filepath=model, up_axis=axis)
+        elif ext == ".fbx":
+            bpy.ops.import_scene.fbx(filepath=model)
+        else:
+            raise SystemExit(f"robot.sh: {ext} is not a model this reads: export glTF (.glb) from Onshape, or STEP")
+        new = [o for o in bpy.data.objects if o not in before]
+        root = empty("team-robot", (0, 0, 0), (0, 0, turn))
+        for o in new:
+            if o.parent is None:
+                o.parent = root
+        bpy.context.view_layer.update()
+        meshes = [o for o in new if o.type == "MESH"]
+
+        def levels_of(o):
+            # The names it sits under, outermost first, down to its own, as
+            # CAD wrote them. A STEP's part comes as one path (step2obj.py
+            # writes gmsh's "Shapes/Robot/Intake/Roller"): each step of it is
+            # a level, gmsh's own "Shapes" left off.
+            levels = []
+            a = o
+            while a is not None and a is not root:
+                names = [a.name.lower()] + ([a.data.name.lower()] if a.type == "MESH" and a.data else [])
+                steps = [s for s in names[0].split("/") if s]
+                if len(steps) > 1 and steps[0] == "shapes":
+                    steps = steps[1:]
+                levels += [[s] for s in reversed(steps)] if len(steps) > 1 else [names]
+                a = a.parent
+            return levels[::-1]
+
+        # What matches nothing: the part a bare `*` is for, else the frame.
+        fallback = next((p for p, globs in rules if "*" in globs), "frame")
+
+        def part_for(o):
+            # The outermost assembly that a line matches decides, so a "Drive
+            # Pulley" in the Intake is the intake's. The robot's own top
+            # assembly is passed over: its name ("Warmonger") is the whole
+            # robot's, not a part's. Among lines matching one name, the first
+            # wins; what nothing matches is the fallback.
+            levels = levels_of(o)
+            for names in levels[1:] if len(levels) > 1 else levels:
+                for p, globs in rules:
+                    if any(g != "*" and fnmatch.fnmatch(n, g) for g in globs for n in names):
+                        return p
+            return fallback
+
+        def size_of(o):
+            corners = [o.matrix_world @ Vector(c) for c in o.bound_box]
+            lo = Vector((min(c.x for c in corners), min(c.y for c in corners), min(c.z for c in corners)))
+            hi = Vector((max(c.x for c in corners), max(c.y for c in corners), max(c.z for c in corners)))
+            return lo, hi
+
+        boxes = {o.name: size_of(o) for o in meshes}
+        lo = Vector((min(b[0].x for b in boxes.values()), min(b[0].y for b in boxes.values()), min(b[0].z for b in boxes.values())))
+        hi = Vector((max(b[1].x for b in boxes.values()), max(b[1].y for b in boxes.values()), max(b[1].z for b in boxes.values())))
+        whole = (hi - lo).length
+        gone = 0
+        for o in list(meshes):
+            b = boxes[o.name]
+            # `hide` is for fasteners and the like: matched against the
+            # part's own name, never its assembly's (a "Drivetrain" holds
+            # its screws, and is not one).
+            own = [o.name.lower()] + ([o.data.name.lower()] if o.data else [])
+            if (b[1] - b[0]).length < whole * 0.012 or any(fnmatch.fnmatch(n, g) for g in hide for n in own):
+                meshes.remove(o)
+                bpy.data.objects.remove(o, do_unlink=True)
+                gone += 1
+        faces = sum(len(o.data.polygons) for o in meshes)
+        ratio = min(1.0, 250_000 / max(faces, 1))
+        counts = {}
+        for o in meshes:
+            part = part_for(o)
+            o["part"] = part
+            counts[part] = counts.get(part, 0) + 1
+            # The CAD's own colours, as our lightness: what each surface is made of.
+            lightness = []
+            for slot in o.material_slots:
+                m = slot.material
+                c = None
+                if m and m.use_nodes:
+                    bsdf = next((n for n in m.node_tree.nodes if n.type == "BSDF_PRINCIPLED"), None)
+                    if bsdf:
+                        c = bsdf.inputs["Base Color"].default_value
+                elif m:
+                    c = m.diffuse_color
+                lightness.append(0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2] if c is not None else 0.5)
+            mat = "body"
+            if lightness:
+                v = sum(lightness) / len(lightness)
+                mat = "white" if v > 0.55 else "body" if v > 0.22 else "soft" if v > 0.08 else "graphite"
+            if part == "bumpers":
+                mat = "accent"
+            # Faces turned one way (a STEP's surfaces may not agree), smooth.
+            mesh = bm.new()
+            mesh.from_mesh(o.data)
+            bm.ops.recalc_face_normals(mesh, faces=mesh.faces)
+            mesh.to_mesh(o.data)
+            mesh.free()
+            o.data.materials.clear()
+            o.data.materials.append(kit.material(mat))
+            for poly in o.data.polygons:
+                poly.use_smooth = True
+            if ratio < 1.0 and len(o.data.polygons) > 400:
+                mod = o.modifiers.new("reduce", "DECIMATE")
+                mod.ratio = ratio
+        print(f"robot.sh: {len(meshes)} solids kept, {gone} small ones or hidden left out, {faces} faces reduced by {ratio:.2f}", flush=True)
+        print("robot.sh: parts:", ", ".join(f"{p} {counts.get(p, 0)}" for p in parts), flush=True)
+        return root
+
+    sizes = [["hero", 112, SPIN, [0]], ["m", 60, SMALL_ARC, [0]]]
+    return dict(build=build, parts=parts, rest_part="frame", sizes=sizes, res=300, tints=["signal", "ice"], source="team", about="The team's own robot")
+
+
+def read_mapping(path):
+    """A mapping file: `part = glob glob …` lines (matched against the CAD's
+    part and assembly names, ignoring case; the first that matches wins),
+    `hide = glob …` for what to leave out, `turn = degrees` to bring the
+    robot's front round to face the camera, `up = y` or `z` (OBJ, STL)."""
+    rules, turn, up, hide = [], 0.0, "z", []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.split("#", 1)[0].strip()
+            if "=" not in line:
+                continue
+            key, value = (s.strip() for s in line.split("=", 1))
+            if key == "turn":
+                turn = float(value)
+            elif key == "up":
+                up = value.lower()
+            elif key == "hide":
+                hide += [g.lower() for g in value.split()]
+            else:
+                rules.append((key, [g.lower() for g in value.split()]))
+    return rules, turn, up, hide
+
+
+# ================================================================ weather ===
+
+WEATHER = dict(sizes=[["l", 52, SMALL_ARC, [0]]], res=208)
+
+
+def sun_disc(parent, loc, k=1.0):
+    s = empty("sun", loc, (0, 0, 0), parent)
+    sphere(0.62 * k, (0, 0, 0), "accent", parent=s)
+    face = upright((0, 0, 0), s)
+    for i in range(8):
+        ray = empty("ray", (0, 0, 0), (0, 0, i * 45 + 22.5), face)
+        box((0.16 * k, 0.32 * k, 0.16 * k), (0, 0.92 * k, 0), r=0.07 * k, mat="accent", parent=ray, segments=4)
+    return s
+
+
+def drop(parent, loc, k=1.0, mat="second"):
+    d = empty("drop", loc, (0, 0, 0), parent)
+    sphere(0.16 * k, (0, 0, 0), mat, parent=d)
+    cyl(0.157 * k, 0.28 * k, (0, 0, 0.17 * k), r=0.0, mat=mat, parent=d, radius2=0.0, verts=32)
+    return d
+
+
+def flake(parent, loc, k=1.0, mat="white"):
+    f = empty("flake", loc, (90, 0, 0), parent)
     for i in range(3):
-        box((0.6, 0.05, 0.36), (0, -d / 2 - 0.03, 0.27 + i * 0.42), r=0.06, mat="second_glow", parent=root)
-    face = upright((0, -d / 2 - 0.07, h / 2), root)
-    bolt(0.04, 0.36, (0, 0, 0), mat="white", parent=face)
+        box((0.06 * k, 0.42 * k, 0.06 * k), (0, 0, 0), r=0.025 * k, mat=mat, rot=(0, 0, i * 60), parent=f, segments=2)
+    sphere(0.06 * k, (0, 0, 0), mat, parent=f)
+    return f
+
+
+def w_sunny():
+    """Weather: clear, by day."""
+    root = empty("sunny")
+    sun_disc(root, (0, 0, 1.2))
+    return root
+
+
+def w_clear_night():
+    """Weather: clear, at night."""
+    root = empty("clear-night")
+    face = upright((0, 0, 1.1), root)
+    prism(crescent(), 0.5, (0, 0, 0), r=0.16, mat="white", parent=face, segments=6)
+    for x, y, s in ((0.62, 0.62, 0.24), (1.02, 0.1, 0.15)):
+        prism(star(4, s, s * 0.36), 0.12, (x, y, 0), r=0.03, mat="accent", parent=face)
+    return root
+
+
+def w_partly_day():
+    """Weather: sun and cloud."""
+    root = empty("partly-day")
+    sun_disc(root, (-0.45, 0.35, 1.5), 0.8)
+    cloud(root, (0.25, -0.35, 0.55), 1.0)
+    return root
+
+
+def w_partly_night():
+    """Weather: the moon behind a cloud."""
+    root = empty("partly-night")
+    face = upright((-0.45, 0.35, 1.45), root)
+    prism([(x * 0.7, y * 0.7) for x, y in crescent()], 0.36, (0, 0, 0), r=0.11, mat="white", parent=face)
+    cloud(root, (0.25, -0.35, 0.55), 1.0, mat="soft")
+    return root
+
+
+def w_cloud():
+    """Weather: overcast, two clouds."""
+    root = empty("cloudy")
+    cloud(root, (-0.35, 0.4, 1.15), 0.72, mat="soft")
+    cloud(root, (0.2, -0.3, 0.6), 1.0)
+    return root
+
+
+def w_rain():
+    """Weather: rain, drops falling from a cloud."""
+    root = empty("rain")
+    cloud(root, (0, 0, 1.25), 1.0)
+    for x, z in ((-0.5, 0.35), (0.05, 0.15), (0.6, 0.4)):
+        drop(root, (x, -0.2, z))
+    return root
+
+
+def w_snow():
+    """Weather: snow."""
+    root = empty("snow")
+    cloud(root, (0, 0, 1.25), 1.0)
+    for x, z in ((-0.55, 0.3), (0.0, 0.12), (0.55, 0.32)):
+        flake(root, (x, -0.25, z), 1.0, "second")
+    return root
+
+
+def w_mix():
+    """Weather: sleet, rain and snow together."""
+    root = empty("sleet")
+    cloud(root, (0, 0, 1.25), 1.0)
+    drop(root, (-0.45, -0.2, 0.3))
+    flake(root, (0.1, -0.25, 0.15), 1.0, "second")
+    drop(root, (0.6, -0.2, 0.36))
+    return root
+
+
+def w_storm():
+    """Weather: a thunderstorm, a dark cloud and a bolt."""
+    root = empty("storm")
+    cloud(root, (0, 0, 1.3), 1.0, mat="graphite")
+    face = upright((0.05, -0.35, 0.45), root)
+    bolt(0.18, 0.62, (0, 0, 0), mat="accent_glow", parent=face)
+    return root
+
+
+def w_fog():
+    """Weather: fog, a cloud behind its bands."""
+    root = empty("fog")
+    cloud(root, (0, 0.2, 1.2), 0.95, mat="soft")
+    face = upright((0, -0.4, 0.0), root)
+    for i, (w, x) in enumerate(((1.8, -0.1), (1.4, 0.25), (1.6, -0.05))):
+        box((w, 0.16, 0.2), (x, 0.35 + i * 0.32, 0), r=0.08, mat="white", parent=face, segments=4)
     return root
 
 
@@ -803,58 +1163,54 @@ def generated(name, about):
 
 A = dict
 
+ROBOT = dict(sizes=[["hero", 112, SPIN, [0]], ["m", 60, SMALL_ARC, [0]]], res=300)
+WIFI_PARTS = ["base", "dot", "arc1", "arc2", "arc3"]
+BATTERY_PARTS = ["shell", "cell1", "cell2", "cell3", "cell4", "cell5", "bolt"]
+
 ASSETS = {
+    # The Robot app: the robot, each part coloured by what it reports.
+    "robot-generic": A(build=frc_robot, **ROBOT, parts=ROBOT_PARTS, rest_part="frame", tints=["signal", "ice"], about="The Robot app, until a team bakes its own robot"),
     # Setup's pages, and the system's big moments.
     "handheld": A(build=handheld, **HERO_AND_THING, tints=["signal", "amber"], about="Setup's welcome, and its last page; About's header: the handheld itself"),
-    "wifi": A(build=wifi, **HERO, tints=["signal", "ice"], about="Setup: Wi-Fi"),
+    "wifi": A(build=wifi, **HERO_AND_THING, parts=WIFI_PARTS, rest_part="base", tints=["signal", "ice"], about="Setup: Wi-Fi, its arcs lit once joined; Net tools with Wi-Fi off"),
     "chip": A(build=chip, **HERO, tints=["signal", "ice"], about="Setup: the hardware check"),
     "keycaps": A(build=keycaps, **HERO, tints=["signal", "amber"], about="Setup: the keyboard lesson"),
-    "key": A(build=key, **HERO, tints=["signal", "ice"], about="Setup: keys for online services"),
+    "key": A(build=key, **HERO_AND_THING, tints=["signal", "ice"], about="Setup: keys for services; the assistant and Browse with no key"),
     "toggle": A(build=toggle, **HERO, tints=["signal", "ice"], about="Setup: choices"),
-    "battery": A(build=battery, **HERO_AND_THING, tints=["signal", "ice"], about="Setup: battery and power; Settings › Battery"),
+    "battery": A(build=battery, **HERO_AND_THING, parts=BATTERY_PARTS, rest_part="shell", tints=["signal", "ice"], about="Setup: battery and power; Settings › Battery, its cells lit by the charge"),
     "palette": A(build=palette, **HERO, tints=["signal", "ice"], about="Setup: the look"),
-    "moon": A(build=moon, **HERO_AND_THING, tints=["signal", "amber"], about="Deep standby, and the screen going off"),
-    "tray": A(build=empty_tray, **THING, tints=["signal", "ice"], about="Empty states: nothing here yet"),
-    "sunmoon": A(build=sunmoon, sizes=[["s", 30, list(range(0, 181, 15)), [0]], ["m", 60, ARC, [0]]], res=240, tints=["signal", "amber"], about="The control centre's Light: a sun, and a moon half a turn behind it"),
-    "robot": A(build=generated("robot", "An FRC robot"), **HERO, tints=["signal", "ice"], source="higgsfield", about="Setup: the team; a robot arriving"),
+    "moon": A(build=moon, **HERO_AND_THING, tints=["signal", "amber"], about="Settings › Battery › Deep standby: lit while it is on"),
+    "tray": A(build=empty_tray, **THING, tints=["signal", "ice"], about="Empty pages: nothing here yet"),
+    "sunmoon": A(build=sunmoon, sizes=[["m", 60, ARC, [0]]], res=240, tints=["signal", "amber"], about="Light and dark (not used: the control centre's switch stays flat)"),
+    "robot": A(build=generated("robot", "An FRC robot"), **HERO, tints=["signal", "ice"], source="higgsfield", about="Setup: the team"),
     "globe": A(build=generated("globe", "A desk globe"), **HERO, tints=["signal", "ice"], source="higgsfield", about="Setup: name and time zone"),
     "laptop": A(build=generated("laptop", "A laptop"), **HERO, tints=["signal", "ice"], source="higgsfield", about="Setup from a computer"),
-    "trophy": A(build=generated("trophy", "A trophy"), **HERO, tints=["signal", "amber"], source="higgsfield", about="You're all set; the match report"),
-    "rocket": A(build=generated("rocket", "A rocket"), **HERO, tints=["signal", "ice"], source="higgsfield", about="System update: ready to install"),
-    # Home's apps, by name.
-    "app-robot": A(build=app_robot, **ICON, tints=["signal", "ice"], about="Robot"),
-    "app-health": A(build=app_health, **ICON, tints=["signal", "ice"], about="Health"),
-    "app-logs": A(build=app_logs, **ICON, tints=["signal", "ice"], about="Logs"),
-    "app-schedule": A(build=app_schedule, **ICON, tints=["signal", "ice"], about="Schedule"),
-    "app-tables": A(build=app_tables, **ICON, tints=["signal", "ice"], about="Tables"),
-    "app-loop": A(build=app_loop, **ICON, tints=["signal", "ice"], about="Loop"),
-    "app-motors": A(build=app_motors, **ICON, tints=["signal", "ice"], about="Motors"),
-    "app-console": A(build=app_console, **ICON, tints=["signal", "ice"], about="Console"),
-    "app-terminal": A(build=app_terminal, **ICON, tints=["signal", "ice"], about="Terminal"),
-    "app-files": A(build=app_files, **ICON, tints=["signal", "ice"], about="Files"),
-    "app-git": A(build=app_git, **ICON, tints=["signal", "ice"], about="Git"),
-    "app-catalogue": A(build=app_catalogue, **ICON, tints=["signal", "ice"], about="Catalogue"),
-    "app-monitor": A(build=app_monitor, **ICON, tints=["signal", "ice"], about="Monitor"),
-    "app-nettools": A(build=app_nettools, **ICON, tints=["signal", "ice"], about="Net tools"),
-    "app-connect": A(build=app_connect, **ICON, tints=["signal", "ice"], about="Connect"),
-    "app-actions": A(build=app_actions, **ICON, tints=["signal", "ice"], about="Actions"),
-    "app-camera": A(build=app_camera, **ICON, tints=["signal", "ice"], about="Camera"),
-    "app-photos": A(build=app_photos, **ICON, tints=["signal", "amber"], about="Photos"),
-    "app-apriltag": A(build=app_apriltag, **ICON, tints=["signal", "ice"], about="AprilTag"),
-    "app-graphs": A(build=app_graphs, **ICON, tints=["signal", "ice"], about="Graphs"),
-    "app-pit": A(build=app_pit, **ICON, tints=["signal", "ice"], about="Pit"),
-    "app-remote": A(build=app_remote, **ICON, tints=["signal", "ice"], about="Remote"),
-    "app-level": A(build=app_level, **ICON, tints=["signal", "ice"], about="Level"),
-    "app-compass": A(build=app_compass, **ICON, tints=["signal", "ice"], about="Compass"),
-    "app-weather": A(build=app_weather, **ICON, tints=["signal", "amber"], about="Weather"),
-    "app-browse": A(build=app_browse, **ICON, tints=["signal", "ice"], about="Browse"),
-    "app-calculator": A(build=app_calculator, **ICON, tints=["signal", "ice"], about="Calculator"),
-    "app-clock": A(build=app_clock, **ICON, tints=["signal", "ice"], about="Clock"),
-    "app-notes": A(build=app_notes, **ICON, tints=["signal", "amber"], about="Notes"),
-    "app-units": A(build=app_units, **ICON, tints=["signal", "ice"], about="Units"),
-    "app-http": A(build=app_http, **ICON, tints=["signal", "ice"], about="HTTP"),
-    "app-share": A(build=app_share, **ICON, tints=["signal", "ice"], about="Share"),
-    "app-assistant": A(build=app_assistant, **ICON, tints=["signal", "amber"], about="Assistant"),
-    "app-web": A(build=app_web, **ICON, tints=["signal", "ice"], about="Web"),
-    "app-settings": A(build=app_settings, **ICON, tints=["signal", "ice"], about="Settings"),
+    "trophy": A(build=generated("trophy", "A trophy"), **HERO, tints=["signal", "amber"], source="higgsfield", about="You're all set"),
+    "rocket": A(build=generated("rocket", "A rocket"), **HERO, tints=["signal", "ice"], source="higgsfield", about="System update (not used yet)"),
+    # Weather: the conditions, as Weather's card shows them.
+    "weather-sunny": A(build=w_sunny, **WEATHER, tints=["amber", "ice"], about="Weather: clear, by day"),
+    "weather-clear-night": A(build=w_clear_night, **WEATHER, tints=["amber", "ice"], about="Weather: clear, at night"),
+    "weather-partly-day": A(build=w_partly_day, **WEATHER, tints=["amber", "ice"], about="Weather: partly cloudy, by day"),
+    "weather-partly-night": A(build=w_partly_night, **WEATHER, tints=["amber", "ice"], about="Weather: partly cloudy, at night"),
+    "weather-cloudy": A(build=w_cloud, **WEATHER, tints=["amber", "ice"], about="Weather: overcast"),
+    "weather-rain": A(build=w_rain, **WEATHER, tints=["amber", "ice"], about="Weather: rain and showers"),
+    "weather-snow": A(build=w_snow, **WEATHER, tints=["amber", "ice"], about="Weather: snow"),
+    "weather-sleet": A(build=w_mix, **WEATHER, tints=["amber", "ice"], about="Weather: sleet, freezing rain"),
+    "weather-storm": A(build=w_storm, **WEATHER, tints=["amber", "ice"], about="Weather: thunderstorms"),
+    "weather-fog": A(build=w_fog, **WEATHER, tints=["amber", "ice"], about="Weather: fog"),
+    # Apps' own objects, for their empty pages (Home's icons stay flat).
+    "app-logs": A(build=app_logs, **ICON, tints=["signal", "ice"], about="Logs: no logs yet"),
+    "app-schedule": A(build=app_schedule, **ICON, tints=["signal", "ice"], about="Schedule: no matches yet"),
+    "app-tables": A(build=app_tables, **ICON, tints=["signal", "ice"], about="Tables, Git: nothing published; reading"),
+    "app-motors": A(build=app_motors, **ICON, tints=["signal", "ice"], about="Motors: no motor history"),
+    "app-terminal": A(build=app_terminal, **ICON, tints=["signal", "ice"], about="Console: no log"),
+    "app-files": A(build=app_files, **ICON, tints=["signal", "ice"], about="Files, Git: an empty folder"),
+    "app-catalogue": A(build=app_catalogue, **ICON, tints=["signal", "ice"], about="Catalogue: empty, or not reached"),
+    "app-nettools": A(build=app_nettools, **ICON, tints=["signal", "ice"], about="Net tools: nothing found"),
+    "app-photos": A(build=app_photos, **ICON, tints=["signal", "amber"], about="Photos: no photos yet"),
+    "app-graphs": A(build=app_graphs, **ICON, tints=["signal", "ice"], about="Graphs, trends, the glance page: nothing to show"),
+    "app-pit": A(build=app_pit, **ICON, tints=["signal", "ice"], about="Pit: an empty checklist"),
+    "app-level": A(build=app_level, **ICON, tints=["signal", "ice"], about="Level: no motion sensor"),
+    "app-compass": A(build=app_compass, **ICON, tints=["signal", "ice"], about="Compass: no compass"),
+    "app-assistant": A(build=app_assistant, **ICON, tints=["signal", "amber"], about="Assistant: no conversations yet"),
 }

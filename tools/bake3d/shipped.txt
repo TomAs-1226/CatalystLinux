@@ -1,7 +1,10 @@
 # The objects the shell carries (pack.py packs these when given no names).
-# Made but not carried yet, so they cost nothing until something shows them:
-# rocket (System update), moon (deep standby), chip (the hardware check),
-# keycaps (the keyboard lesson), palette (the look).
+# Made but not carried, so they cost nothing until something shows them:
+# rocket (System update), moon (deep standby: its page has no room), chip
+# (the hardware check), keycaps (the keyboard
+# lesson), palette (the look), sunmoon (light and dark), and the app icons
+# not used by an empty page (Home's icons are flat).
+robot-generic
 handheld
 laptop
 wifi
@@ -12,39 +15,27 @@ toggle
 battery
 trophy
 tray
-sunmoon
-app-robot
-app-health
+weather-sunny
+weather-clear-night
+weather-partly-day
+weather-partly-night
+weather-cloudy
+weather-rain
+weather-snow
+weather-sleet
+weather-storm
+weather-fog
 app-logs
 app-schedule
 app-tables
-app-loop
 app-motors
-app-console
 app-terminal
 app-files
-app-git
 app-catalogue
-app-monitor
 app-nettools
-app-connect
-app-actions
-app-camera
 app-photos
-app-apriltag
 app-graphs
 app-pit
-app-remote
 app-level
 app-compass
-app-weather
-app-browse
-app-calculator
-app-clock
-app-notes
-app-units
-app-http
-app-share
 app-assistant
-app-web
-app-settings

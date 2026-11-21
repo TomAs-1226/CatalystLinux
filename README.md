@@ -169,8 +169,8 @@ handheld to welcome, the network, the team's robot, a globe, a key, a
 switch, the battery), and moving on carries the camera along to the next
 one, the last page's object passing nearer and off to the left as the next
 turns in from further off (`object3d`, below). The objects answer what is
-done: a network joined turns the Wi-Fi once round and setup carries on by
-itself, a key kept turns the key, a digit of the team number turns the robot
+done: Wi-Fi's arcs stay dark until there is a network, then light, the
+Wi-Fi turns once round and setup carries on by itself, a key kept turns the key, a digit of the team number turns the robot
 a little, a time zone chosen turns the globe by its offset. Pages of choices
 already made (keys, choices, power, the look, the hardware found) start on
 Next, so Enter goes straight on and Up goes into them. The calm version
@@ -955,65 +955,111 @@ software renderer under emulation, which stands in for the VideoCore there.
 
 ## Objects in three dimensions
 
-Home's app icons, setup's objects, the empty pages, About's header and the
-control centre's Light switch are objects in three dimensions, rendered
-beforehand. The handheld renders nothing in 3D: it lays down pictures,
-chosen by springs (`apps/shell/src/object3d.rs`).
+Inside the apps, where a picture can say something a flat icon cannot,
+there are objects in three dimensions, rendered beforehand. Home's icons,
+lists, rows and the control centre stay flat. The handheld renders nothing
+in 3D: it lays down pictures, chosen by springs and coloured by what they
+stand for (`apps/shell/src/object3d.rs`).
 
-- **Rendered in Blender** (5.2, Cycles), headless, by `tools/bake3d`:
-  `blender -b --factory-startup -P tools/bake3d/bake.py -- OUT [names]`.
-  The same Blender, seed and samples give the same pictures. Each object is
-  rendered from every angle it is shown at under Bezel's one light, resting
-  above and to the left (an area light fixed to the camera, so it stays
-  there however the object turns), large enough for soft shadows, over a
-  soft sky that gives ambient occlusion, with a shadow catcher keeping its
-  contact shadow down and to the right.
-- **Two sources.** Most are built in code (`tools/bake3d/models.py`, out of
-  rounded boxes, cylinders, tubes, extruded outlines and type in the
-  shell's own fonts). Five were generated with Higgsfield (text to 3D,
-  Tripo: the team's robot, the globe, the laptop, the trophy and the
-  rocket), reduced to 30,000 faces and kept in `tools/bake3d/glb/`
-  (Draco-compressed, about 200 kB each) by `glb_prep.py`, which reads their
-  textures into our materials: lightness, and their orange as the accent.
-- **Colour at run time.** Objects are rendered in neutral greys that say
-  what a surface is (the shell, white, graphite, dark glass, metal) and
-  which parts take a tint, not what colour they are. Each view is kept as
-  four planes (lightness; how much is tint A and tint B; how much of the
-  pixel the object covers; how dark its shadow makes what is under it).
-  The shell relights the lightness with the palette in use: the shell parts
-  with a tone of the palette's neutrals, tint A with the signal, tint B
-  with ice or amber, overexposure bleeding to white. So one bake serves dark
-  and light, every accent and your own colour, and the colour changes
-  blend as everything else does. Baking every palette would have been
-  154 bakes (77 accents in two modes).
-- **What turns them.** A focused icon on Home turns after the focus ring as
-  it moves (and nods going up or down), on the ring's own spring, and every
-  icon is turned a little by where its tile sits, so the icons turn as the
-  pages slide. The carousel's objects turn to face the middle as their
-  cards come round. Setup's objects stand beside each page's words and the
-  camera travels between them (see *Starting up*). An empty page's object
-  swings round into place as the page rises in. The control centre's Light
-  is a coin with the sun on its face and the moon on its back, turning over
-  with the switch. The calm version keeps them all at rest.
-- **What it costs.** The pack is 3.3 MB in the program file, read in place:
-  46 objects, each view a small PNG of its four planes (icons at 30 px with
-  27 views and 52 px with 9, setup's objects at 92 px all the way round
-  every 15°). Frames are decoded and coloured only when first wanted, and
-  kept in a cache of at most 384 kB, the least recently used let go first:
-  Home's first page at rest holds 24 kB, the focus moving 73 kB, setup end
-  to end at most the full 384 kB. On the development PC a frame takes 17 µs
-  (an icon) to 90 µs (a setup object) to decode and colour, 17 µs to lay
-  down, and 102 µs to blend two angles and move them off the pixel grid;
-  about 1.8, 0.34 and 2 ms on the handheld by the simulator's factor of 20,
-  which only the device can confirm.
-- **Previews.** `tools/bake3d/previews.sh BAKED` packs a bake and runs
-  `catalyst-shell --objects shots/3d-preview`: contact sheets in dark and
-  light and in other accents, turntables, the objects in place on the panel
-  (at its size and three times it) and their motion, and what they cost, all
-  drawn by the shell's own code, with `shots/3d-preview/index.html` showing
-  everything. `tools/bake3d/shipped.txt` lists the objects the shell
-  carries; the rocket, the moon, the processor, the keycaps and the
-  swatches are made but not carried until something shows them.
+- **The robot, in the Robot app.** The robot stands on its stage at the
+  left of the Robot page, turning slowly, and each of its parts shows what
+  the robot says of it (`robot3d.rs`): a part running hot or warned about
+  glows amber, one in fault red, one at work (a shooter at speed, an intake
+  running, an elevator on its way) a faint ice, and the bumpers take the
+  alliance's red or blue. Disabled, the robot is dimmed; with no link, grey
+  and faded. Its mode (disabled, auto, teleop, test, e-stopped) is on a chip
+  at the top, its link's round trip beside it, the battery large at the
+  bottom (amber under 11.8 V, red under 11 V or browned out) and what needs
+  attention beside the battery. When a part turns warm or faults, the robot
+  turns to show it, holds there six seconds and turns on. Which part is
+  which comes from the robot's own words: a health check, a temperature or a
+  current published under a subsystem's name colours the part whose name (or
+  one like it) is in it ("Elevator" the elevator, "FrontLeftDrive" the
+  drivetrain, "Flywheel" the shooter). The mode is read from the Driver
+  Station's control bits (`/FMSInfo/FMSControlData`) and the alliance from
+  `/FMSInfo/IsRedAlliance`, else from Catalyst's own opmode. Health, with
+  nothing firing, shows the same robot; an app with no robot to show (Tables,
+  Motors, Logs) shows it greyed.
+- **The battery** at the top of Settings › Battery: five cells, lit from the
+  bottom one for each fifth of charge begun (red at 15% and under), the bolt
+  over them lit while it charges; the exact figure beside it.
+- **The weather** on Weather's card: sun, clear night, partly cloudy by day
+  and by night, cloud, rain, snow, sleet, storm or fog.
+- **Setup's objects** (see *Starting up*), Wi-Fi's arcs dark until there is a
+  network; **About's header**, the handheld itself; and **empty pages**, each
+  the app's own object (an empty folder, no photos yet, no matches), a key
+  where a key is missing, the instrument greyed where there is no sensor.
+
+**How they are made.** In Blender (5.2, Cycles), headless, by `tools/bake3d`:
+`blender -b --factory-startup -P tools/bake3d/bake.py -- OUT [names]`.
+Each object is rendered from every angle it is shown at under Bezel's one
+light, resting above and to the left (an area light fixed to the camera),
+with soft shadows and ambient occlusion, in neutral greys that say what a
+surface is rather than its colour. Each view is kept as planes: lightness,
+which parts take a tint, cover, shadow, and for an object with parts which
+part each pixel is. Colour is put on at run time from the palette (dark,
+light, any accent, your own colour), and each part painted or lit as it
+reports. Most objects are built in code (`tools/bake3d/models.py`); setup's
+toy robot, the globe, the laptop and the trophy were generated with
+Higgsfield (Tripo, text to 3D) and are kept reduced in `tools/bake3d/glb/`.
+`tools/bake3d/previews.sh BAKED` packs a bake and runs `catalyst-shell
+--objects shots/3d-preview` for the previews (`shots/3d-preview/index.html`).
+
+**What it costs.** The pack is 2.8 MB in the program file, read in place:
+35 objects, a third of it the Robot app's robot, whose 90 views (4 degrees
+apart) keep its slow turn free of double edges where two views are blended.
+Frames are decoded and coloured only when first wanted, into a cache of at
+most 384 kB, the least recently used let go first: the Robot page turning
+holds about 340 kB and decodes about three frames a second, Weather's page
+60 kB, Home none. On the development PC a robot frame takes 230 µs to
+decode and colour and 44 µs to draw while it turns (two views blended):
+about 4.6 and 0.9 ms on the handheld by the simulator's factor of 20, which
+only the device can confirm.
+
+### Your own robot in the Robot app
+
+The Robot app shows the shell's own generic robot until a team installs its
+own, made from its CAD with one command:
+
+    tools/bake3d/robot.sh ROBOT.glb [robot.map] [robot3d.pack]
+
+and copied to the handheld as `/data/catalyst/robot3d.pack` (with SSH
+switched on: `scp robot3d.pack root@<handheld>:/data/catalyst/`).
+The Robot app reads it the next time it opens; a newer file replaces it. No
+system update is needed, and an update leaves it where it is.
+
+1. **Export from Onshape.** Open the robot's **Assembly** tab (not a Part
+   Studio), right-click the tab and choose **Export**. Either:
+   - **GLTF** (best: every part keeps its name and colour). Tick **Export
+     models oriented Y axis up**; leave **Export unique parts as individual
+     files** and **Include hidden instances in export** unticked;
+     **Resolution: Medium** (Coarse is enough for a 112-pixel picture);
+     **Compress** off; **Options: Download**. Or
+   - **STEP**: leave **Export models oriented Y axis up** and **Export unique
+     parts as individual files** unticked; **Version**: use the latest;
+     **Preprocessing: Remove small entities only (basic)**; units as they
+     come; **Options: Download**. A STEP is read with gmsh, which `robot.sh`
+     sets up in `tools/bake3d/.venv` the first time; screws and other parts
+     too small to see are left out before it is meshed.
+2. **Say which part is which.** Copy `tools/bake3d/robot.map` beside the
+   model. Each line names a part of the robot (drivetrain, intake, elevator,
+   shooter, bumpers, frame, or one of your own, such as climber) and globs
+   matched against the CAD's names: `shooter = *shooter* *flywheel*`. A
+   solid goes by the outermost assembly it sits in that a line matches (the
+   robot's own top assembly passed over), else the next one in, down to its
+   own name: a "Drive Pulley" in the Intake is the intake's. Where two lines
+   match one name the first wins; what matches nothing is the frame. `hide =
+   *screw* *washer* …` leaves fasteners out, matched against a solid's own
+   name only; `turn = 90` turns the robot so its front (the intake side)
+   faces the camera. Naming the subassemblies in Onshape after what they are
+   (Swerve Module, Intake, Elevator) makes this a few lines.
+3. **Run it.** `robot.sh` imports the model, leaves out what is too small to
+   see (under 1.2% of the robot across) and whatever `hide` names, reduces
+   the rest to about 250,000 triangles, renders it all the way round with
+   its parts marked (90 views, as the shell's own robot), and packs it: about
+   a minute and a half and 900 kB for a simple robot, longer for a large
+   assembly. It prints how many solids went to each part: a part with none
+   means a glob to fix.
 
 ## External apps
 

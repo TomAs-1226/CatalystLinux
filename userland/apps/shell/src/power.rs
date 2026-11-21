@@ -1006,6 +1006,36 @@ pub fn postponed_floor(care: &Care) -> bool {
 /// The header's height at rest.
 const HERO_H: f32 = 62.0;
 
+/// The battery's look for a charge: its cells lit from the bottom, one for
+/// each fifth begun (so 1% shows one), in ice, or in the fault's red at
+/// 15% and under; the rest dark; the bolt over them lit while it charges.
+/// No reading: no cells lit, the whole greyed.
+pub fn battery_looks(g: &Gfx, charge: Option<(u32, bool)>) -> crate::object3d::Looks {
+    use crate::object3d::{Looks, PartLook};
+    let dark = PartLook { paint: Some(Color::hex(0x2b2f35)), glow: None };
+    let Some((percent, charging)) = charge else {
+        let mut looks = Looks { dim: 0.6, ..Looks::plain() };
+        for i in 1..=5 {
+            looks = looks.part(&format!("cell{i}"), dark);
+        }
+        return looks.part("bolt", dark);
+    };
+    let lit_cells = percent.div_ceil(20).min(5);
+    let lit = if percent <= 15 {
+        PartLook { paint: Some(g.fault()), glow: Some((g.fault(), 0.25)) }
+    } else if charging {
+        PartLook { paint: None, glow: Some((g.tokens.ice, 0.3)) }
+    } else {
+        PartLook::default()
+    };
+    let mut looks = Looks::plain();
+    for i in 1..=5 {
+        looks = looks.part(&format!("cell{i}"), if i <= lit_cells { lit } else { dark });
+    }
+    let bolt = if charging { PartLook { paint: Some(Color::hex(0xf4f6f8)), glow: Some((Color::hex(0xffffff), 0.4)) } } else { dark };
+    looks.part("bolt", bolt)
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Row {
     Saver,
@@ -1102,6 +1132,7 @@ impl BatteryPage {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn draw_hero(&mut self, g: &mut Gfx, top: f32, shown: f32) {
         if shown < 0.02 {
             return;
@@ -1116,11 +1147,20 @@ impl BatteryPage {
             Some(r) => (format!("{}%", r.percent), r.status(), r.draw_line().unwrap_or_default()),
             None => ("–".to_owned(), "no battery gauge".to_owned(), String::new()),
         };
-        let x = PAD + 2.0;
+        // The battery itself, as many of its five cells lit as the charge
+        // reaches (red when low), its bolt lit while it charges; folding
+        // away, it turns as it goes. The figure beside it is the exact one.
+        let cell = match &self.reading {
+            Some(r) => Some((r.percent, r.flow == Flow::Charging)),
+            None => None,
+        };
+        let turned = crate::object3d::View::yaw(if g.calm { 0.0 } else { (1.0 - shown) * 40.0 + g.arriving_turn() });
+        let looks = battery_looks(g, cell);
+        let x = if g.object_looking("battery", "m", PAD + 22.0, y + 25.0, turned, 1.0, shown, &looks) { PAD + 50.0 } else { PAD + 2.0 };
         let w = g.measure(&percent, big).max(g.measure("88%", big));
         g.text_alpha(x, y + 18.0, &percent, big, t.ink, shown);
         // Beneath: how it stands, and what it draws where both fit.
-        let room = W - 2.0 * PAD - 4.0;
+        let room = W - PAD - 2.0 - x;
         let both = g.measure(&status, ty.caption) + 18.0 + g.measure(&line, ty.caption) <= room;
         let status = g.text.fit(&status, &ty.caption, room);
         g.text_alpha(x + 1.0, y + 48.0, &status, ty.caption, t.dim, shown);

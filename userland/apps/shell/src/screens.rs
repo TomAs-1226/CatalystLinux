@@ -196,13 +196,12 @@ fn pulse_spring() -> Animated {
 /// and in the mono voice at the top, its icon at the top right (unless a
 /// dot or a star is there), and what it reports below, in the display voice
 /// and large when it is a reading.
-#[allow(clippy::too_many_arguments)]
-fn bezel_tile(g: &mut Gfx, r: Rect, icon: &str, object: Option<(&str, crate::object3d::View)>, name: &str, status: &str, focused: bool, corner_taken: bool) {
+fn bezel_tile(g: &mut Gfx, r: Rect, icon: &str, name: &str, status: &str, focused: bool, corner_taken: bool) {
     let (t, ty) = (g.tokens, g.ty);
     let quiet = if focused { t.ink } else { t.dim };
     let label_cy = r.y + 7.0 + ty.caption.size * 0.5;
     g.text_fit(r.x + 9.0, label_cy, &name.to_lowercase(), ty.caption, quiet, r.w - 34.0);
-    if !corner_taken && !object.is_some_and(|(o, view)| g.object(o, "s", r.right() - 15.0, label_cy + 3.0, view, 1.0, 1.0)) {
+    if !corner_taken {
         g.icon(icon, focused, r.right() - 13.0, label_cy, 14.0, quiet);
     }
     let baseline = r.bottom() - 8.0;
@@ -240,24 +239,6 @@ fn split_reading(status: &str) -> Option<(&str, &str)> {
     let numeric = lead.is_ascii_digit() || first == "–";
     let label = lead.is_ascii_uppercase() && first.len() <= 4 && first.len() > 1 && chars.all(|c| c.is_ascii_digit());
     (numeric || label).then_some((first, rest))
-}
-
-/// How a tile's 3D icon is turned. By where the tile sits across the panel,
-/// as a camera in its middle would see it: the outer columns 12° either way
-/// (an angle the icons were rendered at, so at rest each shows a frame as it
-/// was rendered), in between as the pages slide. The focused one also turns
-/// after the focus ring as it moves (and nods with it going up or down),
-/// coming back to rest as the ring lands; the ring's own spring carries it,
-/// overshoot and all. Calm, only where it sits.
-fn tile_view(g: &Gfx, r: Rect, tw: f32, columns: usize, focused: bool) -> crate::object3d::View {
-    let half = (columns.max(2) - 1) as f32 * 0.5 * (tw + GAP);
-    let mut view = crate::object3d::View::yaw(-12.0 * (r.cx() - W * 0.5) / half);
-    if focused {
-        let (vx, vy) = g.ring_velocity();
-        view.yaw += (vx * 0.022).clamp(-36.0, 36.0);
-        view.pitch = (vy * 0.012).clamp(-12.0, 12.0);
-    }
-    view
 }
 
 /// How long a tile is pressed in before its app grows out of it: long enough
@@ -356,12 +337,6 @@ impl Home {
             _ => "",
         };
         format!("{said}|{}", attention.unwrap_or(""))
-    }
-
-    /// A built-in app's object in three dimensions, if the shell carries
-    /// one; an external app keeps its icon.
-    fn object(&self, index: usize, name: &str, g: &Gfx) -> Option<String> {
-        matches!(self.tiles.get(index), Some(Tile::Builtin(_))).then(|| crate::object3d::for_app(name)).filter(|o| g.objects.has(o))
     }
 
     /// Whether an app is one of the favourites.
@@ -730,9 +705,7 @@ impl Home {
             // the top, what the app reports large below it.
             if g.theme == crate::look::Theme::Bezel {
                 let corner_taken = attention.is_some() || self.favourite(i);
-                let object = self.object(i, &name, g);
-                let view = tile_view(g, r, tw, columns, lifted);
-                bezel_tile(g, r, &icon, object.as_deref().map(|o| (o, view)), &name, &status, focused, corner_taken);
+                bezel_tile(g, r, &icon, &name, &status, focused, corner_taken);
                 if let Some(severity) = attention {
                     let c = severity_color(g, severity);
                     g.dot(r.right() - 12.0, r.y + 12.0, 3.5 + 1.5 * pulse, c);
@@ -748,26 +721,16 @@ impl Home {
             }
             // A selected item's icon fills in.
             let icon_color = if focused { t.ink } else { t.dim };
-            // A built-in app's icon is its object, in three dimensions: turned
-            // a little by where its tile sits (as a camera in the middle sees
-            // it), so it turns as the pages slide, and the focused one by the
-            // focus ring's motion. Calm, they rest.
-            let object = self.object(i, &name, g);
-            let view = tile_view(g, r, tw, columns, lifted);
             let (text_x, name_cy, status_cy, text_w);
             if tw > 120.0 {
                 // A wide tile: the icon beside two lines.
-                if !object.as_ref().is_some_and(|o| g.object(o, "s", r.x + 24.0, r.cy(), view, 1.0 - 0.06 * pressed, 1.0)) {
-                    g.icon(&icon, focused, r.x + 23.0, r.cy(), 24.0, icon_color);
-                }
+                g.icon(&icon, focused, r.x + 23.0, r.cy(), 24.0, icon_color);
                 text_x = r.x + 44.0;
                 text_w = r.w - 52.0;
                 name_cy = r.cy() - ty.caption.size * 0.5 - 1.0;
                 status_cy = r.cy() + ty.name.size * 0.5 + 1.0;
             } else {
-                if !object.as_ref().is_some_and(|o| g.object(o, "s", r.x + 19.0, r.y + 15.0, view, 1.0 - 0.06 * pressed, 1.0)) {
-                    g.icon(&icon, focused, r.x + 18.0, r.y + 15.0, 18.0, icon_color);
-                }
+                g.icon(&icon, focused, r.x + 18.0, r.y + 15.0, 18.0, icon_color);
                 text_x = r.x + 10.0;
                 text_w = r.w - 16.0;
                 status_cy = r.bottom() - 6.0 - ty.caption.size * 0.5;
@@ -823,14 +786,7 @@ impl Home {
             // once per size, and a size that changed every frame would be
             // drawn afresh every frame.
             let icon_cy = (r.cy() - 16.0 * near).round();
-            // A built-in app's object turns to face the middle as its card
-            // comes round, as on a real turntable; nearer, it is whole.
-            let object = self.object(i, &name, g);
-            let view = crate::object3d::View::yaw((-away * 36.0).clamp(-48.0, 48.0));
-            let drawn = object.as_ref().is_some_and(|o| g.object(o, "l", r.cx(), icon_cy - 5.0 * near, view, scale, 0.55 + 0.45 * near));
-            if !drawn {
-                g.icon_alpha(&icon, near > 0.5, r.cx().round(), icon_cy, 30.0, if near > 0.5 { t.ink } else { t.dim }, 0.55 + 0.45 * near);
-            }
+            g.icon_alpha(&icon, near > 0.5, r.cx().round(), icon_cy, 30.0, if near > 0.5 { t.ink } else { t.dim }, 0.55 + 0.45 * near);
             if near > 0.02 {
                 let name = g.text.fit(&name, &ty.title, cw - 18.0);
                 let status = g.text.fit(&status, &ty.caption, cw - 18.0);
@@ -1181,11 +1137,18 @@ impl Screen for Home {
 
 // ----------------------------------------------------------------- robot ---
 
-/// Link, identity and the Systemcore's vital signs; the robot's address is
-/// set here.
+/// The robot itself, in three dimensions, each part coloured by what it
+/// reports, with its mode, link, battery and what needs attention around
+/// it (`robot3d`); the Systemcore's vital signs beside it; the robot's
+/// address is set here.
 #[derive(Default)]
 pub struct RobotScreen {
     editing: Option<String>,
+    hero: crate::robot3d::Hero,
+    /// As last drawn: the calm version, and whether a robot is linked (it
+    /// turns only then).
+    calm: bool,
+    linked: bool,
 }
 
 /// A team number becomes the Systemcore's static address, 10.TE.AM.2.
@@ -1235,29 +1198,44 @@ impl Screen for RobotScreen {
         Nav::Stay
     }
 
+    fn tick(&mut self, dt: f32) -> bool {
+        // It turns slowly on its stand while a robot is linked.
+        self.hero.tick(dt, self.calm, self.linked)
+    }
+
     fn draw(&mut self, g: &mut Gfx, robot: &Robot) {
         let t = g.tokens;
         let ty = g.ty;
         let top = g.top();
         let bottom = H - PAD - g.hint_h();
-        let left_w = 122.0;
+        (self.calm, self.linked) = (g.calm, robot.linked());
 
-        // Address: the one thing set on this screen.
+        // The robot on its stage: the team's own if one is installed, each
+        // part as the robot reports it, its mode, link and battery around it.
+        let stage = Rect::new(PAD, top, 166.0, bottom - top);
+        g.surface(stage, g.tile_radius(), t.surface1);
+        let object = self.hero.object(g);
+        let parts: Vec<String> = g.objects.parts(object).into_iter().map(|(name, _)| name).collect();
+        let state = crate::robot3d::read(robot, &parts);
+        g.canvas.set_clip(stage.offset(g.ox, 0.0));
+        let size = if g.objects.px(object, "hero").is_some() { "hero" } else { "m" };
+        self.hero.draw(g, object, size, stage.cx(), stage.cy() + 4.0, &state, 1.0);
+        g.canvas.clear_clip();
+        crate::robot3d::draw_captions(g, stage, &state, robot);
+
+        // Beside it: the code on the robot and the Systemcore's vital
+        // signs, and the address, the one thing set on this screen.
+        let x = stage.right() + GAP;
+        let w = W - PAD - x;
         let field_h = ty.caption.size + ty.label.size + 14.0;
-        let field = Rect::new(PAD, bottom - field_h, left_w, field_h);
-        let battery = Rect::new(PAD, top, left_w, field.y - GAP - top);
-        g.stat(battery, "battery", robot.f64("Systemcore/BatteryVolts").map(|v| format!("{v:.1}")), "v", (battery.h - ty.caption.size - 14.0).min(36.0));
-        if robot.bool("Systemcore/BrownedOut") == Some(true) {
-            // On its tile, rising in with it.
-            let fault = g.fault();
-            g.text_at(battery.right() - 9.0, battery.y + 5.0 + ty.caption.size * 0.5, Align::Right, "brownout", ty.caption, fault);
-        }
+        let field = Rect::new(x, bottom - field_h, w, field_h);
         g.surface(field, g.tile_radius(), if self.editing.is_some() { t.surface2 } else { t.surface1 });
         g.text_at(field.x + 9.0, field.y + 5.0 + ty.caption.size * 0.5, Align::Left, "address", ty.caption, t.dim);
         let value_cy = field.bottom() - 5.0 - ty.label.size * 0.5;
         match &self.editing {
             Some(text) => {
-                let w = g.text_at(field.x + 9.0, value_cy, Align::Left, text, ty.label, t.ink);
+                let shown = g.text.fit(text, &ty.label, field.w - 22.0);
+                let w = g.text_at(field.x + 9.0, value_cy, Align::Left, &shown, ty.label, t.ink);
                 g.surface(Rect::new(field.x + 10.0 + w, value_cy - ty.label.size * 0.5, 1.5, ty.label.size), 0.5, t.signal);
                 g.focus_ring(field, g.tile_radius());
             }
@@ -1266,14 +1244,10 @@ impl Screen for RobotScreen {
                 g.text_fit(field.x + 9.0, value_cy, &shown, ty.label, t.ink, field.w - 18.0);
             }
         }
-
-        let x = PAD + left_w + GAP;
-        let w = W - PAD - x;
         let can = robot.get("Systemcore/CanUtilization").and_then(|v| v.as_f64s().map(|u| u.iter().cloned().fold(0.0, f64::max)));
         let cpu = robot.f64("Systemcore/CpuPercent");
         let temp = robot.f64("Systemcore/TempCelsius");
-        let rows: [(&str, String, Option<f32>); 5] = [
-            ("link", if robot.linked() { dash(robot.rtt_ms().map(|ms| format!("{ms:.1} ms"))) } else { robot.status() }, None),
+        let rows: [(&str, String, Option<f32>); 4] = [
             // The code on the robot: its commit, and against the repository
             // marked as the robot's code, how far behind it is.
             ("code", dash(robot.string("Robot/Software/RobotCodeVersion").map(|v| crate::git::robot_code_line(&v).unwrap_or_else(|| v.chars().take(9).collect()))), None),
@@ -1282,18 +1256,19 @@ impl Screen for RobotScreen {
             ("can", dash(can.map(|v| format!("{:.0}%", v * 100.0))), can.map(|v| v as f32)),
         ];
         let gap = 3.0;
-        let row_h = (bottom - top - gap * 4.0) / 5.0;
-        let label_w = g.measure("temp", ty.label) + 18.0;
-        let value_w = g.measure("100 °c", ty.label) + 16.0;
+        let rows_bottom = field.y - GAP;
+        let row_h = (rows_bottom - top - gap * 3.0) / 4.0;
+        let label_w = g.measure("temp", ty.label) + 16.0;
+        let value_w = g.measure("100 °c", ty.label) + 14.0;
         for (i, (label, value, fraction)) in rows.iter().enumerate() {
             let r = Rect::new(x, top + i as f32 * (row_h + gap), w, row_h);
             g.surface(r, (row_h * 0.5).min(11.0), t.surface1);
-            g.text_at(r.x + 10.0, r.cy(), Align::Left, label, ty.label, t.dim);
+            g.text_at(r.x + 9.0, r.cy(), Align::Left, label, ty.label, t.dim);
             match fraction {
                 Some(f) => {
-                    g.text_at(r.right() - 10.0, r.cy(), Align::Right, value, ty.label, t.ink);
+                    g.text_at(r.right() - 9.0, r.cy(), Align::Right, value, ty.label, t.ink);
                     let fill = if *f > 0.85 { t.signal } else { t.ice };
-                    g.meter(Rect::new(r.x + label_w, r.cy() - 3.0, r.w - label_w - value_w, 6.0), *f, fill);
+                    g.meter(Rect::new(r.x + label_w, r.cy() - 3.0, (r.w - label_w - value_w).max(8.0), 6.0), *f, fill);
                 }
                 None => {
                     g.text_fit(r.x + label_w, r.cy(), value, ty.label, t.ink, r.w - label_w - 8.0);
@@ -1365,8 +1340,15 @@ impl Screen for Health {
         if firing.is_empty() && history.is_empty() {
             let (icon, line) = if robot.linked() { ("check_circle", "nothing firing") } else { ("link_off", "no robot") };
             let cy = (list_top + H) * 0.5;
-            g.icon(icon, false, W * 0.5, cy - 12.0, 24.0, t.faint);
-            g.text_at(W * 0.5, cy + 12.0, Align::Center, line, ty.caption, t.dim);
+            let object = if g.objects.has(crate::robot3d::TEAM) { crate::robot3d::TEAM } else { crate::robot3d::GENERIC };
+            let parts: Vec<String> = g.objects.parts(object).into_iter().map(|(name, _)| name).collect();
+            let looks = crate::robot3d::read(robot, &parts).looks(g);
+            if g.object_looking(object, "m", W * 0.5, cy - 10.0, crate::object3d::View::REST, 1.0, 1.0, &looks) {
+                g.text_at(W * 0.5, cy + 24.0, Align::Center, line, ty.caption, t.dim);
+            } else {
+                g.icon(icon, false, W * 0.5, cy - 12.0, 24.0, t.faint);
+                g.text_at(W * 0.5, cy + 12.0, Align::Center, line, ty.caption, t.dim);
+            }
             return;
         }
         let len = firing.len() + history.len();
@@ -1470,7 +1452,7 @@ impl Screen for LogsScreen {
         let rows = robot.logs.list();
         let status = robot.logs.status();
         if rows.is_empty() {
-            g.empty("description", if status.is_empty() { "no robot set" } else { &status });
+            g.empty(if status.is_empty() { "link_off" } else { "description" }, if status.is_empty() { "no robot set" } else { &status });
             return;
         }
         let trends = crate::trends::available(&rows);
@@ -1709,7 +1691,7 @@ impl Screen for Tables {
         let ty = g.ty;
         let nodes = self.nodes(robot);
         if nodes.is_empty() {
-            g.empty("link_off", if robot.linked() { "nothing published here" } else { "no robot" });
+            g.empty(if robot.linked() { "account_tree" } else { "link_off" }, if robot.linked() { "nothing published here" } else { "no robot" });
             return;
         }
         let (top, row_h) = (g.top(), g.row_h());
@@ -1821,7 +1803,7 @@ impl Screen for Motors {
         let ty = g.ty;
         let rows = robot.strings("MotorHistory/Rows");
         if rows.is_empty() {
-            g.empty("precision_manufacturing", if robot.linked() { "no motor history published" } else { "no robot" });
+            g.empty(if robot.linked() { "precision_manufacturing" } else { "link_off" }, if robot.linked() { "no motor history published" } else { "no robot" });
             return;
         }
         let top = g.top();

@@ -146,6 +146,39 @@ def import_model(path):
     return root
 
 
+def tag(obj, part):
+    """Say which part of a robot (or other object with parts) `obj` and
+    everything under it belong to: the shell colours each part on its own."""
+    obj["part"] = part
+    return obj
+
+
+def part_of(obj):
+    """The part an object belongs to: its own tag, or the nearest above it."""
+    while obj is not None:
+        if "part" in obj:
+            return obj["part"]
+        obj = obj.parent
+    return None
+
+
+def part_material(index):
+    """Flat emission carrying a part's number (out of 16) in its red."""
+    name = f"part~{index}"
+    if name in bpy.data.materials:
+        return bpy.data.materials[name]
+    d = bpy.data.materials.new(name)
+    d.use_nodes = True
+    nt = d.node_tree
+    nt.nodes.clear()
+    out = nt.nodes.new("ShaderNodeOutputMaterial")
+    em = nt.nodes.new("ShaderNodeEmission")
+    em.inputs["Color"].default_value = (index / 16.0, 0.0, 0.0, 1.0)
+    em.inputs["Strength"].default_value = 1.0
+    nt.links.new(em.outputs["Emission"], out.inputs["Surface"])
+    return d
+
+
 def reset_materials():
     _lit.clear()
     _data.clear()

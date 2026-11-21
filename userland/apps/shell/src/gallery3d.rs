@@ -1,50 +1,28 @@
 //! The 3D objects laid out to be looked at and approved before they ship:
-//! `catalyst-shell --objects DIR [--preview-pack PATH]`.
+//! `catalyst-shell --objects DIR [--preview-pack PATH] [--all-pack PATH]`.
 //!
-//! Everything here is drawn by the shell's own code (`object3d`), so what
-//! is seen is what the handheld draws: contact sheets of every object in
-//! dark and light (and in other accents), turntables (animated PNGs, from
-//! the larger preview pack when given), the objects in place on the panel
-//! at its own size and enlarged three times (dithered to 16 bits as the
-//! panel shows them), the motion they make as animated PNGs, what they
-//! cost, and `index.html` showing all of it.
+//! Everything here is drawn by the shell's own code (`object3d`,
+//! `robot3d`), so what is seen is what the handheld draws: contact sheets of
+//! the objects the apps show, in dark and light and in the states they
+//! show (the robot disabled, in auto, a motor hot, a fault, no link; the
+//! battery's charge; the weather; Wi-Fi's signal), turntables, the objects
+//! in place on the panel at its own size and three times it (dithered to
+//! 16 bits as the panel shows them), their motion as animated PNGs, what
+//! they cost, and `index.html` showing all of it.
 
 use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Instant;
 
 use bezel::{Accent, Align, Canvas, Color, Rect, TextStyle, Tokens, Tone};
+use nt4::Value;
 
 use crate::gfx::{Gfx, H, W};
-use crate::object3d::{Objects, View};
+use crate::object3d::{Looks, Objects, View};
 use crate::platform::{self, Key};
 use crate::robot::Robot;
+use crate::robot3d::{self, State};
 use crate::shell::Shell;
-
-const APPS: [&str; 35] = [
-    "Robot", "Health", "Logs", "Schedule", "Tables", "Loop", "Motors", "Console", "Terminal", "Files", "Git", "Catalogue", "Monitor", "Net tools", "Connect", "Actions", "Camera", "Photos",
-    "AprilTag", "Graphs", "Pit", "Remote", "Level", "Compass", "Weather", "Browse", "Calculator", "Clock", "Notes", "Units", "HTTP", "Share", "Assistant", "Web", "Settings",
-];
-
-/// The other objects, with where each is used.
-const THINGS: [(&str, &str, &str); 16] = [
-    ("handheld", "hero", "setup: the welcome; working; About's header"),
-    ("laptop", "hero", "setup: from a computer (Higgsfield)"),
-    ("wifi", "hero", "setup: Wi-Fi"),
-    ("robot", "hero", "setup: the team (Higgsfield)"),
-    ("globe", "hero", "setup: name and time zone (Higgsfield)"),
-    ("key", "hero", "setup: keys for services"),
-    ("toggle", "hero", "setup: choices"),
-    ("battery", "hero", "setup: battery and power"),
-    ("trophy", "hero", "setup: all set (Higgsfield)"),
-    ("rocket", "hero", "System update: ready (Higgsfield)"),
-    ("moon", "hero", "Display: deep standby"),
-    ("tray", "m", "empty pages"),
-    ("sunmoon", "m", "control centre: light and dark"),
-    ("chip", "hero", "made, not used yet: the hardware check"),
-    ("keycaps", "hero", "made, not used yet: the keyboard lesson"),
-    ("palette", "hero", "made, not used yet: the look"),
-];
 
 /// Frames as an animated PNG, each after the first kept only where it
 /// differs from the one before (APNG's own frame regions), so motion over a
@@ -100,84 +78,302 @@ fn panel(c: &Canvas) -> Canvas {
     out
 }
 
-fn tokens(accent: Accent, tone: Tone) -> Tokens {
-    Tokens::of(accent, tone)
-}
+/// Every object made, shipped or not, when that pack is given.
+static ALL: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
 
-/// A Gfx drawing into a canvas of its own size, with every object made
-/// (shipped or not) when that pack is given.
+/// A Gfx drawing into a canvas of its own size.
 fn sheet_gfx(w: i32, h: i32, t: Tokens) -> Gfx {
     let mut g = Gfx::new(t);
     if let Some(all) = ALL.get() {
-        g.objects = Objects::from_static(all).expect("the pack of every object");
+        g.objects = Objects::from_bytes(all.clone()).expect("the pack of every object");
     }
     g.canvas = Canvas::new(w, h);
     g.canvas.clear(t.ground);
     g
 }
 
-/// Every app's object at both its sizes, on a tile, named.
-fn apps_sheet(dir: &Path, name: &str, accent: Accent, tone: Tone) -> String {
-    let t = tokens(accent, tone);
-    let (cw, ch, across) = (112, 84, 7);
-    let rows = APPS.len().div_ceil(across);
+/// The robot's states, as the demo robot is told to report them.
+#[derive(Clone, Copy)]
+enum Story {
+    Teleop,
+    Disabled,
+    Auto,
+    Hot,
+    Fault,
+    LowBattery,
+    Red,
+    NoLink,
+}
+
+impl Story {
+    const ALL: [Story; 8] = [Story::Teleop, Story::Disabled, Story::Auto, Story::Hot, Story::Fault, Story::LowBattery, Story::Red, Story::NoLink];
+
+    fn name(self) -> &'static str {
+        match self {
+            Story::Teleop => "teleop, all well",
+            Story::Disabled => "disabled",
+            Story::Auto => "auto",
+            Story::Hot => "elevator hot",
+            Story::Fault => "intake fault",
+            Story::LowBattery => "battery low",
+            Story::Red => "red alliance",
+            Story::NoLink => "no link",
+        }
+    }
+
+    fn file(self) -> &'static str {
+        match self {
+            Story::Teleop => "teleop",
+            Story::Disabled => "disabled",
+            Story::Auto => "auto",
+            Story::Hot => "hot-motor",
+            Story::Fault => "fault",
+            Story::LowBattery => "low-battery",
+            Story::Red => "red-alliance",
+            Story::NoLink => "no-link",
+        }
+    }
+
+    /// The demo robot, quiet (nothing firing, nothing hot), then told this.
+    fn robot(self) -> Robot {
+        if let Story::NoLink = self {
+            // A robot set, its address not answering.
+            return Robot::connect("127.0.0.1:9");
+        }
+        let mut r = Robot::demo();
+        r.refresh(0.1);
+        let quiet: [(&str, Value); 4] = [
+            ("Health/CAN/can_s0/HighUtilization/firing", Value::Bool(false)),
+            ("Health/Elevator/HighTemp/firing", Value::Bool(false)),
+            ("Elevator/TemperatureC", Value::Double(52.0)),
+            ("Health/History", Value::StringArray(vec![])),
+        ];
+        for (k, v) in quiet {
+            r.demo_say(k, v);
+        }
+        let say: Vec<(&str, Value)> = match self {
+            Story::Disabled => vec![("FMSInfo/FMSControlData", Value::Int(32))],
+            Story::Auto => vec![("FMSInfo/FMSControlData", Value::Int(1 | 2 | 32))],
+            Story::Hot => vec![("Elevator/TemperatureC", Value::Double(79.0)), ("Health/Elevator/HighTemp/firing", Value::Bool(true)), ("Health/Elevator/HighTemp/detail", Value::String("79 °C, limit 70".into()))],
+            Story::Fault => vec![
+                ("Health/Intake/OverCurrent/firing", Value::Bool(true)),
+                ("Health/Intake/OverCurrent/severity", Value::String("ERROR".into())),
+                ("Health/Intake/OverCurrent/detail", Value::String("stalled, 42 A".into())),
+            ],
+            Story::LowBattery => vec![("Systemcore/BatteryVolts", Value::Double(10.8))],
+            Story::Red => vec![("FMSInfo/IsRedAlliance", Value::Bool(true))],
+            _ => vec![],
+        };
+        for (k, v) in say {
+            r.demo_say(k, v);
+        }
+        r
+    }
+}
+
+fn robot_state(g: &Gfx, story: Story) -> State {
+    let parts: Vec<String> = g.objects.parts(robot3d::GENERIC).into_iter().map(|(n, _)| n).collect();
+    robot3d::read(&story.robot(), &parts)
+}
+
+/// A sheet of cells, each an object drawn by `draw`, captioned.
+#[allow(clippy::type_complexity)]
+fn sheet(dir: &Path, file: &str, tone: Tone, accent: Accent, cell: (i32, i32), across: usize, cells: &[(String, Box<dyn Fn(&mut Gfx, Rect)>)]) -> String {
+    let t = Tokens::of(accent, tone);
+    let rows = cells.len().div_ceil(across);
+    let (cw, ch) = cell;
     let mut g = sheet_gfx(across as i32 * cw + 8, rows as i32 * ch + 8, t);
-    for (i, app) in APPS.iter().enumerate() {
+    for (i, (caption, draw)) in cells.iter().enumerate() {
         let (x, y) = (8.0 + (i % across) as f32 * cw as f32, 8.0 + (i / across) as f32 * ch as f32);
         let tile = Rect::new(x, y, cw as f32 - 8.0, ch as f32 - 8.0);
         g.canvas.rrect(tile, 12.0, t.surface1, 1.0);
-        let object = crate::object3d::for_app(app);
-        g.object(&object, "s", x + 22.0, y + 30.0, View::REST, 1.0, 1.0);
-        g.object(&object, "l", x + 70.0, y + 30.0, View::REST, 1.0, 1.0);
-        g.text_at(tile.cx(), tile.bottom() - 9.0, Align::Center, app, TextStyle::label(11.0), t.dim);
+        draw(&mut g, tile);
+        let caption = g.text.fit(caption, &TextStyle::label(11.0), tile.w - 8.0);
+        g.text_at(tile.cx(), tile.bottom() - 9.0, Align::Center, &caption, TextStyle::label(11.0), t.dim);
     }
-    let file = format!("{name}.png");
-    platform::sim::save_png(&g.canvas, &dir.join(&file), 2);
-    file
+    let name = format!("{file}.png");
+    platform::sim::save_png(&g.canvas, &dir.join(&name), 2);
+    name
 }
 
-/// The other objects at their sizes, named, with where they are used.
-fn things_sheet(dir: &Path, name: &str, accent: Accent, tone: Tone) -> String {
-    let t = tokens(accent, tone);
-    let (cw, ch, across) = (150, 136, 5);
-    let rows = THINGS.len().div_ceil(across);
-    let mut g = sheet_gfx(across as i32 * cw + 8, rows as i32 * ch + 8, t);
-    for (i, (object, size, _)) in THINGS.iter().enumerate() {
-        let (x, y) = (8.0 + (i % across) as f32 * cw as f32, 8.0 + (i / across) as f32 * ch as f32);
-        let tile = Rect::new(x, y, cw as f32 - 8.0, ch as f32 - 8.0);
-        g.canvas.rrect(tile, 14.0, t.surface1, 1.0);
-        g.object(object, size, tile.cx(), y + 56.0, View::REST, 1.0, 1.0);
-        g.text_at(tile.cx(), tile.bottom() - 12.0, Align::Center, object, TextStyle::label(11.0), t.dim);
-    }
-    let file = format!("{name}.png");
-    platform::sim::save_png(&g.canvas, &dir.join(&file), 2);
-    file
+type Cell = (String, Box<dyn Fn(&mut Gfx, Rect)>);
+
+fn object_cell(caption: &str, object: &'static str, size: &'static str, looks: Looks) -> Cell {
+    (caption.to_owned(), Box::new(move |g: &mut Gfx, r: Rect| {
+        g.object_looking(object, size, r.cx(), r.cy() - 8.0, View::REST, 1.0, 1.0, &looks);
+    }))
 }
 
-/// One object turning all the way round, dark beside light (an app icon
-/// dark only: the sheets show it light): from the preview pack (larger) when
-/// there is one, else at its shipped size.
-fn turntable(dir: &Path, objects: &mut Objects, object: &str, size: &str, accent: Accent) -> Option<(String, i32, i32)> {
+fn sheets(dir: &Path) -> Vec<(String, String)> {
+    let default = crate::shell::Settings::default().accent;
+    let mut out = Vec::new();
+    for (tone_name, tone) in [("dark", Tone::Dark), ("light", Tone::Light)] {
+        // The robot, in each state it shows.
+        let cells: Vec<Cell> = Story::ALL
+            .iter()
+            .map(|&story| {
+                let caption = story.name().to_owned();
+                (caption, Box::new(move |g: &mut Gfx, r: Rect| {
+                    let state = robot_state(g, story);
+                    let looks = state.looks(g);
+                    g.object_looking(robot3d::GENERIC, "hero", r.cx(), r.cy() - 8.0, View::REST, 1.0, if state.linked { 1.0 } else { 0.75 }, &looks);
+                }) as Box<dyn Fn(&mut Gfx, Rect)>)
+            })
+            .collect();
+        out.push((sheet(dir, &format!("sheet-robot-{tone_name}"), tone, default, (150, 150), 4, &cells), format!("The Robot app's robot in each state it shows, {tone_name}: parts glow amber when hot, red on a fault, faint ice at work; bumpers in the alliance's colour; dimmed when disabled, greyed with no link")));
+        // The weather.
+        let weather = [
+            ("sunny", "weather-sunny"),
+            ("clear night", "weather-clear-night"),
+            ("sun, cloud", "weather-partly-day"),
+            ("moon, cloud", "weather-partly-night"),
+            ("cloudy", "weather-cloudy"),
+            ("rain", "weather-rain"),
+            ("snow", "weather-snow"),
+            ("sleet", "weather-sleet"),
+            ("storm", "weather-storm"),
+            ("fog", "weather-fog"),
+        ];
+        let cells: Vec<Cell> = weather.iter().map(|(c, o)| object_cell(c, o, "l", Looks::plain())).collect();
+        out.push((sheet(dir, &format!("sheet-weather-{tone_name}"), tone, default, (96, 92), 5, &cells), format!("Weather's card, each condition, {tone_name}")));
+        // The battery's charge, and Wi-Fi's signal.
+        let mut cells: Vec<Cell> = [(None, "no gauge"), (Some((8, false)), "8%"), (Some((35, false)), "35%"), (Some((62, false)), "62%"), (Some((100, false)), "100%"), (Some((70, true)), "charging")]
+            .into_iter()
+            .map(|(charge, c)| {
+                (c.to_owned(), Box::new(move |g: &mut Gfx, r: Rect| {
+                    let looks = crate::power::battery_looks(g, charge);
+                    g.object_looking("battery", "m", r.cx(), r.cy() - 8.0, View::REST, 1.0, 1.0, &looks);
+                }) as Box<dyn Fn(&mut Gfx, Rect)>)
+            })
+            .collect();
+        for (arcs, c) in [(None, "wi-fi off"), (Some(0), "looking"), (Some(1), "weak"), (Some(3), "strong")] {
+            cells.push(object_cell(c, "wifi", "m", crate::object3d::wifi_looks(arcs)));
+        }
+        out.push((sheet(dir, &format!("sheet-battery-wifi-{tone_name}"), tone, default, (96, 96), 5, &cells), format!("Settings › Battery's battery by its charge, and Wi-Fi by its signal, {tone_name}")));
+        // Empty pages, and the other objects.
+        let empty = [
+            ("Files", "app-files"),
+            ("Logs", "app-logs"),
+            ("Schedule", "app-schedule"),
+            ("Tables, Git", "app-tables"),
+            ("Motors", "app-motors"),
+            ("Console", "app-terminal"),
+            ("Catalogue", "app-catalogue"),
+            ("Net tools", "app-nettools"),
+            ("Photos", "app-photos"),
+            ("Graphs", "app-graphs"),
+            ("Pit", "app-pit"),
+            ("Assistant", "app-assistant"),
+        ];
+        let mut cells: Vec<Cell> = empty.iter().map(|(c, o)| object_cell(c, o, "l", Looks::plain())).collect();
+        cells.push(object_cell("no robot", robot3d::GENERIC, "m", Looks { dim: 0.8, ..Looks::plain() }));
+        cells.push(object_cell("no key", "key", "m", Looks::plain()));
+        cells.push(object_cell("no sensor", "app-level", "l", Looks { dim: 0.6, ..Looks::plain() }));
+        cells.push(object_cell("no history", "tray", "m", Looks::plain()));
+        out.push((sheet(dir, &format!("sheet-empty-{tone_name}"), tone, default, (96, 92), 6, &cells), format!("Empty pages, {tone_name}: the app's own object, or the robot greyed where there is no robot")));
+        let things = [
+            ("handheld", "handheld", "hero"),
+            ("laptop", "laptop", "hero"),
+            ("wi-fi", "wifi", "hero"),
+            ("team robot (toy)", "robot", "hero"),
+            ("globe", "globe", "hero"),
+            ("key", "key", "hero"),
+            ("switch", "toggle", "hero"),
+            ("battery", "battery", "hero"),
+            ("trophy", "trophy", "hero"),
+            ("moon (not used)", "moon", "hero"),
+            ("rocket (not used)", "rocket", "hero"),
+            ("chip (not used)", "chip", "hero"),
+        ];
+        let cells: Vec<Cell> = things.iter().map(|(c, o, s)| object_cell(c, o, s, Looks::plain())).collect();
+        out.push((sheet(dir, &format!("sheet-objects-{tone_name}"), tone, default, (130, 130), 4, &cells), format!("Setup's objects and the rest, {tone_name}")));
+    }
+    // The user's own colour: the robot and the weather follow it.
+    let cells: Vec<Cell> = [Story::Teleop, Story::Hot, Story::Disabled]
+        .iter()
+        .map(|&story| {
+            (story.name().to_owned(), Box::new(move |g: &mut Gfx, r: Rect| {
+                let looks = robot_state(g, story).looks(g);
+                g.object_looking(robot3d::GENERIC, "hero", r.cx(), r.cy() - 8.0, View::REST, 1.0, 1.0, &looks);
+            }) as Box<dyn Fn(&mut Gfx, Rect)>)
+        })
+        .chain([object_cell("sunny", "weather-sunny", "l", Looks::plain()), object_cell("rain", "weather-rain", "l", Looks::plain())])
+        .collect();
+    out.push((sheet(dir, "sheet-own-colour", Tone::Dark, Accent::Hue(36), (150, 150), 5, &cells), "The same in the user's own colour (a teal): the robot's own accent parts and the weather follow it".into()));
+    out
+}
+
+/// An object turning all the way round, in each look given, side by side.
+fn turntable(dir: &Path, objects: &mut Objects, file: &str, object: &str, size: &str, cells: &[(Tone, Looks, f32)]) -> Option<(String, i32, i32)> {
     let px = objects.px(object, size)? as i32;
     let cell = px + 16;
-    let tones: &[Tone] = if object.starts_with("app-") { &[Tone::Dark] } else { &[Tone::Dark, Tone::Light] };
-    let (w, h) = (cell * tones.len() as i32, cell);
+    let (w, h) = (cell * cells.len() as i32, cell);
     let mut frames = Vec::new();
     // Each rendered angle once, 15° apart: what was rendered, nothing blended.
     for step in 0..24 {
         let yaw = step as f32 * 15.0;
         let mut c = Canvas::new(w, h);
-        for (k, &tone) in tones.iter().enumerate() {
-            let t = tokens(accent, tone);
+        for (k, (tone, looks, alpha)) in cells.iter().enumerate() {
+            let t = Tokens::of(crate::shell::Settings::default().accent, *tone);
             c.fill_rect(Rect::new((k as i32 * cell) as f32, 0.0, cell as f32, cell as f32), t.surface1, 1.0);
-            let fault = if tone == Tone::Dark { Color::hex(0xff6b5e) } else { Color::hex(0xb3261e) };
-            objects.draw(&mut c, &t, fault, object, size, (k as i32 * cell + cell / 2) as f32, cell as f32 * 0.5, View::yaw(yaw), 1.0, 1.0);
+            let fault = if *tone == Tone::Dark { Color::hex(0xff6b5e) } else { Color::hex(0xb3261e) };
+            objects.draw_looking(&mut c, &t, fault, object, size, (k as i32 * cell + cell / 2) as f32, cell as f32 * 0.5, View::yaw(yaw), 1.0, *alpha, looks);
         }
         frames.push(c.px);
     }
-    let file = format!("turn-{object}.png");
-    save_apng(&frames, w as usize, h as usize, &dir.join(&file), 70);
-    Some((file, w, h))
+    let name = format!("turn-{file}.png");
+    save_apng(&frames, w as usize, h as usize, &dir.join(&name), 70);
+    Some((name, w, h))
+}
+
+fn turntables(dir: &Path, preview: Option<&Path>) -> Vec<(String, String, i32, i32)> {
+    let mut objects = match preview.map(std::fs::read) {
+        Some(Ok(bytes)) => Objects::from_bytes(bytes).expect("a preview pack"),
+        _ => Objects::shipped(),
+    };
+    let size = |o: &Objects, name: &str| if o.px(name, "preview").is_some() { "preview" } else if o.px(name, "hero").is_some() { "hero" } else { "l" };
+    let mut out = Vec::new();
+    // The robot in four states at once.
+    let g = Gfx::new(Tokens::dark());
+    let states: Vec<(Tone, Looks, f32)> = [Story::Teleop, Story::Hot, Story::Disabled, Story::NoLink]
+        .iter()
+        .map(|&s| {
+            let st = robot_state(&g, s);
+            (Tone::Dark, st.looks(&g), if st.linked { 1.0 } else { 0.75 })
+        })
+        .collect();
+    let s = size(&objects, robot3d::GENERIC);
+    if let Some((f, w, h)) = turntable(dir, &mut objects, "robot-states", robot3d::GENERIC, s, &states) {
+        out.push((f, "the robot: teleop · elevator hot · disabled · no link".into(), w, h));
+    }
+    let both = |looks: Looks| vec![(Tone::Dark, looks.clone(), 1.0), (Tone::Light, looks, 1.0)];
+    let list: Vec<(&str, Looks)> = vec![
+        ("robot-generic", Looks::plain()),
+        ("battery", crate::power::battery_looks(&g, Some((62, false)))),
+        ("wifi", crate::object3d::wifi_looks(Some(2))),
+        ("handheld", Looks::plain()),
+        ("laptop", Looks::plain()),
+        ("robot", Looks::plain()),
+        ("globe", Looks::plain()),
+        ("key", Looks::plain()),
+        ("toggle", Looks::plain()),
+        ("trophy", Looks::plain()),
+        ("moon", Looks::plain()),
+        ("weather-sunny", Looks::plain()),
+        ("weather-partly-day", Looks::plain()),
+        ("weather-rain", Looks::plain()),
+        ("weather-snow", Looks::plain()),
+        ("weather-storm", Looks::plain()),
+        ("weather-clear-night", Looks::plain()),
+    ];
+    for (name, looks) in list {
+        let s = size(&objects, name);
+        let cells = if name.starts_with("weather-") { vec![(Tone::Dark, looks, 1.0)] } else { both(looks) };
+        if let Some((f, w, h)) = turntable(dir, &mut objects, name, name, s, &cells) {
+            out.push((f, name.to_owned(), w, h));
+        }
+    }
+    out
 }
 
 /// The shell, driven by keys, its frames kept.
@@ -186,8 +382,8 @@ struct Run {
 }
 
 impl Run {
-    fn new(light: bool, calm: bool) -> Run {
-        let mut shell = Shell::new(Robot::demo());
+    fn with(robot: Robot, light: bool, calm: bool) -> Run {
+        let mut shell = Shell::new(robot);
         shell.settings.light = light;
         shell.settings.calm = calm;
         shell.apply_settings();
@@ -222,6 +418,20 @@ impl Run {
         platform::sim::save_png(&c, &dir.join(format!("{name}@3x.png")), 3);
         shots.push(name.to_owned());
     }
+    /// Open a built-in app from Home's first tile.
+    fn open(&mut self, app: &str) {
+        self.keys(&vec![Key::Right; crate::steps_to(app)], 0.08);
+        self.settle(0.6);
+        self.shell.key(Key::Enter);
+        self.settle(1.2);
+    }
+    /// Open one of Settings' own pages, by its row.
+    fn settings(&mut self, row: &str) {
+        self.open("Settings");
+        self.keys(&vec![Key::Down; crate::screens::settings_row(row)], 0.08);
+        self.shell.key(Key::Enter);
+        self.settle(1.2);
+    }
 }
 
 fn movie(dir: &Path, name: &str, frames: &[Vec<u32>], movies: &mut Vec<String>) {
@@ -232,143 +442,94 @@ fn movie(dir: &Path, name: &str, frames: &[Vec<u32>], movies: &mut Vec<String>) 
 /// The objects in place, still and moving.
 fn in_situ(dir: &Path, shots: &mut Vec<String>, movies: &mut Vec<String>) {
     use Key::*;
-    for (tone, light) in [("dark", false), ("light", true)] {
-        // Home: the first page, then the focus moving across it.
-        let mut run = Run::new(light, false);
-        run.still(dir, &format!("home-{tone}"), shots);
-        run.shell.key(Right);
-        let f = run.frames(0.6);
-        if tone == "dark" {
-            movie(dir, "motion-home-focus", &f, movies);
-        }
-        run.keys(&[Down], 0.6);
-        run.still(dir, &format!("home-focus-moved-{tone}"), shots);
-        // A page turning: the icons turn as they slide.
-        run.keys(&[Up, Right, Right], 0.5);
-        run.shell.key(Right);
-        let mut f = run.frames(0.7);
-        if tone == "dark" {
-            run.shell.key(Left);
-            f.extend(run.frames(0.7));
-            movie(dir, "motion-home-page-turn", &f, movies);
-        }
+    // The Robot app, in each state.
+    for story in Story::ALL {
+        let mut run = Run::with(story.robot(), false, false);
+        run.open("Robot");
+        run.settle(2.2);
+        run.still(dir, &format!("robot-{}", story.file()), shots);
     }
-    // The carousel, turning.
-    let mut run = Run::new(false, false);
-    run.shell.settings.home = crate::shell::HomeStyle::Carousel;
-    run.shell.apply_settings();
-    run.settle(0.8);
-    run.still(dir, "home-carousel-dark", shots);
-    let mut f = Vec::new();
-    for _ in 0..3 {
-        run.shell.key(Right);
-        f.extend(run.frames(0.45));
-    }
-    run.shell.key(Left);
-    f.extend(run.frames(0.6));
-    movie(dir, "motion-carousel", &f, movies);
-    // The calm version: the same objects, resting.
-    let mut run = Run::new(false, true);
-    run.keys(&[Right], 0.3);
-    run.still(dir, "home-calm", shots);
-    // Bezel's theme and another accent.
-    let mut run = Run::new(false, false);
-    run.shell.settings.theme = crate::look::Theme::Bezel;
-    let (wallpaper, accent) = crate::look::Theme::Bezel.defaults();
-    (run.shell.settings.wallpaper, run.shell.settings.accent) = (wallpaper, accent);
-    run.shell.apply_settings();
-    run.settle(1.2);
-    run.still(dir, "home-bezel-theme", shots);
-    let mut run = Run::new(true, false);
-    run.shell.settings.accent = Accent::Hue(36);
-    run.shell.apply_settings();
-    run.settle(1.2);
-    run.still(dir, "home-own-colour-light", shots);
-
-    // Setup, page by page, and the way through it. (Setup keeps its own
-    // dark ground in either mode, so once is enough.)
-    let mut run = Run::new(false, false);
-    run.shell.start_setup();
+    let mut run = Run::with(Story::Teleop.robot(), true, false);
+    run.open("Robot");
     run.settle(1.0);
-    run.still(dir, "setup-welcome", shots);
-    run.keys(&[Down], 0.8);
-    run.still(dir, "setup-from-a-computer", shots);
-    run.shell.key(Up);
-    let f = run.frames(0.6);
-    movie(dir, "motion-setup-flip", &f, movies);
-    run.shell.key(Enter);
-    let f = run.frames(0.9);
-    movie(dir, "motion-setup-travel", &f, movies);
-    run.still(dir, "setup-wifi", shots);
-    // On past the hardware and the lesson to the team.
-    run.keys(&[Tab], 0.9);
-    run.still(dir, "setup-hardware", shots);
-    run.keys(&[Tab, Tab], 0.9);
-    run.shell.key(Char('5'));
-    let mut f = run.frames(0.15);
-    for c in ['8', '0', '5'] {
-        run.shell.key(Char(c));
-        f.extend(run.frames(0.15));
-    }
-    f.extend(run.frames(0.6));
-    movie(dir, "motion-setup-team-typed", &f, movies);
-    run.still(dir, "setup-team", shots);
-    run.keys(&[Enter], 0.9);
-    run.still(dir, "setup-name-and-time", shots);
-    run.keys(&[Tab], 0.9);
-    run.still(dir, "setup-keys", shots);
-    run.keys(&[Tab], 0.9);
-    run.still(dir, "setup-choices", shots);
-    // A choice switched: the switch gives a little turn.
-    run.keys(&[Up, Up, Up, Up], 0.15);
-    run.shell.key(Enter);
-    let f = run.frames(0.8);
-    movie(dir, "motion-setup-choice-nudge", &f, movies);
-    run.shell.key(Enter);
-    run.keys(&[Tab], 0.9);
-    run.still(dir, "setup-power", shots);
-    run.keys(&[Tab], 0.9);
-    run.still(dir, "setup-look", shots);
-    run.shell.key(Enter);
-    run.settle(0.6);
-    run.still(dir, "setup-working", shots);
-    let f = run.frames(1.8);
-    movie(dir, "motion-setup-finish", &f, movies);
-    run.still(dir, "setup-all-set", shots);
-    // Calm setup: no travel, objects resting where they stand.
-    let mut run = Run::new(false, true);
-    run.shell.start_setup();
+    run.still(dir, "robot-teleop-light", shots);
+    let mut run = Run::with(Story::Hot.robot(), false, true);
+    run.open("Robot");
+    run.still(dir, "robot-hot-motor-calm", shots);
+    // Motion: at rest it turns slowly; a motor running hot, it turns to show it.
+    let mut run = Run::with(Story::Teleop.robot(), false, false);
+    run.open("Robot");
+    let f = run.frames(3.0);
+    movie(dir, "motion-robot-turning", &f, movies);
+    run.shell.robot.demo_say("Elevator/TemperatureC", Value::Double(79.0));
+    run.shell.robot.demo_say("Health/Elevator/HighTemp/firing", Value::Bool(true));
+    run.shell.robot.demo_say("Health/Elevator/HighTemp/detail", Value::String("79 °C, limit 70".into()));
+    let f = run.frames(2.5);
+    movie(dir, "motion-robot-motor-hot", &f, movies);
+    run.still(dir, "robot-turned-to-the-elevator", shots);
+    // Enabled: from disabled to teleop, the robot brightens.
+    let mut run = Run::with(Story::Disabled.robot(), false, false);
+    run.open("Robot");
     run.settle(0.5);
-    run.keys(&[Enter], 0.3);
-    run.still(dir, "setup-wifi-calm", shots);
+    run.shell.robot.demo_say("FMSInfo/FMSControlData", Value::Int(1 | 32));
+    let f = run.frames(1.2);
+    movie(dir, "motion-robot-enabled", &f, movies);
 
-    // An empty page: Graphs with nothing graphed yet, its object turning in.
-    let mut run = Run::new(false, false);
-    let to_graphs = crate::steps_to("Graphs");
-    run.keys(&vec![Right; to_graphs], 0.12);
-    run.settle(0.8);
+    // Health with nothing firing: the robot, all well; with no robot, greyed.
+    let mut run = Run::with(Story::Teleop.robot(), false, false);
+    run.open("Health");
+    run.still(dir, "health-all-well", shots);
+    let mut run = Run::with(Robot::none(), false, false);
+    run.open("Tables");
+    run.still(dir, "tables-no-robot", shots);
+
+    // Weather: the condition, swinging in as the page arrives.
+    let mut run = Run::with(Robot::demo(), false, false);
+    run.keys(&vec![Right; crate::steps_to("Weather")], 0.08);
+    run.settle(0.6);
     run.shell.key(Enter);
     let f = run.frames(1.0);
-    movie(dir, "motion-empty-page", &f, movies);
+    movie(dir, "motion-weather-arrives", &f, movies);
+    run.still(dir, "weather", shots);
+    let mut run = Run::with(Robot::demo(), true, false);
+    run.open("Weather");
+    run.still(dir, "weather-light", shots);
+
+    // Settings › Battery: the charge in cells, the bolt lit when charging.
+    let mut run = Run::with(Robot::demo(), false, false);
+    run.settings("Battery");
+    run.still(dir, "battery", shots);
+    let mut run = Run::with(Robot::demo(), true, false);
+    run.settings("Battery");
+    run.still(dir, "battery-light", shots);
+
+    // Empty pages.
+    let mut run = Run::with(Robot::demo(), false, false);
+    run.open("Graphs");
     run.still(dir, "empty-graphs", shots);
-    // The control centre's Light: the coin turning over with the switch.
-    let mut run = Run::new(false, false);
-    run.shell.key(Ctrl(' '));
-    run.settle(0.8);
-    run.still(dir, "control-centre", shots);
-    run.keys(&[Down], 0.4);
+    let mut run = Run::with(Robot::demo(), false, false);
+    run.open("Browse");
+    run.still(dir, "empty-browse-no-key", shots);
+
+    // Setup's Wi-Fi: its arcs dark until there is a network.
+    let mut run = Run::with(Robot::demo(), false, false);
+    run.shell.start_setup();
+    run.settle(1.0);
     run.shell.key(Enter);
-    let f = run.frames(0.9);
-    movie(dir, "motion-control-light", &f, movies);
-    run.still(dir, "control-centre-light", shots);
+    run.settle(1.0);
+    run.still(dir, "setup-wifi", shots);
+    run.keys(&[Tab, Tab, Tab], 0.9);
+    run.still(dir, "setup-team", shots);
     // About: the handheld in its header.
-    let mut run = Run::new(false, false);
+    let mut run = Run::with(Robot::demo(), false, false);
     let about = crate::screens::settings_row("About this handheld");
-    run.keys(&vec![Right; crate::steps_to("Settings")], 0.1);
-    run.keys(&[Enter], 0.9);
-    run.keys(&vec![Down; about], 0.1);
+    run.open("Settings");
+    run.keys(&vec![Down; about], 0.08);
     run.keys(&[Enter], 1.2);
     run.still(dir, "about-header", shots);
+    // Home's icons stay flat.
+    let mut run = Run::with(Robot::demo(), false, false);
+    run.still(dir, "home-flat", shots);
 }
 
 /// What the objects cost, measured.
@@ -377,49 +538,35 @@ fn budget(dir: &Path) -> String {
     let mut objects = Objects::shipped();
     let pack = objects.pack().map(|p| p.bytes()).unwrap_or(0);
     let _ = writeln!(out, "pack (in the program file; read in place, never copied whole): {:.0} kB", pack as f64 / 1024.0);
-    // Decoding and colouring: every frame of an icon, of a hero.
     let t = Tokens::dark();
     let mut c = Canvas::new(320, 170);
+    let g = Gfx::new(t);
+    let looks = robot_state(&g, Story::Hot).looks(&g);
+    // Each of its views once (they are 4 degrees apart), so each draw is one decode.
     let started = Instant::now();
-    let mut n = 0;
-    for yaw in (-48..=48).step_by(12) {
-        for pitch in [-12, 0, 12] {
-            objects.draw(&mut c, &t, Color::BLACK, "app-robot", "s", 40.0, 40.0, View { yaw: yaw as f32, pitch: pitch as f32 }, 1.0, 1.0);
-            n += 1;
-        }
+    for yaw in (0..360).step_by(4) {
+        objects.draw_looking(&mut c, &t, Color::BLACK, robot3d::GENERIC, "hero", 80.0, 90.0, View::yaw(yaw as f32), 1.0, 1.0, &looks);
     }
-    let icon = started.elapsed().as_secs_f64() * 1e6 / n as f64;
-    let started = Instant::now();
-    for yaw in (0..360).step_by(15) {
-        objects.draw(&mut c, &t, Color::BLACK, "globe", "hero", 160.0, 85.0, View::yaw(yaw as f32), 1.0, 1.0);
-    }
-    let hero = started.elapsed().as_secs_f64() * 1e6 / 24.0;
-    // Drawing a frame already decoded, and a blend of two, moved off the pixel grid.
-    let started = Instant::now();
-    for _ in 0..200 {
-        objects.draw(&mut c, &t, Color::BLACK, "globe", "hero", 160.0, 85.0, View::yaw(0.0), 1.0, 1.0);
-    }
-    let lay = started.elapsed().as_secs_f64() * 1e6 / 200.0;
+    let decode = started.elapsed().as_secs_f64() * 1e6 / 90.0;
     let started = Instant::now();
     for i in 0..200 {
-        objects.draw(&mut c, &t, Color::BLACK, "globe", "hero", 160.3, 85.0, View::yaw(7.5 + (i % 2) as f32 * 15.0), 1.1, 1.0);
+        objects.draw_looking(&mut c, &t, Color::BLACK, robot3d::GENERIC, "hero", 80.0, 90.0, View::yaw(7.0 + (i % 2) as f32 * 15.0), 1.0, 1.0, &looks);
     }
-    let blend = started.elapsed().as_secs_f64() * 1e6 / 200.0;
-    let _ = writeln!(out, "on this PC: decoding and colouring a frame: {icon:.0} µs (an icon, 30 px), {hero:.0} µs (a hero, 92 px)");
-    let _ = writeln!(out, "on this PC: laying a decoded hero down: {lay:.0} µs; two blended, moved and scaled: {blend:.0} µs");
-    let _ = writeln!(out, "the handheld, estimated at 20x this PC (README's factor): a hero frame decoded {:.1} ms, laid down {:.2} ms, blended {:.1} ms", hero * 20.0 / 1000.0, lay * 20.0 / 1000.0, blend * 20.0 / 1000.0);
-    let _ = writeln!(out, "cache of coloured frames: at most {} kB (CACHE_BYTES); after decoding every frame above, {} kB", crate::object3d::CACHE_BYTES / 1024, objects.cached() / 1024);
-    // A Home page at rest, then the focus moving, then setup end to end.
-    let mut run = Run::new(false, false);
-    let home = run.shell.gfx.objects.cached();
-    run.keys(&[Key::Right, Key::Right, Key::Down, Key::Left], 0.4);
-    let moving = run.shell.gfx.objects.peak;
-    run.shell.start_setup();
-    run.settle(0.8);
-    run.keys(&[Key::Down, Key::Up, Key::Enter, Key::Tab, Key::Tab, Key::Enter, Key::Tab, Key::Tab, Key::Tab, Key::Tab, Key::Tab, Key::Enter], 0.8);
-    run.settle(3.0);
-    let _ = writeln!(out, "Home's first page at rest: {} kB of frames; with the focus moving: {} kB at most", home / 1024, moving / 1024);
-    let _ = writeln!(out, "through setup end to end: {} kB at most, {} frames decoded", run.shell.gfx.objects.peak / 1024, run.shell.gfx.objects.decoded);
+    let turning = started.elapsed().as_secs_f64() * 1e6 / 200.0;
+    let _ = writeln!(out, "on this PC: decoding and colouring a robot frame (112 px, its parts by state): {decode:.0} µs; a frame while it turns (two angles blended): {turning:.0} µs");
+    let _ = writeln!(out, "the handheld, estimated at 20x this PC (README's factor): {:.1} ms to decode a frame, {:.1} ms a frame while it turns", decode * 20.0 / 1000.0, turning * 20.0 / 1000.0);
+    let _ = writeln!(out, "cache of coloured frames: at most {} kB (CACHE_BYTES)", crate::object3d::CACHE_BYTES / 1024);
+    // The Robot page open and turning for twenty seconds.
+    let mut run = Run::with(Story::Teleop.robot(), false, false);
+    run.open("Robot");
+    run.settle(20.0);
+    let _ = writeln!(out, "the Robot page turning for 20 s: {} kB of frames at most, {} frames decoded", run.shell.gfx.objects.peak / 1024, run.shell.gfx.objects.decoded);
+    let mut run = Run::with(Robot::demo(), false, false);
+    run.open("Weather");
+    let _ = writeln!(out, "Weather's page: {} kB", run.shell.gfx.objects.peak / 1024);
+    let run = Run::with(Robot::demo(), false, false);
+    let home = run.shell.gfx.objects.peak;
+    let _ = writeln!(out, "Home (flat icons): {} kB", home / 1024);
     std::fs::write(dir.join("budget.txt"), &out).ok();
     out
 }
@@ -427,14 +574,14 @@ fn budget(dir: &Path) -> String {
 fn html(dir: &Path, sheets: &[(String, String)], turns: &[(String, String, i32, i32)], shots: &[String], movies: &[String], budget: &str) {
     let mut h = String::new();
     h.push_str("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Catalyst 3D objects</title><style>");
-    h.push_str(":root{color-scheme:dark;--ground:#0b0c0e;--surface:#16181b;--ink:#eef0f2;--dim:#9aa1a8;--signal:#ff5b1f}body{margin:0;background:var(--ground);color:var(--ink);font:15px/1.5 system-ui,sans-serif}main{max-width:1180px;margin:0 auto;padding:24px 16px 64px}h1{font-size:28px;margin:8px 0 4px}h2{font-size:19px;margin:36px 0 8px;border-top:1px solid #2a2e33;padding-top:20px}p{color:var(--dim);max-width:70ch}img{image-rendering:pixelated;max-width:100%;height:auto;border-radius:8px;display:block}figure{margin:0}figcaption{color:var(--dim);font:12px ui-monospace,monospace;margin:6px 0 0}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:18px}.wide{display:grid;grid-template-columns:repeat(auto-fill,minmax(480px,1fr));gap:18px}pre{background:var(--surface);padding:12px 14px;border-radius:10px;overflow:auto;font-size:13px;color:var(--ink)}");
-    h.push_str("</style><main><h1>Catalyst 3D objects</h1><p>Every picture here was drawn by the shell's own code from the pack it would ship (and the larger preview pack for the turntables): the same colouring for dark and light, any accent and the user's own colour. Panel shots are at the panel's 320 × 170, dithered to 16 bits as it shows them, and three times larger.</p>");
-    h.push_str("<h2>Where they come from</h2><p>Built in code (<code>tools/bake3d/models.py</code>): the 35 app icons, the handheld, Wi-Fi, the key, the switch, the battery, the tray, the sun and moon coin, the moon, the processor, the keycaps and the swatches. Generated with Higgsfield (Tripo text to 3D, detailed, 12.5 credits each) and kept reduced in <code>tools/bake3d/glb/</code>: the robot, the globe, the laptop, the trophy and the rocket. A first robot came out spindly and was generated again: six generations, 75 credits in all. Everything is rendered by the same Blender bake under Bezel's one light.</p>");
+    h.push_str(":root{color-scheme:dark;--ground:#0b0c0e;--surface:#16181b;--ink:#eef0f2;--dim:#9aa1a8;--signal:#ff5b1f}body{margin:0;background:var(--ground);color:var(--ink);font:15px/1.5 system-ui,sans-serif}main{max-width:1180px;margin:0 auto;padding:24px 16px 64px}h1{font-size:28px;margin:8px 0 4px}h2{font-size:19px;margin:36px 0 8px;border-top:1px solid #2a2e33;padding-top:20px}p{color:var(--dim);max-width:72ch}img{image-rendering:pixelated;max-width:100%;height:auto;border-radius:8px;display:block}figure{margin:0}figcaption{color:var(--dim);font:12px ui-monospace,monospace;margin:6px 0 0}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:18px}.wide{display:grid;grid-template-columns:repeat(auto-fill,minmax(480px,1fr));gap:18px}pre{background:var(--surface);padding:12px 14px;border-radius:10px;overflow:auto;font-size:13px;color:var(--ink)}code{color:var(--ink)}");
+    h.push_str("</style><main><h1>Catalyst 3D objects, in the apps</h1><p>Home's icons stay flat. The objects are in the apps, where they show something: the robot in the Robot app with each part coloured by what the robot reports, the battery's charge, the weather as it is, Wi-Fi's signal, setup's steps, and empty pages. Every picture here was drawn by the shell's own code from the pack it would ship (the turntables from a larger preview pack of whole turns). Panel shots are at the panel's 320 × 170, dithered to 16 bits as it shows them, and three times larger.</p>");
+    h.push_str("<h2>Where they come from</h2><p>Built in code (<code>tools/bake3d/models.py</code>): the robot in the Robot app (its parts: drivetrain, intake, elevator, shooter, bumpers, frame), the battery (five cells and a bolt), Wi-Fi (a dot and three arcs), the weather, the handheld, the key, the switch, the tray, and the apps' objects for their empty pages (and a moon, made but not carried). Generated with Higgsfield (Tripo text to 3D) and kept reduced in <code>tools/bake3d/glb/</code>: setup's toy robot, the globe, the laptop and the trophy (and a rocket, made but not carried). A team's own robot is baked from its CAD with <code>tools/bake3d/robot.sh</code> and read from <code>/data/catalyst/robot3d.pack</code>, in place of the shell's.</p>");
     h.push_str("<h2>Contact sheets</h2><div class=\"wide\">");
     for (file, caption) in sheets {
         let _ = write!(h, "<figure><img src=\"{file}\" alt=\"{caption}\"><figcaption>{caption}</figcaption></figure>");
     }
-    h.push_str("</div><h2>Turntables</h2><p>Every rendered angle (15° apart), shown twice their size: setup's objects dark beside light, the app icons dark (the sheets show them light). App icons ship only the turn either side of where they rest (±48°, at 30 and 52 px), setup's objects the whole way round (92 px); between rendered angles the shell blends the two nearest.</p><div class=\"grid\">");
+    h.push_str("</div><h2>Turntables</h2><p>Every rendered angle (15° apart), shown twice their size. The robot's states side by side; setup's objects dark beside light; the weather dark.</p><div class=\"grid\">");
     for (file, caption, w, ht) in turns {
         let _ = write!(h, "<figure><img src=\"{file}\" width=\"{}\" height=\"{}\" alt=\"{caption}\"><figcaption>{caption}</figcaption></figure>", w * 2, ht * 2);
     }
@@ -450,37 +597,14 @@ fn html(dir: &Path, sheets: &[(String, String)], turns: &[(String, String, i32, 
     std::fs::write(dir.join("index.html"), h).expect("write the preview page");
 }
 
-static ALL: std::sync::OnceLock<&'static [u8]> = std::sync::OnceLock::new();
-
 pub fn run(dir: &Path, preview: Option<&Path>, all: Option<&Path>) {
     if let Some(bytes) = all.and_then(|p| std::fs::read(p).ok()) {
-        ALL.set(Box::leak(bytes.into_boxed_slice())).ok();
+        ALL.set(bytes).ok();
     }
     let situ = dir.join("situ");
     std::fs::create_dir_all(&situ).expect("create the preview folder");
-    let default = crate::shell::Settings::default().accent;
-    let mut sheets = Vec::new();
-    for (tone, t) in [("dark", Tone::Dark), ("light", Tone::Light)] {
-        sheets.push((apps_sheet(dir, &format!("sheet-apps-{tone}"), default, t), format!("Home's apps, {tone}: 30 px (the grid) and 52 px (the carousel)")));
-        sheets.push((things_sheet(dir, &format!("sheet-objects-{tone}"), default, t), format!("setup and the system, {tone}")));
-    }
-    sheets.push((apps_sheet(dir, "sheet-apps-blue", Accent::Blue, Tone::Dark), "the same pack in Blue".into()));
-    sheets.push((apps_sheet(dir, "sheet-apps-own-green-light", Accent::Hue(24), Tone::Light), "the user's own colour (a green), light".into()));
-    sheets.push((things_sheet(dir, "sheet-objects-own-violet", Accent::Violet, Tone::Dark), "setup's objects in Violet".into()));
-
-    let mut objects = match preview.map(std::fs::read) {
-        Some(Ok(bytes)) => Objects::from_bytes(bytes).expect("a preview pack"),
-        _ => Objects::shipped(),
-    };
-    let size = if preview.is_some() { "preview" } else { "hero" };
-    let mut turns = Vec::new();
-    let names: Vec<String> = objects.pack().map(|p| p.names().map(str::to_owned).collect()).unwrap_or_default();
-    for name in names {
-        let s = if objects.px(&name, size).is_some() { size } else if name.starts_with("app-") { "l" } else { "m" };
-        if let Some((file, w, h)) = turntable(dir, &mut objects, &name, s, default) {
-            turns.push((file, name, w, h));
-        }
-    }
+    let sheets = sheets(dir);
+    let turns = turntables(dir, preview);
     let (mut shots, mut movies) = (Vec::new(), Vec::new());
     in_situ(&situ, &mut shots, &mut movies);
     let budget = budget(dir);

@@ -182,6 +182,51 @@ def bake(name, spec, out):
             pose(yaw, pitch)
             render(scene, os.path.join(folder, f"{prefix}data_{yaw:+04d}_{pitch:+03d}.png"), DATA_SAMPLES, False)
 
+    # The parts pass, for an object whose parts the shell colours one by one
+    # (a robot's drivetrain, intake, arm...): each part's number as flat
+    # emission, one sample a pixel and no filter, so no pixel mixes two
+    # numbers; pack.py brings it down by the commonest number under each
+    # pixel. And each part's facing: the turn that brings it nearest the camera.
+    parts = spec.get("parts", [])
+    facing = []
+    if parts:
+        pose(0, 0)
+        owner = {o.name: kit.part_of(o) for o in objs}
+        centroids = {}
+        for o in objs:
+            p = owner[o.name]
+            if p in parts:
+                for v in kit.evaluated_points([o])[::7]:
+                    centroids.setdefault(p, []).append(v)
+        for p in parts:
+            pts = centroids.get(p, [])
+            if not pts:
+                facing.append(0)
+                continue
+            cx = sum(v.x for v in pts) / len(pts)
+            cy = sum(v.y for v in pts) / len(pts)
+            # Seen from the camera at -y: a part toward -y faces it. Its
+            # angle about the pivot now (at rest), and the turn on from rest
+            # that brings it round to the front.
+            a = math.degrees(math.atan2(cy, cx))
+            turn_to = (-90.0 - a + 180.0) % 360.0 - 180.0
+            facing.append(0 if math.hypot(cx, cy) < 0.15 else int(round(turn_to)))
+        for o in objs:
+            p = owner[o.name]
+            index = parts.index(p) + 1 if p in parts else (1 + parts.index(spec.get("rest_part", parts[-1])))
+            m = kit.part_material(index)
+            if o.type in ("CURVE", "FONT"):
+                for i in range(len(o.data.materials)):
+                    o.data.materials[i] = m
+            for slot in o.material_slots:
+                slot.material = m
+        scene.cycles.filter_width = 0.01
+        for prefix, views in sets.items():
+            use(prefix)
+            for yaw, pitch in views:
+                pose(yaw, pitch)
+                render(scene, os.path.join(folder, f"{prefix}part_{yaw:+04d}_{pitch:+03d}.png"), 1, False)
+
     meta = {
         "name": name,
         "res": res,
@@ -192,6 +237,8 @@ def bake(name, spec, out):
         "middle": [middle.x, 1 - middle.y],
         "source": spec.get("source", "code"),
         "about": spec.get("about", ""),
+        "parts": parts,
+        "facing": facing,
     }
     with open(os.path.join(folder, "meta.json"), "w") as f:
         json.dump(meta, f, indent=1)
@@ -207,7 +254,14 @@ def main():
     if "--quick" in argv:
         argv.remove("--quick")
         QUICK = True
-    out = argv[0]
+    # Whole paths: Blender reads a relative one against the drive's root.
+    out = os.path.abspath(argv[0])
+    # A team's own robot, from its CAD: --robot MODEL MAP (see robot.sh).
+    if "--robot" in argv:
+        i = argv.index("--robot")
+        model, mapping = os.path.abspath(argv[i + 1]), os.path.abspath(argv[i + 2])
+        bake("robot-team", models.team_robot(model, mapping), out)
+        return
     names = argv[1:] or list(models.ASSETS)
     for name in names:
         bake(name, models.ASSETS[name], out)

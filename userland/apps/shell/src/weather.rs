@@ -238,6 +238,23 @@ fn word(code: u8, day: bool) -> &'static str {
 /// strength is the one cloud with drops (Material's light and heavy rain are
 /// bare streaks, which at strip size read as hatching, not weather); the
 /// words say how much.
+/// The object for a condition's icon (`tools/bake3d/models.py`, `w_*`).
+pub fn object(icon: &str) -> Option<&'static str> {
+    Some(match icon {
+        "sunny" => "weather-sunny",
+        "clear_night" => "weather-clear-night",
+        "partly_cloudy_day" => "weather-partly-day",
+        "partly_cloudy_night" => "weather-partly-night",
+        "cloud" => "weather-cloudy",
+        "foggy" => "weather-fog",
+        "rainy" => "weather-rain",
+        "weather_mix" => "weather-sleet",
+        "weather_snowy" => "weather-snow",
+        "thunderstorm" => "weather-storm",
+        _ => return None,
+    })
+}
+
 pub fn icon(code: u8, day: bool) -> &'static str {
     match code {
         0 | 1 if day => "sunny",
@@ -1366,7 +1383,14 @@ fn draw_hero(g: &mut Gfx, r: Rect, text: &HeroText, reading: &Reading, alpha: f3
     let ty = g.ty;
     let radius = g.tile_radius();
     g.canvas.rrect(r.offset(g.ox, 0.0), radius, t.surface1, alpha);
-    g.icon_alpha(icon(reading.code, reading.day), true, r.x + 25.0, r.cy(), 32.0, t.ink, alpha);
+    // The weather as it is, in three dimensions (the sun, a cloud, rain,
+    // snow, a storm...), swinging into place as the page arrives; its icon
+    // where there is no object for it.
+    let glyph = icon(reading.code, reading.day);
+    let drawn = object(glyph).is_some_and(|o| g.object(o, "l", r.x + 27.0, r.cy(), crate::object3d::View::yaw(g.arriving_turn()), 1.0, alpha));
+    if !drawn {
+        g.icon_alpha(glyph, true, r.x + 25.0, r.cy(), 32.0, t.ink, alpha);
+    }
     let plan = hero_plan(g, r, text);
     g.text_alpha(plan.x, plan.temp_cy, &text.temp, temp_style(g), t.ink, alpha);
     g.text_alpha(plan.x + 1.0, plan.condition_cy, text.condition, ty.body, t.ink, alpha);

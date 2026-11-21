@@ -21,9 +21,15 @@ Colour is put on at run time, from the palette in use (object3d.rs, and
 `colour()` below, which is the same arithmetic): so one bake serves dark and
 light, every accent and the user's own colour.
 
-The pack is little-endian: "C3DP", a version, then each object (its name,
-tints, where it stands, its sizes; each size its views and, per view, where
-its frame lies: a PNG whose red, green, blue and alpha are the four planes).
+An object with parts (a robot's drivetrain, intake, arm...; a battery's
+cells) has a fifth plane: which part each pixel is, by the commonest part
+under it. The shell colours each part on its own, from what it stands for.
+
+The pack is little-endian: "C3DP", a version (2), then each object (its
+name, tints, where it stands, its parts with the turn that faces each to the
+camera, its sizes; each size its views and, per view, where its frame lies:
+a PNG whose red, green, blue and alpha are the four planes, and for an
+object with parts a greyscale PNG of part numbers right after it).
 """
 
 import io
@@ -35,7 +41,7 @@ import sys
 import numpy as np
 from PIL import Image
 
-VERSION = 1
+VERSION = 2
 ROLES = {"signal": 0, "ice": 1, "amber": 2, "fault": 3, "ink": 4}
 # The neutral lightness each kind of surface was rendered at (kit.MATERIALS):
 # a palette colour is anchored there, so a surface facing the light shows
@@ -98,6 +104,28 @@ def planes(folder, yaw, pitch, px, prefix=""):
     return out
 
 
+def part_plane(folder, yaw, pitch, px, prefix, parts, cover):
+    """Which part each pixel is, at `px` across: the commonest part number
+    under it (0 where the object is not)."""
+    raw = load(os.path.join(folder, f"{prefix}part_{yaw:+04d}_{pitch:+03d}.png"))
+    ids = np.round(srgb_to_linear(raw[..., 0]) * 16).astype(np.int32) * (raw[..., 3] > 0.5)
+    best = np.zeros((px, px), np.float32)
+    out = np.zeros((px, px), np.uint8)
+    for k in range(1, len(parts) + 1):
+        share = np.asarray(Image.fromarray((ids == k).astype(np.float32)).resize((px, px), Image.Resampling.BOX))
+        better = share > best
+        out[better] = k
+        best[better] = share[better]
+    out[cover == 0] = 0
+    return out
+
+
+def l8_bytes(plane):
+    out = io.BytesIO()
+    Image.fromarray(np.ascontiguousarray(plane), "L").save(out, "PNG", optimize=True)
+    return out.getvalue()
+
+
 def png_bytes(p):
     """One view's planes as a PNG: shade, tint, cover and shadow in its red,
     green, blue and alpha. Lossless, filtered and deflated, and the shell
@@ -140,6 +168,11 @@ def write_pack(baked, out, preview=None, only=None):
         entry += struct.pack("<BB", ROLES[tints[0]], ROLES[tints[1]])
         fx, fy = meta["foot"]
         entry += struct.pack("<HH", int(round(fx * 65535)), int(round(fy * 65535)))
+        parts = meta.get("parts", [])
+        entry += struct.pack("<B", len(parts))
+        for part, facing in zip(parts, meta.get("facing", [0] * len(parts))):
+            b = part.encode()
+            entry += struct.pack("<B", len(b)) + b + struct.pack("<h", facing)
         entry += struct.pack("<B", len(sizes))
         for label, px, yaws, pitches in sizes:
             label = label.encode()
@@ -152,8 +185,9 @@ def write_pack(baked, out, preview=None, only=None):
                     p = planes(folder, yaw, pitch, px, prefix)
                     raw += p.size
                     blob = png_bytes(p)
-                    entry += struct.pack("<II", len(blobs), len(blob))
-                    blobs += blob
+                    extra = l8_bytes(part_plane(folder, yaw, pitch, px, prefix, parts, p[2])) if parts else b""
+                    entry += struct.pack("<III", len(blobs), len(blob), len(extra))
+                    blobs += blob + extra
         entries.append(entry)
         print(f"  {meta['name']}: {', '.join(f'{s[0]} {s[1]} px × {len(s[2]) * len(s[3])}' for s in sizes)}")
     body = header

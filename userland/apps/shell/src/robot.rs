@@ -11,11 +11,14 @@ use nt4::{Client, Value};
 use crate::logs::Logs;
 
 const ROOT: &str = "/Catalyst/";
+/// What the Driver Station says of the match, as WPILib publishes it: the
+/// robot's mode (`FMSControlData`) and its alliance (`IsRedAlliance`).
+const FMS: &str = "/FMSInfo/";
 
 enum Source {
     Live(Client),
     /// A scripted robot, for developing and demonstrating the UI with no robot.
-    Demo { elapsed: f64, table: BTreeMap<String, Value>, tick: u64 },
+    Demo { elapsed: f64, table: BTreeMap<String, Value>, tick: u64, overrides: BTreeMap<String, Value> },
     None,
 }
 
@@ -62,7 +65,7 @@ impl Robot {
     /// Awake again: the link made again, to the same robot.
     pub fn resume(&mut self) {
         if std::mem::take(&mut self.paused) {
-            self.source = Source::Live(Client::connect(&self.address, "catalyst-linux", &[ROOT]));
+            self.source = Source::Live(Client::connect(&self.address, "catalyst-linux", &[ROOT, FMS]));
         }
     }
 
@@ -73,14 +76,14 @@ impl Robot {
     }
 
     pub fn connect(address: &str) -> Self {
-        let client = Client::connect(address, "catalyst-linux", &[ROOT]);
+        let client = Client::connect(address, "catalyst-linux", &[ROOT, FMS]);
         let host = address.split(':').next().unwrap_or_default();
         Robot { source: Source::Live(client), address: address.to_owned(), logs: Logs::for_robot(host), schedule: crate::schedule::Schedule::for_robot(host), ..Self::none() }
     }
 
     pub fn demo() -> Self {
         let mut robot = Robot {
-            source: Source::Demo { elapsed: 0.0, table: BTreeMap::new(), tick: 0 },
+            source: Source::Demo { elapsed: 0.0, table: BTreeMap::new(), tick: 0, overrides: BTreeMap::new() },
             address: "demo".into(),
             logs: Logs::demo(),
             schedule: crate::schedule::Schedule::demo(),
@@ -132,13 +135,14 @@ impl Robot {
     pub fn refresh(&mut self, dt: f32) -> bool {
         let generation = match &mut self.source {
             Source::Live(c) => c.generation(),
-            Source::Demo { elapsed, table, tick } => {
+            Source::Demo { elapsed, table, tick, overrides } => {
                 *elapsed += dt as f64;
                 self.logs.advance(dt);
                 let now = (*elapsed * 4.0) as u64; // 4 Hz
                 if now != *tick || table.is_empty() {
                     *tick = now;
                     *table = demo_table(now as f64 / 4.0);
+                    table.extend(overrides.iter().map(|(k, v)| (k.clone(), v.clone())));
                 }
                 *tick
             }
@@ -166,6 +170,26 @@ impl Robot {
             self.loop_history.clear();
         }
         true
+    }
+
+    /// What the Driver Station says, by its key under `/FMSInfo/` (the demo
+    /// robot keeps it under `FMSInfo/` in its table).
+    pub fn fms(&self, key: &str) -> Option<Value> {
+        match &self.source {
+            Source::Live(c) => c.get(&format!("{FMS}{key}")),
+            Source::Demo { table, .. } => table.get(&format!("FMSInfo/{key}")).cloned(),
+            Source::None => None,
+        }
+    }
+
+    /// The demo robot told to say something of its own (a hot motor, low
+    /// volts, a mode), whatever its script says: for the galleries and tests.
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn demo_say(&mut self, key: &str, value: Value) {
+        if let Source::Demo { overrides, table, .. } = &mut self.source {
+            overrides.insert(key.to_owned(), value.clone());
+            table.insert(key.to_owned(), value);
+        }
     }
 
     /// A value by its key under `/Catalyst/`.
@@ -303,6 +327,12 @@ fn demo_table(t: f64) -> BTreeMap<String, Value> {
     put("Shooter/AtSpeed", Value::Bool(true));
     put("Swerve/HeadingDeg", Value::Double((t * 12.0) % 360.0));
     put("Swerve/SpeedMPS", Value::Double(1.9 + 1.4 * wave(6.0, 0.0)));
+
+    // The Driver Station: teleop, enabled, on the blue alliance (a mode
+    // read from the bits WPILib publishes: enabled 1, autonomous 2, test 4,
+    // stopped 8, the field 16, the Driver Station 32).
+    put("FMSInfo/FMSControlData", Value::Int(1 | 32));
+    put("FMSInfo/IsRedAlliance", Value::Bool(false));
 
     put("MotorHistory/Summary", s("20 motors · 41.2 h powered"));
     put("MotorHistory/Rows", Value::StringArray(

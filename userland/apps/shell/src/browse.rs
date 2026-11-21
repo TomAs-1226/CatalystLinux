@@ -603,7 +603,7 @@ impl Screen for Browse {
         let t = g.tokens;
         let ty = g.ty;
         if self.service.is_none() {
-            g.empty("travel_explore", "browsing needs an OpenAI or Claude key");
+            g.empty("key", "browsing needs an OpenAI or Claude key");
             g.hint("enter: settings › keys");
             return;
         }

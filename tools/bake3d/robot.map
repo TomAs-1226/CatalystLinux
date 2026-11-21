@@ -1,0 +1,35 @@
+# Which of a robot's CAD parts is which, for robot.sh.
+#
+# Each `part = …` line names a part of the robot as the Robot app colours it,
+# then globs matched against the CAD's names (ignoring case). A solid goes by
+# the outermost assembly it sits in that a line matches, else the next one
+# in, down to its own name: a "Drive Pulley" inside "Intake" is the
+# intake's. The robot's own top assembly is passed over (its name is the
+# whole robot's). Whatever matches nothing goes to the `*` line, the frame.
+# The shell knows drivetrain, intake, elevator, shooter, bumpers and frame,
+# and colours any other part by telemetry under its own name (a "climber"
+# part by Climber/...).
+#
+# Copy this file beside your model and change the globs to your CAD's names.
+# Where two lines match the same name the first wins: put the narrow names
+# first (a "Shooter Flywheel" is the shooter's, though it has a wheel in it).
+
+bumpers    = *bumper*
+shooter    = *shooter* *flywheel* *launcher* *turret* *hood*
+intake     = *intake* *roller* *indexer* *feeder* *hopper*
+elevator   = *elevator* *arm* *wrist* *pivot* *climb* *carriage* *stage*
+drivetrain = *swerve* *module* *drive* *tread* *gearbox*
+frame      = *
+
+# Left out: fasteners, matched against each part's own name (not the
+# assemblies it is in). Short words are matched only at the start of a word
+# (`*[!a-z0-9]nut*`: after a space or a mark), so "nut" is not a "Peanut"
+# and "rivet" not a "Drivetrain Rail". Anything under 1.2% of the robot
+# across is left out anyway.
+hide = *screw* bolt* *[!a-z0-9]bolt* nut* *[!a-z0-9]nut* *washer* rivet* *[!a-z0-9]rivet* *zip*tie*
+
+# Degrees about the vertical that bring the robot's front (its intake side)
+# round to face the camera: 0, 90, 180 or -90 for a CAD's own axes.
+turn = 0
+# Which way is up in an OBJ, STL or PLY (glTF and STEP are known): z or y.
+up = z
