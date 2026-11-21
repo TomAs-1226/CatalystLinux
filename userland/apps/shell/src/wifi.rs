@@ -49,6 +49,13 @@ pub struct State {
     pub status: String,
 }
 
+impl State {
+    /// Joined, with an address: the network can be used ("ssid · 10.58.5.23").
+    pub fn online(&self) -> bool {
+        self.enabled && self.status.rsplit(" · ").next().is_some_and(|a| a.parse::<std::net::Ipv4Addr>().is_ok())
+    }
+}
+
 enum Cmd {
     Enable(bool),
     Join { ssid: String, password: Option<String> },
@@ -508,6 +515,17 @@ aa:bb:cc:00:00:05\t2462\t-60\t[WPA2-PSK-CCMP][ESS]\t\n";
         assert_eq!((networks[1].ssid.as_str(), networks[1].secured), ("Guest", false));
         assert_eq!(networks[2].ssid, "Café \"Net\"");
         assert_eq!((networks[0].bars(), networks[1].bars(), networks[2].bars()), (4, 2, 1));
+    }
+
+    #[test]
+    fn online_means_joined_with_an_address() {
+        let state = |status: &str| State { enabled: true, networks: Vec::new(), status: status.into() };
+        assert!(state("5805_Robot · 10.58.5.23").online());
+        assert!(state(&describe("COMPLETED", Some("Pits · Guest"), Some("192.168.4.20"))).online(), "a name with a dot in it");
+        assert!(!state(&describe("COMPLETED", Some("Pits"), None)).online(), "still getting an address");
+        assert!(!state(&describe("ASSOCIATING", Some("Pits"), None)).online());
+        assert!(!state("starting the radio").online());
+        assert!(!State { enabled: false, ..state("Pits · 10.0.0.2") }.online());
     }
 
     #[test]

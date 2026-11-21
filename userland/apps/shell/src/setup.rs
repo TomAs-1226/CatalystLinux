@@ -1031,6 +1031,11 @@ impl Screen for Setup {
     fn resume(&mut self) {
         // Back from choosing a network or a time zone: say how it went.
         self.entered = 0.0;
+        // Back from joining a network: the next step is Next.
+        let online = self.wifi.as_ref().is_some_and(|w| w.state().online()) || crate::sys::address("wlan0").is_some_and(|a| a.contains('.'));
+        if self.page == Page::Wifi && online {
+            self.focus = self.rows();
+        }
         // Back from typing the line: the keys' chip says how it went.
         if let Some(check) = &mut self.hardware {
             check.tick(10.0);
@@ -1097,7 +1102,7 @@ impl Screen for Setup {
                     if !crate::wifi::switched_on() {
                         crate::wifi::switch(true);
                     }
-                    return Nav::Push(Box::new(crate::screens::WifiScreen::new()));
+                    return Nav::Push(Box::new(crate::screens::WifiScreen::for_setup()));
                 }
                 (Page::Place, 0) => self.focus = 1,
                 (Page::Place, _) => return Nav::Push(Box::new(crate::device::ZonePicker::new())),
@@ -1105,7 +1110,7 @@ impl Screen for Setup {
                     if !crate::wifi::switched_on() {
                         crate::wifi::switch(true);
                     }
-                    return Nav::Push(Box::new(crate::screens::WifiScreen::new()));
+                    return Nav::Push(Box::new(crate::screens::WifiScreen::for_setup()));
                 }
                 (Page::Wifi, _) => return self.next(cx),
                 (Page::Keys, row) => self.typing = Some((row, String::new())),

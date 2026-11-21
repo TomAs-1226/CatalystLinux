@@ -2857,11 +2857,24 @@ pub struct WifiScreen {
     seen: u64,
     /// The network a password is being typed for, and what has been typed.
     entering: Option<(String, String)>,
+    /// Opened from setup: once a network chosen here is joined and has an
+    /// address, back to setup by itself (after a moment saying so).
+    back_when_joined: bool,
+    joining: bool,
+    online_for: Option<f32>,
 }
+
+/// How long "connected" shows before the page goes back to setup.
+const JOINED_PAUSE: f32 = 1.2;
 
 impl WifiScreen {
     pub fn new() -> Self {
-        WifiScreen { wifi: Wifi::open(), list: ListState::default(), seen: u64::MAX, entering: None }
+        WifiScreen { wifi: Wifi::open(), list: ListState::default(), seen: u64::MAX, entering: None, back_when_joined: false, joining: false, online_for: None }
+    }
+
+    /// From setup: back there by itself once joined.
+    pub fn for_setup() -> Self {
+        WifiScreen { back_when_joined: true, ..Self::new() }
     }
 }
 
@@ -2887,6 +2900,7 @@ impl Screen for WifiScreen {
                     self.wifi.join(ssid, Some(password.clone()));
                     *cx.say = Some(format!("joining {ssid}"));
                     self.entering = None;
+                    (self.joining, self.online_for) = (true, None);
                 }
                 Key::Enter => *cx.say = Some("at least 8 characters".into()),
                 _ => {}
@@ -2902,6 +2916,7 @@ impl Screen for WifiScreen {
                 Some(network) if network.saved.is_some() || !network.secured => {
                     self.wifi.join(&network.ssid, None);
                     *cx.say = Some(format!("joining {}", network.ssid));
+                    (self.joining, self.online_for) = (true, None);
                 }
                 Some(network) => self.entering = Some((network.ssid.clone(), String::new())),
                 None => {}
@@ -2918,11 +2933,29 @@ impl Screen for WifiScreen {
         Nav::Stay
     }
 
-    fn tick(&mut self, _dt: f32) -> bool {
+    fn tick(&mut self, dt: f32) -> bool {
         let generation = self.wifi.generation();
         let changed = generation != self.seen;
         self.seen = generation;
+        // From setup: joined, with an address, counts the moment before going back.
+        if self.back_when_joined && self.joining {
+            match (&mut self.online_for, self.wifi.state().online()) {
+                (Some(t), true) => *t += dt,
+                (None, true) => self.online_for = Some(0.0),
+                (_, false) => self.online_for = None,
+            }
+        }
         changed
+    }
+
+    fn update(&mut self, cx: &mut Cx) -> Nav {
+        if self.online_for.is_some_and(|t| t >= JOINED_PAUSE) {
+            self.online_for = None;
+            self.joining = false;
+            *cx.say = Some(format!("connected · {}", self.wifi.state().status));
+            return Nav::Pop;
+        }
+        Nav::Stay
     }
 
     fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
