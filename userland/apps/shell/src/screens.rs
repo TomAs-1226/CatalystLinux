@@ -49,7 +49,7 @@ struct App {
     open: fn(&Robot) -> Box<dyn Screen>,
 }
 
-const APPS: [App; 20] = [
+const APPS: [App; 22] = [
     App { icon: "smart_toy", name: "Robot", open: |_| Box::new(RobotScreen::default()) },
     App { icon: "monitor_heart", name: "Health", open: |_| Box::new(Health::default()) },
     App { icon: "description", name: "Logs", open: |_| Box::new(LogsScreen::default()) },
@@ -69,12 +69,30 @@ const APPS: [App; 20] = [
     App { icon: "qr_code_scanner", name: "AprilTag", open: |_| Box::new(crate::apriltags::Reader::new()) },
     App { icon: "insights", name: "Graphs", open: |_| Box::new(crate::graphs::Graphs::new()) },
     App { icon: "checklist", name: "Pit", open: |_| Box::new(crate::pit::Pit::default()) },
+    App { icon: "straighten", name: "Level", open: |_| Box::new(crate::level::Level::new()) },
+    App { icon: "explore", name: "Compass", open: |_| Box::new(crate::level::Compass::new()) },
     App { icon: "settings", name: "Settings", open: |_| Box::new(SettingsApp::new()) },
 ];
 
-/// The built-in apps, for search: index, icon and name.
+/// Whether a built-in app is offered on this handheld: the Level only where
+/// a motion sensor answers, the Compass only where its magnetometer does
+/// too (the Lite has neither; the C154-V1 no magnetometer).
+fn offered(name: &str) -> bool {
+    match name {
+        "Level" => crate::imu::has_motion(),
+        "Compass" => crate::imu::has_compass(),
+        _ => true,
+    }
+}
+
+/// What the apps offered depend on, to lay Home out again if it changes.
+fn hardware() -> (bool, bool) {
+    (crate::imu::has_motion(), crate::imu::has_compass())
+}
+
+/// The built-in apps this handheld offers, for search: index, icon and name.
 pub fn builtin_apps() -> impl Iterator<Item = (usize, &'static str, &'static str)> {
-    APPS.iter().enumerate().map(|(i, app)| (i, app.icon, app.name))
+    APPS.iter().enumerate().filter(|(_, app)| offered(app.name)).map(|(i, app)| (i, app.icon, app.name))
 }
 
 /// Open a built-in app by its place in the list.
@@ -122,6 +140,8 @@ pub struct Home {
     /// those hidden there left out; and the arrangement they were laid out by.
     tiles: Vec<Tile>,
     arranged_by: crate::shell::Arrangement,
+    /// The hardware the tiles were laid out for (`hardware()`).
+    arranged_for: (bool, bool),
     /// What the glance page says about this device, re-read now and then.
     device: DeviceFacts,
     device_age: f32,
@@ -254,6 +274,7 @@ impl Home {
             external: crate::apps::find(),
             tiles: Vec::new(),
             arranged_by: crate::shell::Arrangement::default(),
+            arranged_for: (false, false),
             device: DeviceFacts::read(true),
             device_age: 0.0,
             h24: true,
@@ -310,8 +331,11 @@ impl Home {
         };
         tiles.sort_by_key(place);
         tiles.retain(|t| self.tile_name(*t) == "Settings" || !hidden.iter().any(|n| n == self.tile_name(*t)));
+        // Apps for hardware this handheld does not have are not offered.
+        tiles.retain(|t| !matches!(t, Tile::Builtin(i) if !offered(APPS[*i].name)));
         self.tiles = tiles;
         self.arranged_by = arrangement.clone();
+        self.arranged_for = hardware();
         self.lift.clear();
         self.pulse.clear();
         self.seen.clear();
@@ -324,9 +348,10 @@ impl Home {
         }
     }
 
-    /// Arrange again if the settings' arrangement is not the one in use.
+    /// Arrange again if the settings' arrangement is not the one in use (or
+    /// the motion sensor has just been found).
     fn follow_arrangement(&mut self, arrangement: &crate::shell::Arrangement) {
-        if self.arranged_by != *arrangement {
+        if self.arranged_by != *arrangement || self.arranged_for != hardware() {
             self.arrange(arrangement);
         }
     }
@@ -406,6 +431,8 @@ impl Home {
             "Net tools" => ("find · ping".into(), None),
             "Connect" => ("ssh · serial".into(), None),
             "Actions" => ("one key".into(), None),
+            "Level" => ("pitch · roll".into(), None),
+            "Compass" => ("heading".into(), None),
             "Logs" => {
                 let rows = robot.logs.list();
                 let worst = rows.iter().filter_map(|r| r.digest.as_ref()).map(|d| d.headline().0).min();
@@ -1941,6 +1968,10 @@ enum Item {
     /// the processor chooses its speed.
     ScreenOff,
     Processor,
+    /// The motion sensor's part in standby (where there is one): picked up,
+    /// the screen comes on; put face down, it goes off.
+    LiftWake,
+    FaceDown,
     // Network.
     WifiSetup,
     /// Settings › USB: what the handheld is to a computer, and whether one has it.
@@ -1985,7 +2016,7 @@ pub struct SettingsApp {
 /// Every app Home can show, by name: the built-in ones, then those found on
 /// the storage.
 fn app_names() -> Vec<String> {
-    APPS.iter().map(|a| a.name.to_owned()).chain(crate::apps::find().into_iter().map(|a| a.name)).collect()
+    builtin_apps().map(|(_, _, name)| name.to_owned()).chain(crate::apps::find().into_iter().map(|a| a.name)).collect()
 }
 
 /// Arrange apps' rows as Home has them: the favourites first, then the rest,
@@ -2025,7 +2056,7 @@ fn glance_items(order: &[Widget]) -> Vec<Item> {
 
 /// Where everything in Settings is, for search: what it is called, the
 /// section it is in, and its place there (none: the section itself).
-const SETTING_PLACES: [(&str, Item, Option<usize>); 48] = [
+const SETTING_PLACES: [(&str, Item, Option<usize>); 50] = [
     ("Robot settings", Item::RobotSection, None),
     ("Open Robot on link", Item::RobotSection, Some(0)),
     ("Match report after a match", Item::RobotSection, Some(1)),
@@ -2056,6 +2087,8 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 48] = [
     ("Graphics and the GPU", Item::Display, Some(1)),
     ("Screen off after", Item::Display, Some(2)),
     ("Power saving", Item::Display, Some(3)),
+    ("Lift to wake", Item::Display, Some(4)),
+    ("Face down to sleep", Item::Display, Some(5)),
     ("Network", Item::Network, None),
     ("Wi-Fi networks", Item::Network, Some(0)),
     ("Keys for online services", Item::KeysSection, None),
@@ -2076,9 +2109,10 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 48] = [
     ("Set up from a computer", Item::FromComputer, None),
 ];
 
-/// The names search finds Settings by.
+/// The names search finds Settings by (the motion sensor's only where it is).
 pub fn setting_names() -> impl Iterator<Item = (usize, &'static str)> {
-    SETTING_PLACES.iter().enumerate().map(|(i, place)| (i, place.0))
+    let motion = crate::imu::has_motion();
+    SETTING_PLACES.iter().enumerate().filter(move |(_, place)| motion || !matches!(place.0, "Lift to wake" | "Face down to sleep")).map(|(i, place)| (i, place.0))
 }
 
 /// Settings opened at one of `SETTING_PLACES`.
@@ -2145,7 +2179,10 @@ impl SettingsApp {
                 page
             }
             GlancePage => Self::page("Glance page", glance_items(&crate::shell::Settings::default().glance)),
-            Display => Self::page("Display", vec![Brightness, Graphics, ScreenOff, Processor]),
+            Display => {
+                let motion: &[Item] = if crate::imu::has_motion() { &[LiftWake, FaceDown] } else { &[] };
+                Self::page("Display", [Brightness, Graphics, ScreenOff, Processor].into_iter().chain(motion.iter().copied()).collect())
+            }
             Network => Self::page("Network", std::iter::once(WifiSetup).chain((0..4).map(Info)).collect()),
             KeysSection => Self::page("Keys", (0..crate::keys::SERVICES.len()).map(KeyFor).chain(std::iter::once(KeysFromFile)).collect()),
             Access => Self::page("Access", vec![Ssh]),
@@ -2318,6 +2355,8 @@ impl SettingsApp {
             ),
             ScreenOff => ("Screen off after".into(), crate::standby::screen_off_name(g.screen_off), g.screen_off != 0),
             Processor => ("Processor".into(), g.power.name().into(), true),
+            LiftWake => ("Lift to wake".into(), onoff(g.lift_wake), g.lift_wake),
+            FaceDown => ("Face down to sleep".into(), onoff(g.face_down), g.face_down),
             WifiSetup => section("Wi-Fi networks", "join".to_owned()),
             Ssh => ("SSH access".into(), onoff(crate::ssh_enabled()), crate::ssh_enabled()),
             DemoRobot => ("Demo robot".into(), onoff(robot.is_demo()), robot.is_demo()),
@@ -2431,6 +2470,8 @@ impl SettingsApp {
             }
             OpenRobot => cx.settings.open_robot = !cx.settings.open_robot,
             MatchReport => cx.settings.match_report = !cx.settings.match_report,
+            LiftWake => cx.settings.lift_wake = !cx.settings.lift_wake,
+            FaceDown => cx.settings.face_down = !cx.settings.face_down,
             MotionScale => {
                 let all = crate::shell::MOTION_SCALES;
                 let at = all.iter().position(|s| *s == cx.settings.motion_scale).unwrap_or(1) as i32;
@@ -2884,7 +2925,7 @@ mod tests {
             assert!(w <= room, "{name} is {w:.0} px, the tile has {room:.0}");
         }
         // And the lines under the tools' names, which never change.
-        for line in ["cpu · memory", "find · ping", "ssh · serial", "one key"] {
+        for line in ["cpu · memory", "find · ping", "ssh · serial", "one key", "pitch · roll", "heading"] {
             assert!(g.measure(line, g.ty.caption) <= room, "{line}");
         }
     }
@@ -2917,6 +2958,49 @@ mod tests {
         assert_eq!(home.focus, 1 + columns);
         home.grid_key(Key::Up, false);
         assert_eq!(home.focus, 1);
+    }
+
+    #[test]
+    fn apps_for_hardware_that_is_not_there_are_not_offered() {
+        use crate::imu::{pretend, Found};
+        // Home's built-in tiles by name (whatever external apps are about).
+        let builtin = |home: &Home| -> Vec<String> {
+            (0..home.count()).map(|i| home.icon_and_name(i).1).filter(|n| APPS.iter().any(|a| a.name == n)).collect()
+        };
+        // The Lite: no motion sensor. Neither app anywhere; the rest as ever.
+        pretend(Some(Found::Nothing));
+        let shown = builtin(&Home::new());
+        assert!(!shown.iter().any(|n| n == "Level" || n == "Compass"), "{shown:?}");
+        assert_eq!(shown.len(), 20, "the twenty the emulator's run counts on");
+        assert_eq!(shown.last().map(String::as_str), Some("Settings"), "Settings stays last");
+        assert_eq!(builtin_apps().position(|(_, _, n)| n == "Terminal"), Some(8), "Terminal where it was");
+        assert!(!builtin_apps().any(|(_, _, n)| n == "Level"), "nor in search");
+        assert!(!app_names().iter().any(|n| n == "Compass"), "nor in Arrange apps");
+        let display = SettingsApp::section(Item::Display).unwrap();
+        assert!(!display.items.contains(&Item::LiftWake) && !display.items.contains(&Item::FaceDown));
+        assert!(!setting_names().any(|(_, n)| n == "Lift to wake"));
+        // The C154-V1: the Level, not the Compass.
+        pretend(Some(Found::Motion));
+        let shown = builtin(&Home::new());
+        assert!(shown.iter().any(|n| n == "Level") && !shown.iter().any(|n| n == "Compass"), "{shown:?}");
+        // The C154: both, before Settings, and the standby switches.
+        pretend(Some(Found::Compass));
+        let shown = builtin(&Home::new());
+        let at = |name: &str| shown.iter().position(|n| n == name).unwrap();
+        assert!(at("Pit") < at("Level") && at("Level") < at("Compass") && at("Compass") < at("Settings"));
+        let display = SettingsApp::section(Item::Display).unwrap();
+        assert!(display.items.ends_with(&[Item::LiftWake, Item::FaceDown]));
+        // Found once Home is already up (the sensor starts behind the logo,
+        // and the first start has nothing remembered): it is laid out again,
+        // the focus on the app it was on.
+        pretend(Some(Found::Nothing));
+        let mut home = Home::new();
+        home.focus = builtin(&home).iter().position(|n| n == "Pit").unwrap();
+        pretend(Some(Found::Compass));
+        home.follow_arrangement(&crate::shell::Arrangement::default());
+        assert!(builtin(&home).iter().any(|n| n == "Compass"));
+        assert_eq!(home.icon_and_name(home.focus).1, "Pit");
+        pretend(None);
     }
 
     #[test]

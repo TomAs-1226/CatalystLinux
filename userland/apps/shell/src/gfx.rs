@@ -138,6 +138,9 @@ pub struct Gfx {
     /// and the processor's speed choice.
     pub screen_off: u32,
     pub power: crate::standby::Power,
+    /// Lift to wake and face down to sleep.
+    pub lift_wake: bool,
+    pub face_down: bool,
     /// The look chosen, its theme on its own for brevity, what every corner
     /// is multiplied by, and tiles across Home.
     pub look: crate::look::Look,
@@ -226,6 +229,8 @@ impl Gfx {
             show_keys: false,
             screen_off: 60,
             power: crate::standby::Power::Balanced,
+            lift_wake: true,
+            face_down: true,
             look: crate::look::Look::default(),
             theme: crate::look::Theme::Catalyst,
             corner: 1.0,

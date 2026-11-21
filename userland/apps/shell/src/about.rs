@@ -62,7 +62,7 @@ pub struct About {
 }
 
 /// The pieces Catalyst Linux is made of that others wrote, with their licences.
-const PIECES: [(&str, &str); 16] = [
+const PIECES: [(&str, &str); 17] = [
     ("Linux kernel", "GPL-2.0"),
     ("BusyBox", "GPL-2.0"),
     ("musl libc", "MIT"),
@@ -75,6 +75,7 @@ const PIECES: [(&str, &str); 16] = [
     ("wpa_supplicant", "BSD-3-Clause"),
     ("Raspberry Pi firmware", "Broadcom"),
     ("M5Stack overlays", "GPL-2.0"),
+    ("Bosch BMI270 program", "BSD-3-Clause"),
     ("Google Sans Flex", "OFL-1.1"),
     ("Google Sans Code", "OFL-1.1"),
     ("Material Symbols", "Apache-2.0"),

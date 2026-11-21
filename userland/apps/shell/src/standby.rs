@@ -8,6 +8,11 @@
 //! A screen with something to watch (a program running in a terminal, a
 //! match timer) keeps the screen awake while it shows: `Screen::keeps_awake`.
 //! On a computer, with no backlight to dim, the picture itself dims instead.
+//!
+//! Where there is a motion sensor, picking the handheld up wakes the screen
+//! for a look (it goes off again soon unless a key follows), and putting it
+//! face down puts the screen out at once, whatever is showing, until a key
+//! or a lift.
 
 use detent::{role, Animated};
 
@@ -79,6 +84,8 @@ pub fn screen_off_name(seconds: u32) -> String {
 const DIM_BEFORE: f32 = 8.0;
 /// How bright it is while dimmed, as a share of its brightness.
 const DIM_LEVEL: f32 = 0.3;
+/// Woken by a lift, how long it stays on with no key: a look at it.
+const GLANCE: u32 = 10;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
@@ -105,6 +112,11 @@ pub struct Standby {
     /// The processor speed chosen, and the one last set.
     power: Power,
     power_set: Option<&'static str>,
+    /// Woken by a lift: it goes off again after `GLANCE` unless a key follows.
+    glance: bool,
+    /// Put out by being laid face down: it stays out, even with something to
+    /// watch, until a key or a lift.
+    down: bool,
 }
 
 impl Standby {
@@ -119,10 +131,11 @@ impl Standby {
             dark: false,
             power: Power::Balanced,
             power_set: None,
+            glance: false,
+            down: false,
         }
     }
 
-    #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     pub fn state(&self) -> State {
         self.state
     }
@@ -130,6 +143,8 @@ impl Standby {
     /// A key came. True if it was spent waking the screen.
     pub fn key(&mut self) -> bool {
         self.idle = 0.0;
+        // Someone is using it: no longer just a look.
+        self.glance = false;
         if self.state == State::Awake {
             return false;
         }
@@ -140,6 +155,8 @@ impl Standby {
     /// Awake at once: something (a key, a robot plugged in) wants the screen.
     pub fn wake_now(&mut self) {
         self.idle = 0.0;
+        self.glance = false;
+        self.down = false;
         if self.state == State::Awake {
             return;
         }
@@ -163,6 +180,25 @@ impl Standby {
         self.light();
     }
 
+    /// Picked up while the screen was off: on for a look.
+    pub fn lifted(&mut self) {
+        self.wake_now();
+        self.glance = true;
+    }
+
+    /// Laid face down: the screen glides out now.
+    pub fn put_down(&mut self) {
+        if self.state == State::Awake {
+            self.base = if self.backlight { crate::sys::brightness() } else { None };
+        }
+        self.down = true;
+        self.glance = false;
+        if self.state != State::Off {
+            self.state = State::Off;
+            self.level.set_with(0.0, role::smooth());
+        }
+    }
+
     /// The processor speed chosen in Settings: set now unless the screen is off.
     pub fn set_power(&mut self, power: Power) {
         self.power = power;
@@ -181,7 +217,9 @@ impl Standby {
     /// `keep_awake` says something on screen needs watching. True while the
     /// light is changing.
     pub fn tick(&mut self, dt: f32, screen_off: u32, keep_awake: bool, calm: bool) -> bool {
-        if keep_awake || screen_off == 0 {
+        // Only a look: off again soon (sooner than the wait chosen).
+        let screen_off = if self.glance && (screen_off == 0 || screen_off > GLANCE) { GLANCE } else { screen_off };
+        if (keep_awake && !self.down) || screen_off == 0 {
             self.idle = 0.0;
         } else {
             self.idle += dt;
@@ -198,8 +236,9 @@ impl Standby {
                 self.state = State::Off;
                 self.level.set_with(0.0, role::smooth());
             }
-            // Something began to need watching while it was dimmed.
-            State::Dim | State::Off if self.idle < dim_at => self.wake_now(),
+            // Something began to need watching while it was dimmed (but
+            // not once it was laid face down).
+            State::Dim | State::Off if self.idle < dim_at && !self.down => self.wake_now(),
             _ => {}
         }
         if calm {
@@ -291,6 +330,53 @@ mod tests {
         run(&mut s, 55.0, 60, false);
         assert_eq!(s.state(), State::Dim);
         s.tick(0.05, 60, true, false);
+        assert_eq!(s.state(), State::Awake);
+    }
+
+    #[test]
+    fn a_lift_wakes_it_for_a_look_and_a_key_keeps_it() {
+        let mut s = Standby::new();
+        s.backlight = false;
+        run(&mut s, 70.0, 60, false);
+        assert_eq!(s.state(), State::Off);
+        // Picked up: on at once, and off again ten seconds later with no key.
+        s.lifted();
+        assert_eq!((s.state(), s.shade()), (State::Awake, 0.0));
+        run(&mut s, 4.0, 60, false);
+        assert_eq!(s.state(), State::Awake);
+        run(&mut s, 7.0, 60, false);
+        assert_eq!(s.state(), State::Off, "a look, not a minute");
+        // Picked up again and a key pressed: the minute chosen, as ever.
+        s.lifted();
+        assert!(!s.key(), "the key is a key: it was already awake");
+        run(&mut s, 30.0, 60, false);
+        assert_eq!(s.state(), State::Awake);
+        // A look while something is to be watched lasts as long as that.
+        run(&mut s, 40.0, 60, false);
+        s.lifted();
+        run(&mut s, 30.0, 60, true);
+        assert_eq!(s.state(), State::Awake);
+    }
+
+    #[test]
+    fn face_down_puts_it_out_even_with_something_to_watch() {
+        let mut s = Standby::new();
+        s.backlight = false;
+        run(&mut s, 5.0, 60, true);
+        s.put_down();
+        run(&mut s, 2.0, 60, true);
+        assert_eq!(s.state(), State::Off, "a match timer showing, laid face down: out");
+        assert!(s.asleep());
+        run(&mut s, 120.0, 60, true);
+        assert_eq!(s.state(), State::Off, "and it stays out");
+        // A key brings it back; then what is showing keeps it awake again.
+        assert!(s.key());
+        run(&mut s, 120.0, 60, true);
+        assert_eq!(s.state(), State::Awake);
+        // Laid face down, then picked up: a lift wakes it.
+        s.put_down();
+        run(&mut s, 2.0, 60, false);
+        s.lifted();
         assert_eq!(s.state(), State::Awake);
     }
 

@@ -69,6 +69,10 @@ pub struct Settings {
     /// 0 never), and how the processor chooses its speed.
     pub screen_off: u32,
     pub power: crate::standby::Power,
+    /// Where there is a motion sensor: the screen comes on when the
+    /// handheld is picked up, and goes off when it is put face down.
+    pub lift_wake: bool,
+    pub face_down: bool,
 }
 
 /// The animation scales developer options offer.
@@ -181,6 +185,8 @@ impl Default for Settings {
             toured: false,
             screen_off: 60,
             power: crate::standby::Power::Balanced,
+            lift_wake: true,
+            face_down: true,
         }
     }
 }
@@ -991,6 +997,7 @@ impl Shell {
         self.gfx.greeting = self.settings.greeting;
         (self.gfx.developer, self.gfx.motion_scale, self.gfx.show_keys) = (self.settings.developer, self.settings.motion_scale, self.settings.show_keys);
         (self.gfx.screen_off, self.gfx.power) = (self.settings.screen_off, self.settings.power);
+        (self.gfx.lift_wake, self.gfx.face_down) = (self.settings.lift_wake, self.settings.face_down);
         self.standby.set_power(self.settings.power);
         self.gfx.want_gpu(self.settings.gpu);
         let s = &self.settings;
@@ -2183,9 +2190,35 @@ impl Shell {
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.saving = None,
             }
         }
+        moving |= self.lift_and_lay_down();
         let keep = self.stack.last().is_some_and(|(s, _)| s.keeps_awake()) || self.saving.is_some();
         moving |= self.standby.tick(dt, self.settings.screen_off, keep, self.settings.calm);
         moving
+    }
+
+    /// Lift to wake, and face down to sleep: the motion sensor watches at
+    /// its slowest while either could happen, and standby hears of it.
+    /// (A lift needs the main loop to look in a few times a second while
+    /// the screen is off, which its idle wait of a quarter second does.)
+    fn lift_and_lay_down(&mut self) -> bool {
+        use crate::standby::State;
+        let off = self.standby.state() == State::Off;
+        let watch = (self.settings.lift_wake && off) || (self.settings.face_down && !off);
+        crate::imu::set_watch(watch && crate::imu::has_motion());
+        // Asked every time, so a lift seen while awake is not kept for later.
+        let lifted = crate::imu::take_lift();
+        if off && lifted && self.settings.lift_wake {
+            self.standby.lifted();
+            self.dirty = true;
+            return true;
+        }
+        // Face down for two seconds, with no key meanwhile: out.
+        let quiet = self.last_key.elapsed() >= std::time::Duration::from_secs_f32(crate::imu::FACE_DOWN_HOLD);
+        if !off && self.settings.face_down && quiet && crate::imu::face_down() {
+            self.standby.put_down();
+            return true;
+        }
+        false
     }
 
     /// Where standby stands: awake, dimmed or off (for the tests and galleries).
