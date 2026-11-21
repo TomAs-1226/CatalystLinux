@@ -1,6 +1,7 @@
 //! Keys for online services: The Blue Alliance and FRC Nexus for the event
-//! schedule, and the AI log analysis. Kept in one file beside the settings on
-//! the data partition, readable only by root, and never shown again in full.
+//! schedule, OpenAI and Claude for the assistant. Kept in one file beside the
+//! settings on the data partition, readable only by root, and never shown
+//! again in full.
 //!
 //! They are set during first-boot setup (on the handheld or from a computer),
 //! in Settings, or by reading a file someone copied over: the same
@@ -9,7 +10,18 @@
 use std::path::{Path, PathBuf};
 
 /// The services a key can be held for: (name in the file, what to call it).
-pub const SERVICES: [(&str, &str); 3] = [("tba", "The Blue Alliance"), ("nexus", "FRC Nexus"), ("ai", "AI analysis")];
+pub const SERVICES: [(&str, &str); 4] = [("tba", "The Blue Alliance"), ("nexus", "FRC Nexus"), ("openai", "OpenAI"), ("claude", "Claude")];
+
+/// Where a key held under an older name now lives: 0.4.0 and before had one
+/// "ai" key, which goes to whichever service it belongs to (Anthropic's keys
+/// begin `sk-ant-`).
+fn current_name<'a>(name: &'a str, value: &str) -> &'a str {
+    match name {
+        "ai" if value.starts_with("sk-ant-") => "claude",
+        "ai" => "openai",
+        other => other,
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Keys {
@@ -36,7 +48,8 @@ impl Keys {
         let mut keys = Keys::default();
         for line in text.lines() {
             if let Some((name, value)) = line.split_once('=') {
-                let (name, value) = (name.trim(), value.trim());
+                let value = value.trim();
+                let name = current_name(name.trim(), value);
                 if SERVICES.iter().any(|(known, _)| *known == name) && !value.is_empty() {
                     keys.set(name, value);
                 }
@@ -91,14 +104,22 @@ mod tests {
 
     #[test]
     fn keys_are_read_from_lines_and_shown_only_in_part() {
-        let keys = Keys::parse("# team keys\ntba = abcdef123456\nnexus=\nsomething=else\nai=sk-xyz-9876\n");
+        let keys = Keys::parse("# team keys\ntba = abcdef123456\nnexus=\nsomething=else\nopenai=sk-proj-xyz-9876\n");
         assert_eq!(keys.get("tba"), Some("abcdef123456"));
         assert_eq!(keys.get("nexus"), None, "an empty value is no key");
         assert_eq!(keys.get("something"), None, "unknown names are passed over");
-        assert_eq!(keys.shown("ai"), "set · …9876");
+        assert_eq!(keys.shown("openai"), "set · …9876");
         assert_eq!(keys.shown("nexus"), "not set");
         let mut mine = Keys::parse("tba=old\nnexus=n1");
         mine.merge(&keys);
-        assert_eq!((mine.get("tba"), mine.get("nexus"), mine.get("ai")), (Some("abcdef123456"), Some("n1"), Some("sk-xyz-9876")));
+        assert_eq!((mine.get("tba"), mine.get("nexus"), mine.get("openai")), (Some("abcdef123456"), Some("n1"), Some("sk-proj-xyz-9876")));
+    }
+
+    #[test]
+    fn the_old_single_ai_key_goes_to_its_own_service() {
+        let claude = Keys::parse("ai=sk-ant-api03-abcd\n");
+        assert_eq!((claude.get("claude"), claude.get("openai"), claude.get("ai")), (Some("sk-ant-api03-abcd"), None, None));
+        let openai = Keys::parse("ai=sk-proj-1234\n");
+        assert_eq!((openai.get("openai"), openai.get("claude")), (Some("sk-proj-1234"), None));
     }
 }

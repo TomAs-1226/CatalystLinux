@@ -32,6 +32,7 @@
 
 mod about;
 mod agent;
+mod ai;
 mod apps;
 mod apriltags;
 mod brand;
@@ -1580,6 +1581,67 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     save(&mut shell, "104-weather-place");
     press(&mut shell, &[Back, Char('u')], 90);
     save(&mut shell, "104b-weather-fahrenheit");
+
+    // The assistant, answered by the simulator's scripted service with the
+    // demo robot: with no key, waiting for a question, thinking, an answer
+    // that looked at the robot and ran an Action, a critical Action waiting
+    // for a yes, its choices, and an Action's editor saying what it does.
+    keys::Keys::default().save().ok();
+    std::fs::remove_file(config_dir().join("assistant")).ok();
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    press(&mut shell, &vec![Right; steps_to("Assistant")], 20);
+    settle(&mut shell, 60);
+    save(&mut shell, "106-home-assistant-tile");
+    press(&mut shell, &[Enter], 90);
+    save(&mut shell, "106b-assistant-no-key");
+    press(&mut shell, &[Back], 60);
+    let mut held = keys::Keys::default();
+    held.set("openai", "sk-proj-demo-7f3a");
+    held.save().ok();
+    press(&mut shell, &[Enter], 90);
+    save(&mut shell, "107-assistant");
+    for c in "how is the robot doing?".chars() {
+        shell.key(Char(c));
+    }
+    settle(&mut shell, 10);
+    save(&mut shell, "107b-assistant-typed");
+    press(&mut shell, &[Enter], 20);
+    save(&mut shell, "107c-assistant-thinking");
+    for _ in 0..40 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        settle(&mut shell, 8);
+    }
+    settle(&mut shell, 60);
+    save(&mut shell, "108-assistant-answer");
+    press(&mut shell, &[Up, Up], 40);
+    save(&mut shell, "108b-assistant-scrolled-up");
+    let mut actions = commands::load();
+    actions.push(commands::Saved { name: "Deploy robot code".into(), command: "cd /data/code/robot && ./gradlew deploy".into(), ask: commands::Ask::Auto });
+    commands::save(&actions);
+    for c in "deploy the code".chars() {
+        shell.key(Char(c));
+    }
+    press(&mut shell, &[Enter], 20);
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        settle(&mut shell, 8);
+    }
+    settle(&mut shell, 60);
+    save(&mut shell, "109-assistant-asks");
+    press(&mut shell, &[Tab], 90);
+    save(&mut shell, "110-assistant-choices");
+    press(&mut shell, &[Back, Back, Back], 90);
+    press(&mut shell, &vec![Left; steps_to("Assistant") - steps_to("Actions")], 20);
+    press(&mut shell, &[Enter], 90);
+    press(&mut shell, &vec![Down; actions.len() - 1], 10);
+    press(&mut shell, &[Char('e')], 90);
+    press(&mut shell, &[Down, Down], 40);
+    save(&mut shell, "111-action-asks-first");
+    keys::Keys::default().save().ok();
+    std::fs::remove_file(config_dir().join("commands")).ok();
+    std::fs::remove_file(config_dir().join("commands-ask")).ok();
     let written =std::fs::read_dir(dir).map_or(0, |d| d.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "png")).count());
     println!("{written} screens in {}, {frames} frames at {:.2} ms each", dir.display(), started.elapsed().as_secs_f64() * 1e3 / frames as f64);
 }

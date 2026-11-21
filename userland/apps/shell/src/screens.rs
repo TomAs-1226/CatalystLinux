@@ -52,7 +52,7 @@ struct App {
     open: fn(&Robot) -> Box<dyn Screen>,
 }
 
-const APPS: [App; 24] = [
+const APPS: [App; 25] = [
     App { icon: "smart_toy", name: "Robot", open: |_| Box::new(RobotScreen::default()) },
     App { icon: "monitor_heart", name: "Health", open: |_| Box::new(Health::default()) },
     App { icon: "description", name: "Logs", open: |_| Box::new(LogsScreen::default()) },
@@ -76,6 +76,7 @@ const APPS: [App; 24] = [
     App { icon: "straighten", name: "Level", open: |_| Box::new(crate::level::Level::new()) },
     App { icon: "explore", name: "Compass", open: |_| Box::new(crate::level::Compass::new()) },
     App { icon: "sunny", name: "Weather", open: |_| Box::new(crate::weather::Weather::new()) },
+    App { icon: "auto_awesome", name: "Assistant", open: |_| Box::new(crate::ai::Assistant::new()) },
     App { icon: "settings", name: "Settings", open: |_| Box::new(SettingsApp::new()) },
 ];
 
@@ -439,6 +440,7 @@ impl Home {
             "Level" => ("pitch · roll".into(), None),
             "Compass" => ("heading".into(), None),
             "Weather" => crate::weather::tile(),
+            "Assistant" => crate::ai::tile(),
             "Logs" => {
                 let rows = robot.logs.list();
                 let worst = rows.iter().filter_map(|r| r.digest.as_ref()).map(|d| d.headline().0).min();
@@ -2080,7 +2082,7 @@ fn glance_items(order: &[Widget]) -> Vec<Item> {
 
 /// Where everything in Settings is, for search: what it is called, the
 /// section it is in, and its place there (none: the section itself).
-const SETTING_PLACES: [(&str, Item, Option<usize>); 58] = [
+const SETTING_PLACES: [(&str, Item, Option<usize>); 59] = [
     ("Robot settings", Item::RobotSection, None),
     ("Open Robot on link", Item::RobotSection, Some(0)),
     ("Match report after a match", Item::RobotSection, Some(1)),
@@ -2125,8 +2127,9 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 58] = [
     ("Keys for online services", Item::KeysSection, None),
     ("The Blue Alliance key", Item::KeysSection, Some(0)),
     ("FRC Nexus key", Item::KeysSection, Some(1)),
-    ("AI analysis key", Item::KeysSection, Some(2)),
-    ("Read keys from a file", Item::KeysSection, Some(3)),
+    ("OpenAI key", Item::KeysSection, Some(2)),
+    ("Claude key", Item::KeysSection, Some(3)),
+    ("Read keys from a file", Item::KeysSection, Some(4)),
     ("SSH access", Item::Access, Some(0)),
     ("System update", Item::UpdateSection, None),
     ("Check for updates", Item::UpdateSection, Some(1)),
@@ -2189,6 +2192,11 @@ impl SettingsApp {
     pub fn new() -> Self {
         use Item::*;
         Self::page("Settings", vec![RobotSection, Appearance, TextSection, HomeSection, Display, BatterySection, Network, NameSection, UsbSection, KeysSection, Access, UpdateSection, Help, About, FromComputer])
+    }
+
+    /// Settings › Keys on its own, for the assistant to send someone to.
+    pub fn keys_page() -> Self {
+        Self::section(Item::KeysSection).unwrap_or_else(Self::new)
     }
 
     fn page(title: &'static str, items: Vec<Item>) -> Self {
@@ -3171,7 +3179,7 @@ mod tests {
         pretend(Some(Found::Nothing));
         let shown = builtin(&Home::new());
         assert!(!shown.iter().any(|n| n == "Level" || n == "Compass"), "{shown:?}");
-        assert_eq!(shown.len(), 22, "the twenty-two the emulator's run counts on (Remote and Weather are on every unit)");
+        assert_eq!(shown.len(), 23, "the twenty-three the emulator's run counts on (Remote, Weather and Assistant are on every unit)");
         assert_eq!(shown.last().map(String::as_str), Some("Settings"), "Settings stays last");
         assert_eq!(builtin_apps().position(|(_, _, n)| n == "Terminal"), Some(8), "Terminal where it was");
         assert!(!builtin_apps().any(|(_, _, n)| n == "Level"), "nor in search");

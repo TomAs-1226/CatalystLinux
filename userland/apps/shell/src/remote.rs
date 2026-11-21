@@ -457,7 +457,12 @@ const FORM: &str = r#"
     <h2>Keys for online services</h2>
     <label>The Blue Alliance <small>read API key</small><input name="tba" spellcheck="false"></label>
     <label>FRC Nexus <small>for live queueing</small><input name="nexus" spellcheck="false"></label>
-    <label>AI analysis<input name="ai" spellcheck="false"></label>
+  </section>
+  <section>
+    <h2>Assistant</h2>
+    <p class="hint">The assistant answers questions about the robot with either service; one key is enough. Each is paid for by use on the account it comes from.</p>
+    <label>OpenAI <small>GPT-6.2 Sol · a key from platform.openai.com, API keys</small><input name="openai" spellcheck="false"></label>
+    <label>Claude <small>Claude Opus 5.5 · a key from platform.claude.com, API keys</small><input name="claude" spellcheck="false"></label>
   </section>
   <section>
     <h2>SSH</h2>
@@ -524,12 +529,13 @@ mod tests {
 
     #[test]
     fn the_form_becomes_answers_and_blank_fields_change_nothing() {
-        let body = "code=123456&team=5805&ssid1=Pit+%225805%22&psk1=pa%26ss&ssid2=&psk2=&tba=abc%3D%3D&nexus=&ai=&ssh_key=ssh-ed25519+AAAAC3+me%40laptop&choices=1&open_robot=on&ssh=on&accent=blue&mode=light&text=large&home=carousel";
+        let body = "code=123456&team=5805&ssid1=Pit+%225805%22&psk1=pa%26ss&ssid2=&psk2=&tba=abc%3D%3D&nexus=&openai=&claude=sk-ant-k1&ssh_key=ssh-ed25519+AAAAC3+me%40laptop&choices=1&open_robot=on&ssh=on&accent=blue&mode=light&text=large&home=carousel";
         let a = answers(&parse_form(body));
         assert_eq!(a.team.as_deref(), Some("5805"));
         assert_eq!(a.wifi, [("Pit \"5805\"".to_owned(), Some("pa&ss".to_owned()))]);
         assert_eq!(a.keys.get("tba"), Some("abc=="));
         assert_eq!(a.keys.get("nexus"), None);
+        assert_eq!((a.keys.get("openai"), a.keys.get("claude")), (None, Some("sk-ant-k1")), "the assistant's keys come with the rest");
         assert_eq!(a.ssh_key.as_deref(), Some("ssh-ed25519 AAAAC3 me@laptop"));
         assert_eq!((a.open_robot, a.match_report, a.ssh, a.calm), (Some(true), Some(false), Some(true), Some(false)));
         assert_eq!((a.accent, a.light, a.text, a.home), (Some(Accent::Blue), Some(true), Some(TextSize::Large), Some(HomeStyle::Carousel)));

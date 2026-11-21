@@ -83,7 +83,7 @@ const WORDS_OPENS_ITSELF: &str = "The page opens here once there is one.";
 const WORDS_TEAM: &str = "The robot's address follows from it: 10.TE.AM.2";
 const WORDS_PLACE: &str = "Its name on the network, and the time it keeps.";
 const WORDS_WIFI: &str = "For the clock, updates and the event schedule.";
-const WORDS_KEYS: &str = "For the event schedule and log analysis.";
+const WORDS_KEYS: &str = "For the event schedule and the assistant.";
 const WORDS_TYPING: &str = "Enter keeps it; esc leaves it as it was.";
 const WORDS_LOOK: &str = "Change any of these later in Settings.";
 const WORDS_HARDWARE: &str = "Each part, looked for. Enter on Keys to type a line.";
@@ -1359,7 +1359,8 @@ impl Screen for Setup {
                         Some((row, text)) if *row == i => format!("{}▏", text.chars().rev().take(18).collect::<Vec<_>>().into_iter().rev().collect::<String>()),
                         _ => self.keys.shown(name),
                     };
-                    self.row(g, i, ROWS_TOP + 2.0 + i as f32 * 22.0, row_w, 19.0, label, &value, self.keys.get(name).is_some());
+                    // Four rows, spaced as Choices' four are.
+                    self.row(g, i, ROWS_TOP + i as f32 * 20.0, row_w, 17.0, label, &value, self.keys.get(name).is_some());
                 }
                 self.bar(g, "esc back · tab skip");
             }
@@ -1529,7 +1530,7 @@ mod tests {
         assert_eq!(crate::remote::received(&crate::remote::Answers::default()), [("Nothing to change".to_owned(), String::new())]);
         // Every row fits beside its value.
         let mut g = Gfx::new(Tokens::dark());
-        let full = crate::remote::answers(&crate::remote::parse_form("team=99999&ssid1=A%20rather%20long%20network%20name&tba=x123456789&nexus=y123456789&ai=z123456789&ssh_key=ssh-ed25519%20AAA&accent=rose&mode=light&text=large&home=carousel&choices=1"));
+        let full = crate::remote::answers(&crate::remote::parse_form("team=99999&ssid1=A%20rather%20long%20network%20name&tba=x123456789&nexus=y123456789&openai=z123456789&claude=sk-ant-w123456789&ssh_key=ssh-ed25519%20AAA&accent=rose&mode=light&text=large&home=carousel&choices=1"));
         for (name, _) in crate::remote::received(&full) {
             assert!(g.measure(&name, TextStyle::sans(11.0, 600.0)) + 32.0 + 60.0 <= W - 2.0 * LEFT, "{name}");
         }
