@@ -357,6 +357,12 @@ impl Home {
         format!("{said}|{}", attention.unwrap_or(""))
     }
 
+    /// A built-in app's object in three dimensions, if the shell carries
+    /// one; an external app keeps its icon.
+    fn object(&self, index: usize, name: &str, g: &Gfx) -> Option<String> {
+        matches!(self.tiles.get(index), Some(Tile::Builtin(_))).then(|| crate::object3d::for_app(name)).filter(|o| g.objects.has(o))
+    }
+
     /// Whether an app is one of the favourites.
     fn favourite(&self, index: usize) -> bool {
         self.tiles.get(index).is_some_and(|t| self.arranged_by.favourites.iter().any(|f| f == self.tile_name(*t)))
@@ -722,7 +728,7 @@ impl Home {
             // the top, what the app reports large below it.
             if g.theme == crate::look::Theme::Bezel {
                 let corner_taken = attention.is_some() || self.favourite(i);
-                let object = matches!(self.tiles.get(i), Some(Tile::Builtin(_))).then(|| crate::object3d::for_app(&name)).filter(|o| g.objects.has(o));
+                let object = self.object(i, &name, g);
                 let view = tile_view(g, r, tw, columns, lifted);
                 bezel_tile(g, r, &icon, object.as_deref().map(|o| (o, view)), &name, &status, focused, corner_taken);
                 if let Some(severity) = attention {
@@ -744,7 +750,7 @@ impl Home {
             // a little by where its tile sits (as a camera in the middle sees
             // it), so it turns as the pages slide, and the focused one by the
             // focus ring's motion. Calm, they rest.
-            let object = matches!(self.tiles.get(i), Some(Tile::Builtin(_))).then(|| crate::object3d::for_app(&name)).filter(|o| g.objects.has(o));
+            let object = self.object(i, &name, g);
             let view = tile_view(g, r, tw, columns, lifted);
             let (text_x, name_cy, status_cy, text_w);
             if tw > 120.0 {
@@ -817,7 +823,7 @@ impl Home {
             let icon_cy = (r.cy() - 16.0 * near).round();
             // A built-in app's object turns to face the middle as its card
             // comes round, as on a real turntable; nearer, it is whole.
-            let object = matches!(self.tiles.get(i), Some(Tile::Builtin(_))).then(|| crate::object3d::for_app(&name)).filter(|o| g.objects.has(o));
+            let object = self.object(i, &name, g);
             let view = crate::object3d::View::yaw((-away * 36.0).clamp(-48.0, 48.0));
             let drawn = object.as_ref().is_some_and(|o| g.object(o, "l", r.cx(), icon_cy - 5.0 * near, view, scale, 0.55 + 0.45 * near));
             if !drawn {

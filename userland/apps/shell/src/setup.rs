@@ -1368,7 +1368,7 @@ fn stand(g: &mut Gfx, object: &str, spot: (f32, f32), d: f32, yaw: f32, k: f32) 
     let tokens = g.tokens;
     g.tokens = Tokens::of(g.accent, Tone::Dark);
     let signal = g.tokens.signal;
-    g.canvas.glow(x, spot.1 + 30.0 * scale, 52.0 * scale, signal, 0.08 * alpha);
+    g.canvas.glow(x + g.ox, spot.1 + 30.0 * scale, 52.0 * scale, signal, 0.08 * alpha);
     g.object(object, "hero", x, spot.1, crate::object3d::View::yaw(yaw - d * 55.0), scale, alpha);
     g.tokens = tokens;
 }
