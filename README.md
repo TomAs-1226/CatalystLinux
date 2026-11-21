@@ -128,8 +128,9 @@ one large unit, which Rust 1.92 on Windows fails to compile.
 - **About**, laid out as Android's "About phone": the handheld's name large
   at the top with Catalyst's icon (the header folds away as the list goes
   down), its model, the Catalyst Linux version (a page of its own: channel,
-  build date, kernel, shell, graphics), its status, the open-source
-  licences, and the build number at the bottom.
+  build date, kernel, shell, graphics), the update history (every version's
+  notes; see *Update logs*), its status, the open-source licences, and the
+  build number at the bottom.
 - **Developer options.** As on Android, pressing Enter on Build number seven
   times makes you a developer (the island counts down the last presses), and
   Settings gains Developer options: an animation scale (0.5× to 10× slower,
@@ -1242,6 +1243,43 @@ card is flashed afresh.
   (download automatically, restart overnight); the island says when an
   update is available, ready, done, or did not take. Apps update apart from
   the system, through the catalogue.
+
+**Update logs.** What changed is written once, in `os/CHANGELOG.md`, and
+read in three places:
+
+- **Before installing.** Settings › System update › *What's new in 0.4.1*
+  (with how many changes) opens the update's own notes, carried in its
+  signed manifest: the version large, then its changes on a card for each
+  heading. F and X scroll, Pg Up and Pg Dn a page at a time; Enter downloads
+  and installs it (or restarts into it, once it is written).
+- **Once, after it takes.** When an update has been kept (the new system's
+  shell came up), its notes slide in over Home, once, the next time Home is
+  at rest. Never on a first start, a card flashed afresh, or an update that
+  did not take. (`whats-new=` in `/data/update/prefs` remembers which
+  version's were shown.)
+- **Any time.** About › Update history lists every version, newest first,
+  from the copy of the changelog the image carries
+  (`/usr/share/catalyst/changelog.md`), so it works offline; Z and C turn
+  from one version's notes to the next.
+
+To write a release's notes, add a section at the top of `os/CHANGELOG.md`
+before running `scripts/release.sh`:
+
+```markdown
+## 0.4.2 · 28 Nov 2026
+
+### New
+- One line for each change, in plain words.
+
+### Fixed
+- What works now that did not.
+```
+
+`## <version>` starts a section (the date after `·` is optional); `### `
+headings group its lines; each change is a `- ` line, wrapped on the panel,
+so keep it to a sentence or two. The script puts the section for the version
+it makes (a nightly takes its base version's) into the manifest and onto the
+release's GitHub page, and stops if there is none; `--notes` replaces it.
 
 Releases are made on this PC by `scripts/release.sh` (stable, tagged
 `v<os/VERSION>`; or nightly, a pre-release) and published to the GitHub

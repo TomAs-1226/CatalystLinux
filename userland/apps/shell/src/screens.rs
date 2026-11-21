@@ -2311,14 +2311,8 @@ impl SettingsApp {
                 };
                 (name.into(), "›".into(), true)
             }
-            UpdateNote => {
-                let u = &self.update;
-                match (u.detail.is_empty(), u.notes.is_empty()) {
-                    (false, _) => ("Note".into(), u.detail.clone(), false),
-                    (true, false) => ("What's new".into(), u.notes.clone(), true),
-                    (true, true) => ("This system".into(), crate::sysupdate::version(), true),
-                }
-            }
+            // What an update brings (or this system brought): opens its notes.
+            UpdateNote => crate::changelog::update_row(&self.update),
             UpdateChannel => ("Channel".into(), crate::sysupdate::pref("channel", "stable"), true),
             UpdateAuto => {
                 let on = crate::sysupdate::pref("auto", "on") == "on";
@@ -2726,6 +2720,11 @@ impl Screen for SettingsApp {
             Key::Enter | Key::Right if item == Item::WifiSetup => return Nav::Push(Box::new(WifiScreen::new())),
             Key::Enter | Key::Right if item == Item::FromComputer => return Nav::Push(Box::new(crate::setup::Setup::from_computer())),
             Key::Enter | Key::Right if item == Item::About => return Nav::Push(Box::new(crate::about::About::new(crate::about::Kind::Main))),
+            Key::Enter | Key::Right if item == Item::UpdateNote => {
+                if let Some(page) = crate::changelog::update_page(&self.update) {
+                    return Nav::Push(Box::new(page));
+                }
+            }
             Key::Enter | Key::Right if item == Item::TakeTour => return Nav::Tour,
             Key::Enter | Key::Right if item == Item::KeyboardShortcuts => return Nav::Push(Box::new(crate::help::Shortcuts::new())),
             Key::Enter | Key::Right if item == Item::BatterySection => return Nav::Push(Box::new(crate::power::BatteryPage::new())),

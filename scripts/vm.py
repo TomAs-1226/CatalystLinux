@@ -362,6 +362,11 @@ def tools(vm):
     out = vm.run("lsmod | grep -c '^gpio_ir'; modprobe gpio_ir_tx; modprobe gpio_ir_recv; lsmod | grep -c '^gpio_ir'; "
                  "modprobe -r gpio_ir_recv; modprobe -r gpio_ir_tx; lsmod | grep -c '^gpio_ir'", 60)
     check("the IR drivers stay out until the Remote app loads them, and go again", out.split() == ["0", "2", "0"], " ".join(out.split()))
+    # The update history the handheld reads offline: the changelog, with a
+    # section for the version this image is.
+    version = vm.run("sed -n 's/^version=//p' /etc/catalyst/version").strip().split("-")[0]
+    sections = vm.run("grep '^## ' /usr/share/catalyst/changelog.md").splitlines()
+    check("the image carries the changelog, with this version's notes", any(s.split()[1:2] == [version] for s in sections), f"{version}: {len(sections)} versions")
 
     print("== power")
     out = vm.run("catalyst-power undervolt status")
@@ -533,8 +538,12 @@ def updates(vm):
         return 1
     release = f"{WORK}/release"
     shutil.rmtree(release, ignore_errors=True)
+    # Notes as release.sh hands them over: a changelog section, in a file.
+    notes = f"{WORK}/vmtest-notes.md"
+    with open(notes, "w") as f:
+        f.write("### New\n- made by vm.py\n- a second line\n")
     made = subprocess.run([tool, "make-release", "--images", IMAGES, "--out", release, "--version", "0.2.1-vmtest", "--channel", "stable",
-                           "--build", str(int(time.time()) + 100000), "--key", key, "--repo", "test/test", "--tag", "vmtest", "--notes", "made by vm.py"],
+                           "--build", str(int(time.time()) + 100000), "--key", key, "--repo", "test/test", "--tag", "vmtest", "--notes-file", notes],
                           capture_output=True, text=True)
     check("a release is made from this image and signed", made.returncode == 0, (made.stdout + made.stderr).strip()[-200:])
     server = subprocess.Popen([sys.executable, "-m", "http.server", "8765", "--bind", "127.0.0.1", "--directory", release],
@@ -544,6 +553,7 @@ def updates(vm):
         vm.run("mkdir -p /data/update && echo 'source=url:http://10.0.2.2:8765' > /data/update/prefs")
         found = vm.run("catalyst-update check 2>&1; catalyst-update status", 180)
         check("it is found, and its signature checked against the key in the image", '"state":"available"' in found, found[-160:])
+        check("its notes arrive whole, line for line", '"notes":"### New\\n- made by vm.py\\n- a second line"' in found, found[-160:])
         vm.run("(catalyst-update install >/tmp/install.log 2>&1 &)")
         deadline = time.time() + 1500
         while time.time() < deadline:

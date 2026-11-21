@@ -1,6 +1,7 @@
 //! About, laid out as Android's "About phone": the handheld's name large at
 //! the top, then its model, the Catalyst Linux version (a page of its own),
-//! its status, the open-source licences, and the build number at the bottom.
+//! the update history (every version's notes), its status, the open-source
+//! licences, and the build number at the bottom.
 //!
 //! As on Android, Enter seven times on Build number makes you a developer
 //! (Settings gains Developer options), and Enter three times in quick
@@ -41,6 +42,8 @@ enum Act {
     Open(Kind),
     /// The hardware check, a page of its own.
     Hardware,
+    /// Every version's notes.
+    History,
     Build,
     Version,
 }
@@ -144,6 +147,7 @@ impl About {
                 row("Device name", device_name(), Act::Nothing),
                 row("Model", model(), Act::Nothing),
                 row("Catalyst Linux version", format!("{version} ›"), Act::Open(Kind::Version)),
+                row("Update history", "›".into(), Act::History),
                 row("Status", format!("{} ›", dash(sys::uptime().map(|u| format!("up {u}")))), Act::Open(Kind::Status)),
                 row("Hardware check", "›".into(), Act::Hardware),
                 row("Open-source licences", "›".into(), Act::Open(Kind::Legal)),
@@ -245,6 +249,7 @@ impl Screen for About {
             Key::Enter | Key::Right => match act {
                 Act::Open(kind) => Nav::Push(Box::new(About::new(kind))),
                 Act::Hardware => Nav::Push(Box::new(crate::hwcheck::HardwareScreen::new())),
+                Act::History => Nav::Push(Box::new(crate::changelog::History::new())),
                 Act::Build if key == Key::Enter => {
                     self.press_build(cx);
                     Nav::Stay

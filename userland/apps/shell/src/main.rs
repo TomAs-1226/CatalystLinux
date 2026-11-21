@@ -37,6 +37,7 @@ mod apps;
 mod apriltags;
 mod brand;
 mod catalogue;
+mod changelog;
 mod commands;
 mod connect;
 mod control;
@@ -872,12 +873,12 @@ fn motion(dir: &std::path::Path) {
     // Settings › System update, part-way through installing (a pretend status).
     let update_dir = config_dir().join("update");
     std::fs::create_dir_all(&update_dir).ok();
-    std::fs::write(update_dir.join("status.json"), r#"{"state":"installing","version":"0.3.0","progress":0.46,"detail":"","size":6800000,"checked":0,"notes":"faster glass, favourites"}"#).ok();
+    std::fs::write(update_dir.join("status.json"), r####"{"state":"installing","version":"0.3.0","progress":0.46,"detail":"","size":6800000,"checked":0,"notes":"### New\n- Faster glass.\n- Favourites, pinned first on Home."}"####).ok();
     let mut shell = fresh(Robot::demo());
     press(&mut shell, &to_settings);
     press(&mut shell, &[Enter, Down, Down, Down, Down, Down, Down, Down, Down, Enter]);
     still(&mut shell, dir, "15-system-update");
-    std::fs::write(update_dir.join("status.json"), r#"{"state":"ready","version":"0.3.0","progress":1.0,"detail":"","size":6800000,"checked":0,"notes":"faster glass, favourites"}"#).ok();
+    std::fs::write(update_dir.join("status.json"), r####"{"state":"ready","version":"0.3.0","progress":1.0,"detail":"","size":6800000,"checked":0,"notes":"### New\n- Faster glass.\n- Favourites, pinned first on Home."}"####).ok();
     // The page reads it again every two seconds, of real time.
     std::thread::sleep(std::time::Duration::from_millis(2100));
     film(&mut shell, 0.5);
@@ -1153,7 +1154,8 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     press(&mut shell, &vec![Down; screens::settings_row("About this handheld")], 20);
     press(&mut shell, &[Enter], 90);
     save(&mut shell, "34-about");
-    press(&mut shell, &[Down; 5], 30);
+    // Build number, the last row.
+    press(&mut shell, &[Down; 7], 30);
     press(&mut shell, &[Enter; 4], 12);
     save(&mut shell, "35-build-number");
     press(&mut shell, &[Enter; 3], 12);
@@ -1175,7 +1177,8 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     save(&mut shell, "39-easter-egg");
     settle(&mut shell, 60 * 5);
     save(&mut shell, "39b-easter-egg-settled");
-    press(&mut shell, &[Back, Back, Down, Down, Enter], 60);
+    // From the version (third) down to the licences (seventh).
+    press(&mut shell, &[Back, Back, Down, Down, Down, Down, Enter], 60);
     save(&mut shell, "40-licences");
     // ? held for five seconds: it repeats as a held key does, and the island counts down.
     shell.key(Char('?'));
@@ -1384,6 +1387,69 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     shell.show(Box::new(panel::KeepPanel::new(false)));
     settle(&mut shell, 60 * 7 + 30);
     save(&mut shell, "84d-keep-the-tear-free-panel");
+
+    // Update logs. What an update brings, before it installs (its notes
+    // are the newest section of the changelog, as its manifest carries them),
+    // and scrolled down; what changed, once, after restarting into it; and
+    // About › Update history, with a version's notes, in each look.
+    let newest = changelog::history().into_iter().next().expect("the changelog has a version");
+    let section = include_str!("../../../../os/CHANGELOG.md").split("\n## ").nth(1).and_then(|s| s.split_once('\n')).map_or(String::new(), |(_, body)| body.to_owned());
+    let coming = sysupdate::Status { state: "available".into(), version: newest.version.clone(), size: 14_200_000, notes: section, ..sysupdate::Status::default() };
+    // Settings › System update with that update found: its line opens them.
+    let update_dir = config_dir().join("update");
+    std::fs::create_dir_all(&update_dir).ok();
+    let status = serde_json::json!({ "state": "available", "version": coming.version, "size": coming.size, "notes": coming.notes });
+    std::fs::write(update_dir.join("status.json"), status.to_string()).ok();
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    let keys = std::iter::repeat_n(Right, steps_to("Settings")).chain([Enter]).chain(std::iter::repeat_n(Down, screens::settings_row("System update"))).chain([Enter, Down, Down]);
+    for key in keys {
+        shell.key(key);
+        settle(&mut shell, 40);
+    }
+    settle(&mut shell, 40);
+    save(&mut shell, "105-settings-update-whats-new");
+    shell.key(Enter);
+    settle(&mut shell, 100);
+    save(&mut shell, "105b-whats-new-before-installing");
+    for _ in 0..3 {
+        shell.key(Down);
+        settle(&mut shell, 20);
+    }
+    settle(&mut shell, 40);
+    save(&mut shell, "105c-whats-new-scrolled");
+    std::fs::remove_dir_all(&update_dir).ok();
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    shell.show(Box::new(changelog::WhatsNew::after_update(&newest.version).expect("the newest has notes")));
+    settle(&mut shell, 100);
+    save(&mut shell, "106-whats-new-after-updating");
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    shell.show(Box::new(changelog::History::new()));
+    settle(&mut shell, 100);
+    save(&mut shell, "107-update-history");
+    for key in [Down, Enter] {
+        shell.key(key);
+        settle(&mut shell, 60);
+    }
+    settle(&mut shell, 40);
+    save(&mut shell, "107b-release-notes");
+    shell.key(Right);
+    settle(&mut shell, 8);
+    save(&mut shell, "107c-release-notes-turning");
+    settle(&mut shell, 60);
+    // Bezel's look, light, at the large text size.
+    let mut shell = Shell::new(Robot::demo());
+    (shell.settings.theme, shell.settings.light, shell.settings.text) = (look::Theme::Bezel, true, gfx::TextSize::Large);
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    shell.show(Box::new(changelog::WhatsNew::history(changelog::history(), 0)));
+    settle(&mut shell, 100);
+    save(&mut shell, "107d-release-notes-bezel-light-large");
 
     // The developer's tools, each from a fresh Home. What they read comes
     // in real time (a reading a second, a ping a second), so real time is

@@ -1265,6 +1265,18 @@ impl Shell {
             sysupdate::run("apply").ok();
         }
         self.update = s;
+        // The first start after an update, once it is kept: what changed,
+        // once, sliding in over Home when Home is at rest and in sight.
+        if let Some(version) = crate::changelog::due_after_update(&self.update) {
+            let at_rest = self.stack.len() == 1 && self.transition.is_none() && self.curtain.is_none() && self.intro.is_none();
+            let clear = self.tour.is_none() && self.tour_after.is_none() && self.switcher.is_none() && !self.control.is_open();
+            if at_rest && clear && !self.standby.asleep() && crate::setup_done() {
+                if let Some(page) = crate::changelog::WhatsNew::after_update(&version) {
+                    self.open(Box::new(page), Path::Slide);
+                }
+                crate::changelog::mark_shown(&version);
+            }
+        }
     }
 
     /// The linked robot's name, kept for the start screen ("team 5805 ·
