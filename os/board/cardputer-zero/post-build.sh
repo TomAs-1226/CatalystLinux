@@ -45,7 +45,8 @@ for f in etc/init.d/catalyst-early etc/init.d/catalyst-shell etc/init.d/catalyst
 	etc/init.d/catalyst-wifi etc/init.d/catalyst-ssh etc/init.d/catalyst-update etc/init.d/catalyst-usb \
 	usr/sbin/catalyst-ssh-toggle usr/sbin/catalyst-net usr/sbin/catalyst-grow-data usr/sbin/catalyst-wifi-toggle \
 	usr/sbin/catalyst-usb usr/sbin/catalyst-power usr/sbin/catalyst-time usr/share/udhcpc/default.script.d/50-catalyst-time \
-	usr/libexec/catalyst/git-credential etc/init.d/catalyst-tailscale usr/sbin/catalyst-tailscale; do
+	usr/libexec/catalyst/git-credential etc/init.d/catalyst-tailscale usr/sbin/catalyst-tailscale \
+	etc/init.d/catalyst-zram; do
 	chmod 0755 "$TARGET_DIR/$f"
 done
 mkdir -p "$TARGET_DIR/data"
@@ -93,6 +94,7 @@ link default catalyst-ssh
 link default catalyst-update
 link default catalyst-usb
 link default catalyst-tailscale
+link default catalyst-zram
 link default agetty.ttyAMA0
 link shutdown killprocs
 link shutdown mount-ro

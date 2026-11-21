@@ -398,6 +398,10 @@ def tools(vm):
     check("the cable is watched from the interface's flags (the adapter can sleep)", out.strip() == "1", out)
     out = vm.run("grep -c '^gpio=24=op,dl' /boot/config.txt 2>/dev/null || (mkdir -p /run/b && mount -o ro /dev/mmcblk0p1 /run/b && grep -c '^gpio=24=op,dl' /run/b/config.txt; umount /run/b)")
     check("the speaker's amplifier is held off", out.strip().endswith("1"), out)
+    # Compressed swap in memory (zram, lz4), half the RAM; never the card.
+    out = vm.run("grep -c '^/dev/zram0 ' /proc/swaps; cat /sys/block/zram0/comp_algorithm; cat /proc/sys/vm/swappiness; grep -c mmcblk /proc/swaps")
+    f = out.split()
+    check("compressed swap in memory is on: zram with lz4, nothing on the card", f[:1] == ["1"] and "[lz4]" in f and f[-2:] == ["100", "0"], " ".join(f))
     out = vm.run("df -k /data | tail -n1 | tr -s ' ' | cut -d' ' -f2")
     want = int(os.environ.get("CATALYST_CARD_GB", "0") or 0)
     grown = out.strip().isdigit() and (want == 0 or int(out) > (want - 6) * 1_000_000)
