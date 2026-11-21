@@ -427,6 +427,60 @@ a modifier changes meanwhile, the keyboard's state stands.
   queueing for the next match (five minutes ahead, then when it is time,
   from FRC Nexus). All three blink fast for eight seconds, then stop.
 
+## The panel, without tearing
+
+Anything moving on the panel used to tear on a diagonal. The ST7789 is a
+170 × 320 panel, upright. M5Stack's set-up turns it on its side in the
+controller (MADCTL `0xA0`: rows and columns exchanged), so the panel
+refreshes its gate lines across the picture's columns while frames arrive
+over SPI row by row. Every frame meets the refresh part-way and splits along
+a slope. No sync can fix that on its own: the frame and the scan run
+crosswise.
+
+Developer options › **Tear-free panel** drives it the panel's own way:
+
+- **Upright.** The `cardputerzero-portrait` overlay, applied after M5Stack's,
+  gives the panel its own init sequence. That is
+  `cardputerzero,st7789v_portrait.bin`, made from M5Stack's by
+  `scripts/panel-portrait-blob.py`, with MADCTL `0x00`. It also gives a
+  framebuffer of 170 × 320 on the 170 of the controller's 240 columns that
+  the glass shows. The shell turns its 320 × 170 picture a quarter as it
+  sends it, and sends only the columns that changed (now a run of the
+  panel's rows).
+- **In step.** The panel's tearing-effect line (GPIO5, wired by M5Stack, its
+  code in their driver but switched off) is switched on by patch 0003. Each
+  flush waits for the panel's vertical blank, at most 50 ms, so a frame is
+  written from the top as the scan starts again there.
+- **Ahead of the scan.** The SPI clock is the core clock over an even
+  divisor, so the 60 MHz asked for is about 42 to 50 MHz, and a whole frame
+  takes 17 to 21 ms. At 60 refreshes a second (16.7 ms) the scan would
+  catch it, so the mode refreshes at 40 (FRCTRL2 `0x1E`, 25 ms). That is
+  also the shell's own beat: a frame a refresh.
+
+Without the overlay, nothing changes: the driver uses the tearing-effect
+line only where the Device Tree gives `te-gpios`.
+
+It is tried before it is kept (`catalyst-power panel`). Switched on, the
+handheld restarts into it, and that start asks: *Keep the tear-free panel?*
+Enter keeps it. With no answer in 15 seconds (or Esc), the panel goes back
+as it was and the handheld restarts. A picture that came up turned,
+mirrored or not at all needs nobody to read it: waiting is enough. A start
+that finds it tried and never answered (a crash, the power cut) undoes it
+too. `scripts/test-catalyst-power.sh` checks both trials.
+
+Not yet checked on a CardputerZero: that the picture comes up upright. The
+quarter turn is worked out from M5Stack's `0xA0`: picture pixel (x, y) on
+the controller's column 35 + y and gate line 319 − x. Under `0x00`, row
+`py` of the framebuffer must be the picture's column 319 − py, which is a
+turn counter-clockwise. If the handheld shows it upside down or mirrored,
+`CATALYST_PANEL_TURN` (`counter`, `clockwise`, `transpose`,
+`antitranspose`) tries the others without a rebuild: every one still sends
+in the panel's own order. `Turn::FOR_THE_PANEL` in `platform.rs` then takes
+the one that is right. Also unchecked: that TE pulses on GPIO5 (the kernel
+says "Timeout waiting for TE signal" once if not), and how a frame now
+looks in motion. Apps that draw for themselves get the upright 170 × 320
+framebuffer in this mode.
+
 ## Looks
 
 Settings › Appearance and Settings › Text, every choice remembered:

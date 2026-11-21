@@ -59,6 +59,7 @@ mod logs;
 mod look;
 mod monitor;
 mod nettools;
+mod panel;
 mod pit;
 mod power;
 mod pty;
@@ -418,6 +419,8 @@ fn main() {
     if flag("--setup") || !setup_done() {
         shell.start_setup();
     }
+    // The start the tear-free panel is tried in asks whether to keep it.
+    shell.check_the_panel();
     if !flag("--no-intro") {
         shell.start_intro(if flag("--setup") || !setup_done() { "let's get you set up".to_owned() } else { start_caption(&shell) });
     }
@@ -1349,6 +1352,14 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     shell.show(Box::new(setup::Setup::without_network()));
     settle(&mut shell, 100);
     save(&mut shell, "24b-setup-computer-no-network");
+    // The start the tear-free panel is tried in: keep it? (Counting down,
+    // a few seconds in.)
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    shell.show(Box::new(panel::KeepPanel::new(false)));
+    settle(&mut shell, 60 * 7 + 30);
+    save(&mut shell, "84d-keep-the-tear-free-panel");
 
     // The developer's tools, each from a fresh Home. What they read comes
     // in real time (a reading a second, a ping a second), so real time is

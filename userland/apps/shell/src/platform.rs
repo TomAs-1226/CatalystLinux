@@ -266,6 +266,138 @@ pub fn changed_rows(shown: &mut Vec<u32>, canvas: &Canvas) -> Option<(usize, usi
     Some((first, last + 1))
 }
 
+// ------------------------------------------------------ the panel, turned ---
+
+/// How the 320 × 170 picture is laid into a 170 × 320 framebuffer: the
+/// tear-free panel mode (Developer options › Tear-free panel), where the
+/// panel is driven upright, in its own scan order, and the picture is turned
+/// a quarter as it is sent. Each names which picture pixel a framebuffer
+/// pixel shows.
+///
+/// [`Turn::FOR_THE_PANEL`] is worked out from M5Stack's landscape set-up:
+/// MADCTL 0xA0 (MY|MV) puts picture pixel (x, y) on the controller's column
+/// 35 + y, gate line 319 − x. The tear-free mode's MADCTL 0x00 puts
+/// framebuffer pixel (px, py) on column 35 + px, gate line py. The same spot
+/// on the glass is then px = y, py = 319 − x: framebuffer row py is the
+/// picture's column 319 − py, read from the top. A quarter turn counter-
+/// clockwise. If the handheld shows it otherwise (upside down, or mirrored),
+/// `CATALYST_PANEL_TURN` tries the others without rebuilding: the picture is
+/// still sent in the panel's own order whichever is chosen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Turn {
+    /// Row r is picture column W−1−r, top to bottom (counter-clockwise).
+    Counter,
+    /// Row r is picture column r, bottom to top (clockwise): Counter upside down.
+    Clockwise,
+    /// Row r is picture column r, top to bottom: Counter mirrored.
+    Transpose,
+    /// Row r is picture column W−1−r, bottom to top: Clockwise mirrored.
+    AntiTranspose,
+}
+
+impl Turn {
+    pub const ALL: [Turn; 4] = [Turn::Counter, Turn::Clockwise, Turn::Transpose, Turn::AntiTranspose];
+    /// The one worked out for the CardputerZero's panel (see above).
+    pub const FOR_THE_PANEL: Turn = Turn::Counter;
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Turn::Counter => "counter",
+            Turn::Clockwise => "clockwise",
+            Turn::Transpose => "transpose",
+            Turn::AntiTranspose => "antitranspose",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Turn> {
+        Turn::ALL.into_iter().find(|t| t.name() == name.trim())
+    }
+
+    /// The turn in use: `CATALYST_PANEL_TURN`, else the panel's own.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn chosen() -> Turn {
+        std::env::var("CATALYST_PANEL_TURN").ok().and_then(|n| Turn::from_name(&n)).unwrap_or(Turn::FOR_THE_PANEL)
+    }
+
+    /// The picture pixel (x, y) shown at framebuffer pixel (px, py), for a
+    /// picture `w` × `h` (the framebuffer being `h` × `w`).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn source(self, px: usize, py: usize, w: usize, h: usize) -> (usize, usize) {
+        match self {
+            Turn::Counter => (w - 1 - py, px),
+            Turn::Clockwise => (py, h - 1 - px),
+            Turn::Transpose => (py, px),
+            Turn::AntiTranspose => (w - 1 - py, h - 1 - px),
+        }
+    }
+
+    /// The framebuffer rows that picture columns `x0..x1` land on.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn rows_for(self, x0: usize, x1: usize, w: usize) -> (usize, usize) {
+        match self {
+            Turn::Counter | Turn::AntiTranspose => (w - x1, w - x0),
+            Turn::Clockwise | Turn::Transpose => (x0, x1),
+        }
+    }
+}
+
+/// The columns that differ from the frame last shown, as first..end, and
+/// note this frame as shown: turned, a run of columns is a run of the
+/// panel's rows, and only those are sent.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn changed_columns(shown: &mut Vec<u32>, canvas: &Canvas) -> Option<(usize, usize)> {
+    let (w, h) = (canvas.w as usize, canvas.h as usize);
+    if shown.len() != canvas.px.len() {
+        *shown = canvas.px.clone();
+        return Some((0, w));
+    }
+    // The span found so far: only columns outside it can widen it.
+    let mut span: Option<(usize, usize)> = None;
+    for y in 0..h {
+        let (was, now) = (&shown[y * w..][..w], &canvas.px[y * w..][..w]);
+        if was == now {
+            continue;
+        }
+        let differs = |x: &usize| was[*x] != now[*x];
+        span = Some(match span {
+            None => {
+                let first = (0..w).find(differs).unwrap_or(0);
+                (first, (first..w).rev().find(differs).unwrap_or(first))
+            }
+            Some((first, last)) => ((0..first).find(differs).unwrap_or(first), (last + 1..w).rev().find(differs).unwrap_or(last)),
+        });
+    }
+    let (first, last) = span?;
+    shown.copy_from_slice(&canvas.px);
+    Some((first, last + 1))
+}
+
+/// Framebuffer rows `rows` of the picture laid in by `turn`, as the panel
+/// takes them (RGB565 dithered by place, or 32-bit), each `stride` bytes
+/// apart, into `out`; `column` is room for one row's pixels.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn turned_rows(canvas: &Canvas, turn: Turn, rows: (usize, usize), bytes_per_pixel: usize, stride: usize, out: &mut Vec<u8>, column: &mut Vec<u32>) {
+    let (w, h) = (canvas.w as usize, canvas.h as usize);
+    out.resize((rows.1 - rows.0) * stride, 0);
+    for py in rows.0..rows.1 {
+        column.clear();
+        column.extend((0..h).map(|px| {
+            let (x, y) = turn.source(px, py, w, h);
+            canvas.px[y * w + x]
+        }));
+        let row = &mut out[(py - rows.0) * stride..][..h * bytes_per_pixel];
+        match bytes_per_pixel {
+            2 => bezel::simd::rgb565_row(column, py, row),
+            4 => {
+                for (o, p) in row.chunks_exact_mut(4).zip(column.iter()) {
+                    o.copy_from_slice(&p.to_ne_bytes());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 // ---------------------------------------------------------------- device ---
 
 #[cfg(target_os = "linux")]
@@ -311,6 +443,10 @@ pub mod device {
         /// The frame the panel is showing, to find what changed.
         shown: Vec<u32>,
         rows: Vec<u8>,
+        /// The tear-free panel mode: the framebuffer upright (170 × 320) and
+        /// the picture turned into it this way; room for one turned row.
+        turn: Option<Turn>,
+        column: Vec<u32>,
         /// The kernel's text console, held in graphics mode while the shell runs.
         _console: Option<File>,
     }
@@ -351,7 +487,8 @@ pub mod device {
 
     /// The panel's framebuffer device. Usually `/dev/fb0`, but another
     /// framebuffer (the Pi's HDMI one) can take that name first, so the one
-    /// with the panel's size is picked.
+    /// with the panel's size is picked: 320 × 170, or 170 × 320 in the
+    /// tear-free mode.
     fn panel_framebuffer() -> String {
         if let Ok(path) = std::env::var("CATALYST_FB") {
             return path;
@@ -360,7 +497,7 @@ pub mod device {
             .into_iter()
             .flatten()
             .flatten()
-            .filter(|e| std::fs::read_to_string(e.path().join("virtual_size")).is_ok_and(|size| size.trim() == "320,170"))
+            .filter(|e| std::fs::read_to_string(e.path().join("virtual_size")).is_ok_and(|size| matches!(size.trim(), "320,170" | "170,320")))
             .map(|e| format!("/dev/{}", e.file_name().to_string_lossy()))
             .collect();
         found.sort();
@@ -435,6 +572,9 @@ pub mod device {
                 repeat: Repeat::default(),
                 shown: Vec::new(),
                 rows: Vec::new(),
+                // Taller than wide: the tear-free mode's upright panel.
+                turn: (height > width).then(Turn::chosen),
+                column: Vec::new(),
                 _console: quiet_console(),
             };
             device.find_inputs();
@@ -582,6 +722,20 @@ pub mod device {
 
         fn present(&mut self, canvas: &Canvas) -> f32 {
             use std::os::unix::fs::FileExt;
+            // The tear-free mode: the changed columns are a run of the
+            // upright panel's rows, sent turned (the driver waits for the
+            // panel's blank and they go out ahead of its scan).
+            if let Some(turn) = self.turn {
+                let Some((x0, x1)) = changed_columns(&mut self.shown, canvas) else { return 0.0 };
+                let (first, end) = turn.rows_for(x0, x1, canvas.w as usize);
+                let end = end.min(self.height);
+                if first >= end || self.width < canvas.h as usize {
+                    return 0.0;
+                }
+                turned_rows(canvas, turn, (first, end), self.bytes_per_pixel, self.stride, &mut self.rows, &mut self.column);
+                self.fb.write_all_at(&self.rows, (first * self.stride) as u64).ok();
+                return (end - first) as f32 / self.height.max(1) as f32;
+            }
             let Some((first, end)) = changed_rows(&mut self.shown, canvas) else { return 0.0 };
             let (w, end) = (self.width.min(canvas.w as usize), end.min(self.height));
             if first >= end {
@@ -951,5 +1105,89 @@ mod tests {
         held.press(6u16, Key::Down, t0);
         let moves = 1 + (0..2000).filter(|ms| held.due(at(*ms)).is_some()).count();
         assert!((20..=26).contains(&moves), "{moves}");
+    }
+
+    /// A picture whose every pixel says where it is: its index as an RGB565
+    /// value, on whole RGB565 steps so the dither leaves it as it is.
+    fn numbered(w: usize, h: usize) -> Canvas {
+        let mut canvas = Canvas::new(w as i32, h as i32);
+        for (i, p) in canvas.px.iter_mut().enumerate() {
+            let v = i as u32;
+            *p = ((v >> 11) & 31) << 19 | ((v >> 5) & 63) << 10 | (v & 31) << 3;
+        }
+        canvas
+    }
+
+    #[test]
+    fn every_turn_shows_each_picture_pixel_once() {
+        let (w, h) = (320, 170);
+        for turn in Turn::ALL {
+            let mut seen = vec![false; w * h];
+            for py in 0..w {
+                for px in 0..h {
+                    let (x, y) = turn.source(px, py, w, h);
+                    assert!(!seen[y * w + x], "{turn:?} shows ({x}, {y}) twice");
+                    seen[y * w + x] = true;
+                }
+            }
+            assert!(seen.iter().all(|s| *s), "{turn:?} leaves pixels out");
+            assert_eq!(Turn::from_name(turn.name()), Some(turn));
+            // A run of picture columns lands on exactly the rows rows_for says.
+            for (x0, x1) in [(0, 1), (10, 40), (300, 320), (0, 320)] {
+                let (r0, r1) = turn.rows_for(x0, x1, w);
+                let rows: Vec<usize> = (0..w).filter(|&py| (x0..x1).contains(&turn.source(0, py, w, h).0)).collect();
+                assert_eq!(rows, (r0..r1).collect::<Vec<_>>(), "{turn:?} {x0}..{x1}");
+            }
+        }
+        // Worked out from MADCTL 0xA0 against 0x00: framebuffer row 0 is the
+        // picture's rightmost column, its first pixel the column's top.
+        assert_eq!(Turn::FOR_THE_PANEL.source(0, 0, w, h), (319, 0));
+        assert_eq!(Turn::FOR_THE_PANEL.source(169, 319, w, h), (0, 169));
+    }
+
+    #[test]
+    fn only_the_changed_columns_are_found() {
+        let mut canvas = numbered(320, 170);
+        let mut shown = Vec::new();
+        assert_eq!(changed_columns(&mut shown, &canvas), Some((0, 320)), "the first frame whole");
+        assert_eq!(changed_columns(&mut shown, &canvas), None, "nothing new");
+        // Changes in three rows, the widest span across them.
+        for (x, y) in [(50, 3), (12, 90), (200, 169), (60, 90)] {
+            canvas.px[y * 320 + x] ^= 0xff;
+        }
+        assert_eq!(changed_columns(&mut shown, &canvas), Some((12, 201)));
+        assert_eq!(changed_columns(&mut shown, &canvas), None);
+        canvas.px[319] ^= 0xff;
+        assert_eq!(changed_columns(&mut shown, &canvas), Some((319, 320)));
+    }
+
+    #[test]
+    fn a_turned_frame_lands_in_the_framebuffer_file_as_the_panel_shows_it() {
+        let (w, h) = (320usize, 170usize);
+        let canvas = numbered(w, h);
+        // A framebuffer file 170 wide (with a padded stride) and 320 tall.
+        let stride = h * 2 + 12;
+        let path = std::env::temp_dir().join(format!("catalyst-turned-fb-{}", std::process::id()));
+        for turn in Turn::ALL {
+            std::fs::write(&path, vec![0u8; stride * w]).unwrap();
+            // Sent in two runs, as changed columns would be.
+            let (mut out, mut column) = (Vec::new(), Vec::new());
+            for (x0, x1) in [(0, 100), (100, 320)] {
+                let (r0, r1) = turn.rows_for(x0, x1, w);
+                turned_rows(&canvas, turn, (r0, r1), 2, stride, &mut out, &mut column);
+                let mut fb = std::fs::read(&path).unwrap();
+                fb[r0 * stride..][..out.len()].copy_from_slice(&out);
+                std::fs::write(&path, fb).unwrap();
+            }
+            let fb = std::fs::read(&path).unwrap();
+            for py in 0..w {
+                for px in 0..h {
+                    let v = u16::from_ne_bytes([fb[py * stride + px * 2], fb[py * stride + px * 2 + 1]]) as usize;
+                    let (x, y) = turn.source(px, py, w, h);
+                    assert_eq!(v, y * w + x, "{turn:?}: ({px}, {py}) should show picture ({x}, {y})");
+                }
+            }
+        }
+        std::fs::remove_file(&path).ok();
     }
 }

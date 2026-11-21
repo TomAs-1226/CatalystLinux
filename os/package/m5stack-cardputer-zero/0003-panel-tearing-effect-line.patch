@@ -1,0 +1,150 @@
+From: Catalyst Linux
+Subject: [PATCH] panel-mipi-dbi-m: the tearing-effect line, where the Device Tree gives one
+
+M5Stack's driver kept its TE code but compiled none of it. Switched on, and
+used only when the panel's node has `te-gpios`: SET_TEAR_ON (vertical blank
+only) as the panel is set up, and each flush waits for the line's rising
+edge (at most 50 ms) while the pipe is on. Without `te-gpios` nothing
+changes. Catalyst Linux's portrait overlay gives it, with an init sequence
+that drives the panel in its own scan direction: written from the top as
+the scan restarts, and faster than it, a frame never tears.
+
+--- a/modules/st7789v-1.0/panel-mipi-dbi-m.c	2026-11-20 18:01:54.512106452 -0800
++++ b/modules/st7789v-1.0/panel-mipi-dbi-m.c	2026-11-20 18:01:54.512106452 -0800
+@@ -9,6 +9,8 @@
+ #include <linux/delay.h>
+ #include <linux/firmware.h>
+ #include <linux/gpio/consumer.h>
++#include <linux/interrupt.h>
++#include <linux/completion.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/property.h>
+@@ -30,15 +32,13 @@
+ 
+ 
+ /*
+- * TE support is intentionally disabled for now. Keep these definitions here
+- * so TE can be enabled again when the panel wiring and timing are verified.
++ * Catalyst Linux: the tearing-effect line, used where the Device Tree gives
++ * `te-gpios` (and not otherwise, so the driver is as it was without it).
++ * SET_TEAR_ON's parameter 0: the line is high in the vertical blank only.
+  */
+-#if 0
+-#ifndef MIPI_DCS_SET_TEAR_ON
+-#define MIPI_DCS_SET_TEAR_ON		0x35
+-#endif
+-#define MIPI_DCS_TEAR_MODE_VBLANK	0x00
+-#endif
++#define CATALYST_TEAR_MODE_VBLANK	0x00
++/* How long a flush waits for the panel's blank before going ahead anyway. */
++#define CATALYST_TE_WAIT_MS		50
+ 
+ 
+ struct panel_mipi_dbi_format {
+@@ -57,11 +57,14 @@
+     struct mipi_dbi_dev dbidev;
+ 
+     /*
+-     * TE support is intentionally disabled for now and may be enabled later.
+-     * struct gpio_desc *te;
+-     * int te_irq;
+-     * struct completion te_completion;
++     * Catalyst Linux: the panel's tearing-effect line, when the Device Tree
++     * gives one. Each flush waits for its vertical blank, so a frame is
++     * written from the top as the panel's scan starts again there, and (in
++     * the scan's own direction, faster than the scan) stays ahead of it.
+      */
++    struct gpio_desc *te;
++    int te_irq;
++    struct completion te_completion;
+     struct mutex display_lock;		/* Serialize reset and display transfers */
+ };
+ 
+@@ -277,12 +280,10 @@
+ 
+     panel_mipi_dbi_commands_execute(dbi, dbidev->driver_private);
+ 
+-    /* TE support is intentionally disabled; re-enable this with TE support. */
+-    /*
++    /* Catalyst Linux: the tearing-effect line on, where there is one. */
+     if (panel->te)
+         mipi_dbi_command(dbi, MIPI_DCS_SET_TEAR_ON,
+-                 MIPI_DCS_TEAR_MODE_VBLANK);
+-    */
++                 CATALYST_TEAR_MODE_VBLANK);
+ 
+     if (dbidev->regulator)
+         regulator_disable(dbidev->regulator);
+@@ -337,11 +338,6 @@
+     .attrs = panel_mipi_dbi_attrs,
+ };
+ 
+-/*
+- * TE support is intentionally disabled for now. Keep the handler and wait
+- * logic here for possible later re-enablement when TE timing is verified.
+- */
+-#if 0
+ /* TE interrupt handler: wake waiters when a TE signal arrives */
+ static irqreturn_t panel_mipi_dbi_te_isr(int irq, void *data)
+ {
+@@ -364,13 +360,12 @@
+     enable_irq(panel->te_irq);
+ 
+     if (!wait_for_completion_timeout(&panel->te_completion,
+-                     msecs_to_jiffies(100)))
++                     msecs_to_jiffies(CATALYST_TE_WAIT_MS)))
+         dev_warn_once(panel->dbidev.drm.dev,
+                   "Timeout waiting for TE signal\n");
+ 
+     disable_irq(panel->te_irq);
+ }
+-#endif
+ 
+ static void panel_mipi_dbi_enable(struct drm_simple_display_pipe *pipe,
+                   struct drm_crtc_state *crtc_state,
+@@ -394,12 +389,10 @@
+     if (!ret)
+         panel_mipi_dbi_commands_execute(dbi, dbidev->driver_private);
+ 
+-    /* TE support is intentionally disabled; re-enable this with TE support. */
+-    /*
++    /* Catalyst Linux: the tearing-effect line on, where there is one. */
+     if (panel->te)
+         mipi_dbi_command(dbi, MIPI_DCS_SET_TEAR_ON,
+-                 MIPI_DCS_TEAR_MODE_VBLANK);
+-    */
++                 CATALYST_TEAR_MODE_VBLANK);
+ 
+     mipi_dbi_enable_flush(dbidev, crtc_state, plane_state);
+ out_exit:
+@@ -415,6 +408,9 @@
+     struct panel_mipi_dbi_device *panel = to_panel_mipi_dbi_device(dbidev);
+ 
+     mutex_lock(&panel->display_lock);
++    /* Catalyst Linux: in step with the panel's refresh, where it says when. */
++    if (panel->te && pipe->crtc.state && pipe->crtc.state->active)
++        panel_mipi_dbi_wait_for_te(panel);
+     mipi_dbi_pipe_update(pipe, old_state);
+     mutex_unlock(&panel->display_lock);
+ }
+@@ -553,11 +549,6 @@
+     if (device_property_present(dev, "write-only"))
+         dbi->read_commands = NULL;
+ 
+-    /*
+-     * TE support is intentionally disabled for now. Keep GPIO and IRQ setup
+-     * commented out so it can be enabled later after TE timing is verified.
+-     */
+-#if 0
+     /* Get the optional TE pin and request its IRQ */
+     panel->te = devm_gpiod_get_optional(dev, "te", GPIOD_IN);
+     if (IS_ERR(panel->te))
+@@ -581,7 +572,6 @@
+         if (ret)
+             return dev_err_probe(dev, ret, "Failed to request TE irq\n");
+     }
+-#endif
+ 
+     dbidev->driver_private = panel_mipi_dbi_commands_from_fw(dev);
+     if (IS_ERR(dbidev->driver_private))
