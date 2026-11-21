@@ -1342,10 +1342,14 @@ impl Setup {
         self.row(g, 1, ROWS_TOP + 30.0, row_w, 21.0, "Time zone", &value, true);
         let (a, dx, dy) = self.reveal(4);
         let now = chrono::Local::now().format(if g.clock.0 { "%H:%M" } else { "%-I:%M %p" }).to_string().to_lowercase();
-        let offset = crate::device::zone_offset(&zone).map(|o| format!(" {o}")).unwrap_or_default();
-        let line = format!("now {now}{offset} · clock: {}", crate::device::clock_note());
-        let line = g.text.fit(&line, &TextStyle::code(9.5), row_w - 11.0);
-        g.text_alpha(LEFT + 11.0 + dx, ROWS_TOP + 64.0 + dy, &line, TextStyle::code(9.5), INK_THIN, a);
+        // Two short lines, so neither has to be cut in the column: the time
+        // and its offset, then where the clock's time came from.
+        let offset = crate::device::zone_offset(&zone).map(|o| format!(" · {o}")).unwrap_or_default();
+        let style = TextStyle::code(9.5);
+        for (k, line) in [format!("now {now}{offset}"), format!("clock: {}", crate::device::clock_note())].iter().enumerate() {
+            let line = g.text.fit(line, &style, row_w - 11.0);
+            g.text_alpha(LEFT + 11.0 + dx, ROWS_TOP + 60.0 + k as f32 * 14.0 + dy, &line, style, INK_THIN, a);
+        }
         self.bar(g, "esc back · tab skip");
     }
 }
