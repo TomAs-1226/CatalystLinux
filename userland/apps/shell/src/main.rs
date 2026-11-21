@@ -45,6 +45,7 @@ mod device;
 mod files;
 mod gfx;
 mod git;
+mod github;
 mod glance;
 mod gpu;
 mod graphs;
@@ -1216,6 +1217,90 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
         settle(&mut shell, 60);
     }
     save(&mut shell, "33-git");
+    // Signed in to GitHub (the simulator's made-up account): the account, its
+    // repositories, one cloned, its page, its history with the branches drawn,
+    // a commit, the branches, and a commit's message being typed. Then gone
+    // again, so the shots after see Git as before.
+    let mut held = keys::Keys::load();
+    held.set("github", "ghp_demo0000000000000000000000000000demo");
+    held.save().ok();
+    std::fs::remove_dir_all(git::code_dir().join("robot-2027")).ok();
+    let go = |shell: &mut Shell, keys: &[Key], frames: usize| {
+        for key in keys {
+            shell.key(*key);
+            settle(shell, frames);
+        }
+    };
+    go(&mut shell, &[Enter], 60);
+    go(&mut shell, &[Down, Enter], 30);
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        settle(&mut shell, 4);
+    }
+    settle(&mut shell, 40);
+    save(&mut shell, "33b-git-account");
+    go(&mut shell, &[Back, Down, Enter], 60);
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        settle(&mut shell, 4);
+    }
+    settle(&mut shell, 40);
+    save(&mut shell, "33c-git-your-repositories");
+    go(&mut shell, &[Enter], 4);
+    for _ in 0..12 {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        settle(&mut shell, 2);
+    }
+    save(&mut shell, "33d-git-cloning");
+    for _ in 0..80 {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        settle(&mut shell, 2);
+    }
+    settle(&mut shell, 60);
+    go(&mut shell, &[Enter], 60);
+    for _ in 0..10 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        settle(&mut shell, 4);
+    }
+    settle(&mut shell, 30);
+    save(&mut shell, "33e-git-repository");
+    go(&mut shell, &[Down, Down, Down, Down, Enter], 30);
+    for _ in 0..10 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        settle(&mut shell, 4);
+    }
+    settle(&mut shell, 40);
+    save(&mut shell, "33f-git-history");
+    go(&mut shell, &[Down, Down], 30);
+    settle(&mut shell, 40);
+    save(&mut shell, "33g-git-history-down");
+    go(&mut shell, &[Enter], 60);
+    for _ in 0..10 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        settle(&mut shell, 4);
+    }
+    settle(&mut shell, 30);
+    save(&mut shell, "33h-git-commit");
+    go(&mut shell, &[Back, Back, Down, Enter], 60);
+    for _ in 0..10 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        settle(&mut shell, 4);
+    }
+    settle(&mut shell, 30);
+    save(&mut shell, "33i-git-branches");
+    go(&mut shell, &[Back, Up, Up, Up, Enter], 60);
+    for c in "Shooter at 4300 rpm".chars() {
+        shell.key(Char(c));
+    }
+    settle(&mut shell, 30);
+    save(&mut shell, "33j-git-commit-message");
+    go(&mut shell, &[Back, Up, Up], 30);
+    save(&mut shell, "33k-git-repository-top");
+    let mut held = keys::Keys::load();
+    held.set("github", "");
+    held.save().ok();
+    crate::github::sign_out();
+    std::fs::remove_dir_all(git::code_dir().join("robot-2027")).ok();
 
     // About, laid out as Android's; seven presses on Build number make a
     // developer, and Developer options appear.

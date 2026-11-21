@@ -971,12 +971,47 @@ and tested against sample replies, not yet against the live service.
 
 ## Git and the robot's code
 
-The Git app lists the repositories under `/data/code` and clones another by
-its address. A repository's page says its branch and how far it is from its
-upstream, pulls (fast-forward only) with one key, and shows what has changed
-as a coloured diff and its history. Git runs in the background, so a slow
-card never holds a frame up. Credentials are not stored: public repositories
-clone and pull as they are.
+The Git app starts with the GitHub account, then your repositories on
+GitHub, then the ones under `/data/code`, and last a field that clones any
+repository by its HTTPS address. Git runs in the background, so a slow card
+never holds a frame up.
+
+- **Account.** Signing in needs a GitHub token with access to your
+  repositories (github.com › Settings › Developer settings; a fine-grained
+  token with Contents read and write is enough). It is typed in Settings ›
+  Keys, read from a file there, or sent from a computer on the "set up from
+  a computer" page, like the other keys. Git › Account then asks GitHub
+  whose it is (`/user`) and keeps the login, name and the address commits
+  carry (GitHub's private `…@users.noreply.github.com` one when the email is
+  hidden) in `/data/catalyst/github`. Sign out forgets that; the key itself
+  stays in Keys until it is cleared there.
+- **Your repositories** come from GitHub's `/user/repos` (yours, your
+  collaborators' and your organisations', newest first), each with whether
+  it is private and when it last changed. Enter clones one into
+  `/data/code`, with git's own progress on screen, or opens it when it is
+  already there; `r` asks GitHub again.
+- **A repository's page**: pull (fast-forward only), push (a new branch gets
+  one on `origin` to push to), commit everything with a message, the
+  changes as a coloured diff, the history and the branches.
+- **History** draws the branch graph beside the commits, each lane its own
+  colour, merges joining back in, with the branch and tag names on their
+  commits. Enter opens a commit: who, when, the message, the files it
+  touched and its diff.
+- **Branches**: the one checked out first, then the others, then the ones
+  only on the remote. Enter switches, tracking a remote one; uncommitted
+  changes come along.
+- **Deploy as an Action**, for a repository with `gradlew`: saves
+  `./gradlew deploy` in it as an Action (critical, so it asks before
+  running), for the robot on the Wi-Fi.
+
+The token never goes on a command line or into a repository's
+`.git/config`. Calls to GitHub's API hand it to curl in a header file only
+the shell can read, removed as soon as the call ends. Git reaches it
+through a credential helper (`/usr/libexec/catalyst/git-credential`, set in
+`/etc/gitconfig`) that answers only for `https://github.com`; any other
+server, or plain HTTP, gets nothing, and git's requests to store or erase
+are ignored. `scripts/test-git-credential.sh` checks that on a computer.
+Public repositories anywhere clone and pull over HTTPS with no account.
 
 One repository can be marked as the robot's code. FrcCatalyst publishes the
 commit a robot was built from (`Robot/Software/RobotCodeVersion`, from the

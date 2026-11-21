@@ -10,7 +10,12 @@
 use std::path::{Path, PathBuf};
 
 /// The services a key can be held for: (name in the file, what to call it).
-pub const SERVICES: [(&str, &str); 4] = [("tba", "The Blue Alliance"), ("nexus", "FRC Nexus"), ("openai", "OpenAI"), ("claude", "Claude")];
+pub const SERVICES: [(&str, &str); 5] = [("tba", "The Blue Alliance"), ("nexus", "FRC Nexus"), ("openai", "OpenAI"), ("claude", "Claude"), ("github", "GitHub")];
+
+/// How many of them the handheld's own setup asks for: its Keys page has room
+/// for four rows. GitHub's key comes later (Git › Account, Settings › Keys, or
+/// the page for setting up from a computer).
+pub const SETUP_SERVICES: usize = 4;
 
 /// Where a key held under an older name now lives: 0.4.0 and before had one
 /// "ai" key, which goes to whichever service it belongs to (Anthropic's keys

@@ -465,6 +465,11 @@ const FORM: &str = r#"
     <label>Claude <small>Claude Opus 5.5 · a key from platform.claude.com, API keys</small><input name="claude" spellcheck="false"></label>
   </section>
   <section>
+    <h2>Git</h2>
+    <p class="hint">For Git on the handheld: your repositories, their history, pulling and pushing.</p>
+    <label>GitHub <small>a token with repository access, from github.com, Settings, Developer settings</small><input name="github" spellcheck="false"></label>
+  </section>
+  <section>
     <h2>SSH</h2>
     <label>Your public key <small>ssh-ed25519 …</small><textarea name="ssh_key" rows="2" spellcheck="false"></textarea></label>
   </section>

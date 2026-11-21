@@ -1,0 +1,9 @@
+# Git on the handheld. GitHub's key (Settings › Keys) comes from the
+# credential helper for https://github.com only; git itself stores nothing.
+[credential "https://github.com"]
+	helper = /usr/libexec/catalyst/git-credential
+[init]
+	defaultBranch = main
+# Repositories live on /data, made by root; git runs as root.
+[safe]
+	directory = *

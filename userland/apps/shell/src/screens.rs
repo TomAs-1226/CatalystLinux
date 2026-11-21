@@ -2121,7 +2121,7 @@ fn glance_items(order: &[Widget]) -> Vec<Item> {
 
 /// Where everything in Settings is, for search: what it is called, the
 /// section it is in, and its place there (none: the section itself).
-const SETTING_PLACES: [(&str, Item, Option<usize>); 59] = [
+const SETTING_PLACES: [(&str, Item, Option<usize>); 60] = [
     ("Robot settings", Item::RobotSection, None),
     ("Open Robot on link", Item::RobotSection, Some(0)),
     ("Match report after a match", Item::RobotSection, Some(1)),
@@ -2168,7 +2168,8 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 59] = [
     ("FRC Nexus key", Item::KeysSection, Some(1)),
     ("OpenAI key", Item::KeysSection, Some(2)),
     ("Claude key", Item::KeysSection, Some(3)),
-    ("Read keys from a file", Item::KeysSection, Some(4)),
+    ("GitHub key", Item::KeysSection, Some(4)),
+    ("Read keys from a file", Item::KeysSection, Some(5)),
     ("SSH access", Item::Access, Some(0)),
     ("System update", Item::UpdateSection, None),
     ("Check for updates", Item::UpdateSection, Some(1)),
