@@ -39,6 +39,8 @@ pub enum Kind {
 enum Act {
     Nothing,
     Open(Kind),
+    /// The hardware check, a page of its own.
+    Hardware,
     Build,
     Version,
 }
@@ -142,6 +144,7 @@ impl About {
                 row("Model", model(), Act::Nothing),
                 row("Catalyst Linux version", format!("{version} ›"), Act::Open(Kind::Version)),
                 row("Status", format!("{} ›", dash(sys::uptime().map(|u| format!("up {u}")))), Act::Open(Kind::Status)),
+                row("Hardware check", "›".into(), Act::Hardware),
                 row("Open-source licences", "›".into(), Act::Open(Kind::Legal)),
                 row("Build number", build_number(), Act::Build),
             ],
@@ -240,6 +243,7 @@ impl Screen for About {
             Key::Back | Key::Left => return Nav::Pop,
             Key::Enter | Key::Right => match act {
                 Act::Open(kind) => Nav::Push(Box::new(About::new(kind))),
+                Act::Hardware => Nav::Push(Box::new(crate::hwcheck::HardwareScreen::new())),
                 Act::Build if key == Key::Enter => {
                     self.press_build(cx);
                     Nav::Stay

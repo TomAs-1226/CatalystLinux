@@ -46,6 +46,7 @@ mod glance;
 mod gpu;
 mod graphs;
 mod help;
+mod hwcheck;
 mod intro;
 mod ir;
 mod irremote;
