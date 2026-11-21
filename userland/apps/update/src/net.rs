@@ -57,7 +57,6 @@ pub fn download(url: &str, to: &Path, size: u64, progress: &mut dyn FnMut(u64)) 
         std::fs::remove_file(to).ok();
     }
     let mut stalls = 0;
-    let mut last = None;
     loop {
         if have(to) == size {
             progress(size);
@@ -74,9 +73,8 @@ pub fn download(url: &str, to: &Path, size: u64, progress: &mut dyn FnMut(u64)) 
             std::fs::remove_file(to).ok();
         }
         stalls = if have(to) > before { 0 } else { stalls + 1 };
-        last = Some(status);
         if stalls >= STALLS {
-            return Err(format!("the download stopped ({})", last.map_or_else(String::new, |s| s.to_string())));
+            return Err(format!("the download stopped ({status})"));
         }
         std::thread::sleep(std::time::Duration::from_secs(2 + 3 * u64::from(stalls)));
     }

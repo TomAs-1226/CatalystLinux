@@ -34,7 +34,6 @@ mod about;
 mod agent;
 mod ai;
 mod browse;
-mod local;
 mod apps;
 mod apriltags;
 mod brand;
