@@ -10,6 +10,17 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.5.2
+
+### Battery
+- Deep standby: after 30 minutes with no key, Wi-Fi, USB, the 5 V outputs and every light go off, and the handheld stops checking for anything. Any key wakes it, and the island says how long it slept and what it drew.
+- Settings › Battery › Deep standby: after 10, 30 or 60 minutes, or never, with what it does and what it draws. Last sleep shows the last one's length and average draw.
+- After 12 hours in deep standby, or at 10%, on battery, the red light blinks once a minute to say the handheld is still on.
+- Deep standby waits while a robot is linked, a computer is connected, someone is signed in over SSH, an update is running or a timer is counting.
+
+### Fixed
+- The red light set to stay dark still lights up if the system crashes.
+
 ## 0.5.1
 
 ### Fixed
