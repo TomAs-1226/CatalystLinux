@@ -45,6 +45,7 @@ mod clock;
 mod commands;
 mod connect;
 mod control;
+mod deep;
 mod device;
 mod files;
 mod gfx;
@@ -431,6 +432,9 @@ fn main() {
     let mut platform: Box<dyn Platform> = open_platform(flag("--sim"));
     // The time zone chosen, in use for every clock this draws (on the handheld).
     device::apply_saved();
+    // A shell before this one stopped in deep standby: Wi-Fi, USB and the
+    // rest brought back.
+    deep::recover();
     // The first start sets the handheld up; `--setup` shows that again.
     if flag("--setup") || !setup_done() {
         shell.start_setup();
@@ -460,13 +464,21 @@ fn main() {
     // rather than as fast as each frame happens to allow. Idle, nothing is
     // drawn at all.
     let mut next_frame = Instant::now();
-    // The panel asleep with the screen dark (deep standby).
+    // The panel asleep with the screen dark (standby).
     let mut panel_asleep = false;
     // The backlight is dark from power-on until the first picture is sent.
     let mut lit = false;
     loop {
         let moving = shell.animating();
-        let timeout = if moving { next_frame.saturating_duration_since(Instant::now()) } else { Duration::from_millis(250) };
+        // Idle, a look four times a second (for a lift); in deep standby,
+        // once a minute.
+        let timeout = if moving {
+            next_frame.saturating_duration_since(Instant::now())
+        } else if shell.deep_asleep() {
+            deep::WAIT
+        } else {
+            Duration::from_millis(250)
+        };
         let Some(keys) = platform.poll(timeout) else { break };
         // Keys are taken in whenever they arrive; the frame waits for its beat.
         for key in keys {
@@ -482,7 +494,9 @@ fn main() {
             continue;
         }
         let work = Instant::now();
-        let dt = (work - last).as_secs_f32().min(0.25);
+        // In deep standby a tick stands for the whole minute that passed.
+        let elapsed = (work - last).as_secs_f32();
+        let dt = if shell.deep_asleep() { elapsed } else { elapsed.min(0.25) };
         last = work;
         if arrive.is_some_and(|at| work >= at) {
             arrive = None;
@@ -1010,33 +1024,39 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
         .chain(std::iter::repeat_n(Down, screens::settings_row("About this handheld") - screens::settings_row("Network")))
         .chain([Enter])
         .collect();
-    let tour: &[(&str, &[Key])] = &[
-        ("01-home", &[]),
-        ("02-robot", &[Enter]),
-        ("03-health", &[Back, Right, Enter]),
-        ("04-logs", &[Back, Right, Enter]),
-        ("04b-match", &[Enter]),
-        // Home's tiles: Robot, Health, Logs / Schedule, Tables, Loop on the
-        // first page; Motors, Console, Terminal / Files, Git, Catalogue on the
-        // second; the developer's tools after them, then Settings, then the
-        // external apps.
-        ("04c-tables", &[Back, Back, Down, Left, Enter]),
-        ("05-tables-elevator", &[Down, Down, Enter]),
-        ("06-loop", &[Back, Back, Right, Enter]),
-        ("06b-schedule", &[Back, Left, Left, Enter]),
-        ("07-motors", &[Back, Right, Right, Right, Enter, Down]),
-        ("08-console", &[Back, Right, Enter]),
-        ("08b-terminal", &[Back, Right, Enter, Char('l'), Char('s'), Enter, Char('c'), Char('o'), Char('l'), Char('o'), Char('r'), Char('s'), Enter, Char('u'), Char('n'), Char('a'), Char('m'), Char('e'), Enter]),
-        ("08c-files", &[Ctrl('q'), Down, Left, Left, Enter]),
-        ("08d-editor", &[Down, Down, Enter, Down, Down, Right, Right, Right, Right]),
-        ("09-settings", &files_to_settings),
-        ("09b-appearance", &[Down, Enter]),
-        ("09c-light-blue", &[Down, Enter, Down, Enter, Enter]),
-        ("09d-network", &[Back, Down, Down, Down, Down, Enter]),
-        ("09e-wifi", &[Enter, Down, Down, Down]),
-        ("09f-wifi-password", &[Enter, Char('c'), Char('a'), Char('t'), Char('a'), Char('l'), Char('y'), Char('s'), Char('t'), Char('7')]),
-        ("09g-about", &network_to_about),
-        ("10-home-page-3-light", &[Back, Back]),
+    // Along Home's tiles from one app to another, by name: Left and Right go
+    // through them in turn, so apps added between never throw the tour off.
+    let walk = |from: &str, to: &str| -> Vec<Key> {
+        let (a, b) = (steps_to(from), steps_to(to));
+        vec![if b >= a { Right } else { Left }; a.abs_diff(b)]
+    };
+    let typed = |text: &str| -> Vec<Key> { text.chars().map(|c| if c == '\n' { Enter } else { Char(c) }).collect() };
+    // Down Settings' list to a section, by name.
+    let down_to = |from: &str, to: &str| vec![Down; screens::settings_row(to) - screens::settings_row(from)];
+    let elevator = robot_tables(&shell.robot).iter().position(|t| t == "Elevator").expect("the demo robot's Elevator table");
+    let tour: Vec<(&str, Vec<Key>)> = vec![
+        ("01-home", vec![]),
+        ("02-robot", vec![Enter]),
+        ("03-health", [vec![Back], walk("Robot", "Health"), vec![Enter]].concat()),
+        ("04-logs", [vec![Back], walk("Health", "Logs"), vec![Enter]].concat()),
+        ("04b-match", vec![Enter]),
+        ("04c-tables", [vec![Back, Back], walk("Logs", "Tables"), vec![Enter]].concat()),
+        ("05-tables-elevator", [vec![Down; elevator], vec![Enter]].concat()),
+        ("06-loop", [vec![Back, Back], walk("Tables", "Loop"), vec![Enter]].concat()),
+        ("06b-schedule", [vec![Back], walk("Loop", "Schedule"), vec![Enter]].concat()),
+        ("07-motors", [vec![Back], walk("Schedule", "Motors"), vec![Enter, Down]].concat()),
+        ("08-console", [vec![Back], walk("Motors", "Console"), vec![Enter]].concat()),
+        ("08b-terminal", [vec![Back], walk("Console", "Terminal"), vec![Enter], typed("ls\ncolors\nuname\n")].concat()),
+        ("08c-files", [vec![Ctrl('q')], walk("Terminal", "Files"), vec![Enter]].concat()),
+        ("08d-editor", vec![Down, Down, Enter, Down, Down, Right, Right, Right, Right]),
+        ("09-settings", files_to_settings),
+        ("09b-appearance", [down_to("Robot settings", "Appearance"), vec![Enter]].concat()),
+        ("09c-light-blue", vec![Down, Enter, Down, Enter, Enter]),
+        ("09d-network", [vec![Back], down_to("Appearance", "Network"), vec![Enter]].concat()),
+        ("09e-wifi", vec![Enter, Down, Down, Down]),
+        ("09f-wifi-password", [vec![Enter], typed("catalyst7")].concat()),
+        ("09g-about", network_to_about),
+        ("10-home-page-3-light", vec![Back, Back]),
     ];
     let frame = |shell: &mut Shell| {
         if shell.tick(1.0 / 60.0) {
@@ -1053,7 +1073,7 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     for _ in 0..90 {
         frame(&mut shell);
     }
-    for (name, keys) in tour {
+    for (name, keys) in &tour {
         for key in keys.iter() {
             shell.key(*key);
             // Mid-turn frames show the page spring; settle before the next key.
@@ -1609,7 +1629,7 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     let mut shell = Shell::new(Robot::demo());
     shell.apply_settings();
     settle(&mut shell, 100);
-    let keys = std::iter::repeat_n(Right, steps_to("Settings")).chain([Enter, Down, Down, Down, Down, Enter, Down, Down, Down]);
+    let keys = std::iter::repeat_n(Right, steps_to("Settings")).chain([Enter]).chain(std::iter::repeat_n(Down, screens::settings_row("Display"))).chain([Enter, Down, Down, Down]);
     for key in keys {
         shell.key(key);
         settle(&mut shell, 40);
@@ -1624,24 +1644,41 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     save(&mut shell, "78-standby-dimmed");
 
     // Settings › Battery: the charge and its day at the top, then the saver
-    // and the rest of the choices; the control centre's saver switch; and
-    // the card as the battery runs out.
+    // and the rest of the choices (deep standby among them), and the last
+    // deep standby beneath; the control centre's saver switch; and the card
+    // as the battery runs out. A night of deep standby is kept for them to
+    // show, and whatever was kept before is put back after.
+    let record = deep::record_path();
+    let kept = std::fs::read(&record).ok();
+    let night = power::Reading { percent: 41, flow: power::Flow::Discharging, milliamps: Some(180.0), volts: Some(3.8), ..power::Reading::default() };
+    let measured = deep::Slept { woke: chrono::Utc::now().timestamp() - 3 * 3600, seconds: 7 * 3600 + 12 * 60, watts: Some(0.684), charging: false };
+    deep::keep(&measured);
     let mut shell = Shell::new(Robot::demo());
     shell.apply_settings();
     settle(&mut shell, 100);
-    let at_battery = std::iter::repeat_n(Right, steps_to("Settings")).chain([Enter, Down, Down, Down, Down, Down]);
+    let at_battery = std::iter::repeat_n(Right, steps_to("Settings")).chain([Enter]).chain(std::iter::repeat_n(Down, screens::settings_row("Battery")));
     for key in at_battery.chain([Enter]) {
         shell.key(key);
         settle(&mut shell, 40);
     }
     settle(&mut shell, 40);
     save(&mut shell, "81-battery");
-    for key in [Enter, Down, Down, Down, Down, Down] {
+    // Down to the last deep standby's figures.
+    for key in std::iter::once(Enter).chain(std::iter::repeat_n(Down, power::DEEP_ROW + 3)) {
         shell.key(key);
         settle(&mut shell, 30);
     }
     settle(&mut shell, 40);
     save(&mut shell, "81b-battery-below");
+    // Back up to Deep standby, its choice moved on to an hour and back.
+    for key in std::iter::repeat_n(Up, 3).chain([Right]) {
+        shell.key(key);
+        settle(&mut shell, 30);
+    }
+    settle(&mut shell, 40);
+    save(&mut shell, "81c-battery-deep-standby");
+    shell.key(Left);
+    settle(&mut shell, 30);
     shell.key(Ctrl(' '));
     settle(&mut shell, 90);
     save(&mut shell, "82-control-centre-saver");
@@ -1650,6 +1687,32 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     shell.show_battery_empty();
     settle(&mut shell, 70);
     save(&mut shell, "83-battery-empty");
+    // Battery › Deep standby: what it does and draws. Never measured, an
+    // estimate; once it has slept, what it drew.
+    std::fs::remove_file(&record).ok();
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    shell.show(Box::new(deep::DeepPage::new()));
+    settle(&mut shell, 90);
+    save(&mut shell, "81d-deep-standby-estimate");
+    deep::keep(&measured);
+    shell.key(Back);
+    settle(&mut shell, 60);
+    shell.show(Box::new(deep::DeepPage::new()));
+    settle(&mut shell, 90);
+    save(&mut shell, "81e-deep-standby-measured");
+    // A night of it on Home, and a key: the island says how long and what it drew.
+    shell.key(Back);
+    settle(&mut shell, 90);
+    shell.deep_for(7.0 * 3600.0 + 12.0 * 60.0, night);
+    shell.key(Char(' '));
+    settle(&mut shell, 40);
+    save(&mut shell, "81f-deep-standby-woke");
+    match &kept {
+        Some(bytes) => std::fs::write(&record, bytes).ok(),
+        None => std::fs::remove_file(&record).ok(),
+    };
     // Set up from a computer with no network yet: Wi-Fi offered there.
     let mut shell = Shell::new(Robot::demo());
     shell.apply_settings();

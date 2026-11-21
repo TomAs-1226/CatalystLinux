@@ -14,6 +14,13 @@ mkdir -p "$T/boot" "$T/data" "$T/bin"
 touch "$T/watchdog"
 printf '#!/bin/sh\nexec sleep 60\n' >"$T/bin/watchdog"
 chmod +x "$T/bin/watchdog"
+# OpenRC stood in for: each call noted, Wi-Fi's status kept as the service does.
+cat >"$T/bin/rc-service" <<EOF
+#!/bin/sh
+echo "\$*" >>"$T/rc.log"
+case "\$2" in stop) echo off >"$T/run/catalyst-wifi.status" ;; start) echo running >"$T/run/catalyst-wifi.status" ;; esac
+EOF
+chmod +x "$T/bin/rc-service"
 PATH="$T/bin:$PATH"
 export PATH
 
@@ -23,6 +30,8 @@ sed -e "s|^MNT=.*|MNT=$T/boot|" \
 	-e "s|^WATCHDOG_DEV=.*|WATCHDOG_DEV=$T/watchdog|" \
 	-e "s|^WATCHDOG_PID=.*|WATCHDOG_PID=$T/watchdog.pid|" \
 	-e "s|^TRYBOOT=.*|TRYBOOT=$T/tryboot|" \
+	-e "s|^SYS=.*|SYS=$T/sys|" \
+	-e "s|^RUN=.*|RUN=$T/run|" \
 	-e 's|mount -t vfat -o rw "$BOOT_DEV" "$MNT" \|\| return 1|:|' \
 	-e 's|^\tumount "$MNT"|\t:|' \
 	-e 's|busybox reboot -f|echo REBOOT|' \
@@ -130,5 +139,88 @@ $P panel off
 check "the panel's out, the voltage's stays" "$(grep -c '^over_voltage=-1$' "$T/boot/config.txt"):$(grep -c '^dtoverlay=cardputerzero-portrait$' "$T/boot/config.txt")" "1:0"
 $P undervolt off
 check "both out: config.txt as it was" "$(cmp -s "$T/boot/config.txt" "$T/original.txt" && echo same)" "same"
+
+# Deep standby, against a sysfs laid out as the handheld's: Wi-Fi running,
+# a radio unblocked, the USB controller as the host, the Grove output on,
+# and the red light following the card.
+S=$T/sys
+mkdir -p "$T/run" "$S/class/rfkill/rfkill0" "$S/bus/platform/drivers/dwc2/3f980000.usb" "$S/class/udc/3f980000.usb" \
+	"$S/firmware/devicetree/base/soc/usb@7e980000" "$S/class/leds/grove_5v_out" "$S/class/leds/ext_5v_out" "$S/class/leds/ACT"
+fresh() {
+	echo running >"$T/run/catalyst-wifi.status"
+	touch "$T/data/wifi-enabled"
+	echo 0 >"$S/class/rfkill/rfkill0/soft"
+	: >"$S/bus/platform/drivers/dwc2/unbind"
+	: >"$S/bus/platform/drivers/dwc2/bind"
+	echo "not attached" >"$S/class/udc/3f980000.usb/state"
+	printf 'otg\000' >"$S/firmware/devicetree/base/soc/usb@7e980000/dr_mode"
+	echo 1 >"$S/class/leds/grove_5v_out/brightness"
+	echo 0 >"$S/class/leds/ext_5v_out/brightness"
+	echo "none [mmc0] timer heartbeat panic" >"$S/class/leds/ACT/trigger"
+	echo 0 >"$S/class/leds/ACT/brightness"
+	: >"$T/rc.log"
+}
+# Wi-Fi comes back in the background: wait for it (two seconds at most).
+wifi_back() {
+	n=0
+	while ! grep -q 'catalyst-wifi start' "$T/rc.log" && [ $n -lt 20 ]; do
+		sleep 0.1
+		n=$((n + 1))
+	done
+}
+
+echo "== deep standby: on, and back as it was"
+fresh
+check "not deep to begin with" "$($P deep status)" "off"
+$P deep on
+check "deep now" "$($P deep status)" "on"
+check "Wi-Fi stopped" "$(cat "$T/rc.log")" "catalyst-wifi stop"
+check "the radio blocked" "$(cat "$S/class/rfkill/rfkill0/soft")" "1"
+check "the USB host unbound" "$(cat "$S/bus/platform/drivers/dwc2/unbind")" "3f980000.usb"
+check "the Grove output off" "$(cat "$S/class/leds/grove_5v_out/brightness")" "0"
+check "the red light dark, no trigger" "$(cat "$S/class/leds/ACT/brightness"):$(cat "$S/class/leds/ACT/trigger")" "0:none"
+check "in this order: Wi-Fi, radio, USB, 5 V, red light" "$(cut -d' ' -f1 "$T/run/catalyst-deep" | tr '\n' ' ')" "wifi radio usb out red "
+check "an output already off is not noted" "$(grep -c ext_5v_out "$T/run/catalyst-deep")" "0"
+$P deep on
+check "on twice: what to bring back is kept" "$(cut -d' ' -f1 "$T/run/catalyst-deep" | tr '\n' ' ')" "wifi radio usb out red "
+$P deep off
+wifi_back
+check "no longer deep" "$($P deep status)" "off"
+check "the red light follows the card again" "$(cat "$S/class/leds/ACT/trigger")" "mmc0"
+check "the Grove output on again" "$(cat "$S/class/leds/grove_5v_out/brightness")" "1"
+check "the other output left off" "$(cat "$S/class/leds/ext_5v_out/brightness")" "0"
+check "the USB host bound again" "$(cat "$S/bus/platform/drivers/dwc2/bind")" "3f980000.usb"
+check "the radio unblocked" "$(cat "$S/class/rfkill/rfkill0/soft")" "0"
+check "Wi-Fi started again, last" "$(tr '\n' ',' <"$T/rc.log")" "catalyst-wifi stop,catalyst-wifi start,"
+$P deep off
+check "off twice: nothing more" "$(tr '\n' ',' <"$T/rc.log")" "catalyst-wifi stop,catalyst-wifi start,"
+
+echo "== deep standby leaves alone what was already off, and a computer's link"
+fresh
+echo off >"$T/run/catalyst-wifi.status"
+echo 1 >"$S/class/rfkill/rfkill0/soft"
+echo configured >"$S/class/udc/3f980000.usb/state"
+echo "none timer heartbeat [panic]" >"$S/class/leds/ACT/trigger"
+$P deep on
+check "Wi-Fi off already: not touched" "$(cat "$T/rc.log")" ""
+check "a computer has it as its device: the controller left bound" "$(cat "$S/bus/platform/drivers/dwc2/unbind")" ""
+check "noted: the 5 V output and the red light" "$(cut -d' ' -f1 "$T/run/catalyst-deep" | tr '\n' ' ')" "out red "
+$P deep off
+check "the quiet red light back as it was" "$(cat "$S/class/leds/ACT/trigger")" "panic"
+check "Wi-Fi not started" "$(cat "$T/rc.log")" ""
+check "the radio left blocked" "$(cat "$S/class/rfkill/rfkill0/soft")" "1"
+fresh
+printf 'peripheral\000' >"$S/firmware/devicetree/base/soc/usb@7e980000/dr_mode"
+$P deep on
+check "a USB mode chosen (the handheld a device): the controller left bound" "$(cat "$S/bus/platform/drivers/dwc2/unbind")" ""
+$P deep off
+wifi_back
+fresh
+rm -f "$T/data/wifi-enabled"
+$P deep on
+$P deep off
+sleep 0.3
+check "Wi-Fi switched off meanwhile: not started again" "$(cat "$T/rc.log")" "catalyst-wifi stop"
+check "the usage is said" "$($P deep sideways 2>&1 >/dev/null | head -n1)" "usage: $T/catalyst-power deep on|off|status"
 
 exit $fail

@@ -140,6 +140,12 @@ impl Standby {
         self.state
     }
 
+    /// Seconds since the last key, or since something last needed the
+    /// screen: deep standby counts its wait from here.
+    pub fn idle(&self) -> f32 {
+        self.idle
+    }
+
     /// A key came. True if it was spent waking the screen.
     pub fn key(&mut self) -> bool {
         self.idle = 0.0;

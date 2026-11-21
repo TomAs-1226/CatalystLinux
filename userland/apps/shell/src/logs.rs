@@ -455,6 +455,8 @@ fn pull_loop(shared: &Shared, dir: &Path, host: &str) {
             if shared.stop.load(Ordering::Relaxed) {
                 return;
             }
+            // In deep standby, parked here: no wakeups until it wakes.
+            crate::deep::rest();
             thread::sleep(Duration::from_millis(200));
         }
     }

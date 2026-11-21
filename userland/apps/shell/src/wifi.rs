@@ -378,6 +378,8 @@ fn run(shared: &Shared, rx: &Receiver<Cmd>) {
         let every = if state.networks.is_empty() { 1 } else { 8 };
         // Quicker ticks while the list is still empty.
         let tick = if state.networks.is_empty() { 700 } else { 1500 };
+        // In deep standby, parked here: no wakeups until it wakes.
+        crate::deep::rest();
         match rx.recv_timeout(Duration::from_millis(tick)) {
             Ok(Cmd::Enable(on)) => {
                 Command::new(TOGGLE).arg(if on { "on" } else { "off" }).status().ok();
