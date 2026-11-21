@@ -294,7 +294,16 @@ def main():
     ap.add_argument("--keep", action="store_true", help="reuse the card from the last run (a second boot)")
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--run", action="append", default=[], help="a command to run in the machine after the measurements")
+    ap.add_argument("--only", metavar="PARTS", help="check just these parts, comma-separated: ui (the keyboard tour, the slowest), "
+                    "tools (with power), update. For a small change; a release with new screens runs all of --tour")
     opts = ap.parse_args()
+    parts = {"ui", "tools", "update"}
+    if opts.only:
+        chosen = set(opts.only.split(","))
+        if chosen - parts:
+            ap.error(f"--only takes {', '.join(sorted(parts))}, not {', '.join(sorted(chosen - parts))}")
+        parts = chosen
+        opts.tour = opts.tour or "shots/vm"
     vm = Machine(fresh=not opts.keep, quiet=not opts.verbose)
     failed = 0
     try:
@@ -307,9 +316,12 @@ def main():
             print(f"-- {command}\n{vm.run(command, 120)}")
         if opts.tour:
             os.makedirs(opts.tour, exist_ok=True)
-            failed = tour(vm, opts.tour)
-            failed += tools(vm)
-            failed += updates(vm)
+            if "ui" in parts:
+                failed += tour(vm, opts.tour)
+            if "tools" in parts:
+                failed += tools(vm)
+            if "update" in parts:
+                failed += updates(vm)
     finally:
         vm.stop()
     sys.exit(1 if failed else 0)
