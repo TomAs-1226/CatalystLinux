@@ -430,8 +430,9 @@ pub(crate) enum Path {
 impl Path {
     fn spring(&self) -> Spring {
         match self {
-            // Bezel's page turn.
-            Path::Slide => role::page(),
+            // A whole page arriving, as long as Bezel's page turn but with a
+            // settle that shows: it runs about 5 px past and comes back.
+            Path::Slide => crate::gfx::spatial::slow(),
             // Bezel's app window: opening, closing and reopening.
             Path::Grow(_) => role::release(),
         }
@@ -459,6 +460,44 @@ struct Transition {
     /// it: the recent apps as they showed, for a card to grow out of, or
     /// Home, for an app brought back several pages deep.
     backdrop: Option<Vec<u32>>,
+    /// A page pushed while the one before it was still sliding in: that
+    /// slide goes on playing beneath this one (the page it covered drifting
+    /// off, the page it brought finishing its way in) rather than the page
+    /// being put down at rest at once.
+    beneath: Option<Box<Transition>>,
+}
+
+impl Transition {
+    fn new(path: Path, from: f32, to: f32, leaving: Option<Box<dyn Screen>>, backdrop: Option<Vec<u32>>) -> Self {
+        let mut progress = Animated::new(from, path.spring()).with_rest(0.002);
+        progress.set(to);
+        Transition { path, progress, pictures: None, made: 0, leaving, backdrop, beneath: None }
+    }
+
+    /// A page sliding in, with its pictures taken: one that can go on
+    /// beneath a page pushed over it.
+    fn can_go_beneath(&self) -> bool {
+        self.path == Path::Slide && self.leaving.is_none() && self.pictures.is_some()
+    }
+
+    /// Advance the slide beneath, if there is one; true while it moves. Once
+    /// it has landed it is let go: the picture of the page at rest is the same.
+    fn tick_beneath(&mut self, dt: f32) -> bool {
+        let moving = self.beneath.as_mut().is_some_and(|b| b.progress.tick(dt));
+        if !moving {
+            self.beneath = None;
+        }
+        moving
+    }
+}
+
+/// A slide's frame: the page beneath drifting a third as far as the page on
+/// top travels, at `p` (0 to 1, a little past either end as it settles).
+fn compose_slide(dst: &mut [u32], under: &[u32], over: &[u32], p: f32) -> (f32, f32) {
+    let (under_x, over_x) = ((-p * W * 0.3).round(), ((1.0 - p) * W).round());
+    blit_shifted(dst, under, W as usize, H as usize, under_x as i32);
+    blit_shifted(dst, over, W as usize, H as usize, over_x as i32);
+    (under_x, over_x)
 }
 
 pub struct Shell {
@@ -523,6 +562,8 @@ pub struct Shell {
     pub spent: (std::time::Duration, std::time::Duration),
     /// Room for a page rising in, kept between frames.
     rise_scratch: Vec<u32>,
+    /// A slide still playing beneath a page pushed over it, drawn as one picture.
+    beneath_scratch: Vec<u32>,
     /// System updates: what the updater last said, when it was read, when
     /// the shell started, the last key, and the last check started.
     update: crate::sysupdate::Status,
@@ -658,6 +699,7 @@ impl Shell {
             status: Status { age: f32::MAX, ..Status::default() },
             last_screen: (Vec::new(), None),
             rise_scratch: Vec::new(),
+            beneath_scratch: Vec::new(),
             update: crate::sysupdate::Status::default(),
             update_age: 0.0,
             started: std::time::Instant::now(),
@@ -1119,9 +1161,17 @@ impl Shell {
             self.transition = None;
             return;
         }
-        let mut progress = Animated::new(0.0, path.spring()).with_rest(0.002);
-        progress.set(1.0);
-        self.transition = Some(Transition { path, progress, pictures: None, made: 0, leaving: None, backdrop: None });
+        // Pushed while the page before was still sliding in: that slide goes
+        // on beneath this one, from where it was and at its speed. (One deep:
+        // whatever was beneath it lands at once.)
+        let mut transition = Transition::new(path, 0.0, 1.0, None, None);
+        if path == Path::Slide {
+            if let Some(mut before) = self.transition.take().filter(|t| t.can_go_beneath()) {
+                before.beneath = None;
+                transition.beneath = Some(Box::new(before));
+            }
+        }
+        self.transition = Some(transition);
     }
 
     fn close(&mut self) {
@@ -1145,11 +1195,7 @@ impl Shell {
                 t.leaving = Some(screen);
                 t.progress.set(0.0);
             }
-            _ => {
-                let mut progress = Animated::new(1.0, path.spring()).with_rest(0.002);
-                progress.set(0.0);
-                self.transition = Some(Transition { path, progress, pictures: None, made: 0, leaving: Some(screen), backdrop: None });
-            }
+            _ => self.transition = Some(Transition::new(path, 1.0, 0.0, Some(screen), None)),
         }
     }
 
@@ -1364,7 +1410,8 @@ impl Shell {
             }
         }
         if let Some(t) = &mut self.transition {
-            if t.progress.tick(motion_dt) || motion_dt == 0.0 {
+            // Both must be advanced, so no short-circuit.
+            if t.progress.tick(motion_dt) | t.tick_beneath(motion_dt) || motion_dt == 0.0 {
                 moving = true;
             } else {
                 let ended = self.transition.take().expect("in flight");
@@ -1702,10 +1749,19 @@ impl Shell {
             let [(under, under_dots), (over, over_dots)] = transition.pictures.as_ref().expect("taken above");
             match transition.path {
                 Path::Slide => {
-                    // The one underneath drifts a third as far as the one on top travels.
-                    let (under_x, over_x) = ((-p * W * 0.3).round(), ((1.0 - p) * W).round());
-                    blit_shifted(&mut g.canvas.px, under, W as usize, H as usize, under_x as i32);
-                    blit_shifted(&mut g.canvas.px, over, W as usize, H as usize, over_x as i32);
+                    // The one underneath drifts a third as far as the one on top
+                    // travels. If it was itself still sliding in, that slide
+                    // plays on beneath, as one picture.
+                    let beneath = transition.beneath.as_ref().and_then(|b| Some((b.progress.value(), b.pictures.as_ref()?)));
+                    let under: &[u32] = match beneath {
+                        Some((bp, [(b_under, _), (b_over, _)])) => {
+                            self.beneath_scratch.clone_from(&self.background);
+                            compose_slide(&mut self.beneath_scratch, b_under, b_over, bp);
+                            &self.beneath_scratch
+                        }
+                        None => under,
+                    };
+                    let (under_x, over_x) = compose_slide(&mut g.canvas.px, under, over, p);
                     g.pager = under_dots.map(|(pages, current)| (pages, current, under_x)).or(over_dots.map(|(pages, current)| (pages, current, over_x)));
                 }
                 Path::Grow(from) => {
@@ -2206,10 +2262,7 @@ impl Shell {
             self.transition = None;
             return;
         }
-        let path = Path::Grow(from);
-        let mut progress = Animated::new(0.0, path.spring()).with_rest(0.002);
-        progress.set(1.0);
-        self.transition = Some(Transition { path, progress, pictures: None, made: 0, leaving: None, backdrop });
+        self.transition = Some(Transition::new(Path::Grow(from), 0.0, 1.0, None, backdrop));
     }
 
     /// Save `picture`, the panel as it showed, as a screenshot: a flash says
@@ -3345,5 +3398,68 @@ pub(crate) mod tests {
         frames(&mut shell, 40 * 4, 0.25);
         assert!(shell.stack.last().unwrap().0.keeps_awake());
         assert_eq!(shell.standby_state(), State::Awake);
+    }
+
+    /// A plain page for pushing.
+    struct Page(&'static str);
+
+    impl Screen for Page {
+        fn title(&self) -> &str {
+            self.0
+        }
+        fn key(&mut self, _key: Key, _cx: &mut Cx) -> Nav {
+            Nav::Stay
+        }
+        fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
+            let ink = g.tokens.ink;
+            g.surface(Rect::new(PAD, 40.0, W - 2.0 * PAD, 40.0), 8.0, ink);
+        }
+    }
+
+    #[test]
+    fn a_page_slides_in_runs_a_little_past_and_settles_exactly() {
+        let mut shell = shell();
+        shell.open(Box::new(Page("one")), Path::Slide);
+        let mut most = 0.0f32;
+        let mut n = 0;
+        while let Some(p) = shell.progress() {
+            most = most.max(p);
+            frames(&mut shell, 1, 0.025);
+            n += 1;
+            assert!(n < 60, "it never came to rest");
+        }
+        // A few pixels past its place (the panel is 320 wide), then home.
+        assert!(most > 1.005 && most < 1.03, "furthest {most}");
+        assert!(n as f32 * 0.025 < 0.9, "{n} frames");
+    }
+
+    #[test]
+    fn a_page_pushed_while_the_last_is_still_arriving_carries_that_one_on() {
+        let mut shell = shell();
+        shell.open(Box::new(Page("one")), Path::Slide);
+        frames(&mut shell, 4, 0.025);
+        let t = shell.transition.as_ref().unwrap();
+        let (p, v) = (t.progress.value(), t.progress.velocity());
+        assert!(p > 0.2 && p < 0.9 && v > 0.5, "mid-way and moving: {p} at {v}/s");
+        // Enter again before it lands: its slide goes on beneath the new page,
+        // from where it was and at its speed, rather than landing at once.
+        let picture_before = shell.gfx.canvas.px.clone();
+        shell.open(Box::new(Page("two")), Path::Slide);
+        let beneath = &shell.transition.as_ref().unwrap().beneath.as_ref().expect("carried on").progress;
+        assert_eq!((beneath.value(), beneath.velocity()), (p, v));
+        // Its first frame: the new page has not moved yet, so nothing else has either.
+        frames(&mut shell, 1, 0.0);
+        let same = picture_before.iter().zip(&shell.gfx.canvas.px).filter(|(a, b)| a == b).count();
+        assert!(same as f32 > 0.97 * picture_before.len() as f32, "no jump: {same} of {} pixels the same", picture_before.len());
+        let mut n = 0;
+        while shell.transition.is_some() {
+            frames(&mut shell, 1, 0.025);
+            n += 1;
+            assert!(n < 60, "it never came to rest");
+        }
+        assert_eq!(shell.stack.len(), 3);
+        // A page pushed from rest has nothing beneath it.
+        shell.open(Box::new(Page("three")), Path::Slide);
+        assert!(shell.transition.as_ref().unwrap().beneath.is_none());
     }
 }
