@@ -277,16 +277,20 @@ fn sd_rrect(px: f32, py: f32, r: &Rect, radius: f32) -> f32 {
     outside + qx.max(qy).min(0.0) - k
 }
 
-/// Words broken into lines no wider than `width`.
+/// Words broken into lines no wider than `width`. A no-break space (as
+/// between a number and its unit, "0.7 W") holds its two sides on one line,
+/// and is drawn as a plain space.
 pub fn wrap(g: &mut Gfx, words: &str, style: bezel::TextStyle, width: f32) -> Vec<String> {
+    let no_break = |c: char| matches!(c, '\u{a0}' | '\u{202f}' | '\u{2007}');
     let mut lines = Vec::new();
     let mut line = String::new();
-    for word in words.split_whitespace() {
-        let tried = if line.is_empty() { word.to_owned() } else { format!("{line} {word}") };
+    for word in words.split(|c: char| c.is_whitespace() && !no_break(c)).filter(|w| !w.is_empty()) {
+        let word = word.replace(no_break, " ");
+        let tried = if line.is_empty() { word.clone() } else { format!("{line} {word}") };
         if g.measure(&tried, style) <= width || line.is_empty() {
             line = tried;
         } else {
-            lines.push(std::mem::replace(&mut line, word.to_owned()));
+            lines.push(std::mem::replace(&mut line, word));
         }
     }
     if !line.is_empty() {
