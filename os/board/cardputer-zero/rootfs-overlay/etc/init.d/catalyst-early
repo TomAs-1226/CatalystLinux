@@ -16,6 +16,15 @@ start() {
 	modprobe -a $(grep -v '^#' /etc/modules-load.d/cardputer-zero.conf) 2>/dev/null
 	# The time, from the clock chip, before anything shows or records it.
 	[ -e /dev/rtc0 ] && hwclock -s -u 2>/dev/null
+	# Never before this system was built: a clock chip that lost its time (or
+	# never kept one) starts in 2000, and no web certificate checks out then,
+	# so neither updates nor anything else over HTTPS would work until the
+	# network set it. From the build's time they do; the network corrects it.
+	built=$(sed -n 's/^built=//p' /etc/catalyst/version 2>/dev/null)
+	build=$(sed -n 's/^build=//p' /etc/catalyst/version 2>/dev/null)
+	if [ -n "$built" ] && [ -n "$build" ] && [ "$(date -u +%s)" -lt "$build" ]; then
+		date -u -s "$built" >/dev/null 2>&1
+	fi
 
 	mount /tmp
 	# /data is everything that must survive a restart. A power cut can leave

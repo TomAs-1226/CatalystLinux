@@ -59,6 +59,13 @@ pub fn check(dev: &Device) -> Result<(), String> {
     let (version, build) = dev.version();
     let channel = status::pref(dev, "channel").unwrap_or_else(|| "stable".into());
     status::update(dev, |s| s.state = state::CHECKING.into());
+    // The clock first: with it wrong (a clock chip that lost its time, a
+    // network that blocks the time servers), no certificate checks out and
+    // GitHub cannot be asked at all. Waits for a setting under way; quick
+    // when the clock was set in the last few hours.
+    if !dev.test {
+        std::process::Command::new("/usr/sbin/catalyst-time").arg("sync").status().ok();
+    }
     let found = (|| {
         let key = dev.public_key().ok_or("this system has no update key")?;
         let release = net::latest(&dev.source(), &channel)?;
@@ -95,12 +102,40 @@ pub fn check(dev: &Device) -> Result<(), String> {
             if s.state.is_empty() || s.state == state::CHECKING {
                 s.state = state::CURRENT.into();
             }
-            s.detail = format!("could not check: {why}");
+            s.detail = why_not(&why, now(), build);
             status::write(dev, &s);
             return Err(why);
         }
     }
     Ok(())
+}
+
+/// Why a check could not be made, in the few words Settings has room for.
+/// A clock before this system was built is certainly wrong; a secure
+/// connection that failed is most often the clock too.
+fn why_not(why: &str, now: u64, build: u64) -> String {
+    if now < build {
+        return format!("clock wrong · {}", day_of(now));
+    }
+    if ["certificate", "SSL", "(60)", "(35)"].iter().any(|w| why.contains(w)) {
+        return "secure link failed · clock?".into();
+    }
+    format!("could not check: {why}")
+}
+
+/// A moment as "2026-11-20" (UTC), from seconds since 1970: the civil date
+/// from a day count (Howard Hinnant's method).
+fn day_of(secs: u64) -> String {
+    let z = (secs / 86_400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y}-{m:02}-{d:02}")
 }
 
 /// Whether the release's system fits the spare system's partition. Cards
@@ -423,6 +458,23 @@ mod tests {
 
     fn curl_works() -> bool {
         std::process::Command::new("curl").arg("--version").output().is_ok_and(|o| o.status.success())
+    }
+
+    #[test]
+    fn a_check_that_could_not_be_made_says_why_in_a_few_words() {
+        assert_eq!(day_of(0), "1970-01-01");
+        assert_eq!(day_of(951_782_400), "2000-02-29");
+        assert_eq!(day_of(951_868_800), "2000-03-01");
+        assert_eq!(day_of(1_795_132_800), "2026-11-20");
+        let build = 1_795_132_800;
+        // A clock chip that lost its time: before this system was built.
+        assert_eq!(why_not("could not fetch …: curl: (60) SSL certificate problem", 946_684_800, build), "clock wrong · 2000-01-01");
+        // After it, but a certificate would not check out: most often the clock.
+        assert_eq!(why_not("curl: (60) SSL certificate problem: certificate is not yet valid", build + 10, build), "secure link failed · clock?");
+        assert_eq!(why_not("no stable release yet", build + 10, build), "could not check: no stable release yet");
+        // Short enough for the row it is shown in.
+        assert!(why_not("x (60)", build + 10, build).chars().count() <= 28);
+        assert!(why_not("x", 0, build).chars().count() <= 28);
     }
 
     fn file_url(path: &Path) -> String {

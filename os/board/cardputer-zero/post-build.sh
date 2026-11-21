@@ -17,8 +17,11 @@ install -D -m 0755 "$UPDATE_BIN" "$TARGET_DIR/usr/bin/catalyst-update"
 # against (scripts/release.sh sets both; a plain build is the base version,
 # built now).
 VERSION="${CATALYST_VERSION:-$(cat "$BR2_EXTERNAL_CATALYST_PATH/VERSION")}"
+BUILT_AT="${CATALYST_BUILD_TIME:-$(date +%s)}"
 mkdir -p "$TARGET_DIR/etc/catalyst" "$TARGET_DIR/boot"
-printf 'version=%s\nbuild=%s\n' "$VERSION" "${CATALYST_BUILD_TIME:-$(date +%s)}" > "$TARGET_DIR/etc/catalyst/version"
+# `built` is the same moment as UTC words BusyBox's date -s reads: the clock
+# never starts earlier than this (catalyst-early).
+printf 'version=%s\nbuild=%s\nbuilt=%s\n' "$VERSION" "$BUILT_AT" "$(date -u -d "@$BUILT_AT" '+%Y-%m-%d %H:%M:%S')" > "$TARGET_DIR/etc/catalyst/version"
 # What changed in each version, for Settings › About › Update history and
 # the "What's new" shown once after an update: read on the handheld, offline.
 install -D -m 0644 "$BR2_EXTERNAL_CATALYST_PATH/CHANGELOG.md" "$TARGET_DIR/usr/share/catalyst/changelog.md"

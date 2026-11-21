@@ -2734,8 +2734,10 @@ impl Screen for SettingsApp {
             Key::Enter | Key::Right if item == Item::KeyboardLesson => return Nav::Push(Box::new(crate::setup::Setup::lesson())),
             Key::Enter | Key::Right if item == Item::TimeZone => return Nav::Push(Box::new(crate::device::ZonePicker::new())),
             Key::Enter if item == Item::DeviceName => self.naming = Some(crate::device::name()),
-            // How the clock was set is only to read.
-            Key::Enter | Key::Right | Key::Left if item == Item::ClockNote => {}
+            // The clock set from the network now: the time servers, else the
+            // web (for a network that blocks them). The row says how it went.
+            Key::Enter | Key::Right if item == Item::ClockNote => *cx.say = Some(crate::device::set_clock_now()),
+            Key::Left if item == Item::ClockNote => {}
             // Switched off, developer options go, and their page with them.
             Key::Enter | Key::Right | Key::Left if item == Item::DevMode => {
                 let s = &mut *cx.settings;

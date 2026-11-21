@@ -373,6 +373,18 @@ pub fn clock_note() -> String {
     }
 }
 
+/// Ask the network for the time now, in the background (catalyst-time: the
+/// time servers, else a web answer's date); what the island says meanwhile.
+pub fn set_clock_now() -> String {
+    if !crate::sys::on_handheld() {
+        return "the clock is this computer's".into();
+    }
+    match std::process::Command::new("sh").args(["-c", "/usr/sbin/catalyst-time sync now >/dev/null 2>&1 &"]).status() {
+        Ok(_) => "asking the network for the time".into(),
+        Err(_) => "could not ask for the time".into(),
+    }
+}
+
 /// The network set the clock `ago` seconds ago.
 fn network_note(ago: i64) -> String {
     match ago {

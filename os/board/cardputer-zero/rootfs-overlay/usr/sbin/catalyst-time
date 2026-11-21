@@ -1,43 +1,50 @@
 #!/bin/sh
 # The clock, set from the network. Run after DHCP gives an address with a
 # router to go through (/usr/share/udhcpc/default.script.d/50-catalyst-time),
-# on Wi-Fi or Ethernet. Once the network has set it, the RX8130 clock chip is
-# set from it too, so the next start has the right time from its first frame
-# even with no network (catalyst-early reads the chip back).
+# on Wi-Fi or Ethernet, and by catalyst-update before it looks for an update.
+# Once the network has set it, the RX8130 clock chip is set from it too, so
+# the next start has the right time from its first frame even with no network
+# (catalyst-early reads the chip back).
 #
-#   catalyst-time sync        ask the time servers, unless they answered in
-#                             the last six hours
-#   catalyst-time sync now    ask them whatever
-#   catalyst-time status      when the network last set the clock
+#   catalyst-time sync        ask, unless the clock was set in the last six
+#                             hours; waits for an asking already under way
+#   catalyst-time sync now    ask whatever
+#   catalyst-time status      when the network last set the clock, and how
 #
-# A network with no way out (a robot's radio, a cable into the Systemcore)
-# simply never answers: the attempt gives up after WAIT seconds.
+# First the time servers (NTP). Many networks (schools, venues, some homes)
+# block their port, so when none answers, the time is taken from the Date
+# line of an ordinary web answer over plain HTTP: good to a second or two,
+# which is plenty for certificates, and plain HTTP needs no clock to be right
+# first (HTTPS does). A network with no way out (a robot's radio, a cable
+# into the Systemcore) simply never answers: each try gives up after WAIT
+# seconds.
 set -u
 
-# (The folder and the wait can be moved for a test.)
+# (The folder, the wait and how the clock is set can be moved for a test.)
 STATE="${CATALYST_RUN:-/run/catalyst}"
 SYNCED="$STATE/time-synced"
+SOURCE="$STATE/time-source"
 LOCK="$STATE/time-sync.lock"
 SERVERS="pool.ntp.org time.cloudflare.com time.google.com"
+# Answers with a Date line and nothing else to speak of, from three companies.
+WEB="http://connectivitycheck.gstatic.com/generate_204 http://www.msftconnecttest.com/connecttest.txt http://captive.apple.com/hotspot-detect.html"
 WAIT="${CATALYST_TIME_WAIT:-25}"
+SET_CLOCK="${CATALYST_TIME_SET:-date -u -s}"
 FRESH=21600
 
-case "${1:-}" in
-sync)
-	mkdir -p "$STATE"
-	if [ "${2:-}" != now ] && [ -s "$SYNCED" ]; then
-		age=$(($(date +%s) - $(cat "$SYNCED")))
-		[ "$age" -ge 0 ] && [ "$age" -lt "$FRESH" ] && exit 0
-	fi
-	# One at a time: a second lease while one is asking is not asked again.
-	mkdir "$LOCK" 2>/dev/null || exit 0
-	trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+fresh() {
+	[ -s "$SYNCED" ] || return 1
+	age=$(($(date +%s) - $(cat "$SYNCED")))
+	[ "$age" -ge 0 ] && [ "$age" -lt "$FRESH" ]
+}
+
+# The time servers, given WAIT seconds: BusyBox's ntpd, in front (-n), quits
+# once the clock is set (-q); with no server answering it would keep trying.
+from_servers() {
 	peers=""
 	for server in $SERVERS; do
 		peers="$peers -p $server"
 	done
-	# BusyBox's ntpd: -n stays in front, -q quits once the clock is set. With
-	# no server answering it would keep trying, so it is given WAIT seconds.
 	# shellcheck disable=SC2086
 	ntpd -n -q $peers >/dev/null 2>&1 &
 	pid=$!
@@ -48,18 +55,69 @@ sync)
 	timer=$!
 	if wait "$pid"; then
 		kill "$timer" 2>/dev/null
-		date +%s >"$SYNCED"
-		[ -e /dev/rtc0 ] && hwclock -w -u 2>/dev/null
-		logger -t catalyst-time "clock set from the network" 2>/dev/null
-	else
-		kill "$timer" 2>/dev/null
-		logger -t catalyst-time "no time server answered" 2>/dev/null
+		return 0
+	fi
+	kill "$timer" 2>/dev/null
+	return 1
+}
+
+# "Thu, 20 Nov 2026 20:41:07 GMT" as "2026-11-20 20:41:07", which date -s
+# reads; nothing for anything else.
+http_date() {
+	echo "$1" | awk '{
+		m = index("JanFebMarAprMayJunJulAugSepOctNovDec", $3)
+		if (m == 0 || $4 !~ /^[0-9][0-9][0-9][0-9]$/ || $5 !~ /^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]$/) exit 1
+		printf "%s-%02d-%02d %s\n", $4, (m + 2) / 3, $2, $5
+	}'
+}
+
+# The Date line of the first web answer that has one.
+from_web() {
+	for url in $WEB; do
+		line=$(curl -sI --max-time 8 "$url" 2>/dev/null | tr -d '\r' | sed -n 's/^[Dd][Aa][Tt][Ee]: *//p' | head -n 1)
+		[ -n "$line" ] || continue
+		stamp=$(http_date "$line") || continue
+		[ -n "$stamp" ] || continue
+		# shellcheck disable=SC2086
+		$SET_CLOCK "$stamp" >/dev/null 2>&1 && return 0
+	done
+	return 1
+}
+
+case "${1:-}" in
+sync)
+	mkdir -p "$STATE"
+	if [ "${2:-}" != now ] && fresh; then
+		exit 0
+	fi
+	# One at a time. Someone already asking (a lease just given, say) is
+	# waited for rather than asked again, so whoever wants the time gets it.
+	if ! mkdir "$LOCK" 2>/dev/null; then
+		waited=0
+		while [ -d "$LOCK" ] && [ "$waited" -lt $((2 * WAIT + 20)) ]; do
+			sleep 1
+			waited=$((waited + 1))
+		done
+		fresh && exit 0
 		exit 1
 	fi
+	trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+	if from_servers; then
+		how="the time servers"
+	elif from_web; then
+		how="the web"
+	else
+		logger -t catalyst-time "neither the time servers nor the web answered" 2>/dev/null
+		exit 1
+	fi
+	date +%s >"$SYNCED"
+	echo "$how" >"$SOURCE"
+	[ -e /dev/rtc0 ] && hwclock -w -u 2>/dev/null
+	logger -t catalyst-time "clock set from $how" 2>/dev/null
 	;;
 status)
 	if [ -s "$SYNCED" ]; then
-		echo "set from the network $(($(date +%s) - $(cat "$SYNCED"))) s ago"
+		echo "set from $(cat "$SOURCE" 2>/dev/null || echo the network) $(($(date +%s) - $(cat "$SYNCED"))) s ago"
 	elif [ -e /dev/rtc0 ]; then
 		echo "kept by the clock chip since the start"
 	else
