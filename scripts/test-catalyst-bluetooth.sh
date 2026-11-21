@@ -21,6 +21,7 @@ case "\$*" in
 *" pair "*) cat "$T/pair-answer" ;;
 *" connect "*) echo "Attempting to connect"; echo "Connection successful" ;;
 devices) printf 'Device 0C:A6:94:12:34:56 WH-1000XM4\nDevice 11:22:33:44:55:66 Kitchen Speaker\nDevice AA:BB:CC:DD:EE:01 AA-BB-CC-DD-EE-01\nDevice 70:F0:87:00:00:01 Fitness Band\nDevice 98:00:00:00:00:02 Old Earbuds\n' ;;
+"devices Connected") printf 'Device 11:22:33:44:55:66 Kitchen Speaker\n' ;;
 "info 0C:A6:94:12:34:56") printf '\tName: WH-1000XM4\n\tIcon: audio-headphones\n\tPaired: no\n\tConnected: no\n' ;;
 "info 11:22:33:44:55:66") printf '\tIcon: audio-card\n\tPaired: yes\n\tConnected: yes\n' ;;
 "info AA:BB:CC:DD:EE:01") printf '\tIcon: audio-headset\n\tPaired: no\n\tConnected: no\n' ;;

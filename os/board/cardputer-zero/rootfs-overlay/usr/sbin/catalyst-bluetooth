@@ -159,9 +159,10 @@ devices() {
 	done | sort -t "$(printf '\t')" -k2,2r -k5,5
 }
 
-# The first connected audio device, if any.
+# The first connected device, if any (one question to bluetoothd, not one
+# a device: the page asks every few seconds).
 connected_device() {
-	devices | awk -F '\t' '$3 == "connected" { print $1; exit }'
+	bluetoothctl devices Connected 2>/dev/null | awk '$1 == "Device" { print $2; exit }'
 }
 
 status() {
