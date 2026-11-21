@@ -156,10 +156,12 @@ a computer's own setup does: no island, no status, the brand's ground, each
 page's title, words and rows rising in one after another from the side the
 page came from. "Hi." offers three ways on:
 
-- **Set up here**: the keyboard lesson (below), the team number (the
-  robot's address follows from it), the handheld's name and time zone, Wi-Fi,
-  keys for online services, a page of choices (open Robot on link, the match
-  report, SSH, the calm version), and the look (accent, mode, text size,
+- **Set up here**: the hardware check (below), the keyboard lesson (below),
+  the team number (the robot's address follows from it), the handheld's name
+  and time zone, Wi-Fi, keys for online services, a page of choices (open
+  Robot on link, the match report, SSH, the calm version), battery and power
+  (the screen-off time, the battery saver at 20%, Wi-Fi in standby, and lift
+  to wake where there is a motion sensor), and the look (accent, mode, text size,
   Home's style, with a live picture of Home), then "Just a moment…", "You're
   all set." and Home. The pages are one list in `setup.rs` (`FLOW`): Next goes
   one along, Esc one back, Tab skips one, and the progress marks count them.
@@ -174,6 +176,25 @@ page came from. "Hi." offers three ways on:
 - **Set up later**: straight to Home; everything is in Settings.
 
 `/data/catalyst/setup-done` marks setup as done.
+
+**The hardware check** comes first, and is in Settings › About too. Each part
+of the handheld is looked for and shown on a chip:
+
+- the battery's fuel gauge;
+- storage;
+- the clock chip;
+- the Wi-Fi radio;
+- the Ethernet adapter (behind the USB switch, which must be to the right);
+- the camera;
+- the motion sensor, and the compass where the unit has one;
+- infrared.
+
+A found part is ticked. A missing one is amber, and the line under the title
+says what was found or what to try. Enter on Keys opens a line to type that
+uses every letter and digit, and Keys is ticked once the line is typed whole.
+Parts that come late are looked for again every few seconds: the motion
+sensor starts a moment after the shell, and the adapter appears when the
+switch moves.
 
 **The keyboard lesson** is five short cards, each with a little practice
 that ticks off as it is done (Enter always goes on, so nobody is held up, and
@@ -1170,7 +1191,10 @@ system (the emulator starts kernels itself), the flasher writing a real card
 (its writing and reading back are tested on a file), the keyboard (Sym's
 symbols and Fn's keys are mapped from the driver's keymap, not yet pressed),
 the clock set from the network and kept in the clock chip, Ethernet, Wi-Fi, the fuel gauge,
-idle memory with the board's drivers at work), the NT4 client against a real
+idle memory with the board's drivers at work, what the power savings measure
+in milliamps, the panel waking from its sleep, the keyboard's lights borrowed,
+the infrared LED and receiver, the motion sensor and compass and their axes),
+the NT4 client against a real
 Systemcore, the log reader against a log from a real robot, the schedule
 against the live Blue Alliance and Nexus services, setup from a computer over
 a real network, and the catalogue against its repository (which does not
@@ -1203,7 +1227,10 @@ switcher), screenshots, standby and power saving, the system monitor, the
 network toolkit with the robot finder, the SSH client and serial console,
 saved commands, the AprilTag reader, USB to a computer, the command-line
 tools, live graphs, the pit checklist and match timer, and match trends; then
-the Level, the Compass, and lift to wake.
+(0.4.0) deep standby, the battery saver, low-battery care and the Battery page,
+the lower-voltage option, the keyboard's lights for notices and warnings, 1 GB
+system slots, the universal remote, the Level, the Compass and lift to wake,
+the keyboard lesson, the handheld's name and time zone, and the hardware check.
 
 ## Third-party pieces
 
