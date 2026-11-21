@@ -1799,15 +1799,31 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     }
     settle(&mut shell, 60);
     save(&mut shell, "109-assistant-asks");
+    press(&mut shell, &[Enter], 90);
+    save(&mut shell, "109b-assistant-confirm");
+    press(&mut shell, &[Up], 40);
+    save(&mut shell, "109c-assistant-confirm-run-it");
+    press(&mut shell, &[Back], 90);
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        settle(&mut shell, 8);
+    }
+    settle(&mut shell, 60);
+    save(&mut shell, "109d-assistant-skipped");
     press(&mut shell, &[Tab], 90);
     save(&mut shell, "110-assistant-choices");
-    press(&mut shell, &[Back, Back, Back], 90);
+    // Back to Home, on the Assistant's tile (a third Esc would take Home to
+    // its first app).
+    press(&mut shell, &[Back, Back], 90);
     press(&mut shell, &vec![Left; steps_to("Assistant") - steps_to("Actions")], 20);
     press(&mut shell, &[Enter], 90);
+    press(&mut shell, &vec![Down; actions.len() + 1], 20);
+    save(&mut shell, "111-actions-built-in");
+    press(&mut shell, &vec![Up; actions.len() + 1], 20);
     press(&mut shell, &vec![Down; actions.len() - 1], 10);
     press(&mut shell, &[Char('e')], 90);
     press(&mut shell, &[Down, Down], 40);
-    save(&mut shell, "111-action-asks-first");
+    save(&mut shell, "111b-action-asks-first");
     keys::Keys::default().save().ok();
     std::fs::remove_file(config_dir().join("commands")).ok();
     std::fs::remove_file(config_dir().join("commands-ask")).ok();

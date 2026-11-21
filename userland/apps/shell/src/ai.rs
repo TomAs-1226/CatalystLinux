@@ -395,9 +395,9 @@ enum Plan {
     Now(Result<String, String>),
     /// The Catalyst Agent asked, on a thread.
     Agent(String),
-    /// An Action run, on a thread; a critical one only once the person says
-    /// yes (with the model's reason).
-    Run { saved: Saved, line: String, ask: Option<String> },
+    /// An Action run, on a thread, with the model's reason for it; a
+    /// critical one only once the person says yes.
+    Run { saved: Saved, line: String, reason: String, ask: bool },
 }
 
 fn plan(call: &Call, robot: &Robot, actions: &[Saved]) -> Plan {
@@ -417,7 +417,7 @@ fn plan(call: &Call, robot: &Robot, actions: &[Saved]) -> Plan {
                 return Plan::Now(Err(format!("no Action is called \"{name}\"; list_actions gives their names")));
             };
             match crate::commands::expand(&saved.command, host(robot).as_deref(), crate::tools::team(robot)) {
-                Ok(line) => Plan::Run { saved: saved.clone(), line, ask: saved.critical().then(|| call.input["reason"].as_str().unwrap_or_default().trim().to_owned()) },
+                Ok(line) => Plan::Run { saved: saved.clone(), line, reason: call.input["reason"].as_str().unwrap_or_default().trim().to_owned(), ask: saved.critical() },
                 Err(why) => Plan::Now(Err(why)),
             }
         }
@@ -443,6 +443,56 @@ fn tail(text: &str, keep: usize) -> String {
     }
     let rest: String = text.chars().skip(count - keep).collect();
     format!("…{rest}")
+}
+
+/// Where what the assistant ran is kept: in /data on the handheld, where
+/// Files opens (a file a run, newest last by name).
+fn runs_dir() -> PathBuf {
+    if cfg!(target_os = "linux") && std::path::Path::new("/data").is_dir() {
+        PathBuf::from("/data/assistant")
+    } else {
+        crate::config_dir().join("assistant-runs")
+    }
+}
+
+/// Runs kept before the oldest go.
+const RUNS_KEPT: usize = 200;
+
+/// Keep a record of a run: what, when, why, who asked, and what it printed.
+fn keep_run(dir: &std::path::Path, name: &str, line: &str, reason: &str, by: &str, approved: bool, result: &Result<String, String>) -> Option<PathBuf> {
+    std::fs::create_dir_all(dir).ok()?;
+    let now = chrono::Local::now();
+    let mut slug = String::new();
+    for c in name.to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c);
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    let path = dir.join(format!("{}-{}.txt", now.format("%Y%m%d-%H%M%S"), slug.trim_matches('-')));
+    let (ending, output) = match result {
+        Ok(json) => {
+            let v: Value = serde_json::from_str(json).unwrap_or(Value::Null);
+            let ending = match (v["exitCode"].as_i64(), v["timedOutAfterSeconds"].as_u64()) {
+                (Some(code), _) => format!("exit {code}"),
+                (None, Some(s)) => format!("stopped after {s} s"),
+                _ => "ended".to_owned(),
+            };
+            (ending, v["output"].as_str().unwrap_or_default().to_owned())
+        }
+        Err(why) => ("did not run".to_owned(), why.clone()),
+    };
+    let asked = if approved { " · you said yes" } else { "" };
+    let text = format!("{name}\n{} · run by the assistant ({by}){asked}\nwhy: {reason}\n$ {line}\n{ending}\n\n{output}\n", now.format("%Y-%m-%d %H:%M:%S"));
+    crate::sys::write_atomic(&path, text.as_bytes()).ok()?;
+    // The oldest go once there are too many.
+    let mut kept: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "txt")).collect();
+    kept.sort();
+    for old in kept.iter().take(kept.len().saturating_sub(RUNS_KEPT)) {
+        std::fs::remove_file(old).ok();
+    }
+    Some(path)
 }
 
 /// Run an Action's command, what it prints and its errors together, for at
@@ -887,12 +937,15 @@ enum Busy {
     /// row's words once it is done.
     Tool { rx: Receiver<Result<String, String>>, id: String, row: usize, done: String },
     /// A critical Action shown, waiting for yes or no.
-    Approving { id: String, saved: Saved, line: String, row: usize },
+    Approving { id: String, saved: Saved, line: String, reason: String, row: usize },
 }
 
 /// Set by the choices page for a fresh conversation when the assistant is
 /// back on top.
 static NEW_CHAT: AtomicBool = AtomicBool::new(false);
+
+/// The confirm page's answer, taken up when the assistant is on top again.
+static DECISION: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
 
 /// An entry laid out: its lines at the width it was wrapped to, and height.
 #[derive(Clone)]
@@ -1005,7 +1058,7 @@ impl Assistant {
         self.input.clear();
         self.question = text.clone();
         self.rounds = 0;
-        self.actions = self.actions_given.clone().unwrap_or_else(crate::commands::load);
+        self.actions = self.actions_given.clone().unwrap_or_else(crate::commands::all);
         self.push(Entry::You(text));
         self.ask();
     }
@@ -1099,14 +1152,14 @@ impl Assistant {
                     self.busy = Busy::Tool { rx, id: call.id, row, done: words.done };
                     return;
                 }
-                Plan::Run { saved, line, ask: None } => {
-                    self.run(call.id, &saved, line);
+                Plan::Run { saved, line, reason, ask: false } => {
+                    self.run(call.id, &saved, line, reason, false);
                     return;
                 }
-                Plan::Run { saved, line, ask: Some(reason) } => {
-                    self.push(Entry::Asks { name: saved.name.clone(), command: line.clone(), reason, state: AskState::Waiting });
+                Plan::Run { saved, line, reason, ask: true } => {
+                    self.push(Entry::Asks { name: saved.name.clone(), command: line.clone(), reason: reason.clone(), state: AskState::Waiting });
                     let row = self.entries.len() - 1;
-                    self.busy = Busy::Approving { id: call.id, saved, line, row };
+                    self.busy = Busy::Approving { id: call.id, saved, line, reason, row };
                     return;
                 }
             }
@@ -1124,26 +1177,32 @@ impl Assistant {
         self.ask();
     }
 
-    fn run(&mut self, id: String, saved: &Saved, line: String) {
-        let name = saved.name.to_lowercase();
-        self.push(Entry::Step { words: format!("running {name}"), state: StepState::Working });
+    /// Run an Action on a thread, and keep a record of it on disk.
+    fn run(&mut self, id: String, saved: &Saved, line: String, reason: String, approved: bool) {
+        let lower = saved.name.to_lowercase();
+        self.push(Entry::Step { words: format!("running {lower}"), state: StepState::Working });
         let row = self.entries.len() - 1;
         let (tx, rx) = mpsc::channel();
+        let name = saved.name.clone();
+        let by = self.service.as_ref().map_or("", |(s, _)| s.label()).to_owned();
+        let dir = runs_dir();
         std::thread::spawn(move || {
-            tx.send(run_command(&line)).ok();
+            let result = run_command(&line);
+            keep_run(&dir, &name, &line, &reason, &by, approved, &result);
+            tx.send(result).ok();
         });
-        self.busy = Busy::Tool { rx, id, row, done: format!("ran {name}") };
+        self.busy = Busy::Tool { rx, id, row, done: format!("ran {lower}") };
     }
 
     /// The person's yes or no to a critical Action.
     fn approve(&mut self, yes: bool, robot: &Robot) {
-        let Busy::Approving { id, saved, line, row } = std::mem::replace(&mut self.busy, Busy::Idle) else { return };
+        let Busy::Approving { id, saved, line, reason, row } = std::mem::replace(&mut self.busy, Busy::Idle) else { return };
         if let Some((Entry::Asks { state, .. }, _)) = self.entries.get_mut(row) {
             *state = if yes { AskState::Yes } else { AskState::No };
             self.revision += 1;
         }
         if yes {
-            self.run(id, &saved, line);
+            self.run(id, &saved, line, reason, true);
         } else {
             self.outcomes.push(Outcome { id, text: "The person declined: the Action was not run.".into(), error: true });
             self.next_call(robot);
@@ -1170,31 +1229,32 @@ impl Assistant {
     /// Every entry laid out at the type size in use (wrapping is only done
     /// again when something changed).
     fn lay_out(&mut self, g: &mut Gfx) {
-        let size = g.ty.body.size;
+        let chat = chat_style(g);
+        let size = chat.size;
         if self.laid.as_ref().is_some_and(|(rev, s, _)| *rev == self.revision && *s == size) {
             return;
         }
         let ty = g.ty;
-        let body_lh = ty.body.size + 4.0;
+        let body_lh = chat_line(g);
         let cap_lh = ty.caption.size + 4.0;
         let mut laid = Vec::with_capacity(self.entries.len());
         for (entry, _) in &self.entries {
             laid.push(match entry {
                 Entry::You(text) => {
-                    let lines = wrap_paragraphs(g, text, ty.body, W * 0.72 - 20.0);
-                    let h = lines.len() as f32 * body_lh + 10.0;
+                    let lines = wrap_paragraphs(g, text, chat, W * 0.72 - 20.0);
+                    let h = lines.len() as f32 * body_lh + 8.0;
                     Laid { lines, h }
                 }
                 Entry::Said(text) => {
-                    let lines = wrap_paragraphs(g, text, ty.body, W - 2.0 * PAD - 8.0);
+                    let lines = wrap_paragraphs(g, text, chat, W - 2.0 * PAD - 8.0);
                     let h = lines.iter().map(|l| if l.is_empty() { body_lh * 0.5 } else { body_lh }).sum();
                     Laid { lines, h }
                 }
-                Entry::Step { .. } => Laid { lines: Vec::new(), h: cap_lh + 2.0 },
+                Entry::Step { .. } => Laid { lines: Vec::new(), h: cap_lh },
                 Entry::Asks { reason, .. } => {
                     let mut lines = crate::help::wrap(g, reason, ty.caption, W - 2.0 * PAD - 24.0);
                     lines.truncate(3);
-                    let h = 10.0 + ty.name.size + 6.0 + lines.len() as f32 * cap_lh + cap_lh + 4.0 + cap_lh + 8.0;
+                    let h = 9.0 + ty.body.size + 5.0 + lines.len() as f32 * cap_lh + cap_lh + 3.0 + cap_lh + 7.0;
                     Laid { lines, h }
                 }
                 Entry::Note(text) => {
@@ -1222,7 +1282,7 @@ impl Assistant {
     /// The line typed into, along the bottom.
     fn draw_input(&self, g: &mut Gfx, bar: Rect, focused: bool) {
         let t = g.tokens;
-        let ty = g.ty;
+        let chat = chat_style(g);
         let radius = bar.h * 0.5;
         g.surface(bar, radius, t.surface2);
         let cy = bar.cy();
@@ -1230,21 +1290,21 @@ impl Assistant {
         if self.input.is_empty() {
             let words = if self.idle() || matches!(self.busy, Busy::Approving { .. }) { "type a question" } else { "esc: stop" };
             if focused {
-                g.surface(Rect::new(bar.x + 12.0, cy - ty.body.size * 0.5, 1.5, ty.body.size), 0.5, t.signal);
+                g.surface(Rect::new(bar.x + 12.0, cy - chat.size * 0.5, 1.5, chat.size), 0.5, t.signal);
             }
-            g.text_at(bar.x + 17.0, cy, Align::Left, words, ty.body, t.faint);
+            g.text_at(bar.x + 17.0, cy, Align::Left, words, chat, t.faint);
         } else {
             // A long line shows its end, where the typing is.
             let room = bar.w - 24.0 - send_w;
             let mut shown: &str = &self.input;
-            while g.measure(shown, ty.body) > room {
+            while g.measure(shown, chat) > room {
                 let mut chars = shown.chars();
                 chars.next();
                 shown = chars.as_str();
             }
-            let w = g.text_at(bar.x + 12.0, cy, Align::Left, shown, ty.body, t.ink);
+            let w = g.text_at(bar.x + 12.0, cy, Align::Left, shown, chat, t.ink);
             if focused {
-                g.surface(Rect::new(bar.x + 13.0 + w, cy - ty.body.size * 0.5, 1.5, ty.body.size), 0.5, t.signal);
+                g.surface(Rect::new(bar.x + 13.0 + w, cy - chat.size * 0.5, 1.5, chat.size), 0.5, t.signal);
             }
             let ready = self.idle();
             g.icon("send", ready, bar.right() - 8.0 - send_w * 0.5, cy, 16.0, if ready { t.signal } else { t.faint });
@@ -1278,6 +1338,16 @@ fn step_words(call: &Call) -> StepWords {
         }
         other => same(&other.replace('_', " ")),
     }
+}
+
+/// The conversation's text: the sans at the caption's size (which follows the
+/// text size chosen), so more of it fits on the panel.
+fn chat_style(g: &Gfx) -> bezel::TextStyle {
+    bezel::TextStyle::body(g.ty.caption.size)
+}
+
+fn chat_line(g: &Gfx) -> f32 {
+    g.ty.caption.size + 3.5
 }
 
 /// Text wrapped paragraph by paragraph; a blank line between paragraphs.
@@ -1346,9 +1416,16 @@ impl Screen for Assistant {
                 }
             }
             Key::Leave => return Nav::Pop,
+            // A critical Action: Enter opens the page that asks for certain;
+            // Esc skips it here.
             _ if matches!(self.busy, Busy::Approving { .. }) => match key {
-                Key::Enter | Key::Char('y') => self.approve(true, cx.robot),
-                Key::Back | Key::Char('n') => self.approve(false, cx.robot),
+                Key::Enter => {
+                    if let Busy::Approving { saved, line, reason, .. } = &self.busy {
+                        *DECISION.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                        return Nav::Push(Box::new(Confirm::new(&saved.name, line, reason)));
+                    }
+                }
+                Key::Back => self.approve(false, cx.robot),
                 _ => {}
             },
             Key::Back if !self.input.is_empty() => self.input.clear(),
@@ -1366,6 +1443,12 @@ impl Screen for Assistant {
     }
 
     fn update(&mut self, cx: &mut Cx) -> Nav {
+        // Back from the confirm page with an answer.
+        if matches!(self.busy, Busy::Approving { .. }) {
+            if let Some(yes) = DECISION.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                self.approve(yes, cx.robot);
+            }
+        }
         match &self.busy {
             Busy::Asking(rx) => {
                 // The simulator's script answers at once; it is held as long
@@ -1411,7 +1494,9 @@ impl Screen for Assistant {
     fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
         let t = g.tokens;
         let ty = g.ty;
-        LINE.with(|l| l.set(ty.body.size + 4.0));
+        LINE.with(|l| l.set(chat_line(g)));
+        let chat = chat_style(g);
+        let lh = chat_line(g);
         if self.service.is_none() {
             g.empty("key", "add an OpenAI or Claude key to ask it anything");
             g.hint("enter: settings › keys");
@@ -1420,7 +1505,7 @@ impl Screen for Assistant {
         if g.calm {
             self.scroll.jump(self.scroll.target());
         }
-        let bar_h = ty.body.size + 14.0;
+        let bar_h = chat.size + 13.0;
         let bar = Rect::new(PAD, H - PAD - bar_h, W - 2.0 * PAD, bar_h);
         let area = Rect::new(0.0, g.top(), W, bar.y - 4.0 - g.top());
         let approving = matches!(self.busy, Busy::Approving { .. });
@@ -1481,22 +1566,22 @@ impl Screen for Assistant {
             };
             match entry {
                 Entry::You(_) => {
-                    let widest = l.lines.iter().map(|s| g.measure(s, ty.body)).fold(0.0, f32::max);
-                    let r = Rect::new(W - PAD - widest - 20.0, top, widest + 20.0, l.h);
-                    g.canvas.rrect(r.offset(g.ox, 0.0), 12.0_f32.min(l.h * 0.5), t.surface2, fade(r.y + 8.0).min(fade(r.bottom() - 8.0)));
+                    let widest = l.lines.iter().map(|s| g.measure(s, chat)).fold(0.0, f32::max);
+                    let r = Rect::new(W - PAD - widest - 18.0, top, widest + 18.0, l.h);
+                    g.canvas.rrect(r.offset(g.ox, 0.0), 10.0_f32.min(l.h * 0.5), t.surface2, fade(r.y + 7.0).min(fade(r.bottom() - 7.0)));
                     for (k, line) in l.lines.iter().enumerate() {
-                        let cy = top + 5.0 + (k as f32 + 0.5) * (ty.body.size + 4.0);
-                        g.text_alpha(r.x + 10.0, cy, line, ty.body, t.ink, fade(cy));
+                        let cy = top + 4.0 + (k as f32 + 0.5) * lh;
+                        g.text_alpha(r.x + 9.0, cy, line, chat, t.ink, fade(cy));
                     }
                 }
                 Entry::Said(_) => {
                     let mut ly = top;
                     for line in &l.lines {
-                        let lh = if line.is_empty() { (ty.body.size + 4.0) * 0.5 } else { ty.body.size + 4.0 };
+                        let this = if line.is_empty() { lh * 0.5 } else { lh };
                         if !line.is_empty() {
-                            g.text_alpha(PAD + 2.0, ly + lh * 0.5, line, ty.body, t.ink, fade(ly + lh * 0.5));
+                            g.text_alpha(PAD + 2.0, ly + this * 0.5, line, chat, t.ink, fade(ly + this * 0.5));
                         }
-                        ly += lh;
+                        ly += this;
                     }
                 }
                 Entry::Step { words, state } => {
@@ -1517,11 +1602,11 @@ impl Screen for Assistant {
                     let radius = g.tile_radius().min(14.0);
                     let card = fade(r.y + 10.0).min(fade(r.bottom() - 10.0));
                     g.canvas.rrect(r.offset(g.ox, 0.0), radius, t.surface1, card);
-                    let mut ly = r.y + 10.0 + ty.name.size * 0.5;
-                    g.icon_alpha("front_hand", *state == AskState::Waiting, r.x + 16.0, ly, 15.0, if *state == AskState::Waiting { t.signal } else { t.dim }, fade(ly));
-                    let title = g.text.fit(&format!("Run {name}?"), &ty.name, r.w - 40.0);
-                    g.text_alpha(r.x + 30.0, ly, &title, ty.name, t.ink, fade(ly));
-                    ly += ty.name.size * 0.5 + 6.0;
+                    let mut ly = r.y + 9.0 + ty.body.size * 0.5;
+                    g.icon_alpha("front_hand", *state == AskState::Waiting, r.x + 16.0, ly, 14.0, if *state == AskState::Waiting { t.signal } else { t.dim }, fade(ly));
+                    let title = g.text.fit(&format!("Run {name}?"), &ty.body, r.w - 40.0);
+                    g.text_alpha(r.x + 29.0, ly, &title, ty.body, t.ink, fade(ly));
+                    ly += ty.body.size * 0.5 + 5.0;
                     let cap_lh = ty.caption.size + 4.0;
                     for line in &l.lines {
                         g.text_alpha(r.x + 12.0, ly + cap_lh * 0.5, line, ty.caption, t.dim, fade(ly + cap_lh * 0.5));
@@ -1529,9 +1614,9 @@ impl Screen for Assistant {
                     }
                     let command = g.text.fit(command, &ty.caption, r.w - 24.0);
                     g.text_alpha(r.x + 12.0, ly + cap_lh * 0.5, &command, ty.caption, t.faint, fade(ly + cap_lh * 0.5));
-                    ly += cap_lh + 4.0;
+                    ly += cap_lh + 3.0;
                     let (words, color) = match state {
-                        AskState::Waiting => ("enter: run it · esc: skip", t.ink),
+                        AskState::Waiting => ("enter: confirm · esc: skip", t.ink),
                         AskState::Yes => ("you said run it", t.dim),
                         AskState::No => ("you skipped it", t.dim),
                     };
@@ -1567,6 +1652,108 @@ thread_local! {
 
 fn g_line_height() -> f32 {
     LINE.with(std::cell::Cell::get)
+}
+
+// --------------------------------------------------------------- confirm ---
+
+/// A critical Action asked about in full before it runs: what it is, why the
+/// assistant wants it, the command exactly as it will run, and run it or not
+/// (not, unless chosen).
+pub struct Confirm {
+    name: String,
+    command: String,
+    reason: String,
+    list: ListState,
+}
+
+impl Confirm {
+    fn new(name: &str, command: &str, reason: &str) -> Self {
+        let mut list = ListState::default();
+        list.focus = 1;
+        Confirm { name: name.to_owned(), command: command.to_owned(), reason: reason.to_owned(), list }
+    }
+
+    fn answer(&self, yes: bool) -> Nav {
+        *DECISION.lock().unwrap_or_else(|e| e.into_inner()) = Some(yes);
+        Nav::Pop
+    }
+}
+
+/// A command broken into lines by width alone: it may have no spaces to
+/// break at.
+fn wrap_command(g: &mut Gfx, text: &str, style: bezel::TextStyle, width: f32) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for c in text.chars() {
+        line.push(c);
+        if g.measure(&line, style) > width && line.chars().count() > 1 {
+            line.pop();
+            lines.push(std::mem::take(&mut line));
+            line.push(c);
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+impl Screen for Confirm {
+    fn title(&self) -> &str {
+        "Confirm"
+    }
+
+    fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
+        match key {
+            Key::Back | Key::Leave => return self.answer(false),
+            Key::Enter => return self.answer(self.list.focus == 0),
+            other => crate::screens::list_key(&mut self.list, other, 2),
+        }
+        Nav::Stay
+    }
+
+    fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
+        let t = g.tokens;
+        let ty = g.ty;
+        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let rows_top = bottom - 2.0 * row_h - 3.0;
+        let cap_lh = ty.caption.size + 4.0;
+        // What it is, and why.
+        let mut y = top + 1.0;
+        let cy = y + ty.name.size * 0.5;
+        g.icon("front_hand", true, PAD + 8.0, cy, 16.0, t.signal);
+        let title = g.text.fit(&self.name, &ty.name, W - 2.0 * PAD - 24.0);
+        g.text_at(PAD + 22.0, cy, Align::Left, &title, ty.name, t.ink);
+        y += ty.name.size + 4.0;
+        let why = if self.reason.is_empty() { "the assistant wants to run it" } else { self.reason.as_str() };
+        for line in crate::help::wrap(g, why, ty.caption, W - 2.0 * PAD).into_iter().take(2) {
+            g.text_at(PAD, y + cap_lh * 0.5, Align::Left, &line, ty.caption, t.dim);
+            y += cap_lh;
+        }
+        // The command itself, as it will run.
+        y += 3.0;
+        let fits = (((rows_top - 5.0 - y) - 8.0) / cap_lh).floor().max(1.0) as usize;
+        let mut lines = wrap_command(g, &self.command, ty.caption, W - 2.0 * PAD - 16.0);
+        if lines.len() > fits {
+            lines.truncate(fits);
+            if let Some(last) = lines.last_mut() {
+                last.pop();
+                last.push('…');
+            }
+        }
+        let box_h = lines.len() as f32 * cap_lh + 8.0;
+        g.surface(Rect::new(PAD, y, W - 2.0 * PAD, box_h), 8.0, t.surface2);
+        for (k, line) in lines.iter().enumerate() {
+            g.text_at(PAD + 8.0, y + 4.0 + (k as f32 + 0.5) * cap_lh, Align::Left, line, ty.caption, t.ink);
+        }
+        // Run it, or not.
+        for (i, ry) in self.list.layout(g, 2, rows_top, row_h, 3.0, bottom) {
+            let r = Rect::new(PAD, ry, W - 2.0 * PAD, row_h);
+            let (name, value) = if i == 0 { ("Run it", "it could change something") } else { ("Don't run it", "") };
+            g.row(r, name, value, t.dim, i == self.list.focus);
+        }
+        g.hint("enter: confirm · esc: don't run");
+    }
 }
 
 // --------------------------------------------------------------- choices ---
@@ -1840,7 +2027,20 @@ mod tests {
             assert!(matches!(page.entries.last(), Some((Entry::Asks { state: AskState::Waiting, .. }, _))));
             {
                 let mut cx = Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true };
-                page.key(if yes { Key::Enter } else { Key::Back }, &mut cx);
+                if yes {
+                    // Enter asks for certain on a page of its own, which
+                    // starts on not running it.
+                    assert!(matches!(page.key(Key::Enter, &mut cx), Nav::Push(_)));
+                    let mut confirm = Confirm::new("Deploy robot code", "cd /data/code/robot && ./gradlew deploy", "asked");
+                    assert_eq!(confirm.list.focus, 1, "not run unless chosen");
+                    confirm.key(Key::Up, &mut cx);
+                    assert!(matches!(confirm.key(Key::Enter, &mut cx), Nav::Pop));
+                    assert!(matches!(page.busy, Busy::Approving { .. }), "still waiting until it is on top again");
+                    page.update(&mut cx);
+                } else {
+                    // Esc on the card skips it there and then.
+                    page.key(Key::Back, &mut cx);
+                }
             }
             run(&mut page, &mut robot, &mut settings, &mut say, 400);
             let last = page.entries.last().map(|(e, _)| e.clone());
@@ -1865,6 +2065,29 @@ mod tests {
         assert_eq!(page.input, "why so slow?");
         assert_eq!(page.chat.as_ref().unwrap().len(), marked, "the conversation is as it was");
         assert!(matches!(page.entries.last(), Some((Entry::Note(_), _))));
+    }
+
+    #[test]
+    fn every_run_is_kept_on_disk_and_the_oldest_go() {
+        let dir = std::env::temp_dir().join(format!("catalyst-runs-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let ok = Ok(json!({"exitCode": 0, "output": "4 packets received"}).to_string());
+        let path = keep_run(&dir, "Ping the robot", "ping -c 4 10.58.5.2", "to check the link", "gpt-6.2 sol", false, &ok).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(path.file_name().unwrap().to_string_lossy().ends_with("-ping-the-robot.txt"));
+        assert!(text.starts_with("Ping the robot\n"));
+        assert!(text.contains("run by the assistant (gpt-6.2 sol)\nwhy: to check the link\n$ ping -c 4 10.58.5.2\nexit 0\n\n4 packets received"), "{text}");
+        let deploy = keep_run(&dir, "Deploy robot code", "./gradlew deploy", "asked", "opus 5.5", true, &Err("the command could not start".into())).unwrap();
+        assert!(std::fs::read_to_string(deploy).unwrap().contains("you said yes"));
+        // Too many: the oldest names (by time) go first.
+        for i in 0..RUNS_KEPT + 3 {
+            std::fs::write(dir.join(format!("20000101-0000{i:03}-old.txt")), "old").unwrap();
+        }
+        keep_run(&dir, "Clock", "date", "", "opus 5.5", false, &ok).unwrap();
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+        assert_eq!(left.len(), RUNS_KEPT);
+        assert!(!dir.join("20000101-0000000-old.txt").exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Asks the real services with keys from the environment

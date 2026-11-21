@@ -1,7 +1,8 @@
 //! Actions: shell commands kept under a name and run with one key, each in
-//! a terminal of its own, its output left on screen when it is done. A few
-//! come ready (the robot pinged, its agent asked how it is, the disk and
-//! memory, the kernel's messages); any can be changed, removed or added.
+//! a terminal of its own, its output left on screen when it is done. The
+//! team's own come first; after them, built-in ones for the robot, the
+//! network and the handheld itself, which stay as they are (`e` on one keeps
+//! a copy to change).
 //!
 //! `{robot}` and `{team}` in a command are filled in when it runs: the
 //! robot's address and the team's number.
@@ -31,7 +32,7 @@ pub struct Saved {
 }
 
 impl Saved {
-    fn new(name: &str, command: &str) -> Self {
+    pub fn new(name: &str, command: &str) -> Self {
         Saved { name: name.to_owned(), command: command.to_owned(), ask: Ask::Auto }
     }
 
@@ -149,16 +150,55 @@ fn reads_only(part: &str) -> bool {
     }
 }
 
-const DEFAULTS: [(&str, &str); 8] = [
-    ("Ping the robot", "ping -c 4 {robot}"),
-    ("Ask the robot's agent", "curl -s http://{robot}:9010/api/system"),
-    ("Disk space", "df -h"),
-    ("Memory", "free -m"),
-    ("Addresses", "ip addr"),
-    ("Busiest processes", "top -b -n 1 | head -n 20"),
-    ("Kernel messages", "dmesg | tail -n 40"),
-    ("System log", "logread | tail -n 40"),
+/// The built-in Actions: the robot, the network, the handheld. Each says
+/// whether the assistant may run it freely (`Auto`: as the command reads) or
+/// must ask (`Always`); `Never` for those that only look but whose shell
+/// form the guess cannot read.
+const BUILT_IN: [(&str, &str, Ask); 26] = [
+    // The robot.
+    ("Ping the robot", "ping -c 4 {robot}", Ask::Auto),
+    ("Ask the robot's agent", "curl -fsS http://{robot}:9010/api/system", Ask::Auto),
+    ("Logs on the robot", "curl -fsS http://{robot}:9010/api/logs", Ask::Auto),
+    ("Trace to the robot", "traceroute -n -w 2 -m 8 {robot}", Ask::Auto),
+    ("Robot's name and address", "nslookup {robot}", Ask::Auto),
+    // The network.
+    ("Wi-Fi link", "iw dev wlan0 link", Ask::Auto),
+    ("Wi-Fi networks nearby", "iw dev wlan0 scan | grep -e SSID -e signal", Ask::Auto),
+    ("Ethernet link", "ip link show eth0", Ask::Auto),
+    ("Addresses", "ip addr", Ask::Auto),
+    ("Routes", "ip route", Ask::Auto),
+    ("Name servers", "cat /etc/resolv.conf", Ask::Auto),
+    ("Internet reachable", "ping -c 3 -W 2 1.1.1.1", Ask::Auto),
+    // The handheld.
+    ("Disk space", "df -h", Ask::Auto),
+    ("Memory", "free -m", Ask::Auto),
+    ("Busiest processes", "top -b -n 1 | head -n 20", Ask::Auto),
+    ("Uptime and load", "uptime", Ask::Auto),
+    ("Clock", "date", Ask::Auto),
+    ("Processor temperature", "cat /sys/class/thermal/thermal_zone0/temp", Ask::Auto),
+    ("Processor speed", "cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", Ask::Auto),
+    ("Services", "rc-status", Ask::Never),
+    ("USB devices", "lsusb", Ask::Auto),
+    ("I2C devices", "i2cdetect -y -r 1", Ask::Auto),
+    ("Kernel messages", "dmesg | tail -n 40", Ask::Auto),
+    ("System log", "logread | tail -n 40", Ask::Auto),
+    // Changes: always asked first.
+    ("Restart Wi-Fi", "rc-service catalyst-wifi restart", Ask::Always),
+    ("Restart the handheld", "reboot", Ask::Always),
 ];
+
+/// The built-in Actions.
+pub fn builtin() -> Vec<Saved> {
+    BUILT_IN.iter().map(|(name, command, ask)| Saved { name: (*name).into(), command: (*command).into(), ask: *ask }).collect()
+}
+
+/// Every Action: the team's own, then the built-in ones they have not
+/// replaced with their own of the same name.
+pub fn all() -> Vec<Saved> {
+    let mut all = load();
+    all.extend(builtin().into_iter().filter(|b| !all.iter().any(|s| s.name.eq_ignore_ascii_case(&b.name))).collect::<Vec<_>>());
+    all
+}
 
 fn file() -> PathBuf {
     crate::config_dir().join("commands")
@@ -171,8 +211,9 @@ fn asks_file() -> PathBuf {
     crate::config_dir().join("commands-ask")
 }
 
-/// The commands kept, one a line as `name<tab>command`; the ready ones until
-/// the list is first changed.
+/// The team's own commands, one a line as `name<tab>command`. (Before 0.4.1
+/// a list never changed held a few ready ones; they are built in now, under
+/// the same names.)
 pub fn load() -> Vec<Saved> {
     let mut saved: Vec<Saved> = match std::fs::read_to_string(file()) {
         Ok(text) => text
@@ -181,7 +222,8 @@ pub fn load() -> Vec<Saved> {
             .filter(|(n, c)| !n.trim().is_empty() && !c.trim().is_empty())
             .map(|(n, c)| Saved::new(n.trim(), c.trim()))
             .collect(),
-        Err(_) => DEFAULTS.iter().map(|(n, c)| Saved::new(n, c)).collect(),
+        // None of their own yet: the built-in ones are there all the same.
+        Err(_) => Vec::new(),
     };
     if let Ok(text) = std::fs::read_to_string(asks_file()) {
         for (name, word) in text.lines().filter_map(|l| l.split_once('\t')) {
@@ -221,16 +263,35 @@ fn command_char(c: char) -> bool {
 
 // ------------------------------------------------------------------ list ---
 
+/// The team's own commands, a row to add one, then the built-in ones.
 pub struct Commands {
     saved: Vec<Saved>,
+    builtin: Vec<Saved>,
     list: ListState,
     deleting: Option<usize>,
 }
 
 impl Commands {
     pub fn new() -> Self {
-        Commands { saved: load(), list: ListState::default(), deleting: None }
+        Commands { saved: load(), builtin: shown_builtin(&load()), list: ListState::default(), deleting: None }
     }
+
+    fn len(&self) -> usize {
+        self.saved.len() + 1 + self.builtin.len()
+    }
+
+    /// The command on row `i`: the team's, or a built-in one (and which).
+    fn at(&self, i: usize) -> Option<(&Saved, bool)> {
+        match i.checked_sub(self.saved.len() + 1) {
+            Some(b) => self.builtin.get(b).map(|s| (s, true)),
+            None => self.saved.get(i).map(|s| (s, false)),
+        }
+    }
+}
+
+/// The built-in commands not replaced by one of the team's of the same name.
+fn shown_builtin(saved: &[Saved]) -> Vec<Saved> {
+    builtin().into_iter().filter(|b| !saved.iter().any(|s| s.name.eq_ignore_ascii_case(&b.name))).collect()
 }
 
 impl Screen for Commands {
@@ -240,7 +301,8 @@ impl Screen for Commands {
 
     fn resume(&mut self) {
         self.saved = load();
-        self.list.focus = self.list.focus.min(self.saved.len());
+        self.builtin = shown_builtin(&self.saved);
+        self.list.focus = self.list.focus.min(self.len() - 1);
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -250,7 +312,7 @@ impl Screen for Commands {
             Key::Back => return Nav::Pop,
             Key::Enter | Key::Right if at == self.saved.len() => return Nav::Push(Box::new(Edit::new(None, None))),
             Key::Enter | Key::Right => {
-                let s = &self.saved[at];
+                let Some((s, _)) = self.at(at) else { return Nav::Stay };
                 let robot = crate::tools::robot_address(cx.robot);
                 match expand(&s.command, robot.as_deref(), crate::tools::team(cx.robot)) {
                     Ok(line) => {
@@ -262,6 +324,13 @@ impl Screen for Commands {
             }
             Key::Char('n') => return Nav::Push(Box::new(Edit::new(None, None))),
             Key::Char('e') if at < self.saved.len() => return Nav::Push(Box::new(Edit::new(Some(at), Some(self.saved[at].clone())))),
+            // A built-in one stays as it is: a copy of it becomes the team's own.
+            Key::Char('e') if at > self.saved.len() => {
+                if let Some((s, _)) = self.at(at) {
+                    return Nav::Push(Box::new(Edit::new(None, Some(s.clone()))));
+                }
+            }
+            Key::Char('d') if at > self.saved.len() => *cx.say = Some("built in: it stays · e keeps a copy to change".into()),
             Key::Char('d') if at < self.saved.len() => {
                 if armed == Some(at) {
                     let gone = self.saved.remove(at);
@@ -272,7 +341,10 @@ impl Screen for Commands {
                     self.deleting = Some(at);
                 }
             }
-            other => crate::screens::list_key(&mut self.list, other, self.saved.len() + 1),
+            other => {
+                let len = self.len();
+                crate::screens::list_key(&mut self.list, other, len);
+            }
         }
         Nav::Stay
     }
@@ -280,22 +352,27 @@ impl Screen for Commands {
     fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
         let t = g.tokens;
         let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
-        let len = self.saved.len() + 1;
+        let len = self.len();
         for (i, y) in self.list.layout(g, len, top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
-            match self.saved.get(i) {
-                Some(s) => {
+            match self.at(i) {
+                Some((s, built_in)) => {
                     // As much of the command as fits beside its name.
                     let style = if g.theme == crate::look::Theme::Bezel { g.ty.body } else { g.ty.label };
                     let name_w = g.measure(&s.name, g.ty.body).max(60.0);
                     let preview = g.text.fit(&s.command, &style, (r.w - name_w - 34.0).max(30.0));
-                    g.row(r, &s.name, &preview, t.dim, i == self.list.focus);
+                    g.row(r, &s.name, &preview, if built_in { t.faint } else { t.dim }, i == self.list.focus);
                 }
                 None => g.row(r, "New command", "n", t.dim, i == self.list.focus),
             }
         }
         self.list.scrollbar(g, len, top, bottom);
-        g.hint(if self.list.focus < self.saved.len() { "enter: run · e: edit · d: remove" } else { "enter: a new one" });
+        let focus = self.list.focus;
+        g.hint(match focus.cmp(&self.saved.len()) {
+            std::cmp::Ordering::Less => "enter: run · e: edit · d: remove",
+            std::cmp::Ordering::Equal => "enter: a new one",
+            std::cmp::Ordering::Greater => "built in · enter: run · e: a copy to change",
+        });
     }
 }
 
@@ -425,19 +502,23 @@ mod tests {
     }
 
     #[test]
-    fn commands_are_kept_and_the_ready_ones_come_until_then() {
+    fn the_teams_commands_are_kept_and_the_built_in_ones_follow() {
         crate::shell::tests::sandbox();
         std::fs::remove_file(file()).ok();
-        let ready = load();
-        assert_eq!(ready.len(), DEFAULTS.len());
-        assert!(ready.iter().any(|s| s.command.contains("{robot}")));
-        let mut mine = vec![Saved::new("Deploy", "cd /data/code/robot && ./gradlew deploy"), Saved::new("Robot log", "ssh admin@{robot} tail -n 50 /var/log/robot")];
+        assert!(load().is_empty(), "none of their own to begin with");
+        assert_eq!(all(), builtin(), "but the built-in ones all the same");
+        assert!(builtin().iter().any(|s| s.command.contains("{robot}")));
+        let mut mine = vec![Saved::new("Deploy", "cd /data/code/robot && ./gradlew deploy"), Saved::new("Ping the robot", "ping -c 20 {robot}")];
         mine[1].ask = Ask::Never;
         assert!(save(&mine));
         assert_eq!(load(), mine, "what the assistant was told about each is kept too");
         // The list itself stays in the form an older shell reads.
         assert_eq!(std::fs::read_to_string(file()).unwrap().lines().next(), Some("Deploy\tcd /data/code/robot && ./gradlew deploy"));
-        // An empty list stays empty: the ready ones do not come back.
+        // Theirs first; a built-in one of the same name gives way to theirs.
+        let every = all();
+        assert_eq!(&every[..2], &mine[..]);
+        assert_eq!(every.iter().filter(|s| s.name == "Ping the robot").count(), 1);
+        assert_eq!(every.len(), 2 + builtin().len() - 1);
         assert!(save(&[]));
         assert!(load().is_empty());
         std::fs::remove_file(file()).ok();
@@ -445,10 +526,17 @@ mod tests {
     }
 
     #[test]
-    fn the_ready_commands_only_read_and_changes_are_critical() {
-        for (name, command) in DEFAULTS {
-            assert!(!looks_critical(command), "{name}: {command}");
+    fn the_built_in_commands_say_rightly_whether_they_change_anything() {
+        let names: Vec<&str> = BUILT_IN.iter().map(|(n, ..)| *n).collect();
+        assert_eq!(names.len(), names.iter().collect::<std::collections::HashSet<_>>().len(), "no two share a name");
+        for (name, command, ask) in BUILT_IN {
+            match ask {
+                Ask::Auto => assert!(!looks_critical(command), "{name}: {command} reads as a change"),
+                Ask::Always => assert!(looks_critical(command), "{name}: {command} is asked about, and reads as a change too"),
+                Ask::Never => {}
+            }
         }
+        assert!(builtin().iter().filter(|s| s.critical()).all(|s| s.name.starts_with("Restart")), "only the restarts ask first");
         for command in [
             "cd /data/code/robot && ./gradlew deploy",
             "ssh admin@{robot} sudo reboot",
