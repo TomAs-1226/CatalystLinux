@@ -794,7 +794,7 @@ mod tests {
         let current = Status { state: "current".into(), version: crate::sysupdate::version(), ..Status::default() };
         let (name, value, _) = update_row(&current);
         assert_eq!(name, format!("What's new in {}", base(&crate::sysupdate::version())));
-        assert!(value.ends_with("changes ›"), "{value}");
+        assert!(value.ends_with(" changes ›") || value == "1 change ›", "{value}");
         assert_eq!(update_page(&current).unwrap().then, Then::Back);
     }
 
