@@ -396,6 +396,15 @@ impl Gfx {
         }
     }
 
+    /// Words that read as "fine" (a 200, the fastest lap): ice on dark, and
+    /// ice's own ink on light, where ice is a fill too pale to read.
+    pub fn good(&self) -> Color {
+        match self.tokens.tone {
+            bezel::Tone::Dark => self.tokens.ice,
+            bezel::Tone::Light => self.tokens.on_ice,
+        }
+    }
+
     /// The focus ring's colour: in Catalyst, the ink (white on dark), as
     /// setup's; in Bezel, the signal.
     pub fn ring_color(&self) -> Color {
@@ -727,6 +736,16 @@ impl Gfx {
         let (style, color) = (self.ty.caption, self.tokens.dim);
         let fitted = self.text.fit(s, &style, W - 2.0 * PAD);
         self.text_at(W * 0.5, H - 2.0 - style.size * 0.5, Align::Center, &fitted, style, color);
+    }
+
+    /// The first of `choices` (longest first) that fits whole, so a larger
+    /// text size leaves keys out rather than cutting one in half.
+    pub fn hint_any(&mut self, choices: &[&str]) {
+        let style = self.ty.caption;
+        let fits = choices.iter().copied().find(|s| self.measure(s, style) <= W - 2.0 * PAD);
+        if let Some(s) = fits.or(choices.last().copied()) {
+            self.hint(s);
+        }
     }
 
     /// What a page says when it has nothing to show.

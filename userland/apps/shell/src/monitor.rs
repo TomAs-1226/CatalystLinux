@@ -339,7 +339,7 @@ impl Monitor {
         let procs = self.processes();
         let head_h = ty.caption.size + 6.0;
         let sort = if self.by_memory { "by memory" } else { "by cpu" };
-        let left = format!("{}{} · {} running", if self.now.simulated { "simulated · " } else { "" }, sort, procs.len());
+        let left = format!("{}{} · {} running · s: sort", if self.now.simulated { "simulated · " } else { "" }, sort, procs.len());
         g.text_fit(PAD + 4.0, top + head_h * 0.5 - 1.0, &left, ty.caption, t.dim, W - 2.0 * PAD - 8.0);
         let (list_top, row_h, bottom) = (top + head_h + 2.0, g.row_h(), H - 16.0);
         for (i, y) in self.list.layout(g, procs.len(), list_top, row_h, 3.0, bottom) {
@@ -418,9 +418,14 @@ impl Screen for Monitor {
             Key::Right if self.page == 0 => self.page = 1,
             Key::Enter if self.page == 0 => self.page = 1,
             Key::Left if self.page == 1 => self.page = 0,
-            Key::Enter => {
+            Key::Char('s') if self.page == 1 => {
                 self.by_memory = !self.by_memory;
                 self.list.focus = 0;
+            }
+            Key::Enter | Key::Char('k') if self.page == 1 => {
+                if let Some(p) = self.processes().get(self.list.focus) {
+                    return Nav::Push(Box::new(ProcessView::new(p.pid, &p.name, self.now.simulated)));
+                }
             }
             other if self.page == 1 => crate::screens::list_key(&mut self.list, other, self.now.procs.len()),
             _ => {}
@@ -464,9 +469,235 @@ impl Screen for Monitor {
     }
 }
 
+// --------------------------------------------------------------- process ---
+
+/// One process in detail, read once a second from `/proc/<pid>`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Detail {
+    pub name: String,
+    pub state: String,
+    pub ppid: u32,
+    pub threads: u32,
+    pub rss_kb: u64,
+    pub nice: i32,
+    pub command: String,
+    /// Seconds since it started.
+    pub age: Option<f64>,
+}
+
+/// `/proc/<pid>/status`, `stat` and `cmdline` read as one process's detail.
+pub fn detail(status: &str, stat: &str, cmdline: &[u8], uptime: Option<f64>) -> Detail {
+    let field = |name: &str| status.lines().find_map(|l| l.strip_prefix(name)?.strip_prefix(':')).map(|v| v.trim().to_owned()).unwrap_or_default();
+    let rest: Vec<&str> = stat.rfind(')').map_or(Vec::new(), |i| stat[i + 1..].split_whitespace().collect());
+    let at = |n: usize| rest.get(n - 3).copied().unwrap_or("0");
+    let started_ticks: f64 = at(22).parse().unwrap_or(0.0);
+    let state = field("State");
+    Detail {
+        name: field("Name"),
+        state: state.split_once(' ').map_or(state.clone(), |(_, words)| words.trim_matches(['(', ')']).to_owned()),
+        ppid: field("PPid").parse().unwrap_or(0),
+        threads: field("Threads").parse().unwrap_or(0),
+        rss_kb: field("VmRSS").split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0),
+        nice: at(19).parse().unwrap_or(0),
+        command: cmdline.split(|b| *b == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect::<Vec<_>>().join(" "),
+        age: uptime.map(|u| (u - started_ticks / 100.0).max(0.0)),
+    }
+}
+
+/// Why a process may not be ended from here, if it may not.
+pub fn protected(pid: u32, detail: &Detail) -> Option<&'static str> {
+    if pid == 1 {
+        Some("init runs everything: it stays")
+    } else if pid == std::process::id() {
+        Some("this is the shell itself")
+    } else if detail.ppid == 2 || (detail.command.is_empty() && detail.ppid == 0) {
+        Some("a kernel thread: it stays")
+    } else {
+        None
+    }
+}
+
+pub struct ProcessView {
+    pid: u32,
+    name: String,
+    simulated: bool,
+    now: Detail,
+    read_at: Option<Instant>,
+    /// The signal asked for once (k: end, K: force); asked again, it is sent.
+    armed: Option<char>,
+    gone: bool,
+}
+
+impl ProcessView {
+    fn new(pid: u32, name: &str, simulated: bool) -> Self {
+        let mut view = ProcessView { pid, name: name.to_owned(), simulated, now: Detail::default(), read_at: None, armed: None, gone: false };
+        view.read();
+        view
+    }
+
+    fn read(&mut self) {
+        self.read_at = Some(Instant::now());
+        if self.simulated {
+            self.now = Detail { name: self.name.clone(), state: "sleeping".into(), ppid: 1, threads: 1, rss_kb: 2_380, nice: 0, command: format!("/usr/sbin/{}", self.name), age: Some(3.0 * 3600.0 + 61.0) };
+            return;
+        }
+        let dir = format!("/proc/{}", self.pid);
+        let status = std::fs::read_to_string(format!("{dir}/status"));
+        let Ok(status) = status else {
+            self.gone = true;
+            return;
+        };
+        let stat = std::fs::read_to_string(format!("{dir}/stat")).unwrap_or_default();
+        let cmdline = std::fs::read(format!("{dir}/cmdline")).unwrap_or_default();
+        let uptime = std::fs::read_to_string("/proc/uptime").ok().and_then(|t| t.split_whitespace().next()?.parse().ok());
+        self.now = detail(&status, &stat, &cmdline, uptime);
+    }
+
+    fn signal(&mut self, force: bool) -> String {
+        if let Some(why) = protected(self.pid, &self.now) {
+            return why.into();
+        }
+        if self.simulated {
+            return "simulated: nothing to end".into();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let sig = if force { libc::SIGKILL } else { libc::SIGTERM };
+            // SAFETY: a plain system call on a process id.
+            if unsafe { libc::kill(self.pid as i32, sig) } == 0 {
+                return if force { format!("{} forced to stop", self.now.name) } else { format!("asked {} to end", self.now.name) };
+            }
+            format!("could not: {}", std::io::Error::last_os_error())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = force;
+            "not on this computer".into()
+        }
+    }
+
+    fn renice(&mut self, by: i32) -> String {
+        if self.simulated {
+            return "simulated".into();
+        }
+        let to = (self.now.nice + by).clamp(-20, 19);
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: a plain system call on a process id.
+            if unsafe { libc::setpriority(libc::PRIO_PROCESS, self.pid as libc::id_t, to) } == 0 {
+                self.read();
+                return format!("nice {to} · {}", if to > 0 { "gives way to others" } else if to < 0 { "goes ahead of others" } else { "as usual" });
+            }
+            format!("could not: {}", std::io::Error::last_os_error())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = to;
+            "not on this computer".into()
+        }
+    }
+}
+
+impl Screen for ProcessView {
+    /// Not the name: most are too long for the space beside the island, so
+    /// it heads the page instead.
+    fn title(&self) -> &str {
+        "Process"
+    }
+
+    fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
+        let armed = self.armed.take();
+        match key {
+            Key::Back => return Nav::Pop,
+            Key::Char(c @ ('k' | 'K')) => {
+                if let Some(why) = protected(self.pid, &self.now) {
+                    *cx.say = Some(why.into());
+                } else if armed == Some(c) {
+                    *cx.say = Some(self.signal(c == 'K'));
+                    self.read();
+                } else {
+                    *cx.say = Some(if c == 'K' { "K again forces it to stop".into() } else { "k again asks it to end".into() });
+                    self.armed = Some(c);
+                }
+            }
+            Key::Char('+') => *cx.say = Some(self.renice(1)),
+            Key::Char('-') => *cx.say = Some(self.renice(-1)),
+            _ => {}
+        }
+        Nav::Stay
+    }
+
+    fn tick(&mut self, _dt: f32) -> bool {
+        if self.read_at.is_none_or(|at| at.elapsed() >= EVERY) {
+            self.read();
+            return true;
+        }
+        false
+    }
+
+    fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
+        let t = g.tokens;
+        let ty = g.ty;
+        let top = g.top();
+        if self.gone {
+            g.empty("check_circle", &format!("process {} has ended", self.pid));
+            g.hint("esc: back");
+            return;
+        }
+        let d = &self.now;
+        // Six lines (the name, four readings, the command) above the hint at
+        // any text size.
+        let line = (ty.body.size + 6.0).min((H - PAD - g.hint_h() - top) / 6.0);
+        let mut y = top + line * 0.5;
+        // The name, and which process it is.
+        let ids = format!("pid {} · parent {}", self.pid, d.ppid);
+        let ids_w = g.measure(&ids, ty.caption);
+        let name = g.text.fit(&self.name, &ty.body, W - 2.0 * PAD - 16.0 - ids_w);
+        g.text_at(PAD + 4.0, y, Align::Left, &name, ty.body, t.ink);
+        g.text_at(W - PAD - 4.0, y, Align::Right, &ids, ty.caption, t.dim);
+        y += line;
+        let rows = [
+            ("state", format!("{} · {} thread{}", d.state, d.threads, if d.threads == 1 { "" } else { "s" })),
+            ("memory", crate::tools::bytes(d.rss_kb as f64 * 1024.0)),
+            ("nice", format!("{}{}", d.nice, if d.nice > 0 { " · gives way" } else if d.nice < 0 { " · goes ahead" } else { "" })),
+            ("running", d.age.map_or("–".into(), uptime)),
+        ];
+        for (name, value) in &rows {
+            g.text_at(PAD + 4.0, y, Align::Left, name, ty.caption, t.dim);
+            let value = g.text.fit(value, &ty.body, W - 2.0 * PAD - 80.0);
+            g.text_at(W - PAD - 4.0, y, Align::Right, &value, ty.body, t.ink);
+            y += line;
+        }
+        let command = if d.command.is_empty() { "(a kernel thread)".to_owned() } else { d.command.clone() };
+        let command = g.text.fit(&command, &ty.caption, W - 2.0 * PAD - 8.0);
+        g.text_at(PAD + 4.0, y, Align::Left, &command, ty.caption, t.faint);
+        g.hint(match protected(self.pid, d) {
+            Some(_) => "+ −: nice",
+            None => "k: end · K: force · + −: nice",
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_process_is_read_in_detail_from_proc() {
+        let status = "Name:\twpa_supplicant\nState:\tS (sleeping)\nPPid:\t1\nThreads:\t1\nVmRSS:\t    2380 kB\n";
+        let stat = "412 (wpa_supplicant) S 1 412 412 0 -1 4194560 300 0 0 0 12 30 0 0 20 5 1 0 1500 5300000 595 18446744073709551615";
+        let d = detail(status, stat, b"/usr/sbin/wpa_supplicant\0-B\0-i\0wlan0\0", Some(100.0));
+        assert_eq!(d.name, "wpa_supplicant");
+        assert_eq!(d.state, "sleeping");
+        assert_eq!((d.ppid, d.threads, d.rss_kb, d.nice), (1, 1, 2380, 5));
+        assert_eq!(d.command, "/usr/sbin/wpa_supplicant -B -i wlan0");
+        assert_eq!(d.age, Some(85.0));
+        assert!(protected(412, &d).is_none());
+        assert!(protected(1, &d).is_some(), "init stays");
+        assert!(protected(std::process::id(), &d).is_some(), "the shell itself stays");
+        let kthread = Detail { ppid: 2, ..Detail::default() };
+        assert!(protected(30, &kthread).is_some());
+    }
 
     #[test]
     fn the_processor_is_read_from_proc_stat() {

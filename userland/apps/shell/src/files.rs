@@ -156,7 +156,7 @@ impl Screen for Files {
             Key::Enter | Key::Right => match focused {
                 Some(entry) if entry.dir => self.enter(self.dir.join(&entry.name), None),
                 Some(entry) if !entry.file => *cx.say = Some("not a file the editor can open".into()),
-                Some(entry) if entry.bytes > EDITABLE => *cx.say = Some(format!("{} is too large to open", size(entry.bytes))),
+                Some(entry) if entry.bytes > EDITABLE => *cx.say = Some(format!("{} is too large to edit · h shows its bytes", size(entry.bytes))),
                 Some(entry) => match Editor::open(&self.dir.join(&entry.name)) {
                     Ok(editor) => return Nav::Push(Box::new(editor)),
                     Err(why) => *cx.say = Some(why),
@@ -164,6 +164,16 @@ impl Screen for Files {
                 None => {}
             },
             Key::Char('n') => self.naming = Some(String::new()),
+            // Any file as bytes, however large (only what is on screen is read).
+            // (Not x: outside typing, bare X is the Cardputer's down arrow.)
+            Key::Char('h') => match focused {
+                Some(entry) if entry.file => match crate::hex::HexView::open(&self.dir.join(&entry.name)) {
+                    Ok(view) => return Nav::Push(Box::new(view)),
+                    Err(why) => *cx.say = Some(why),
+                },
+                Some(_) => *cx.say = Some("only a file opens as hex".into()),
+                None => {}
+            },
             Key::Char('d') => {
                 if let Some(entry) = focused {
                     if armed.as_deref() == Some(entry.name.as_str()) {
@@ -220,7 +230,7 @@ impl Screen for Files {
             g.row(r, &name, &value, t.dim, i == self.list.focus);
         }
         self.list.scrollbar(g, entries.len(), top, bottom);
-        g.hint("n: new file · d: delete");
+        g.hint("n: new file · d: delete · h: as hex");
     }
 }
 

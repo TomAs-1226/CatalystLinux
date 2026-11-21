@@ -36,8 +36,10 @@ mod ai;
 mod apps;
 mod apriltags;
 mod brand;
+mod calc;
 mod catalogue;
 mod changelog;
+mod clock;
 mod commands;
 mod connect;
 mod control;
@@ -49,6 +51,8 @@ mod glance;
 mod gpu;
 mod graphs;
 mod help;
+mod hex;
+mod http;
 mod hwcheck;
 mod imu;
 mod intro;
@@ -61,6 +65,7 @@ mod logs;
 mod look;
 mod monitor;
 mod nettools;
+mod notes;
 mod panel;
 mod pit;
 mod power;
@@ -74,6 +79,7 @@ mod screens;
 mod screenshot;
 mod search;
 mod setup;
+mod share;
 mod shell;
 mod standby;
 mod sys;
@@ -83,6 +89,7 @@ mod term;
 mod terminal;
 mod tools;
 mod trends;
+mod units;
 mod weather;
 mod wifi;
 mod wpilog;
@@ -643,7 +650,7 @@ fn tour_fixtures() {
     std::fs::create_dir_all(apps.join("clock")).ok();
     std::fs::create_dir_all(apps.join("processes")).ok();
     std::fs::write(apps.join("check.sh"), "#!/bin/sh\nping -c 1 10.58.5.2\n").ok();
-    std::fs::write(apps.join("clock/app"), "name = Clock\nicon = schedule\nabout = big digits\nrun = ./clock\nscreen = own\n").ok();
+    std::fs::write(apps.join("clock/app"), "name = Big clock\nicon = schedule\nabout = big digits\nrun = ./clock\nscreen = own\n").ok();
     std::fs::write(apps.join("processes/app"), "name = Processes\nicon = memory\nabout = what is running\nrun = top\n").ok();
     std::env::set_var("CATALYST_APPS", &apps);
     // Setup's page for a computer, at the address a handheld on team 5805's cable would have.
@@ -1835,6 +1842,138 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     keys::Keys::default().save().ok();
     std::fs::remove_file(config_dir().join("commands")).ok();
     std::fs::remove_file(config_dir().join("commands-ask")).ok();
+
+    // The tools: Calculator (an answer, then programmer mode), Units (torque),
+    // Notes (the list, a search), Clock (timers running, the stopwatch with
+    // laps, the world), HTTP (a request to the demo robot's agent, its
+    // answer and headers), Share (the Wi-Fi as a code), Monitor's process
+    // detail, and a file in hex from Files with a match found.
+    let notes_dir = config_dir().join("notes");
+    std::fs::remove_dir_all(&notes_dir).ok();
+    std::fs::create_dir_all(&notes_dir).ok();
+    for (file, text) in [
+        ("2026-11-20-1012.txt", "Battery 3\nsagged to 6.2 V in Q14: retire it\n\n— Q14 · nov 20 10:12\n"),
+        ("2026-11-20-1130.txt", "Elevator belt\nfollower slips at the top · retension\n\n— Q19 · nov 20 11:30\n"),
+        ("2026-11-21-0905.txt", "Intake off can_s0\nmove it to can_s1 before Q27\n\n— Q27 · nov 21 09:05\n"),
+        ("2026-11-21-0940.txt", "Pit list for Saturday\nzip ties, 10 batteries charged, spare NEO\n\n— nov 21 09:40\n"),
+    ] {
+        std::fs::write(notes_dir.join(file), text).ok();
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+    notes::toggle_pin(&notes_dir, "2026-11-20-1012.txt");
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    let home = |shell: &mut Shell| {
+        for _ in 0..4 {
+            shell.key(Back);
+            settle(shell, 30);
+        }
+    };
+    let typed = |shell: &mut Shell, text: &str| {
+        for c in text.chars() {
+            shell.key(Char(c));
+        }
+        settle(shell, 12);
+    };
+    press(&mut shell, &vec![Right; steps_to("Calculator")], 12);
+    settle(&mut shell, 60);
+    save(&mut shell, "112-home-tools");
+    press(&mut shell, &vec![Right; steps_to("Share") - steps_to("Calculator")], 12);
+    settle(&mut shell, 60);
+    save(&mut shell, "112b-home-tools-more");
+    press(&mut shell, &vec![Left; steps_to("Share") - steps_to("Calculator")], 12);
+    settle(&mut shell, 60);
+    press(&mut shell, &[Enter], 90);
+    typed(&mut shell, "2*(3+4)^2 - sqrt(16)");
+    save(&mut shell, "113-calculator");
+    press(&mut shell, &[Enter], 20);
+    typed(&mut shell, "/7");
+    save(&mut shell, "113b-calculator-answer");
+    press(&mut shell, &[Enter, Tab], 20);
+    typed(&mut shell, "0xf0 | 0b1010 << 1");
+    press(&mut shell, &[Enter], 20);
+    save(&mut shell, "113c-calculator-programmer");
+    press(&mut shell, &[Ctrl('w')], 20);
+    typed(&mut shell, "~0xff");
+    press(&mut shell, &[Enter], 20);
+    save(&mut shell, "113d-calculator-64-bit");
+    home(&mut shell);
+    press(&mut shell, &vec![Right; steps_to("Units")], 12);
+    press(&mut shell, &[Enter], 90);
+    save(&mut shell, "114-units");
+    press(&mut shell, &[Down, Down, Down, Enter], 60);
+    press(&mut shell, &[Backspace], 4);
+    typed(&mut shell, "25");
+    save(&mut shell, "114b-units-torque");
+    home(&mut shell);
+    press(&mut shell, &vec![Right; steps_to("Notes")], 12);
+    press(&mut shell, &[Enter], 90);
+    press(&mut shell, &[Down], 30);
+    save(&mut shell, "115-notes");
+    press(&mut shell, &[Char('/')], 20);
+    typed(&mut shell, "can_s");
+    save(&mut shell, "115b-notes-search");
+    press(&mut shell, &[Back, Back], 30);
+    home(&mut shell);
+    clock::add_timer(300.0);
+    clock::add_timer(150.0);
+    clock::add_timer(20.0);
+    press(&mut shell, &vec![Right; steps_to("Clock")], 12);
+    press(&mut shell, &[Enter], 90);
+    press(&mut shell, &[Down, Enter, Up], 20);
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    settle(&mut shell, 30);
+    save(&mut shell, "116-clock-timers");
+    press(&mut shell, &[Left], 60);
+    press(&mut shell, &[Enter], 10);
+    for _ in 0..3 {
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        press(&mut shell, &[Char('l')], 4);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(430));
+    settle(&mut shell, 20);
+    save(&mut shell, "116b-clock-stopwatch");
+    press(&mut shell, &[Enter, Right, Right], 60);
+    save(&mut shell, "116c-clock-world");
+    home(&mut shell);
+    press(&mut shell, &vec![Right; steps_to("HTTP")], 12);
+    press(&mut shell, &[Enter], 90);
+    save(&mut shell, "117-http");
+    press(&mut shell, &[Down, Down, Down, Down, Enter], 10);
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        settle(&mut shell, 6);
+    }
+    settle(&mut shell, 90);
+    save(&mut shell, "117b-http-response");
+    press(&mut shell, &[Tab], 30);
+    save(&mut shell, "117c-http-headers");
+    home(&mut shell);
+    press(&mut shell, &vec![Right; steps_to("Share")], 12);
+    press(&mut shell, &[Enter], 90);
+    save(&mut shell, "118-share");
+    press(&mut shell, &[Enter], 90);
+    save(&mut shell, "118b-share-wifi-code");
+    home(&mut shell);
+    press(&mut shell, &vec![Right; steps_to("Monitor")], 12);
+    press(&mut shell, &[Enter], 90);
+    press(&mut shell, &[Right], 60);
+    press(&mut shell, &[Down], 20);
+    save(&mut shell, "119-monitor-processes");
+    press(&mut shell, &[Enter], 90);
+    save(&mut shell, "119b-monitor-process");
+    home(&mut shell);
+    press(&mut shell, &vec![Right; steps_to("Files")], 12);
+    press(&mut shell, &[Enter], 90);
+    press(&mut shell, &[Down, Down], 20);
+    press(&mut shell, &[Char('h')], 90);
+    save(&mut shell, "120-files-hex");
+    press(&mut shell, &[Char('/')], 20);
+    typed(&mut shell, "elevator");
+    press(&mut shell, &[Enter], 60);
+    save(&mut shell, "120b-files-hex-found");
+    std::fs::remove_dir_all(&notes_dir).ok();
     let written =std::fs::read_dir(dir).map_or(0, |d| d.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "png")).count());
     println!("{written} screens in {}, {frames} frames at {:.2} ms each", dir.display(), started.elapsed().as_secs_f64() * 1e3 / frames as f64);
     // An icon asked for and never built in draws as nothing: a blank where

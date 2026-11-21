@@ -2385,6 +2385,12 @@ impl Shell {
         }
         self.lights.tick(dt);
         self.watch_queue(dt);
+        // A Clock timer run out, wherever the handheld is: said, and the
+        // keyboard's lights blink (with the screen off, Fn until it wakes).
+        if let Some(said) = crate::clock::due() {
+            self.say(said);
+            self.lights.warning();
+        }
     }
 
     /// Time to queue for the team's next match (FRC Nexus, when its key is
