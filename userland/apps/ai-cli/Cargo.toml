@@ -1,0 +1,17 @@
+[package]
+name = "catalyst-ai"
+description = "`ai` in the Terminal: questions answered, commands proposed (and run only when you say yes), output explained; with the team's OpenAI or Claude key, or the on-device model."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ai"
+path = "src/main.rs"
+
+[dependencies]
+localmodel = { workspace = true }
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -1308,6 +1308,75 @@ services, and the ignored test `live_services_answer` does so with keys from
 `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`. Not yet tried against the live
 services from this repository's tests or from a CardputerZero.
 
+## On-device model
+
+A small language model that runs on the handheld itself, with no network
+and no key: the assistant's "On this handheld", and `ai --local` in the
+Terminal. Settings › On-device model chooses one, downloads it, tries it
+with one question, and removes it.
+
+| Model | File | In use while answering | Like |
+|---|---|---|---|
+| SmolLM2 135M (default) | 145 MB | about 190 MB | light; simple answers |
+| SmolLM2 360M | 271 MB | about 305 MB | better; slower |
+
+Both are Hugging Face's SmolLM2 Instruct (Apache-2.0) as GGUF files
+quantised by bartowski (135M at 8 bits, 360M at 4), each pinned in
+`userland/crates/localmodel` by its size and SHA-256. Neither is in the image:
+one is downloaded when asked for, over HTTPS with curl, to `/data/models`,
+carrying on after a dropped connection, and kept only if its sum checks out.
+Be honest about them: they are quick and offline, fine for short answers and
+wording, often wrong on facts, and they have none of the assistant's tools
+(they cannot see the robot or run Actions).
+
+It runs as llama.cpp's `llama-server` (Buildroot's `llama-cpp`, b8117), only
+while something asks: on 127.0.0.1:8088, one conversation, three threads
+(the fourth core stays the shell's), at a lower priority than the shell, and
+stopped after three minutes unasked, so it costs nothing at rest. Memory is
+what limits it on 512 MB, so it runs with an 8-bit attention cache (flash
+attention), batches of 128 and the model mapped from the card; measured
+under emulation, llama's own buffers come to 185 MB for the 135M (model 136,
+cache 24, working space 25) and 302 MB for the 360M, and a model is not
+started unless the kernel says that much and 40 MB more is free (the 360M
+then asks for other apps to be closed). Every other llama.cpp tool is taken
+out of the image (41 MB).
+
+**Built for this processor.** ggml chooses its kernels when it is compiled,
+so `os/package/llama-cpp-catalyst` pins it: no native guessing,
+`-march=armv8-a+crc`, one CPU build, no OpenMP runtime, no downloads of its
+own. The CM0's A53 has no dot product, int8 matrix, fp16 arithmetic, crypto
+or LSE instructions (the emulator's does, so a wrong build would pass there);
+a scan of llama-server and its libraries finds none of the first four, and
+the few LSE atomics are GCC's outline helpers, each behind its run-time
+check.
+
+## ai in the Terminal
+
+`ai` is the assistant for a shell, using the same keys and choices as the
+Assistant app (Settings › Keys; Tab › Effort there), or the on-device model
+with `--local` (and when no key is set):
+
+```
+ai what does a brownout do to the robot
+ai cmd find the ten biggest files in /data
+dmesg | tail -n 30 | ai explain
+```
+
+- `ai <question>` answers in plain text, wrapped to the terminal (53 columns
+  on the handheld).
+- `ai cmd <what you want>` proposes one BusyBox command and a line on what it
+  does, and runs it only after a `y`; one that could delete or change things
+  (rm, dd, mkfs, a redirect into a file, kill, reboot, git push, `sed -i`,
+  `find -delete`…) needs `yes` typed out. The answer is read from the
+  terminal itself, so piping into `ai` cannot answer for you.
+- `… | ai explain [question]` explains output or an error (its last 12,000
+  characters).
+
+Keys reach curl through a file only root can read, removed straight after,
+never on its command line; requests are the Assistant's (OpenAI's Responses
+API with `store: false`, Claude's Messages API with server-side fallback).
+`--cloud` uses a key even with the model downloaded.
+
 ## Actions
 
 Actions keeps shell commands under a name, run with one key in a terminal of

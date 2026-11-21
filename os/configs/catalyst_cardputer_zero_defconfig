@@ -87,6 +87,12 @@ BR2_PACKAGE_PICOCOM=y
 # JavaScript, keyboard first; HTTPS through the OpenSSL Python already uses.
 BR2_PACKAGE_LYNX=y
 BR2_PACKAGE_LINKS=y
+# The on-device model's runtime: llama.cpp's llama-server, started only when
+# the assistant or `ai --local` asks, on a model downloaded to /data/models.
+# Its CPU flags are pinned to the A53's (package/llama-cpp-catalyst); every
+# other llama tool is taken out of the image in post-build.sh.
+BR2_PACKAGE_LLAMA_CPP=y
+BR2_PACKAGE_LLAMA_CPP_TOOLS=y
 # The Terminal says it is an xterm, which ncurses describes; tmux's own
 # descriptions too, for what runs inside it.
 BR2_PACKAGE_NCURSES_ADDITIONAL_TERMINFO="t/tmux t/tmux-256color"
