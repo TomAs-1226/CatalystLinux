@@ -91,3 +91,17 @@ pub fn pref(device: &Device, key: &str) -> Option<String> {
 pub fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_release_s_notes_reach_the_shell_line_for_line() {
+        let notes = "### New\n- Weather: now, the hours and the week.\n- Update logs.\n\n### Fixed\n- Sending setup works.";
+        let s = Status { state: state::AVAILABLE.into(), version: "0.4.1".into(), notes: notes.into(), ..Status::default() };
+        let back = Status::parse(&s.to_json());
+        assert_eq!(back, s);
+        assert_eq!(back.notes.lines().count(), 6);
+    }
+}

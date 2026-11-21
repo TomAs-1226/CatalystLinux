@@ -172,4 +172,22 @@ mod tests {
         let other = public_of(&"22".repeat(32)).unwrap();
         assert!(verify(text.as_bytes(), &sig, &other).is_err());
     }
+
+    #[test]
+    fn a_changelog_section_rides_in_the_signed_manifest_whole() {
+        // The notes are a section of os/CHANGELOG.md: groups, bullets, line
+        // breaks, a quote and a non-ASCII character or two.
+        let notes = "### New\n- Weather: now, the hours and the week. No key needed.\n- \"Update logs\" · what's new\n\n### Fixed\n- Setup from a computer: sending works.";
+        let m = Manifest { notes: notes.into(), ..sample() };
+        let text = m.to_json();
+        let back = Manifest::parse(text.as_bytes()).unwrap();
+        assert_eq!(back.notes, notes, "every line, as written");
+        let seed = "33".repeat(32);
+        let sig = sign(text.as_bytes(), &seed).unwrap();
+        assert!(verify(text.as_bytes(), &sig, &public_of(&seed).unwrap()).is_ok());
+        // The signature covers the notes: a line slipped in is refused.
+        let tampered = text.replacen("sending works.", "sending works.\\n- Free robots.", 1);
+        assert_ne!(tampered, text);
+        assert!(verify(tampered.as_bytes(), &sig, &public_of(&seed).unwrap()).is_err());
+    }
 }

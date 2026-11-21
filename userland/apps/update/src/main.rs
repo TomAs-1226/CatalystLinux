@@ -12,7 +12,8 @@
 //!
 //!     catalyst-update keygen KEY PUBLIC
 //!     catalyst-update make-release --images DIR --out DIR --version V --channel C
-//!         --build EPOCH --key KEY --repo OWNER/REPO --tag TAG [--previous DIR] [--notes TEXT]
+//!         --build EPOCH --key KEY --repo OWNER/REPO --tag TAG [--previous DIR]
+//!         [--notes TEXT | --notes-file FILE]
 
 mod device;
 mod manifest;
@@ -57,7 +58,12 @@ fn run(args: &[String]) -> Result<(), String> {
                 version: need("--version")?,
                 channel: value("--channel").unwrap_or_else(|| "stable".into()),
                 build: need("--build")?.parse().map_err(|_| "--build is seconds since 1970")?,
-                notes: value("--notes").unwrap_or_default(),
+                // What changed, as written in os/CHANGELOG.md: several lines,
+                // so release.sh hands them over in a file.
+                notes: match value("--notes-file") {
+                    Some(path) => std::fs::read_to_string(&path).map_err(|e| format!("the notes, {path}: {e}"))?.trim().to_owned(),
+                    None => value("--notes").unwrap_or_default(),
+                },
                 key: key.trim().to_owned(),
                 previous: value("--previous").map(PathBuf::from),
                 repo: need("--repo")?,

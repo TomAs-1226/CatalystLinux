@@ -7,6 +7,11 @@
 #   bash scripts/release.sh stable --publish   build, make, and publish on GitHub
 #   bash scripts/release.sh nightly --publish --notes "faster glass"
 #
+# What changed comes from os/CHANGELOG.md: the section for this version (a
+# nightly takes its base version's section). It goes into the signed
+# manifest, which the handheld shows before installing, and onto the
+# release's GitHub page. --notes replaces it.
+#
 # A stable release is version os/VERSION, tagged v<version>. A nightly one is
 # that version plus the date and time, published as a pre-release; handhelds
 # on the nightly channel take those. Each release carries a patch from the
@@ -51,6 +56,27 @@ else
 fi
 BUILD_TIME="$(date +%s)"
 OUT="$BUILD/releases/$CHANNEL/$VERSION"
+
+# The notes: the changelog's section for the base version, from its "## "
+# line to the next, without the heading itself or blank lines at either end.
+changelog_section() {
+	awk -v want="$1" '
+		/^## / {
+			v = $2; sub(/^v/, "", v)
+			if (inside) exit
+			inside = (v == want)
+			next
+		}
+		inside { print }
+	' "$HERE/os/CHANGELOG.md" | sed -e '/./,$!d' | sed -e ':a' -e '/^\n*$/{$d;N;ba' -e '}'
+}
+if [ -z "$NOTES" ]; then
+	NOTES="$(changelog_section "$BASE")"
+	if [ -z "$NOTES" ]; then
+		echo "os/CHANGELOG.md has no section for $BASE: add one (## $BASE, then - lines), or pass --notes" >&2
+		exit 1
+	fi
+fi
 KEY="$BUILD/keys/update.key"
 PUB="$HERE/os/board/cardputer-zero/rootfs-overlay/etc/catalyst/update.pub"
 
@@ -102,9 +128,12 @@ if [ -n "$PREVIOUS" ] && [ -f "$PREVIOUS/system.img" ]; then
 fi
 
 echo "== making the release"
-rm -rf "$OUT"
+rm -rf "${OUT:?}"
+mkdir -p "$OUT"
+# Several lines: handed over in a file, kept with the release.
+printf '%s\n' "$NOTES" > "$OUT/notes.md"
 "$TOOL" make-release --images "$BUILD/output/images" --out "$OUT" --version "$VERSION" --channel "$CHANNEL" \
-	--build "$BUILD_TIME" --key "$KEY" --repo "$REPO" --tag "$TAG" --notes "$NOTES" "${PREV_ARGS[@]}"
+	--build "$BUILD_TIME" --key "$KEY" --repo "$REPO" --tag "$TAG" --notes-file "$OUT/notes.md" "${PREV_ARGS[@]}"
 ls -l "$OUT"
 
 # The flasher and the simulator for Windows, built by Windows' own Rust (this
@@ -144,7 +173,7 @@ if [ "$PUBLISH" = 1 ]; then
 	done
 	PRE=()
 	[ "$CHANNEL" = nightly ] && PRE=(--prerelease)
-	"$GH" release create "$TAG" --repo "$REPO" --title "Catalyst Linux $VERSION" --notes "${NOTES:-Catalyst Linux $VERSION}" "${PRE[@]}" "${ASSETS[@]}"
+	"$GH" release create "$TAG" --repo "$REPO" --title "Catalyst Linux $VERSION" --notes-file "$(host_path "$OUT/notes.md")" "${PRE[@]}" "${ASSETS[@]}"
 	echo "published: https://github.com/$REPO/releases/tag/$TAG"
 else
 	echo "made $OUT (add --publish to put it on GitHub)"

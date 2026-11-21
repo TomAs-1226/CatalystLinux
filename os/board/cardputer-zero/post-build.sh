@@ -19,6 +19,9 @@ install -D -m 0755 "$UPDATE_BIN" "$TARGET_DIR/usr/bin/catalyst-update"
 VERSION="${CATALYST_VERSION:-$(cat "$BR2_EXTERNAL_CATALYST_PATH/VERSION")}"
 mkdir -p "$TARGET_DIR/etc/catalyst" "$TARGET_DIR/boot"
 printf 'version=%s\nbuild=%s\n' "$VERSION" "${CATALYST_BUILD_TIME:-$(date +%s)}" > "$TARGET_DIR/etc/catalyst/version"
+# What changed in each version, for Settings › About › Update history and
+# the "What's new" shown once after an update: read on the handheld, offline.
+install -D -m 0644 "$BR2_EXTERNAL_CATALYST_PATH/CHANGELOG.md" "$TARGET_DIR/usr/share/catalyst/changelog.md"
 if [ ! -s "$TARGET_DIR/etc/catalyst/update.pub" ]; then
 	echo "post-build: no update key in the image (scripts/release.sh makes one): it will refuse every update" >&2
 fi
