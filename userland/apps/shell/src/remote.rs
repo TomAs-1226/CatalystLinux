@@ -192,6 +192,8 @@ fn serve(listener: TcpListener, shared: Arc<Shared>, code: String) {
             return;
         }
         let Ok((stream, _)) = listener.accept() else {
+            // In deep standby, parked here: no wakeups until it wakes.
+            crate::deep::rest();
             std::thread::sleep(Duration::from_millis(60));
             continue;
         };

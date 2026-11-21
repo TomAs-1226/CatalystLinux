@@ -47,7 +47,7 @@ const STEPS: [Step; 9] = [
     Step { spot: Spot::Pager, title: "Pages", words: "Home turns its pages as you go. Left of the first app is the glance page: the robot and this handheld at a glance." },
     Step { spot: Spot::Nothing, title: "Control centre", words: "Ctrl Space brings it down over any screen: Wi-Fi, light mode, brightness. Up from Home's top row works too." },
     Step { spot: Spot::Nothing, title: "Recent apps", words: "Ctrl Tab shows the apps you used last. Enter takes you back to one, just as you left it." },
-    Step { spot: Spot::Nothing, title: "Search", words: "Space on Home searches the apps and settings. Just start typing." },
+    Step { spot: Spot::Nothing, title: "Search", words: "Ctrl Enter searches from any screen: apps, settings, files, notes, matches, a sum. Space on Home too." },
     Step { spot: Spot::Nothing, title: "Forgot a key?", words: "Hold ? for five seconds on any screen for the list of shortcuts. Settings › Help has this tour again." },
 ];
 
@@ -277,16 +277,20 @@ fn sd_rrect(px: f32, py: f32, r: &Rect, radius: f32) -> f32 {
     outside + qx.max(qy).min(0.0) - k
 }
 
-/// Words broken into lines no wider than `width`.
+/// Words broken into lines no wider than `width`. A no-break space (as
+/// between a number and its unit, "0.7 W") holds its two sides on one line,
+/// and is drawn as a plain space.
 pub fn wrap(g: &mut Gfx, words: &str, style: bezel::TextStyle, width: f32) -> Vec<String> {
+    let no_break = |c: char| matches!(c, '\u{a0}' | '\u{202f}' | '\u{2007}');
     let mut lines = Vec::new();
     let mut line = String::new();
-    for word in words.split_whitespace() {
-        let tried = if line.is_empty() { word.to_owned() } else { format!("{line} {word}") };
+    for word in words.split(|c: char| c.is_whitespace() && !no_break(c)).filter(|w| !w.is_empty()) {
+        let word = word.replace(no_break, " ");
+        let tried = if line.is_empty() { word.clone() } else { format!("{line} {word}") };
         if g.measure(&tried, style) <= width || line.is_empty() {
             line = tried;
         } else {
-            lines.push(std::mem::replace(&mut line, word.to_owned()));
+            lines.push(std::mem::replace(&mut line, word));
         }
     }
     if !line.is_empty() {
@@ -315,7 +319,15 @@ const SHORTCUTS: &[Line] = &[
     Line::Keys("Leave any app", "esc held · ctrl q"),
     Line::Keys("Control centre", "ctrl space"),
     Line::Keys("Recent apps", "ctrl tab"),
+    Line::Keys("Search", "ctrl enter"),
     Line::Keys("This list, after 5 s", "? held"),
+    Line::Head("search"),
+    Line::Keys("Next or last result", "↑ ↓"),
+    Line::Keys("Open it", "enter"),
+    Line::Keys("Preview it", "tab · →"),
+    Line::Keys("Back to the results", "← · tab"),
+    Line::Keys("Clear what is typed", "fn bksp"),
+    Line::Keys("Put it away", "esc"),
     Line::Head("control centre"),
     Line::Keys("Recent apps", "r"),
     Line::Keys("Screenshot", "s"),
@@ -328,7 +340,7 @@ const SHORTCUTS: &[Line] = &[
     Line::Keys("Up and down a page", "↑ ↓"),
     Line::Keys("Glance page", "← on the first"),
     Line::Keys("Control centre", "↑ on the top row"),
-    Line::Keys("Search", "space"),
+    Line::Keys("Search", "space · /"),
     Line::Head("lists"),
     Line::Keys("A page at a time", "pg up · pg dn"),
     Line::Keys("Hold to keep going", "↑ ↓ held"),
@@ -346,6 +358,15 @@ const SHORTCUTS: &[Line] = &[
     Line::Keys("Clear for a match", "r"),
     Line::Keys("Start, pause timer", "enter"),
     Line::Keys("Timer's next phase", "← →"),
+    Line::Head("reminders"),
+    Line::Keys("New, as it is said", "n"),
+    Line::Keys("Done", "enter"),
+    Line::Keys("Snooze, longer", "s · s again"),
+    Line::Keys("Repeat", "r"),
+    Line::Keys("Pit or personal", "l"),
+    Line::Keys("One list", "tab"),
+    Line::Keys("The pit routine", "p"),
+    Line::Keys("Remind me of a note", "r in notes"),
     Line::Head("logs"),
     Line::Keys("Trends", "↑ to the top"),
     Line::Keys("Another match", "← →"),
