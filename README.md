@@ -222,7 +222,7 @@ switch off in Settings › Robot. `.\scripts\run-sim.ps1 -Arrive 5` shows the
 two together: no robot at first, then the demo one, back from a match.
 
 The **control centre** is a sheet of glass that drops from the top over
-whatever is showing: Wi-Fi, SSH, light or dark, the calm version, and
+whatever is showing: Wi-Fi, SSH, light or dark, the battery saver, and
 brightness, with two actions along its foot, Recents and Screenshot (R and S
 while it is down). Ctrl-Space brings it down from any screen, a terminal
 included (so does the Opt key, if the keyboard reports one), and Up from the
@@ -280,9 +280,79 @@ Settings › Display:
 A screen with something to watch keeps it awake while it shows (the hook is
 `Screen::keeps_awake`): an app's program running in a terminal, and the login
 shell while what runs in it is printing (a build, a log being followed), for
-a minute after it last printed. On battery, Settings › About › Status shows
-how long the battery has left, when the fuel gauge can say. On a computer,
-with no backlight to dim, the picture itself dims.
+a minute after it last printed. On a computer, with no backlight to dim, the
+picture itself dims.
+
+**Deep standby.** The CM0's chip has no suspend-to-RAM, so standby means
+switching off everything that can be. Once the screen is off and dark:
+
+- the panel itself sleeps: the framebuffer is blanked, and a patch to
+  M5Stack's panel driver sends the ST7789 display-off and sleep-in (enabling
+  it again runs its whole init sequence, as at boot);
+- the shell stops keeping a frame beat and looks in four times a second;
+- after ten minutes Wi-Fi goes off (the choice to have it is kept, and it
+  comes back with the screen), unless an update is downloading or someone is
+  logged in over SSH. Settings › Battery › Wi-Fi in standby turns this off.
+
+Some savings run all the time. The Ethernet chip (an SR9900A, driven by
+r8152) and the USB hub suspend whenever they are idle. M5Stack's community
+measured that as the largest draw after the screen: about 90 mA. The driver
+wakes on a cable or a packet. ifplugd reads the link from the interface's
+own flags (`-m iff`), so it never wakes the chip to ask. The speaker
+amplifier is held off from the first instant (`gpio=24=op,dl`). Wi-Fi's
+own power save is on, which is brcmfmac's default.
+
+## Battery
+
+Settings › Battery has:
+
+- **The charge**, large, beside a chart of the last 24 hours (a point every
+  five minutes, a week kept in `battery-history` on /data).
+- **How it stands**: "on battery · 4 h 38 m left", or "charging · full in
+  40 m".
+- **The draw**, in mA and W, from the BQ27220 fuel gauge.
+- **The battery itself**: its health (what it holds now as a share of new),
+  its charge cycles, temperature and voltage.
+
+Its choices:
+
+- **Battery saver**: 30 frames a second instead of 40, the wallpaper held
+  still, and the processor capped at 800 MHz and slow to climb (the kernel's
+  `conservative`). It is a switch in the control centre too, and comes on by
+  itself at 20% (**On by itself at 20%**), going off again on the charger
+  unless you switched it on yourself.
+- **Turn off at 5%**: warnings at 15% and at 10%, once each time on battery.
+  The island says it and the keyboard's lights blink for a few seconds. At
+  5%, held for three readings, a card counts ten seconds down and the
+  handheld turns off cleanly, so the card is never cut off half-written.
+  Plugging in keeps it on, and Esc puts it off until 2%. Slide the switch off
+  afterwards: a software power-off leaves the switch to cut the power.
+- **Wi-Fi in standby**: off after ten minutes with the screen off, or left on.
+- **Red light**: quiet (dark, blinking only if the kernel panics) or card
+  activity, as the CM0 does by default.
+
+**Lower voltage** (Developer options) runs the processor's core a step
+lower: `over_voltage=-1` (−25 mV at full speed) and `over_voltage_min=-2`
+(−50 mV when idle, where there is the most to spare), in config.txt above
+the system block. It is tried before it is kept. The first start with it
+counts, and once the shell has run on it for five minutes `catalyst-power`
+confirms it. If a start finds it tried but never confirmed (that start
+crashed, hung or was switched off), it takes the lines out again and
+restarts, and the island says it did not hold.
+
+## The keyboard's lights
+
+The Shift, Fn and Sym lights hang off the M5IOE1, which blinks them by
+itself, so a blink costs the processor nothing. The keyboard driver uses them
+to show a modifier's state: on while held, a slow blink for one key, fast
+while locked. The shell borrows them for two things and gives them back. If
+a modifier changes meanwhile, the keyboard's state stands.
+
+- **A notice**: something was said while the screen was off (an update
+  ready, a message). Fn blinks slowly until the screen wakes.
+- **A warning**: a battery warning, the pit timer moving to its next phase,
+  queueing for the next match (five minutes ahead, then when it is time,
+  from FRC Nexus). All three blink fast for eight seconds, then stop.
 
 ## Looks
 
@@ -824,8 +894,13 @@ framework on the dwc2 controller):
 - **Drive of logs**: a read-only drive holding the match logs as they were
   when it was made; choosing it again brings it up to date.
 
-The page says whether a computer has it. Not yet checked on a CardputerZero:
-whether its USB-C port takes the device role when plugged into a computer.
+The page says whether a computer has it. The CardputerZero's USB switch
+chooses where the CM0's one USB port goes, according to M5Stack's guide. To
+the left, it goes straight to USB-C2, for these modes. To the right, it goes
+to the internal hub, which carries the USB-A port, USB-C1 and the Ethernet
+chip, so the robot's cable needs the switch to the right. Not yet checked on
+a CardputerZero: whether its USB-C port takes the device role when plugged
+into a computer.
 
 ## Command-line tools
 
