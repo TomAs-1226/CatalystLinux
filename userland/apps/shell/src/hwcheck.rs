@@ -149,14 +149,25 @@ pub fn look(part: Part, sim: bool) -> State {
     }
 }
 
-/// The BMI270 (filled in with the IMU's own module).
+/// The BMI270, as the shell's own driver found it (started at boot).
 fn motion() -> State {
-    State::Missing("not looked for yet".into())
+    use crate::imu::Found;
+    match crate::imu::found() {
+        Found::Looking => State::Needs("starting".into()),
+        Found::Motion | Found::Compass => State::Ok("BMI270 found".into()),
+        // The Lite has none; anything else is the chip not answering.
+        Found::Nothing => State::Missing(crate::imu::trouble().filter(|t| t.chars().count() <= 18).unwrap_or_else(|| "not found".into())),
+    }
 }
 
-/// The BMM150 behind it, on units that have one.
+/// The BMM150 behind it. Units made without one (the C154-V1) do not list it.
 fn compass() -> State {
-    State::Missing("not looked for yet".into())
+    use crate::imu::Found;
+    match crate::imu::found() {
+        Found::Compass => State::Ok("BMM150 found".into()),
+        Found::Looking => State::Needs("starting".into()),
+        Found::Motion | Found::Nothing => State::Missing("none on this unit".into()),
+    }
 }
 
 /// The infrared LED and receiver: their device-tree nodes (their drivers
@@ -196,7 +207,7 @@ impl Check {
             .map(|&p| (p, if p == Part::Keys && keys { State::Ok("every key works".into()) } else { look(p, self.sim) }))
             // A compass is not missing on a unit made without one: it is
             // simply not listed.
-            .filter(|(p, s)| !(*p == Part::Compass && !s.ok() && self.sim))
+            .filter(|(p, s)| !(*p == Part::Compass && matches!(s, State::Missing(_))))
             .collect();
     }
 

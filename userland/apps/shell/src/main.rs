@@ -47,11 +47,13 @@ mod gpu;
 mod graphs;
 mod help;
 mod hwcheck;
+mod imu;
 mod intro;
 mod ir;
 mod irremote;
 mod keys;
 mod lights;
+mod level;
 mod logs;
 mod look;
 mod monitor;
@@ -185,6 +187,8 @@ fn settings_text(s: &shell::Settings) -> String {
         ("toured", s.toured.to_string()),
         ("screen_off", s.screen_off.to_string()),
         ("power", s.power.key().to_owned()),
+        ("lift_wake", s.lift_wake.to_string()),
+        ("face_down", s.face_down.to_string()),
     ];
     lines.iter().chain(s.battery.lines().iter()).map(|(k, v)| format!("{k}={v}\n")).collect()
 }
@@ -236,6 +240,8 @@ fn parse_settings(text: &str, settings: &mut shell::Settings) {
                 settings.screen_off = v.parse::<u32>().ok().filter(|s| standby::SCREEN_OFF_CHOICES.contains(s)).unwrap_or(settings.screen_off)
             }
             Some(("power", v)) => settings.power = standby::Power::from_key(v).unwrap_or(settings.power),
+            Some(("lift_wake", v)) => settings.lift_wake = v != "false",
+            Some(("face_down", v)) => settings.face_down = v != "false",
             _ => {}
         }
     }
@@ -343,6 +349,9 @@ fn main() {
     if flag("--shots") {
         tour_fixtures();
     }
+    // The motion sensor starts on a thread of its own (its program takes
+    // most of a second over the bus), so Home knows what it offers.
+    imu::start();
     let mut shell = Shell::new(robot);
     load_settings(&mut shell.settings);
     shell.settings.light |= flag("--light");
@@ -1416,7 +1425,42 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     save(&mut shell, "59-trends");
     press(&mut shell, &[Down, Down, Down, Left, Left], 30);
     save(&mut shell, "59b-trends-earlier-match");
-    let written = std::fs::read_dir(dir).map_or(0, |d| d.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "png")).count());
+
+    // The Level on the simulated bench, zeroed there, and stood on an edge;
+    // the Compass, and a calibration turning; and where lift to wake is.
+    // (The simulated sensor keeps real time, so some shots wait for it.)
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    press(&mut shell, &vec![Right; steps_to("Level")], 20);
+    settle(&mut shell, 60);
+    save(&mut shell, "99-home-level-tile");
+    press(&mut shell, &[Enter], 90);
+    save(&mut shell, "95-level");
+    press(&mut shell, &[Char(' ')], 70);
+    save(&mut shell, "95b-level-zeroed");
+    press(&mut shell, &[Char(' ')], 10);
+    imu::simulate_standing(true);
+    settle(&mut shell, 120);
+    save(&mut shell, "96-level-on-edge");
+    imu::simulate_standing(false);
+    press(&mut shell, &[Back, Right], 90);
+    press(&mut shell, &[Enter], 90);
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    settle(&mut shell, 30);
+    save(&mut shell, "97-compass");
+    press(&mut shell, &[Enter], 10);
+    for _ in 0..8 {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        settle(&mut shell, 6);
+    }
+    save(&mut shell, "97b-compass-calibrating");
+    press(&mut shell, &[Enter, Back], 90);
+    press(&mut shell, &[Right, Enter], 90);
+    press(&mut shell, &[Down, Down, Down, Down, Enter], 90);
+    press(&mut shell, &[Down, Down, Down, Down], 40);
+    save(&mut shell, "98-display-lift-to-wake");
+    let written =std::fs::read_dir(dir).map_or(0, |d| d.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "png")).count());
     println!("{written} screens in {}, {frames} frames at {:.2} ms each", dir.display(), started.elapsed().as_secs_f64() * 1e3 / frames as f64);
 }
 
@@ -1687,6 +1731,7 @@ mod tests {
         (s.robot_name, s.gpu) = (Some("atlas".into()), false);
         (s.developer, s.motion_scale, s.show_keys, s.toured) = (true, 5.0, true, true);
         (s.screen_off, s.power) = (300, standby::Power::Saving);
+        (s.lift_wake, s.face_down) = (false, false);
         let saved = settings_text(&s);
         assert!(saved != settings_text(&shell::Settings::default()), "every one of these differs from the default");
         let mut back = shell::Settings::default();
@@ -1698,6 +1743,7 @@ mod tests {
         assert_eq!(partial.theme, look::Theme::Bezel);
         assert_eq!(partial.columns, 3, "out of range: kept as it was");
         assert!(partial.gpu, "not in the file: the default (the gpu when it helps)");
+        assert!(partial.lift_wake && partial.face_down, "not in the file: on, as they start");
     }
 
     #[test]

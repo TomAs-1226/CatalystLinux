@@ -140,6 +140,9 @@ pub struct Gfx {
     pub power: crate::standby::Power,
     /// Settings › Battery's choices, for the rows that show them.
     pub battery: crate::power::Choices,
+    /// Lift to wake and face down to sleep.
+    pub lift_wake: bool,
+    pub face_down: bool,
     /// The look chosen, its theme on its own for brevity, what every corner
     /// is multiplied by, and tiles across Home.
     pub look: crate::look::Look,
@@ -229,6 +232,8 @@ impl Gfx {
             screen_off: 60,
             power: crate::standby::Power::Balanced,
             battery: crate::power::Choices::default(),
+            lift_wake: true,
+            face_down: true,
             look: crate::look::Look::default(),
             theme: crate::look::Theme::Catalyst,
             corner: 1.0,

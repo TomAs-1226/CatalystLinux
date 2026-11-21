@@ -281,7 +281,9 @@ A screen with something to watch keeps it awake while it shows (the hook is
 `Screen::keeps_awake`): an app's program running in a terminal, and the login
 shell while what runs in it is printing (a build, a log being followed), for
 a minute after it last printed. On a computer, with no backlight to dim, the
-picture itself dims.
+picture itself dims. Where there is a motion sensor, picking the handheld up
+wakes it for a look and laying it face down puts it out (see *Level, Compass
+and the motion sensor*).
 
 **Deep standby.** The CM0's chip has no suspend-to-RAM, so standby means
 switching off everything that can be. Once the screen is off and dark:
@@ -915,6 +917,57 @@ Not yet checked on a CardputerZero: the LED's range, and the receiver's
 timing (the decoders allow for a receiver lengthening light by a hundred
 microseconds or so, tested).
 
+## Level, Compass and the motion sensor
+
+The CardputerZero has a Bosch BMI270 (accelerometer and gyroscope) at 0x68 on
+the board's I2C bus and, on the C154, a BMM150 magnetometer behind it on the
+BMI270's own auxiliary bus (the C154-V1 has none; the Lite has no motion
+sensor at all). What answers is what is offered: the **Level** needs the
+BMI270, the **Compass** the BMM150 too; the apps, their search entries and
+their Settings rows are left out where the chip is not there, and Home lays
+itself out again once the sensor is found (what the last start found is kept,
+`motion-sensor` beside the settings, so the tiles are there from the start).
+
+- **Level**: pitch and roll to a tenth of a degree, and a bubble that drifts
+  to the high side, turning ice when level (within 0.2°). Stood on an edge it
+  reads that edge's angle to level instead (a line across the page stays
+  level with the world; "right end low"), as a spirit level laid along a
+  frame or an arm does. **Space** zeroes it against whatever it rests on (and
+  clears the zero), **Enter** holds the reading.
+- **Compass**: the top edge's magnetic heading, held level against the way up
+  so it stays true as the handheld tips (and face down). The metal around a
+  magnetometer pulls it off true: **Enter** calibrates by turning it round
+  once, flat (the rim fills as the gyroscope sees each eighth of the turn);
+  the offset it finds is taken away from every reading after (kept in
+  `compass.json` beside the settings). It says when a magnet is near
+  (over 100 µT).
+- **Lift to wake** and **face down to sleep** (Settings › Display, both on):
+  while the screen is off, picking the handheld up turns it on for a look
+  (off again after ten seconds unless a key follows); while it is on, laid
+  face down for two seconds it goes out, whatever is showing, until a key or
+  a lift. A lift only counts from lying still, so carried about in a pocket
+  or a bag it never wakes itself; a knock on the bench shakes it without
+  turning it.
+
+The shell drives the chip itself through `/dev/i2c-1` (`i2c-dev`, loaded first
+thing in boot), not through a kernel driver, because standby wants the chip's
+low-power mode: watching for a lift, the accelerometer alone runs at 12.5
+samples a second in its least-power setting, read four times a second; with
+nothing wanting it everything on the chip is off; the Level and Compass run
+it at full rate only while open. The BMI270 needs Bosch's 8 KB program loaded
+at every power-up (`userland/assets/bmi270`, BSD-3-Clause, the same bytes
+M5Stack's image loads), sent in short pieces so the keyboard on the same bus
+is never kept waiting. The chips sit turned on the board; the turn is
+M5Stack's own (from their Compass app). In the simulator a simulated sensor
+lies on a bench, nudged now and then, with a magnetometer whose own offset a
+calibration takes away (tested); it never lifts or lies face down.
+
+Not yet checked on a CardputerZero: the sensor answering over the real bus
+(its start-up, the magnetometer behind it), the axes as M5Stack gives them
+(a heading that runs the wrong way, or a pitch with its sign turned, would
+show it), how a lift and face down feel in the hand, and the calibration on
+the real board's magnetic field.
+
 ## USB to a computer
 
 Settings › USB chooses what the handheld is to a computer its USB-C port is
@@ -1105,11 +1158,14 @@ personal start, the new motion, and the GPU; then the recent apps (an app
 switcher), screenshots, standby and power saving, the system monitor, the
 network toolkit with the robot finder, the SSH client and serial console,
 saved commands, the AprilTag reader, USB to a computer, the command-line
-tools, live graphs, the pit checklist and match timer, and match trends.
+tools, live graphs, the pit checklist and match timer, and match trends; then
+the Level, the Compass, and lift to wake.
 
 ## Third-party pieces
 
 Google Sans Flex and Google Sans Code (SIL OFL 1.1) and Material Symbols
 (Apache 2.0) are vendored under `userland/assets` with their licences; the
 fonts built into the shell are subsets of them. The board drivers come from
-`m5stack/m5stack-linux-dtoverlays` (GPL-2.0) at build time.
+`m5stack/m5stack-linux-dtoverlays` (GPL-2.0) at build time. The BMI270's
+program is Bosch's (`bmi270_config_file` from the BMI270 Sensor API,
+BSD-3-Clause), vendored under `userland/assets/bmi270` with its licence.
