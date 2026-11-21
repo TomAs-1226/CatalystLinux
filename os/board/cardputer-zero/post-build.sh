@@ -39,6 +39,17 @@ ln -sfn /data/catalyst/localtime "$TARGET_DIR/etc/localtime"
 rm -f "$TARGET_DIR/etc/timezone"
 rm -rf "$TARGET_DIR/usr/share/zoneinfo/right"
 
+# The CardputerZero's CM0 carries a CYW43439 radio (brcmfmac asks for
+# brcm/brcmfmac43439-sdio.raspberrypi,0-compute-module.*, then the plain
+# name). Its firmware, clm_blob and board settings are in cypress/ (from
+# Raspberry Pi's firmware-nonfree, with their licence); the names the
+# driver asks for lead there, as Raspberry Pi OS lays them out.
+for ext in bin clm_blob txt; do
+	for name in brcmfmac43439-sdio brcmfmac43439-sdio.raspberrypi,0-compute-module; do
+		ln -sfn "../cypress/cyfmac43439-sdio.$ext" "$TARGET_DIR/lib/firmware/brcm/$name.$ext"
+	done
+done
+
 # --- what runs at boot, and in what order ---
 #
 #   sysinit   /sys and /dev

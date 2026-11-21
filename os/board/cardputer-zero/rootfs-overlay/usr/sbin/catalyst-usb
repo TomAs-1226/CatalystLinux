@@ -12,7 +12,15 @@
 # Made with the kernel's USB gadget framework (configfs) on the dwc2
 # controller. The choice is kept in /data/catalyst/usb-mode and applied at
 # every start by the catalyst-usb service. `status` prints the mode and
-# whether a computer has the handheld ("connected") or not.
+# whether a computer has the handheld ("connected"), not, or "restart"
+# (the controller is not yet in the role the mode needs).
+#
+# The CardputerZero's USB switch moves the CM0's one USB port between the
+# internal hub (right: the controller must be the host) and USB-C2 (left: it
+# must be a device), but does not tell the controller which. So the role is
+# set in config.txt, as Pi Zero gadget setups do: dr_mode=peripheral for
+# the modes a computer sees, the default (otg, which runs the hub) for
+# charging only. It takes effect at the next start.
 set -u
 
 G=/sys/kernel/config/usb_gadget/catalyst
@@ -23,6 +31,36 @@ ADDR=192.168.7.1
 RUN=/run/catalyst-usb
 
 udc() { ls /sys/class/udc 2>/dev/null | head -n 1; }
+
+# The role the controller runs in now (from the device tree it started
+# with) and the one config.txt asks for, as peripheral or otg.
+running_role() {
+	for f in /proc/device-tree/soc/usb@*/dr_mode; do
+		[ -e "$f" ] && { tr -d '\0' <"$f"; return; }
+	done
+	echo otg
+}
+
+wanted_role() {
+	case "$(saved)" in serial | network | drive) echo peripheral ;; *) echo otg ;; esac
+}
+
+# config.txt's dwc2 line, for the role the saved mode needs.
+set_role() {
+	case "$(wanted_role)" in
+	peripheral) line="dtoverlay=dwc2,dr_mode=peripheral" ;;
+	*) line="dtoverlay=dwc2" ;;
+	esac
+	mnt=/run/catalyst-usb-boot
+	mkdir -p "$mnt"
+	mount -t vfat -o rw /dev/mmcblk0p1 "$mnt" 2>/dev/null || return 1
+	if ! grep -qx "$line" "$mnt/config.txt"; then
+		sed "s/^dtoverlay=dwc2\$/$line/; s/^dtoverlay=dwc2,.*\$/$line/" "$mnt/config.txt" >"$mnt/config.new" &&
+			mv "$mnt/config.new" "$mnt/config.txt"
+	fi
+	sync
+	umount "$mnt"
+}
 
 saved() {
 	m=$(cat "$MODE_FILE" 2>/dev/null)
@@ -160,6 +198,7 @@ case "${1:-}" in
 off | serial | network | drive)
 	mkdir -p /data/catalyst
 	echo "$1" > "$MODE_FILE"
+	set_role
 	apply || { down; exit 1; }
 	;;
 apply) apply ;;
@@ -167,6 +206,7 @@ down) down ;;
 status)
 	state=$(cat /sys/class/udc/*/state 2>/dev/null | head -n 1)
 	case "$state" in configured) link=connected ;; *) link="not connected" ;; esac
+	[ "$(running_role)" = "$(wanted_role)" ] || [ "$(wanted_role)" = otg ] || link=restart
 	echo "$(saved) $link"
 	;;
 *)

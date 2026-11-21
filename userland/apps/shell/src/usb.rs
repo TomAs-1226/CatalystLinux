@@ -47,6 +47,25 @@ pub fn set(index: usize) -> Result<(), String> {
     }
 }
 
+/// A mode a computer sees is chosen, but the USB controller is still in the
+/// role it started in (the host, for the internal hub): it takes the device
+/// role from the next start (catalyst-usb sets it in config.txt), with the
+/// USB switch to the left.
+pub fn restart_needed() -> bool {
+    mode() != 0 && std::path::Path::new(SCRIPT).exists() && !running_as_device()
+}
+
+/// The USB controller started in the device role (`dr_mode` peripheral).
+pub fn running_as_device() -> bool {
+    std::fs::read_dir("/proc/device-tree/soc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("usb@"))
+        .find_map(|e| std::fs::read_to_string(e.path().join("dr_mode")).ok())
+        .is_some_and(|s| s.trim_end_matches('\0').trim() == "peripheral")
+}
+
 /// Whether a computer has taken the handheld as its device: `None` where
 /// there is no USB device controller (a computer, the simulator).
 pub fn connected() -> Option<bool> {

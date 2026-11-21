@@ -2321,6 +2321,8 @@ impl SettingsApp {
                 ("Plugged into a computer".into(), crate::usb::MODES[at].1.into(), at != 0)
             }
             UsbLink => match crate::usb::connected() {
+                // The controller takes the device role at the next start.
+                _ if crate::usb::restart_needed() => ("Computer".into(), "after a restart".into(), false),
                 Some(true) => ("Computer".into(), "connected".into(), true),
                 Some(false) => ("Computer".into(), "not connected".into(), false),
                 None => ("Computer".into(), "on the handheld".into(), false),
@@ -2543,6 +2545,11 @@ impl SettingsApp {
                 let n = crate::usb::MODES.len() as i32;
                 let next = (crate::usb::mode() as i32 + step).rem_euclid(n) as usize;
                 *cx.say = Some(match crate::usb::set(next) {
+                    // A computer mode: the switch to the left, and a restart
+                    // the first time (the controller's role is set at start).
+                    Ok(()) if next != 0 && std::path::Path::new("/usr/sbin/catalyst-usb").exists() && !crate::usb::running_as_device() => {
+                        "restart · usb switch to the left".to_owned()
+                    }
                     Ok(()) => format!("usb: {}", crate::usb::MODES[next].1),
                     Err(why) => why,
                 });
