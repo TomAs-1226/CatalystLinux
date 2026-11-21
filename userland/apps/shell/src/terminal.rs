@@ -171,11 +171,13 @@ impl Screen for Terminal {
     }
 
     /// Only the login shell is kept among recent apps (its session was always
-    /// kept). A program started in a terminal of its own (an app, an SSH
-    /// session, a saved command, a serial line) ends when it is left, as an
-    /// app that draws for itself does: nothing goes on running unseen.
+    /// kept), and only while it runs: one that has ended is not brought back
+    /// saying so, Terminal opens on a new one. A program started in a
+    /// terminal of its own (an app, an SSH session, a saved command, a
+    /// serial line) ends when it is left, as an app that draws for itself
+    /// does: nothing goes on running unseen.
     fn keep_in_recents(&self) -> bool {
-        self.program.is_none() && self.serial.is_none()
+        self.program.is_none() && self.serial.is_none() && !self.ended
     }
 
     fn keeps_awake(&self) -> bool {

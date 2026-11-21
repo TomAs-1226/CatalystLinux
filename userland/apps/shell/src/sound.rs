@@ -182,6 +182,39 @@ fn run(args: &[&str]) -> Result<String, String> {
     }
 }
 
+// ----------------------------------------------------------------- chimes ---
+
+const SOUNDS: &str = "/usr/share/catalyst/sounds";
+
+/// What plays as reminders come due (reminders.rs calls it): the chime, or
+/// for the pit's a brighter, quicker one that cuts through a busy pit. At
+/// the system volume, over whatever else plays; nothing while muted.
+pub fn reminder_chime(rang: &[crate::reminders::Ring]) {
+    let file = if rang.iter().any(|r| r.pit) { "pit.wav" } else { "chime.wav" };
+    play_file(file);
+}
+
+/// A sound from the image's own, played to "default" on a thread of its
+/// own (waited for there, so nothing is left behind).
+fn play_file(name: &'static str) {
+    if !on_device() || level().heard() == 0 {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("chime".into())
+        .stack_size(64 * 1024)
+        .spawn(move || {
+            let path = Path::new(SOUNDS).join(name);
+            Command::new("aplay").args(["-q", "-D", "default"]).arg(path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().ok();
+        })
+        .ok();
+}
+
+/// At start: the reminders' chime.
+pub fn start() {
+    crate::reminders::set_chime(reminder_chime);
+}
+
 // ------------------------------------------------------------------- keys ---
 
 /// A sound or music key, over any screen: what the island says.

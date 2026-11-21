@@ -23,6 +23,10 @@ serde_json = "1"
 sha2 = "0.10"
 # Music, signed in: YouTube's request signature (SAPISIDHASH) is a SHA-1.
 sha1 = "0.11"
+# The lock screen's passcode, kept only as an Argon2id hash (RustCrypto's,
+# pure Rust: BLAKE2b's 64-bit adds and rotations, nothing the CM0's A53
+# lacks). No `rand`: the salt is read from the kernel.
+argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "password-hash"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 vte = "0.15"
 # QR codes for the setup page's address (Project Nayuki's encoder; no dependencies).

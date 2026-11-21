@@ -14,9 +14,13 @@
 //!
 //! What a light showed before is read first and put back after, unless the
 //! keyboard changed it meanwhile (a modifier pressed), which then stands.
+//! In deep standby all three are put out, whatever they showed, and given
+//! back the same way as it wakes.
 //!
 //! The red light follows the CM0's activity LED, which flickers on every
 //! card access. Quiet, it stays dark, and blinks only if the kernel panics.
+//! Deep standby puts it out (catalyst-power), and may have it blink once a
+//! minute as a reminder (`red_reminder`).
 
 use std::cell::Cell;
 
@@ -47,6 +51,8 @@ impl Light {
 /// What the shell has a light do (off is the keyboard's own state, given back).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
+    /// Out, in deep standby.
+    Dark = 0,
     Blink = 1,
     Fast = 2,
 }
@@ -126,6 +132,8 @@ pub struct Lights {
     notice: bool,
     /// Seconds of warning blink left.
     warning: f32,
+    /// Deep standby: all three out.
+    dark: bool,
 }
 
 impl Lights {
@@ -138,7 +146,15 @@ impl Lights {
     }
 
     pub fn on(board: Box<dyn Board>) -> Lights {
-        Lights { board, borrowed: [None; 3], notice: false, warning: 0.0 }
+        Lights { board, borrowed: [None; 3], notice: false, warning: 0.0, dark: false }
+    }
+
+    /// Deep standby: every light out (or, waking, given back).
+    pub fn set_dark(&mut self, dark: bool) {
+        if self.dark != dark {
+            self.dark = dark;
+            self.show();
+        }
     }
 
     /// Something happened while the screen was off.
@@ -180,7 +196,9 @@ impl Lights {
 
     /// What each light should show now, and whether the shell has it.
     fn wanted(&self, light: Light) -> Option<Mode> {
-        if self.warning > 0.0 {
+        if self.dark {
+            Some(Mode::Dark)
+        } else if self.warning > 0.0 {
             Some(Mode::Fast)
         } else if self.notice && light == Light::Fn {
             Some(Mode::Blink)
@@ -227,12 +245,37 @@ impl Lights {
 /// The red light: quiet (dark, blinking only on a kernel panic) or showing
 /// card activity as the CM0 does by default.
 pub fn red_light(quiet: bool) {
-    let Some(dir) = ["ACT", "led0"].iter().map(|n| std::path::Path::new("/sys/class/leds").join(n)).find(|p| p.exists()) else { return };
+    let Some(dir) = red_dir() else { return };
     if quiet {
-        std::fs::write(dir.join("trigger"), "panic").or_else(|_| std::fs::write(dir.join("trigger"), "none")).ok();
+        // Dark first: writing 0 lets go of any trigger, so it goes before
+        // the panic trigger is set, not after (which took it off again).
         std::fs::write(dir.join("brightness"), "0").ok();
+        std::fs::write(dir.join("trigger"), "panic").or_else(|_| std::fs::write(dir.join("trigger"), "none")).ok();
     } else {
         std::fs::write(dir.join("trigger"), "mmc0").ok();
+    }
+}
+
+/// The CM0's activity light.
+fn red_dir() -> Option<std::path::PathBuf> {
+    ["ACT", "led0"].iter().map(|n| std::path::Path::new("/sys/class/leds").join(n)).find(|p| p.exists())
+}
+
+/// Deep standby's reminder that the handheld is still on: the red light
+/// blinks once a minute, briefly. The kernel's timer trigger blinks it, so
+/// nothing in the shell wakes for it; its cost is a few milliwatt-seconds a
+/// minute. Off: dark again, no trigger (catalyst-power puts back what it
+/// had before deep standby).
+pub fn red_reminder(on: bool) {
+    let Some(dir) = red_dir() else { return };
+    let (lit, dark) = crate::deep::BLINK_MS;
+    if on {
+        std::fs::write(dir.join("trigger"), "timer").ok();
+        std::fs::write(dir.join("delay_off"), dark.to_string()).ok();
+        std::fs::write(dir.join("delay_on"), lit.to_string()).ok();
+    } else {
+        std::fs::write(dir.join("brightness"), "0").ok();
+        std::fs::write(dir.join("trigger"), "none").ok();
     }
 }
 
@@ -297,6 +340,32 @@ mod tests {
         // The waking key was Fn, held: the driver lit it.
         chip.0.borrow_mut().insert(0xBE, 3);
         lights.seen();
+        assert_eq!(chip.0.borrow()[&0xBE], 3);
+    }
+
+    #[test]
+    fn deep_standby_puts_every_light_out_and_gives_them_back() {
+        let chip = Fake::default();
+        // Shift locked by the keyboard, and Fn blinking a notice.
+        chip.0.borrow_mut().insert(0xBD, 2);
+        let mut lights = Lights::on(Box::new(chip.clone()));
+        lights.notice();
+        lights.set_dark(true);
+        assert_eq!(lights.showing(), [Some(Mode::Dark); 3]);
+        for reg in [0xBD, 0xBE, 0xBF] {
+            assert_eq!(chip.0.borrow()[&reg], 0, "register {reg:#x} out");
+        }
+        lights.warning();
+        assert_eq!(chip.0.borrow()[&0xBD], 0, "a warning does not light them in deep standby");
+        lights.tick(WARNING_SECONDS);
+        lights.seen();
+        lights.set_dark(false);
+        assert_eq!(chip.0.borrow()[&0xBD], 2, "Shift's lock shows again");
+        assert_eq!(lights.showing(), [None; 3]);
+        // The waking key was Fn, held: the driver lit it, and that stands.
+        lights.set_dark(true);
+        chip.0.borrow_mut().insert(0xBE, 3);
+        lights.set_dark(false);
         assert_eq!(chip.0.borrow()[&0xBE], 3);
     }
 

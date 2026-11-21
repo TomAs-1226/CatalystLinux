@@ -561,6 +561,17 @@ fn send(cmd: Cmd) {
     player().tx.send(cmd).ok();
 }
 
+/// Music is playing, or about to (a stream being found, or the first
+/// sound on its way): deep standby waits for it to stop.
+pub fn playing() -> bool {
+    // The unit tests' player (the simulator's) plays beside tests of deep
+    // standby, which must not see it.
+    if cfg!(test) {
+        return false;
+    }
+    PLAYER.get().is_some_and(|p| matches!(p.state.lock().unwrap().phase, Phase::Playing | Phase::Loading))
+}
+
 /// Home's tile: the song playing, else what the app is.
 pub fn tile() -> (String, Option<&'static str>) {
     let n = now();
@@ -645,6 +656,7 @@ impl Worker {
             Cmd::Radio(id, next) => {
                 let mut s = self.state.lock().unwrap();
                 if s.queue.len() == 1 && s.queue[0].id == id {
+                    know(&next);
                     s.queue.extend(next.into_iter().filter(|t| t.id != id).take(40));
                 }
                 drop(s);
@@ -1137,6 +1149,67 @@ fn demo_cover(track: &Track) -> Picture {
     Picture { w: COVER_PX, h: COVER_PX, rgb }
 }
 
+// ------------------------------------------------------------- spotlight ---
+
+/// Songs the app has listed (the start page, searches, radios): Spotlight
+/// finds them by name and artist without asking YouTube again.
+static KNOWN: Mutex<Vec<Track>> = Mutex::new(Vec::new());
+static KNOWN_CHANGED: AtomicU64 = AtomicU64::new(0);
+const KNOWN_KEPT: usize = 200;
+
+fn know(tracks: &[Track]) {
+    let mut known = KNOWN.lock().unwrap();
+    for t in tracks {
+        known.retain(|k| k.id != t.id);
+        known.push(t.clone());
+    }
+    let over = known.len().saturating_sub(KNOWN_KEPT);
+    known.drain(..over);
+    KNOWN_CHANGED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Music in Spotlight: the songs it knows, played from there, and, for
+/// anything typed, a search of YouTube Music, after the rest.
+pub struct Spotlight;
+
+/// Spotlight finds Music's songs from now on.
+pub fn register_spotlight() {
+    crate::spotlight::register(Arc::new(Spotlight));
+}
+
+impl crate::spotlight::Provider for Spotlight {
+    fn name(&self) -> &'static str {
+        "music"
+    }
+
+    fn items(&self) -> Vec<crate::spotlight::Item> {
+        use crate::spotlight::{weight, Item};
+        KNOWN.lock().unwrap().iter().map(|t| Item::new(format!("song:{}", t.id), t.title.clone(), "music_note", weight::OTHER).detail(format!("song · {}", t.artist.to_lowercase())).words(t.artist.clone())).collect()
+    }
+
+    fn stamp(&self) -> Option<u64> {
+        Some(KNOWN_CHANGED.load(Ordering::Relaxed))
+    }
+
+    fn answer(&self, query: &crate::spotlight::Query, _robot: &Robot, out: &mut Vec<crate::spotlight::Item>) {
+        use crate::spotlight::{weight, Item, TAIL};
+        let q = query.raw.trim();
+        if q.chars().count() >= 2 {
+            out.push(Item::new(format!("search:{q}"), format!("Search YouTube Music for “{q}”"), "music_note", weight::OTHER).detail("music").ranked(TAIL));
+        }
+    }
+
+    fn open(&self, item: &crate::spotlight::Item, _cx: &mut Cx) -> Result<Box<dyn Screen>, String> {
+        if let Some(q) = item.id.strip_prefix("search:") {
+            return Ok(Box::new(MusicScreen::searching(q)));
+        }
+        let id = item.id.strip_prefix("song:").unwrap_or(&item.id);
+        let track = KNOWN.lock().unwrap().iter().find(|t| t.id == id).cloned().ok_or_else(|| "that song is not to hand: search for it in Music".to_owned())?;
+        send(Cmd::Play(vec![track], 0));
+        Ok(Box::new(MusicScreen::new()))
+    }
+}
+
 // ---------------------------------------------------------------- screen ---
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -1185,6 +1258,15 @@ pub struct MusicScreen {
 }
 
 impl MusicScreen {
+    /// Opened on a search for `query` (from Spotlight).
+    pub fn searching(query: &str) -> Self {
+        let mut screen = Self::new();
+        screen.go(Page::Search);
+        screen.query = query.to_owned();
+        screen.run_search();
+        screen
+    }
+
     pub fn new() -> Self {
         let playing = now().track().is_some();
         let mut screen = MusicScreen {
@@ -1413,6 +1495,7 @@ impl Screen for MusicScreen {
             self.picks_job = None;
             match done {
                 Ok((what, t)) => {
+                    know(&t);
                     self.picks = t;
                     self.picks_are = what;
                     self.picks_error = None;
@@ -1425,7 +1508,10 @@ impl Screen for MusicScreen {
             self.search_job = None;
             match done {
                 Ok(t) if t.is_empty() => *cx.say = Some("no songs found".into()),
-                Ok(t) => self.results = t,
+                Ok(t) => {
+                    know(&t);
+                    self.results = t;
+                }
                 Err(why) => *cx.say = Some(why),
             }
             self.changed = true;
@@ -1799,6 +1885,25 @@ mod tests {
         assert_eq!((t[0].artist.as_str(), t[0].album.as_str(), t[0].seconds, t[0].art.as_str()), ("Mara Ellis", "Night Bus", Some(201), "https://i.ytimg.com/vi/a/sddefault.jpg"));
         // A year is not an album.
         assert_eq!((t[1].title.as_str(), t[1].album.as_str(), t[1].seconds), ("Glasshouse", "", Some(226)));
+    }
+
+    #[test]
+    fn spotlight_finds_the_songs_listed_and_offers_a_search() {
+        use crate::spotlight::{Provider, Query};
+        know(&demo_catalogue()[..2]);
+        let items = Spotlight.items();
+        assert!(items.iter().any(|i| i.id == "song:demo01" && i.title == "Harbour Lights" && i.detail == "song · wren & the tide"), "{items:?}");
+        let before = Spotlight.stamp();
+        know(&demo_catalogue()[2..3]);
+        assert_ne!(Spotlight.stamp(), before, "read again once more are known");
+        let mut out = Vec::new();
+        Spotlight.answer(&Query::new("daft punk"), &Robot::demo(), &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].title.as_str(), out[0].id.as_str()), ("Search YouTube Music for “daft punk”", "search:daft punk"));
+        // A single letter is no search yet.
+        out.clear();
+        Spotlight.answer(&Query::new("d"), &Robot::demo(), &mut out);
+        assert!(out.is_empty());
     }
 
     #[test]

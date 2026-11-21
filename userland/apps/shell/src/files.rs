@@ -67,6 +67,12 @@ fn roots() -> (PathBuf, PathBuf) {
     (dir.clone(), dir)
 }
 
+/// Where Files starts: the storage that persists (`/data` on the handheld),
+/// which search looks through.
+pub fn storage() -> PathBuf {
+    roots().0
+}
+
 pub struct Files {
     dir: PathBuf,
     root: PathBuf,
@@ -84,6 +90,16 @@ impl Files {
         let (start, root) = roots();
         let mut files = Files { dir: PathBuf::new(), root, entries: Vec::new(), list: ListState::default(), naming: None, deleting: None, title: String::new() };
         files.enter(start, None);
+        files
+    }
+
+    /// Files open on a folder, with the focus on `select` there (a file
+    /// search found): within the storage Files may climb about in.
+    pub fn at(dir: &Path, select: Option<&str>) -> Self {
+        let mut files = Self::new();
+        if dir.starts_with(&files.root) && dir.is_dir() {
+            files.enter(dir.to_owned(), select);
+        }
         files
     }
 

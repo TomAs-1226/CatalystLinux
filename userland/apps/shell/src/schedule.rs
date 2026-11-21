@@ -357,6 +357,8 @@ fn run(shared: &Shared, team: u32) {
             if shared.stop.load(Ordering::Relaxed) {
                 return;
             }
+            // In deep standby, parked here: no wakeups until it wakes.
+            crate::deep::rest();
             std::thread::sleep(Duration::from_millis(200));
         }
     }
@@ -466,6 +468,16 @@ pub struct ScheduleScreen {
     /// The focus has been put on the next match, once, when the list first
     /// showed; after that it is wherever the keys put it.
     placed: bool,
+}
+
+impl ScheduleScreen {
+    /// The schedule open on one match (by its place in the list), as search
+    /// finds a match or a team.
+    pub fn at(index: usize) -> Self {
+        let mut list = ListState::default();
+        list.focus = index;
+        ScheduleScreen { list, placed: true }
+    }
 }
 
 impl Screen for ScheduleScreen {

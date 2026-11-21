@@ -10,10 +10,12 @@
 //! - **Low-battery care**: a warning at 15% and at 10% (the island says it,
 //!   and the keyboard's lights blink for a few seconds, once), and at 5% a
 //!   clean power-off, so the card is never cut off half-written.
-//! - **Deep standby**, while the screen is off: the panel itself sleeps (see
+//! - **Standby**, while the screen is off: the panel itself sleeps (see
 //!   `Platform::panel_sleep`), the processor is at its slowest (standby.rs),
 //!   and after ten minutes Wi-Fi goes off, unless an update is downloading
 //!   or someone is logged in over SSH. It comes back as the screen wakes.
+//! - **Deep standby**, after half an hour of that: everything a key need not
+//!   have, off (deep.rs and `catalyst-power deep`).
 //! - **Idle USB sleeps**: the Ethernet chip (an SR9900A, driven by r8152)
 //!   and the hub suspend whenever they are idle, the largest draw after the
 //!   screen itself. The driver wakes on a cable or a packet, so the robot
@@ -32,7 +34,7 @@ use crate::platform::Key;
 use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
 
-const SCRIPT: &str = "/usr/sbin/catalyst-power";
+pub(crate) const SCRIPT: &str = "/usr/sbin/catalyst-power";
 const UNDERVOLT_STATE: &str = "/data/catalyst/undervolt";
 /// The battery saver comes on by itself at this charge.
 pub const SAVER_AT: u32 = 20;
@@ -69,23 +71,26 @@ pub struct Choices {
     pub wifi_sleeps: bool,
     /// The red light stays dark instead of flickering with the card.
     pub quiet_light: bool,
+    /// Minutes with the screen off and no key before deep standby (0: never).
+    pub deep_after: u32,
 }
 
 impl Default for Choices {
     fn default() -> Self {
-        Choices { saver: false, saver_auto: true, empty_off: true, wifi_sleeps: true, quiet_light: true }
+        Choices { saver: false, saver_auto: true, empty_off: true, wifi_sleeps: true, quiet_light: true, deep_after: crate::deep::AFTER_DEFAULT }
     }
 }
 
 impl Choices {
     /// As the settings file keeps them.
-    pub fn lines(&self) -> [(&'static str, String); 5] {
+    pub fn lines(&self) -> [(&'static str, String); 6] {
         [
             ("saver", self.saver.to_string()),
             ("saver_auto", self.saver_auto.to_string()),
             ("empty_off", self.empty_off.to_string()),
             ("wifi_sleeps", self.wifi_sleeps.to_string()),
             ("quiet_light", self.quiet_light.to_string()),
+            ("deep_after", self.deep_after.to_string()),
         ]
     }
 
@@ -98,6 +103,7 @@ impl Choices {
             "empty_off" => self.empty_off = on,
             "wifi_sleeps" => self.wifi_sleeps = on,
             "quiet_light" => self.quiet_light = on,
+            "deep_after" => self.deep_after = crate::deep::parse_after(value),
             _ => return false,
         }
         true
@@ -148,6 +154,8 @@ pub struct Reading {
     pub cycles: Option<u32>,
     /// What it holds now, as a share of what it held new.
     pub health: Option<u32>,
+    /// The charge left, mAh: deep standby's draw, from what it lost.
+    pub charge_mah: Option<f32>,
 }
 
 /// The power supply that is a battery: the first with a charge.
@@ -190,6 +198,7 @@ impl Reading {
             celsius: num("temp").map(|t| (t / 10.0) as f32),
             cycles: num("cycle_count").map(|c| c as u32),
             health,
+            charge_mah: num("charge_now").map(|uah| (uah / 1000.0) as f32).filter(|mah| *mah >= 0.0),
         })
     }
 
@@ -205,6 +214,7 @@ impl Reading {
             celsius: Some(27.5),
             cycles: Some(12),
             health: Some(98),
+            charge_mah: Some(1330.0),
         }
     }
 
@@ -375,7 +385,7 @@ fn usb_sleeps() {
 }
 
 /// Someone is logged in over SSH: an established connection to port 22.
-fn ssh_session() -> bool {
+pub(crate) fn ssh_session() -> bool {
     ["/proc/net/tcp", "/proc/net/tcp6"].iter().any(|file| {
         std::fs::read_to_string(file).is_ok_and(|text| {
             text.lines().skip(1).any(|line| {
@@ -656,8 +666,8 @@ thread_local! {
     static POSTPONED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Readings, the history, the saver's rules, low-battery care and deep
-/// standby's Wi-Fi, ticked by the shell.
+/// Readings, the history, the saver's rules, low-battery care and
+/// standby's Wi-Fi, ticked by the shell (once a minute in deep standby).
 pub struct Care {
     pub reading: Option<Reading>,
     source: Source,
@@ -1002,14 +1012,20 @@ enum Row {
     SaverAuto,
     EmptyOff,
     WifiSleeps,
+    Deep,
     RedLight,
     Drawing,
+    LastDeep,
     Health,
     Temperature,
     Voltage,
 }
 
-const ROWS: [Row; 9] = [Row::Saver, Row::SaverAuto, Row::EmptyOff, Row::WifiSleeps, Row::RedLight, Row::Drawing, Row::Health, Row::Temperature, Row::Voltage];
+const ROWS: [Row; 11] =
+    [Row::Saver, Row::SaverAuto, Row::EmptyOff, Row::WifiSleeps, Row::Deep, Row::RedLight, Row::Drawing, Row::LastDeep, Row::Health, Row::Temperature, Row::Voltage];
+
+/// Where the deep standby row is, for search and the gallery.
+pub const DEEP_ROW: usize = 4;
 
 /// Settings › Battery: the charge and the last day of it at the top, then
 /// the battery saver and the rest of the choices, then the battery itself.
@@ -1020,6 +1036,8 @@ pub struct BatteryPage {
     read_at: std::time::Instant,
     hero: Animated,
     demo: bool,
+    /// The last deep standby: how long, and what it drew.
+    last: Option<crate::deep::Slept>,
 }
 
 impl BatteryPage {
@@ -1032,6 +1050,7 @@ impl BatteryPage {
             read_at: std::time::Instant::now(),
             hero: Animated::new(1.0, role::page()).with_rest(0.004),
             demo,
+            last: None,
         };
         page.read();
         page
@@ -1053,6 +1072,7 @@ impl BatteryPage {
         let now = now();
         self.points = if self.demo { demo_history(now) } else { history() };
         self.points.retain(|p| p.0 >= now - 24 * 3600);
+        self.last = crate::deep::last();
     }
 
     fn describe(&self, row: Row, c: &Choices) -> (&'static str, String, bool) {
@@ -1063,8 +1083,10 @@ impl BatteryPage {
             Row::SaverAuto => ("On by itself at 20%", onoff(c.saver_auto), c.saver_auto),
             Row::EmptyOff => ("Turn off at 5%", onoff(c.empty_off), c.empty_off),
             Row::WifiSleeps => ("Wi-Fi in standby", (if c.wifi_sleeps { "off after 10 min" } else { "stays on" }).into(), c.wifi_sleeps),
+            Row::Deep => ("Deep standby", crate::deep::after_value(c.deep_after), c.deep_after > 0),
             Row::RedLight => ("Red light", (if c.quiet_light { "quiet" } else { "card activity" }).into(), true),
             Row::Drawing => ("Drawing now", r.and_then(Reading::draw_line).unwrap_or_else(|| "–".into()), false),
+            Row::LastDeep => ("Last sleep", self.last.map_or_else(|| "–".into(), |s| s.summary()), false),
             Row::Health => (
                 "Health",
                 match (r.and_then(|r| r.health), r.and_then(|r| r.cycles)) {
@@ -1156,6 +1178,13 @@ impl Screen for BatteryPage {
         let row = ROWS[self.list.focus.min(ROWS.len() - 1)];
         match key {
             Key::Back => return Nav::Pop,
+            // Deep standby: Enter opens what it does and draws; ←→ choose when.
+            Key::Enter if row == Row::Deep => return Nav::Push(Box::new(crate::deep::DeepPage::new())),
+            Key::Left | Key::Right if row == Row::Deep => {
+                let c = &mut cx.settings.battery;
+                c.deep_after = crate::deep::step_after(c.deep_after, if key == Key::Left { -1 } else { 1 });
+                crate::save_settings(cx.settings);
+            }
             Key::Enter | Key::Left | Key::Right => {
                 let c = &mut cx.settings.battery;
                 match row {
@@ -1210,6 +1239,12 @@ impl Screen for BatteryPage {
     }
 }
 
+/// The gauge now (the demo battery on a computer), for a page that shows
+/// the charge without the shell's own readings (StandBy's preview).
+pub fn reading_now() -> Option<Reading> {
+    Source::find().read()
+}
+
 /// "76% · 4 h 38 m left": Settings' summary of the battery.
 pub fn summary() -> String {
     match Source::find().read() {
@@ -1241,13 +1276,27 @@ mod tests {
     #[test]
     fn choices_round_trip_and_default_to_saving() {
         let c = Choices::default();
-        assert!(!c.saver && c.saver_auto && c.empty_off && c.wifi_sleeps && c.quiet_light);
-        let mut back = Choices { saver: true, saver_auto: false, empty_off: false, wifi_sleeps: false, quiet_light: false };
+        assert!(!c.saver && c.saver_auto && c.empty_off && c.wifi_sleeps && c.quiet_light && c.deep_after == 30);
+        let mut back = Choices { saver: true, saver_auto: false, empty_off: false, wifi_sleeps: false, quiet_light: false, deep_after: 0 };
         for (k, v) in c.lines() {
             assert!(back.parse(k, &v));
         }
         assert_eq!(back, c);
         assert!(!back.parse("light", "true"));
+        // Deep standby: each choice read back; anything else, half an hour.
+        for minutes in crate::deep::AFTER_CHOICES {
+            let c = Choices { deep_after: minutes, ..Choices::default() };
+            let mut back = Choices::default();
+            for (k, v) in c.lines() {
+                back.parse(k, &v);
+            }
+            assert_eq!(back.deep_after, minutes);
+        }
+        for odd in ["45", "-1", "half an hour", ""] {
+            back.parse("deep_after", odd);
+            assert_eq!(back.deep_after, 30, "{odd:?}");
+        }
+        assert_eq!(ROWS[DEEP_ROW], Row::Deep);
     }
 
     #[test]
@@ -1264,11 +1313,13 @@ mod tests {
             ("cycle_count", "7"),
             ("charge_full", "1680000"),
             ("charge_full_design", "1750000"),
+            ("charge_now", "705000"),
         ] {
             std::fs::write(dir.join(name), format!("{value}\n")).unwrap();
         }
         let r = Reading::from_dir(&dir).unwrap();
         assert_eq!((r.percent, r.flow), (42, Flow::Discharging));
+        assert_eq!(r.charge_mah, Some(705.0), "the charge left, for deep standby's draw");
         assert_eq!(r.milliamps, Some(310.0), "drawn, whichever sign the gauge gives");
         assert_eq!(r.minutes_left, Some(270));
         assert_eq!((r.health, r.cycles), (Some(96), Some(7)));
@@ -1391,16 +1442,21 @@ mod tests {
     #[test]
     fn the_battery_page_fits_at_every_text_size() {
         let mut g = Gfx::new(bezel::Tokens::dark());
-        let page = BatteryPage { list: ListState::default(), reading: Some(Reading::demo()), points: demo_history(now()), read_at: std::time::Instant::now(), hero: Animated::new(1.0, role::page()), demo: true };
+        // The longest a last deep standby reads.
+        let last = crate::deep::Slept { woke: 0, seconds: 23 * 3600 + 59 * 60, watts: Some(0.888), charging: false };
+        let mut page = BatteryPage { list: ListState::default(), reading: Some(Reading::demo()), points: demo_history(now()), read_at: std::time::Instant::now(), hero: Animated::new(1.0, role::page()), demo: true, last: Some(last) };
         for size in [crate::gfx::TextSize::Compact, crate::gfx::TextSize::Standard, crate::gfx::TextSize::Large] {
             g.set_text_size(size);
             let ty = g.ty;
             let width = W - 2.0 * PAD - 5.0;
-            for row in ROWS {
-                for c in [Choices::default(), Choices { saver: true, wifi_sleeps: false, quiet_light: false, ..Choices::default() }] {
-                    let (name, value, _) = page.describe(row, &c);
-                    let room = width - 30.0 - g.measure(&value, ty.label);
-                    assert!(g.measure(name, ty.body) <= room, "{name} beside {value} at {size:?}");
+            for last in [Some(last), Some(crate::deep::Slept { charging: true, ..last }), None] {
+                page.last = last;
+                for row in ROWS {
+                    for c in [Choices::default(), Choices { saver: true, wifi_sleeps: false, quiet_light: false, deep_after: 60, ..Choices::default() }, Choices { deep_after: 0, ..Choices::default() }] {
+                        let (name, value, _) = page.describe(row, &c);
+                        let room = width - 30.0 - g.measure(&value, ty.label);
+                        assert!(g.measure(name, ty.body) <= room, "{name} beside {value} at {size:?}");
+                    }
                 }
             }
             // The header: the charge with the chart beside it, and its line beneath.

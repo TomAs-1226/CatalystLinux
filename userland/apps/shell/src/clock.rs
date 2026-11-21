@@ -147,6 +147,13 @@ pub fn due() -> Option<String> {
     })
 }
 
+/// A timer is counting down (deep standby waits for it: it must be said
+/// when it runs out). The stopwatch need not be watched: it is a time kept.
+#[cfg_attr(test, allow(dead_code))]
+pub fn any_running() -> bool {
+    shared(|s| s.timers.iter().any(Timer::running))
+}
+
 /// What Home's tile says: a timer under way, the stopwatch, or nothing new.
 /// Twelve characters at most, all a tile's line holds.
 pub fn tile() -> (String, Option<&'static str>) {
@@ -699,6 +706,13 @@ mod tests {
         assert_eq!(sw.laps.len(), 3, "no lap while stopped");
         sw.reset();
         assert_eq!(sw.elapsed(), 0.0);
+    }
+
+    #[test]
+    fn a_running_timer_is_seen_by_deep_standby() {
+        let id = add_timer(3600.0);
+        assert!(any_running());
+        shared(|s| s.timers.retain(|t| t.id != id));
     }
 
     #[test]

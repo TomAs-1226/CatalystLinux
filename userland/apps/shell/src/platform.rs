@@ -279,6 +279,12 @@ pub trait Platform {
     fn framebuffer(&self) -> Option<String> {
         None
     }
+    /// What the panel shows now, read back (an app that drew for itself
+    /// left it there), the way round the shell draws. None where it cannot
+    /// be read; on a computer the window shows only what the shell sent.
+    fn capture(&mut self) -> Option<Vec<u32>> {
+        None
+    }
     /// Standby with the screen dark: the panel itself sleeps (`true`), or
     /// wakes and shows the last frame again (`false`). Nothing on a computer.
     fn panel_sleep(&mut self, _asleep: bool) {}
@@ -429,6 +435,30 @@ pub fn turned_rows(canvas: &Canvas, turn: Turn, rows: (usize, usize), bytes_per_
             _ => {}
         }
     }
+}
+
+/// A framebuffer's bytes (`width` × `height` pixels, rows `stride` bytes
+/// apart, RGB565 or 32-bit) as a picture the way round the shell draws: in
+/// the tear-free mode the framebuffer is upright and `turn` lays it back.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn picture_from_framebuffer(bytes: &[u8], (width, height, stride): (usize, usize, usize), bytes_per_pixel: usize, turn: Option<Turn>) -> Option<Vec<u32>> {
+    if !matches!(bytes_per_pixel, 2 | 4) || bytes.len() < stride * height || stride < width * bytes_per_pixel {
+        return None;
+    }
+    let (w, h) = if turn.is_some() { (height, width) } else { (width, height) };
+    let mut picture = vec![0u32; w * h];
+    for py in 0..height {
+        let row = &bytes[py * stride..][..width * bytes_per_pixel];
+        for (px, p) in row.chunks_exact(bytes_per_pixel).enumerate() {
+            let rgb = match p {
+                [a, b] => bezel::canvas::rgb565_to_rgb(u16::from_ne_bytes([*a, *b])),
+                _ => u32::from_ne_bytes([p[0], p[1], p[2], p[3]]) & 0xff_ffff,
+            };
+            let (x, y) = turn.map_or((px, py), |turn| turn.source(px, py, w, h));
+            picture[y * w + x] = rgb;
+        }
+    }
+    Some(picture)
 }
 
 // ---------------------------------------------------------------- device ---
@@ -649,6 +679,11 @@ pub mod device {
             if code == 125 || code == 126 || (code == 57 && self.ctrl) {
                 return (value == 1).then_some(Key::Ctrl(' '));
             }
+            // Ctrl-Enter brings Spotlight up over any screen: no program in a
+            // terminal can tell it from Enter, so it takes nothing from one.
+            if (code == 28 || code == 96) && self.ctrl {
+                return (value == 1).then_some(Key::Ctrl('\n'));
+            }
             if own {
                 if let Some(ch) = sym_char(code) {
                     return Some(Key::Char(ch));
@@ -802,6 +837,14 @@ pub mod device {
             Some(self.fb_path.clone())
         }
 
+        /// The framebuffer read back: what an app that drew for itself left.
+        fn capture(&mut self) -> Option<Vec<u32>> {
+            use std::os::unix::fs::FileExt;
+            let mut bytes = vec![0u8; self.stride * self.height];
+            self.fb.read_exact_at(&mut bytes, 0).ok()?;
+            picture_from_framebuffer(&bytes, (self.width, self.height, self.stride), self.bytes_per_pixel, self.turn)
+        }
+
         /// Blanking the framebuffer powers the display pipe down, and the
         /// panel's driver puts the ST7789 to sleep (display off, sleep in);
         /// unblanking runs its init sequence again and sends the frame it
@@ -924,6 +967,7 @@ pub mod sim {
                 K::Down => Key::Down,
                 K::Left => Key::Left,
                 K::Right => Key::Right,
+                K::Enter | K::NumPadEnter if ctrl => Key::Ctrl('\n'),
                 K::Enter | K::NumPadEnter => Key::Enter,
                 K::Escape => Key::Back,
                 K::Backspace => Key::Backspace,
@@ -1240,5 +1284,43 @@ mod tests {
             }
         }
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn what_an_app_left_in_the_framebuffer_reads_back_the_way_round_the_shell_draws() {
+        let (w, h) = (320usize, 170usize);
+        // A picture whose every pixel says where it is, in colours the
+        // panel's 16 bits keep exactly.
+        let mut canvas = Canvas::new(w as i32, h as i32);
+        for (i, p) in canvas.px.iter_mut().enumerate() {
+            *p = bezel::canvas::rgb565_to_rgb(i as u16);
+        }
+        // Undithered, as an app would write it: the shell's own frames are dithered.
+        let rgb565 = |p: u32| ((p >> 19 & 0x1f) << 11 | (p >> 10 & 0x3f) << 5 | (p >> 3 & 0x1f)) as u16;
+        // As the panel's own mode lays it out, rows padded.
+        let stride = w * 2 + 8;
+        let mut fb = vec![0u8; stride * h];
+        for y in 0..h {
+            for x in 0..w {
+                fb[y * stride + x * 2..][..2].copy_from_slice(&rgb565(canvas.px[y * w + x]).to_ne_bytes());
+            }
+        }
+        assert_eq!(picture_from_framebuffer(&fb, (w, h, stride), 2, None).as_deref(), Some(canvas.px.as_slice()));
+        // Upright in the tear-free mode, turned each way.
+        for turn in Turn::ALL {
+            let stride = h * 2 + 12;
+            let mut fb = vec![0u8; stride * w];
+            for py in 0..w {
+                for px in 0..h {
+                    let (x, y) = turn.source(px, py, w, h);
+                    fb[py * stride + px * 2..][..2].copy_from_slice(&rgb565(canvas.px[y * w + x]).to_ne_bytes());
+                }
+            }
+            assert_eq!(picture_from_framebuffer(&fb, (h, w, stride), 2, Some(turn)).as_deref(), Some(canvas.px.as_slice()), "{turn:?}");
+        }
+        // 32-bit, and a framebuffer too short to be the panel's.
+        let fb: Vec<u8> = canvas.px.iter().flat_map(|p| (p | 0xff00_0000).to_ne_bytes()).collect();
+        assert_eq!(picture_from_framebuffer(&fb, (w, h, w * 4), 4, None).as_deref(), Some(canvas.px.as_slice()));
+        assert_eq!(picture_from_framebuffer(&fb[..100], (w, h, w * 4), 4, None), None);
     }
 }
