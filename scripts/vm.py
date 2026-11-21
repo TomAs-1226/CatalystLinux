@@ -574,10 +574,15 @@ def updates(vm):
             time.sleep(10)
         check("it is downloaded, written into system B and read back", '"state":"ready"' in status, status[-200:] + " " + vm.run("tail -2 /tmp/install.log"))
         boot = vm.run("mkdir -p /tmp/b && mount -t vfat -o ro /dev/mmcblk0p1 /tmp/b && tail -4 /tmp/b/config.txt | tr '\n' ' '; "
-                      "echo '|'; cat /tmp/b/slot-b/cmdline.txt; echo '|'; ls /tmp/b/slot-b | wc -l; umount /tmp/b")
+                      "echo '|'; cat /tmp/b/slot-b/cmdline.txt; echo '|'; ls /tmp/b/slot-b | wc -l; "
+                      "echo '|'; tail -4 /tmp/b/tryboot.txt 2>/dev/null | tr '\n' ' '; umount /tmp/b")
         parts = [p.strip() for p in boot.split("|")]
-        check("config.txt starts system A and tries system B", len(parts) == 3 and "[all] os_prefix=slot-a/ [tryboot] os_prefix=slot-b/" in parts[0], parts[0] if parts else boot)
-        check("system B's kernel is in slot-b, rooted on system B", len(parts) == 3 and "root=/dev/mmcblk0p3" in parts[1] and int(parts[2] or 0) > 3, boot)
+        check("config.txt starts system A and tries system B", len(parts) == 4 and "[all] os_prefix=slot-a/ [tryboot] os_prefix=slot-b/" in parts[0], parts[0] if parts else boot)
+        check("system B's kernel is in slot-b, rooted on system B", len(parts) == 4 and "root=/dev/mmcblk0p3" in parts[1] and int(parts[2] or 0) > 3, boot)
+        # The Pi firmware for this chip reads tryboot.txt, not config.txt, on
+        # the start an update is tried in (the emulator has no firmware, so
+        # only the file is checked): it must start system B.
+        check("tryboot.txt, which the firmware reads on a try, starts system B", len(parts) == 4 and "[all] os_prefix=slot-b/" in parts[3], parts[3] if len(parts) == 4 else boot)
         verified = vm.run("rc-status default | grep catalyst-update | tr -s ' '")
         check("the start-up check of the last update ran", "started" in verified, verified)
     finally:

@@ -10,6 +10,11 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.5.1
+
+### Fixed
+- Updates start the new system: the handheld's firmware reads tryboot.txt for a try, which is now written. Before, an update was downloaded and written, but the try came straight back to the old system.
+
 ## 0.5.0
 
 ### Camera and Photos

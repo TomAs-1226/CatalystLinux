@@ -167,6 +167,27 @@ pub fn set_slots(config: &str, run: usize, try_slot: usize) -> String {
     )
 }
 
+/// Write which system starts: `config.txt` starts `run` (and, for firmware
+/// that reads it on a try, tries `try_slot` in its `[tryboot]` section), and
+/// `tryboot.txt` starts `try_slot`. Raspberry Pi firmware for this chip
+/// (bootcode.bin and start.elf for the BCM2837/RP3A0) reads `tryboot.txt`
+/// *instead of* `config.txt` on a start after `reboot "0 tryboot"`: without
+/// it, the try found no settings and the old system came back (0.5.0's first
+/// update on a CardputerZero). Each is written whole and renamed into place.
+pub fn write_slots(boot: &Path, run: usize, try_slot: usize) -> Result<(), String> {
+    let config_path = boot.join("config.txt");
+    let config = std::fs::read_to_string(&config_path).map_err(|e| format!("reading config.txt: {e}"))?;
+    let put = |name: &str, text: String| -> Result<(), String> {
+        let tmp = boot.join(format!("{name}.new"));
+        std::fs::write(&tmp, text).map_err(|e| format!("writing {name}: {e}"))?;
+        std::fs::rename(&tmp, boot.join(name)).map_err(|e| format!("writing {name}: {e}"))
+    };
+    // The trial's settings first: a config.txt asking for a try is never
+    // left without the file the try reads.
+    put("tryboot.txt", set_slots(&config, try_slot, try_slot))?;
+    put("config.txt", set_slots(&config, run, try_slot))
+}
+
 /// The system `config.txt` starts normally, and the one it tries.
 #[cfg(test)]
 pub fn slots_of(config: &str) -> Option<(usize, usize)> {
