@@ -20,6 +20,8 @@ apriltag = { workspace = true }
 localmodel = { workspace = true }
 # App packages: the app file, the catalogue's index, signatures.
 catalyst-appkg = { workspace = true }
+# The microphone and the speaker, speech to text and text to speech (push-to-talk).
+speech = { workspace = true }
 serde_json = "1"
 # Checking a downloaded on-device model against its pinned sum.
 sha2 = "0.10"

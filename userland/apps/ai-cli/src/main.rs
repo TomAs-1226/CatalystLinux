@@ -8,6 +8,10 @@
 //!   <command> 2>&1 | ai explain [question]
 //!                               what some output or an error means
 //!   ai --local …                the on-device model rather than a key
+//!   ai --listen [cmd]           the question (or what the command should
+//!                               do) said aloud: the microphone listens until
+//!                               Enter, and OpenAI's gpt-transcribe writes it
+//!                               down with the OpenAI key
 //!
 //! It answers with the service the Assistant app uses (Settings › Keys:
 //! OpenAI's GPT-6.2 Sol or Claude Opus 5.5, at the effort chosen there), or
@@ -52,6 +56,8 @@ const HELP: &str = "ai: the assistant, in the terminal
   --local   the on-device model
             (Settings > On-device model)
   --cloud   use a key even with the model here
+  --listen  say it aloud; enter stops listening
+            (ai --listen, ai --listen cmd)
 
 examples
   ai what does a brownout do to the robot
@@ -80,28 +86,34 @@ enum Mode {
 struct Args {
     mode: Mode,
     local: Option<bool>,
+    /// The question (or the command's purpose) said aloud.
+    listen: bool,
 }
 
 fn parse_args(args: &[String]) -> Args {
     let mut local = None;
+    let mut listen = false;
     let mut words: Vec<&str> = Vec::new();
     for a in args {
         match a.as_str() {
             "--local" => local = Some(true),
             "--cloud" => local = Some(false),
-            "-h" | "--help" | "help" if words.is_empty() => return Args { mode: Mode::Help, local },
+            "--listen" | "-l" => listen = true,
+            "-h" | "--help" | "help" if words.is_empty() => return Args { mode: Mode::Help, local, listen: false },
             other => words.push(other),
         }
     }
     let rest = |from: usize| words[from..].join(" ");
     let mode = match words.first().copied() {
+        // Nothing typed, to be said instead.
+        None if listen => Mode::Ask(String::new()),
         None => Mode::Help,
         Some("cmd") => Mode::Cmd(rest(1)),
         Some("explain") => Mode::Explain(rest(1)),
         Some("app") => Mode::App(rest(1)),
         Some(_) => Mode::Ask(rest(0)),
     };
-    Args { mode, local }
+    Args { mode, local, listen }
 }
 
 // ------------------------------------------------------------------ setup ---
@@ -555,6 +567,119 @@ fn put_app(dir: &Path, id: &str, app: &str, script: &str) -> Result<PathBuf, Str
     Ok(folder)
 }
 
+// ------------------------------------------------------------------ voice ---
+
+/// Listening stops by itself after this long.
+const LISTEN_MOST: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A level as a meter a terminal can show: `[||||||......]`.
+fn meter(level: f32) -> String {
+    let filled = (level.clamp(0.0, 1.0) * 12.0).round() as usize;
+    format!("[{}{}]", "|".repeat(filled), ".".repeat(12 - filled))
+}
+
+/// What is said aloud, written down: the microphone (ALSA's `default`)
+/// listens until Enter (or 30 s), with a meter on the terminal, and OpenAI's
+/// gpt-transcribe writes it down with the OpenAI key. The microphone is
+/// closed again the moment it is done with.
+fn listen_aloud(keys: &[(String, String)]) -> Result<String, String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc};
+    let key = key_for(keys, Service::OpenAi).ok_or("--listen needs an OpenAI key (Settings > Keys): OpenAI writes down what you say")?;
+    let procs = speech::Procs::default();
+    let stop = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = mpsc::channel::<Result<Vec<i16>, String>>();
+    let (mic_procs, mic_stop) = (procs.clone(), stop.clone());
+    std::thread::spawn(move || {
+        use speech::source::Source;
+        let mut mic = match speech::source::Arecord::start("default", &mic_procs) {
+            Ok(mic) => mic,
+            Err(why) => {
+                tx.send(Err(why)).ok();
+                return;
+            }
+        };
+        while !mic_stop.load(Ordering::Relaxed) {
+            let mut chunk = Vec::new();
+            match mic.read(&mut chunk) {
+                Ok(more) => {
+                    if tx.send(Ok(chunk)).is_err() || !more {
+                        break;
+                    }
+                }
+                Err(why) => {
+                    tx.send(Err(why)).ok();
+                    break;
+                }
+            }
+        }
+    });
+    // Enter, from the terminal itself (stdin may be piped).
+    let (enter_tx, enter_rx) = mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        match std::fs::File::open("/dev/tty") {
+            Ok(tty) => {
+                std::io::BufRead::read_line(&mut std::io::BufReader::new(tty), &mut line).ok();
+            }
+            Err(_) => {
+                std::io::stdin().read_line(&mut line).ok();
+            }
+        }
+        enter_tx.send(()).ok();
+    });
+    let shown = std::io::stderr().is_terminal();
+    let started = std::time::Instant::now();
+    let mut samples: Vec<i16> = Vec::new();
+    let mut level = 0.0;
+    let mut failed = None;
+    loop {
+        while let Ok(heard) = rx.try_recv() {
+            match heard {
+                Ok(chunk) => {
+                    level = speech::level(&chunk);
+                    samples.extend(chunk);
+                }
+                Err(why) => failed = Some(why),
+            }
+        }
+        if failed.is_some() || enter_rx.try_recv().is_ok() || started.elapsed() >= LISTEN_MOST {
+            break;
+        }
+        if shown {
+            eprint!("\r\x1b[Klistening {} enter stops", meter(level));
+            std::io::stderr().flush().ok();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(80));
+    }
+    // The last of it, then the microphone closed.
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    stop.store(true, Ordering::Relaxed);
+    procs.kill_all();
+    while let Ok(Ok(chunk)) = rx.recv_timeout(std::time::Duration::from_millis(100)) {
+        samples.extend(chunk);
+    }
+    if shown {
+        eprint!("\r\x1b[K");
+    }
+    if let (Some(why), true) = (failed, samples.is_empty()) {
+        return Err(why);
+    }
+    let clip = speech::Clip { samples };
+    if clip.silent() {
+        return Err("heard nothing: is the microphone on?".into());
+    }
+    let text = {
+        let _w = Waiting::new("writing it down…");
+        speech::openai::transcribe(&key, &clip.wav(), speech::openai::KEYWORDS, &std::env::temp_dir())?
+    };
+    if text.trim().is_empty() {
+        return Err("did not catch that: try again".into());
+    }
+    eprintln!("you: {}", text.trim());
+    Ok(text.trim().to_owned())
+}
+
 // -------------------------------------------------------------------- main ---
 
 /// "thinking…" on the terminal while it waits, gone when the answer comes.
@@ -581,13 +706,21 @@ impl Drop for Waiting {
 
 fn run() -> Result<i32, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let args = parse_args(&args);
+    let mut args = parse_args(&args);
     if args.mode == Mode::Help {
         println!("{HELP}");
         return Ok(0);
     }
     let dir = config_dir();
     let keys = pairs(&std::fs::read_to_string(dir.join("keys")).unwrap_or_default());
+    // Said aloud: the question, or what the command should do.
+    if args.listen {
+        args.mode = match args.mode {
+            Mode::Ask(_) => Mode::Ask(listen_aloud(&keys)?),
+            Mode::Cmd(_) => Mode::Cmd(listen_aloud(&keys)?),
+            _ => return Err("--listen asks a question (ai --listen) or for a command (ai --listen cmd)".into()),
+        };
+    }
     let prefs = pairs(&std::fs::read_to_string(dir.join("assistant")).unwrap_or_default());
     let models = lm::dir();
     let (service, key) = choose(args.local, &prefs, &keys, lm::present(&models, lm::chosen(&models)))?;
@@ -711,7 +844,9 @@ mod tests {
         assert_eq!(s(&["what", "is", "can"]).mode, Mode::Ask("what is can".into()));
         assert_eq!(s(&["cmd", "find", "big", "files"]).mode, Mode::Cmd("find big files".into()));
         assert_eq!(s(&["explain"]).mode, Mode::Explain(String::new()));
-        assert_eq!(s(&["--local", "explain", "why?"]), Args { mode: Mode::Explain("why?".into()), local: Some(true) });
+        assert_eq!(s(&["--local", "explain", "why?"]), Args { mode: Mode::Explain("why?".into()), local: Some(true), listen: false });
+        assert_eq!(s(&["--listen"]), Args { mode: Mode::Ask(String::new()), local: None, listen: true }, "said, not typed");
+        assert_eq!(s(&["-l", "cmd"]).mode, Mode::Cmd(String::new()));
         assert_eq!(s(&[]).mode, Mode::Help);
         assert_eq!(s(&["--help"]).mode, Mode::Help);
         assert_eq!(s(&["help", "me"]).mode, Mode::Help, "help first is help");
@@ -779,6 +914,14 @@ mod tests {
         assert!(put_app(&dir, &id, &file, &script).unwrap_err().contains("already"));
         std::fs::remove_dir_all(&dir).ok();
         assert_eq!(parse_args(&["app".into(), "a".into(), "timer".into()]).mode, Mode::App("a timer".into()));
+    }
+
+    #[test]
+    fn the_listening_meter_is_plain_characters_any_font_has() {
+        assert_eq!(meter(0.0), "[............]");
+        assert_eq!(meter(0.5), "[||||||......]");
+        assert_eq!(meter(2.0), "[||||||||||||]");
+        assert!(meter(0.7).is_ascii());
     }
 
     #[test]

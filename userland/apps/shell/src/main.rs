@@ -109,6 +109,7 @@ mod tools;
 mod trends;
 mod units;
 mod upnext;
+mod voice;
 mod weather;
 mod wifi;
 mod wpilog;
@@ -386,8 +387,16 @@ fn main() {
     };
     // The scripted tour brings its own files and apps to show.
     #[cfg(not(target_arch = "aarch64"))]
-    if flag("--shots") {
+    if flag("--shots") || flag("--voice-shots") {
         tour_fixtures();
+    }
+    // The voice screens keep their state in a folder of their own: a tour
+    // run at the same time clears the shared one as it starts.
+    #[cfg(not(target_arch = "aarch64"))]
+    if flag("--voice-shots") {
+        let own = std::env::temp_dir().join(format!("catalyst-voice-shots-{}", std::process::id()));
+        std::fs::create_dir_all(&own).ok();
+        std::env::set_var("CATALYST_CONF", own.join("robot"));
     }
     // The motion sensor starts on a thread of its own (its program takes
     // most of a second over the bus), so Home knows what it offers.
@@ -432,6 +441,27 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--catalogue-shots") {
         return catalogue::shots(std::path::Path::new(&dir));
+    }
+    // The voice screens alone (push-to-talk, dictation, spoken answers),
+    // as the end of the full tour (`--shots`) shows them.
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--voice-shots") {
+        std::fs::create_dir_all(&dir).expect("create the screenshot folder");
+        for _ in 0..120 {
+            if shell.tick(1.0 / 60.0) {
+                shell.draw();
+            }
+        }
+        voice::gallery(&mut shell, std::path::Path::new(&dir));
+        // And every voice island over every title it meets, in both looks
+        // at each text size: a sheet each.
+        for (what, settled) in voice::island_sheets(std::path::Path::new(&dir)) {
+            if !settled {
+                eprintln!("the title had not settled whole or gone: {what}");
+            }
+        }
+        std::fs::remove_dir_all(config_dir()).ok();
+        return;
     }
 
     if flag("--bench") || flag("--about") {
@@ -2517,6 +2547,7 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     std::fs::remove_dir_all(&notes_dir).ok();
     sound_shots(&mut shell, &press, &save, &settle);
     music_shots(&mut shell, &press, &save, &settle);
+    voice::gallery(&mut shell, dir);
     let written =std::fs::read_dir(dir).map_or(0, |d| d.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "png")).count());
     println!("{written} screens in {}, {frames} frames at {:.2} ms each", dir.display(), started.elapsed().as_secs_f64() * 1e3 / frames as f64);
     // An icon asked for and never built in draws as nothing: a blank where
