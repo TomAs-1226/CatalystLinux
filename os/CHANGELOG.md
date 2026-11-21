@@ -10,6 +10,13 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.5.3
+
+### Fixed
+- Opening and closing apps quickly no longer flashes an old screen, a blank frame or the wrong app: a window keeps moving from where it was, even when the next key comes first.
+- Apps that draw for themselves, like Paint, start every time they're opened, and close from their own last picture.
+- Recent apps (Ctrl Tab) opened during a zoom shows the app as it is, not jumped to full size.
+
 ## 0.5.2
 
 ### Battery
