@@ -37,6 +37,7 @@ mod browse;
 mod apps;
 mod apriltags;
 mod brand;
+mod camera;
 mod catalogue;
 mod changelog;
 mod commands;
@@ -64,6 +65,7 @@ mod look;
 mod monitor;
 mod nettools;
 mod panel;
+mod photos;
 mod pit;
 mod power;
 mod pty;
@@ -1289,6 +1291,72 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
         settle(&mut shell, 4);
         save(&mut shell, name);
     }
+
+    // The Camera on the simulated one (real time again: its pictures, its
+    // photos written on a thread, its QR codes read on another), then the
+    // album and a photo in it.
+    let wait = |shell: &mut Shell, ms: u64| {
+        let until = Instant::now() + std::time::Duration::from_millis(ms);
+        while Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            settle(shell, 1);
+        }
+    };
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    press(&mut shell, &vec![Right; steps_to("Camera")], 20);
+    settle(&mut shell, 60);
+    save(&mut shell, "80bc-home-camera");
+    press(&mut shell, &[Enter], 60);
+    wait(&mut shell, 3000);
+    save(&mut shell, "80c-camera");
+    // The grid, the three-second timer, and the timer counting down.
+    press(&mut shell, &[Char('g'), Char('t')], 30);
+    wait(&mut shell, 2600);
+    press(&mut shell, &[Enter], 1);
+    wait(&mut shell, 1150);
+    save(&mut shell, "80d-camera-timer");
+    // The shutter's flash, caught as it goes, then the photo kept.
+    wait(&mut shell, 1950);
+    settle(&mut shell, 4);
+    save(&mut shell, "80e-camera-shutter");
+    wait(&mut shell, 2500);
+    save(&mut shell, "80f-camera-saved");
+    // Scan mode, and the Wi-Fi code on the card read.
+    press(&mut shell, &[Char('g'), Char('t'), Char('t'), Right], 30);
+    wait(&mut shell, 3000);
+    save(&mut shell, "80g-camera-scan");
+    // The album, on the photo just taken; that photo; closer; its details;
+    // deleting it, asked.
+    press(&mut shell, &[Left, Down], 1);
+    wait(&mut shell, 2000);
+    save(&mut shell, "80h-photos");
+    press(&mut shell, &[Enter], 1);
+    wait(&mut shell, 1500);
+    save(&mut shell, "80i-photo");
+    press(&mut shell, &[Char('+'), Right], 1);
+    wait(&mut shell, 1500);
+    save(&mut shell, "80j-photo-zoomed");
+    press(&mut shell, &[Back, Char('i')], 1);
+    wait(&mut shell, 1000);
+    save(&mut shell, "80k-photo-details");
+    press(&mut shell, &[Char('i'), Char('d')], 1);
+    wait(&mut shell, 600);
+    save(&mut shell, "80l-photo-delete");
+    // And the album with nothing in it.
+    let kept = photos::dir().with_extension("kept");
+    std::fs::rename(photos::dir(), &kept).ok();
+    std::fs::create_dir_all(photos::dir()).ok();
+    std::fs::write(photos::dir().join(".seeded"), b"").ok();
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    press(&mut shell, &vec![Right; steps_to("Photos")], 20);
+    press(&mut shell, &[Enter], 90);
+    save(&mut shell, "80m-photos-empty");
+    std::fs::remove_dir_all(photos::dir()).ok();
+    std::fs::rename(&kept, photos::dir()).ok();
 
     // Remote: the simulator's two remotes, the TV's buttons, one sent, then a
     // button learned from the simulated remote (which waits a moment in real

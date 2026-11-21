@@ -156,6 +156,8 @@ impl Screen for Files {
             Key::Enter | Key::Right => match focused {
                 Some(entry) if entry.dir => self.enter(self.dir.join(&entry.name), None),
                 Some(entry) if !entry.file => *cx.say = Some("not a file the editor can open".into()),
+                // A photo opens in the Photos viewer, however large.
+                Some(entry) if crate::photos::is_photo(&entry.name) => return Nav::Push(Box::new(crate::photos::Viewer::single(self.dir.join(&entry.name)))),
                 Some(entry) if entry.bytes > EDITABLE => *cx.say = Some(format!("{} is too large to open", size(entry.bytes))),
                 Some(entry) => match Editor::open(&self.dir.join(&entry.name)) {
                     Ok(editor) => return Nav::Push(Box::new(editor)),

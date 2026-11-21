@@ -27,6 +27,13 @@ vte = "0.15"
 qrcodegen = "1.8"
 # Screenshots, on the handheld as on a computer (and the galleries' pictures).
 png = "0.18"
+# QR codes read by the camera (pure Rust, no C library to build). Without
+# its `img` feature: it is given the picture's brightness, not an image crate.
+rqrr = { version = "0.11", default-features = false }
+# Photos opened in the album, at an eighth, a quarter or half of their size
+# where that is all the panel needs (scaled in the decoder, so a 3280 × 2464
+# photo never needs its whole 24 MB). No thread pool.
+jpeg-decoder = { version = "0.3", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
@@ -35,3 +42,6 @@ libc = "0.2"
 # device image.
 [target.'cfg(not(target_arch = "aarch64"))'.dependencies]
 minifb = { version = "0.29", default-features = false }
+# The simulated camera's photos (on the handheld, catalyst-camera writes
+# them through libjpeg-turbo).
+jpeg-encoder = "0.7"

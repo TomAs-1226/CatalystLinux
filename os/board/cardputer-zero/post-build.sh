@@ -112,8 +112,9 @@ done
 # (the shell and plain C programs link it), as do libatomic (curl and libcurl
 # link it), the C++ runtime (Mesa's shader compiler and libcamera are C++)
 # and ncurses with its form, menu and panel libraries (vim, nano, htop, tmux
-# and Python's curses use them).
-for lib in libgomp libkmod libpsx libss \
+# and Python's curses use them). libturbojpeg is libjpeg-turbo's other API
+# (catalyst-camera writes photos through libjpeg itself).
+for lib in libgomp libkmod libpsx libss libturbojpeg \
 	libnl-route-3 libnl-idiag-3 libnl-nf-3 libnl-xfrm-3; do
 	rm -f "$TARGET_DIR"/lib/$lib.so* "$TARGET_DIR"/usr/lib/$lib.so*
 done

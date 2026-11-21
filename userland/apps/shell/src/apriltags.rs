@@ -121,8 +121,9 @@ enum Source {
 /// (the ISP) as well as the sensor, and the ISP is reached through vchiq,
 /// which the image does not load at start (nothing else needs it, and it
 /// holds memory): without it the sensor is found but libcamera reports no
-/// camera. Loaded here the first time the reader opens, then kept.
-fn ready_the_isp() {
+/// camera. Loaded here the first time the reader (or the Camera) opens, then
+/// kept.
+pub fn ready_the_isp() {
     let has_isp = || {
         std::fs::read_dir("/sys/class/video4linux")
             .into_iter()
