@@ -28,12 +28,26 @@ pub enum Key {
     /// Fn + U and Fn + I on the handheld.
     BrightnessDown,
     BrightnessUp,
+    /// The sound and music keys: Fn + A, S, D and Fn + Q, W, E on the
+    /// handheld, and a USB keyboard's own.
+    Media(Media),
     Char(char),
     /// A letter with Ctrl held.
     Ctrl(char),
     /// Esc held for a second: leave whatever has the screen, even a program
     /// that takes every other key for itself. (A short Esc is still `Back`.)
     Leave,
+}
+
+/// The keys for sound and music, by what they do.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Media {
+    Mute,
+    VolumeDown,
+    VolumeUp,
+    PlayPause,
+    Previous,
+    Next,
 }
 
 impl Key {
@@ -95,8 +109,10 @@ pub fn sym_char(code: u16) -> Option<char> {
 }
 
 /// The keys of the Fn layer the shell has a use for, by key code: Delete,
-/// Home and End, F1 to F12, and the brightness keys. (The arrows and Page Up
-/// and Down are ordinary key codes, read with the rest.)
+/// Home and End, F1 to F12, the brightness keys, and the sound and music
+/// keys (Fn + A, S, D: mute, quieter, louder; Fn + Q, W, E: play or pause,
+/// previous, next). (The arrows and Page Up and Down are ordinary key
+/// codes, read with the rest.)
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn fn_key(code: u16) -> Option<Key> {
     Some(match code {
@@ -108,6 +124,12 @@ pub fn fn_key(code: u16) -> Option<Key> {
         88 => Key::F(12),
         224 => Key::BrightnessDown,
         225 => Key::BrightnessUp,
+        113 => Key::Media(Media::Mute),
+        114 => Key::Media(Media::VolumeDown),
+        115 => Key::Media(Media::VolumeUp),
+        164 => Key::Media(Media::PlayPause),
+        165 => Key::Media(Media::Previous),
+        163 => Key::Media(Media::Next),
         _ => return None,
     })
 }
@@ -183,7 +205,18 @@ impl<Id: PartialEq + Copy> Repeat<Id> {
     pub fn press(&mut self, id: Id, key: Key, now: std::time::Instant) {
         let repeats = matches!(
             key,
-            Key::Up | Key::Down | Key::Left | Key::Right | Key::PageUp | Key::PageDown | Key::Backspace | Key::Delete | Key::BrightnessDown | Key::BrightnessUp | Key::Char(_)
+            Key::Up
+                | Key::Down
+                | Key::Left
+                | Key::Right
+                | Key::PageUp
+                | Key::PageDown
+                | Key::Backspace
+                | Key::Delete
+                | Key::BrightnessDown
+                | Key::BrightnessUp
+                | Key::Media(Media::VolumeDown | Media::VolumeUp)
+                | Key::Char(_)
         ) || (key == Key::Enter && ENTER_REPEATS.load(std::sync::atomic::Ordering::Relaxed));
         self.held = repeats.then_some((id, key, now + REPEAT_AFTER));
         if key == Key::Enter {
@@ -957,6 +990,10 @@ pub mod sim {
                 K::F10 => Key::F(10),
                 K::F11 => Key::F(11),
                 K::F12 => Key::F(12),
+                // The handheld's sound keys (Fn + A, S, D), on the keypad.
+                K::NumPadPlus => Key::Media(Media::VolumeUp),
+                K::NumPadMinus => Key::Media(Media::VolumeDown),
+                K::NumPadAsterisk => Key::Media(Media::Mute),
                 K::Space if ctrl => Key::Ctrl(' '),
                 K::Space => Key::Char(' '),
                 K::Period => Key::Char('.'),
@@ -1115,6 +1152,20 @@ mod tests {
         assert_eq!((fn_key(59), fn_key(68), fn_key(88)), (Some(Key::F(1)), Some(Key::F(10)), Some(Key::F(12))));
         assert_eq!(fn_key(225), Some(Key::BrightnessUp));
         assert_eq!(fn_key(103), None, "the arrows are read with the rest");
+    }
+
+    #[test]
+    fn the_fn_layer_gives_the_sound_and_music_keys() {
+        // As M5Stack's keymap has them: Fn + A, S, D and Fn + Q, W, E.
+        assert_eq!((fn_key(113), fn_key(114), fn_key(115)), (Some(Key::Media(Media::Mute)), Some(Key::Media(Media::VolumeDown)), Some(Key::Media(Media::VolumeUp))));
+        assert_eq!((fn_key(164), fn_key(165), fn_key(163)), (Some(Key::Media(Media::PlayPause)), Some(Key::Media(Media::Previous)), Some(Key::Media(Media::Next))));
+        // Held, the volume keys run on as the arrows do; the others count once.
+        let t0 = Instant::now();
+        let mut held = Repeat::default();
+        held.press(1u16, Key::Media(Media::VolumeUp), t0);
+        assert!(held.next().is_some());
+        held.press(2u16, Key::Media(Media::PlayPause), t0);
+        assert!(held.next().is_none());
     }
 
     #[test]

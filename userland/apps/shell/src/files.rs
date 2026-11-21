@@ -466,7 +466,7 @@ impl Screen for Editor {
             Key::Delete => b.delete_forward(),
             // Esc does nothing here, so a slip does not close an unsaved file.
             // Neither does holding it: the way out is Ctrl-Q, which asks first.
-            Key::Back | Key::Leave | Key::Ctrl(_) | Key::F(_) | Key::BrightnessDown | Key::BrightnessUp => {}
+            Key::Back | Key::Leave | Key::Ctrl(_) | Key::F(_) | Key::BrightnessDown | Key::BrightnessUp | Key::Media(_) => {}
         }
         Nav::Stay
     }

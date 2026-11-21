@@ -871,6 +871,7 @@ fn key_name(key: Key) -> String {
         Key::F(n) => format!("f{n}"),
         Key::BrightnessDown => "bright −".into(),
         Key::BrightnessUp => "bright +".into(),
+        Key::Media(m) => crate::sound::key_name(m).into(),
         Key::Char(' ') => "space".into(),
         Key::Char(c) => c.to_string(),
         Key::Ctrl(' ') => "ctrl space".into(),
@@ -1155,6 +1156,18 @@ impl Shell {
     pub fn key(&mut self, key: Key) {
         self.dirty = true;
         self.last_key = std::time::Instant::now();
+        // The sound and music keys work with the screen off (music in a
+        // pocket) without waking it, and without a word for nobody to read.
+        // In deep standby nothing plays (music keeps it out of it) and the
+        // radios are off: there only the volume keys stay asleep, and play
+        // wakes it like any key.
+        if let Key::Media(media) = key {
+            let volume = matches!(media, crate::platform::Media::Mute | crate::platform::Media::VolumeDown | crate::platform::Media::VolumeUp);
+            if (self.deep.on() && volume) || (!self.deep.on() && self.standby.state() == crate::standby::State::Off) {
+                crate::sound::media_key(media);
+                return;
+            }
+        }
         // The key that woke it from deep standby, still held: its repeats
         // are spent too, so none reaches the app as it wakes.
         if let Some((woke, last)) = self.woke_by.take() {
@@ -1259,6 +1272,15 @@ impl Shell {
                 _ => "the backlight is on the handheld".to_owned(),
             };
             return self.say(said);
+        }
+        // Fn + A, S, D (mute, quieter, louder) and Fn + Q, W, E (play or
+        // pause, previous, next), over any screen (sound.rs, music.rs).
+        if let Key::Media(media) = key {
+            if let Some(said) = crate::sound::media_key(media) {
+                self.say(said);
+            }
+            self.moving = true;
+            return;
         }
         // Whoever is pressing keys is busy: a robot that arrived a moment
         // ago does not take the screen from under them.
@@ -3240,6 +3262,7 @@ impl Shell {
             update: self.update_busy(),
             timer: timer_running(),
             saving: self.saving.is_some(),
+            music: crate::music::playing(),
         })
     }
 
@@ -3621,6 +3644,7 @@ impl Shell {
         if !self.spotlight_warmed && self.clock > 2.0 {
             self.spotlight_warmed = true;
             crate::spotlight::warm();
+            crate::music::register_spotlight();
         }
         let mut moving = false;
         if self.spotlight.visible() {

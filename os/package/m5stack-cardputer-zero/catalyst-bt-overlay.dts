@@ -1,0 +1,77 @@
+// Catalyst Linux: Bluetooth on, the serial console kept where it is.
+//
+// Applied after disable-bt, only while Bluetooth is switched on (Settings >
+// Bluetooth adds it to config.txt with catalyst-bluetooth). The CM0's radio
+// is wired to the PL011 (uart0); the serial console needs the PL011 too, on
+// GPIO14/15 (ttyAMA0, the Grove port and the EXT header). So the radio goes
+// to the mini UART (uart1, ttyS0) on the same internal pins, as Raspberry
+// Pi's miniuart-bt does, and ttyAMA0 stays the console: cmdline.txt and the
+// serial login do not change.
+//
+// The mini UART's baud rate is divided from the VPU's core clock, so the
+// block that adds this also holds core_freq at 250 MHz (a clock that
+// changed would garble the link). At that clock 921600 baud divides with
+// 0.3% error, and with the radio's flow-control lines (GPIO30/31) carries
+// A2DP at SBC's high quality (about 330 kbit/s) with room to spare. The
+// stock 230400 would not.
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2835";
+
+	// The PL011 to GPIO14/15 alone (the firmware routes the primary UART).
+	fragment@0 {
+		target = <&uart0>;
+		__overlay__ {
+			pinctrl-names = "default";
+			pinctrl-0 = <&uart0_pins>;
+			status = "okay";
+		};
+	};
+
+	fragment@1 {
+		target = <&uart0_pins>;
+		__overlay__ {
+			brcm,pins;
+			brcm,function;
+			brcm,pull;
+		};
+	};
+
+	// The radio's node on the PL011 stays off ...
+	fragment@2 {
+		target = <&bt>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	// ... and the one on the mini UART comes on, on the radio's pins
+	// (TX, RX, CTS, RTS: GPIO32, 33, 30, 31).
+	fragment@3 {
+		target = <&uart1>;
+		__overlay__ {
+			pinctrl-names = "default";
+			pinctrl-0 = <&uart1_bt_pins>;
+			status = "okay";
+		};
+	};
+
+	fragment@4 {
+		target = <&minibt>;
+		__overlay__ {
+			max-speed = <921600>;
+			status = "okay";
+		};
+	};
+
+	fragment@5 {
+		target-path = "/aliases";
+		__overlay__ {
+			serial0 = "/soc/serial@7e201000";
+			serial1 = "/soc/serial@7e215040";
+			bluetooth = "/soc/serial@7e215040/bluetooth";
+		};
+	};
+};

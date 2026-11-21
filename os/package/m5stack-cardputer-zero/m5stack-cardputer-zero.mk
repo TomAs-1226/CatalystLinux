@@ -15,15 +15,21 @@ M5STACK_CARDPUTER_ZERO_MODULE_SUBDIRS = \
 	modules/st7789v-1.0 \
 	modules/tca8418-1.0 \
 	modules/bq27220-1.0 \
+	modules/es8389-1.0 \
 	modules/CardputerZero
 M5STACK_CARDPUTER_ZERO_MODULE_MAKE_OPTS = CONFIG_CARDPUTERO_V0_5=y
 
 # Build only what Catalyst Linux uses: the DRM panel driver rather than the
-# old fbtft one, and no audio machine driver until audio is brought up.
+# old fbtft one. Sound is M5Stack's three: the ES8389 codec (es8389-1.0,
+# with the amplifier switch beside it) and the board's machine driver. The
+# codec driver is theirs rather than the kernel's snd-soc-es8389: the board
+# feeds the codec's MCLK pin from the I2S data line (R160), so its clock
+# must come from the bit clock, which M5Stack's driver does by default and
+# their overlay's "everest,es8390" names.
 define M5STACK_CARDPUTER_ZERO_TRIM_MODULES
 	$(SED) 's/^kermel_ko *:=.*/kermel_ko := pwm_bl_m5stack.ko panel-mipi-dbi-m.ko/' \
 		$(@D)/modules/st7789v-1.0/Makefile
-	$(SED) 's/^kermel_ko *:=.*/kermel_ko := powerfail_suo.ko gpio-forwarder.ko/' \
+	$(SED) 's/^kermel_ko *:=.*/kermel_ko := powerfail_suo.ko gpio-forwarder.ko cardputerzero-audio.ko/' \
 		$(@D)/modules/CardputerZero/Makefile
 endef
 M5STACK_CARDPUTER_ZERO_POST_PATCH_HOOKS += M5STACK_CARDPUTER_ZERO_TRIM_MODULES
@@ -44,6 +50,9 @@ define M5STACK_CARDPUTER_ZERO_BUILD_OVERLAYS
 	# Catalyst Linux's own: the panel driven tear-free (Developer options >
 	# Tear-free panel adds it after cardputerzero-v5-overlay).
 	$(call M5STACK_CARDPUTER_ZERO_DTBO,$(M5STACK_CARDPUTER_ZERO_PKGDIR)/cardputerzero-portrait-overlay.dts,cardputerzero-portrait,)
+	# Bluetooth on the mini UART, the console kept on the PL011
+	# (Settings > Bluetooth adds it after disable-bt; catalyst-bluetooth).
+	$(call M5STACK_CARDPUTER_ZERO_DTBO,$(M5STACK_CARDPUTER_ZERO_PKGDIR)/catalyst-bt-overlay.dts,catalyst-bt,)
 endef
 M5STACK_CARDPUTER_ZERO_POST_BUILD_HOOKS += M5STACK_CARDPUTER_ZERO_BUILD_OVERLAYS
 

@@ -1,3 +1,4 @@
 source "$BR2_EXTERNAL_CATALYST_PATH/package/m5stack-cardputer-zero/Config.in"
 source "$BR2_EXTERNAL_CATALYST_PATH/package/catalyst-camera/Config.in"
 source "$BR2_EXTERNAL_CATALYST_PATH/package/catalyst-tailscale/Config.in"
+source "$BR2_EXTERNAL_CATALYST_PATH/package/catalyst-yt-dlp/Config.in"

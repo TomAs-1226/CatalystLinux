@@ -1,0 +1,17 @@
+config BR2_PACKAGE_CATALYST_YT_DLP
+	bool "catalyst-yt-dlp"
+	depends on BR2_PACKAGE_PYTHON3
+	depends on BR2_PACKAGE_QUICKJS
+	select BR2_PACKAGE_PYTHON3_SSL
+	select BR2_PACKAGE_PYTHON3_SQLITE
+	select BR2_PACKAGE_PYTHON3_PYEXPAT
+	select BR2_PACKAGE_PYTHON3_UNICODEDATA
+	help
+	  yt-dlp's single-file release, for the Music app to find a
+	  song's audio stream. It runs the script that answers YouTube's
+	  player challenges in QuickJS (qjs).
+
+	  https://github.com/yt-dlp/yt-dlp
+
+comment "catalyst-yt-dlp needs python3 and quickjs"
+	depends on !BR2_PACKAGE_PYTHON3 || !BR2_PACKAGE_QUICKJS

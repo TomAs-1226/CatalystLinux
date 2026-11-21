@@ -52,7 +52,7 @@ struct App {
     open: fn(&Robot) -> Box<dyn Screen>,
 }
 
-const APPS: [App; 36] = [
+const APPS: [App; 37] = [
     App { icon: "smart_toy", name: "Robot", open: |_| Box::new(RobotScreen::default()) },
     App { icon: "monitor_heart", name: "Health", open: |_| Box::new(Health::default()) },
     App { icon: "description", name: "Logs", open: |_| Box::new(LogsScreen::default()) },
@@ -95,6 +95,8 @@ const APPS: [App; 36] = [
         name: "Web",
         open: |_| Box::new(crate::terminal::Terminal::running("Web", "lynx -accept_all_cookies -nopause file:///usr/share/catalyst/web.html", crate::connect::session_dir())),
     },
+    // YouTube Music, playing on behind every other app (music.rs).
+    App { icon: "music_note", name: "Music", open: |_| Box::new(crate::music::MusicScreen::new()) },
     App { icon: "settings", name: "Settings", open: |_| Box::new(SettingsApp::new()) },
 ];
 
@@ -471,6 +473,7 @@ impl Home {
             "Assistant" => crate::ai::tile(),
             "Browse" => ("read the web".into(), None),
             "Web" => ("pages as text".into(), None),
+            "Music" => crate::music::tile(),
             "Logs" => {
                 let rows = robot.logs.list();
                 let worst = rows.iter().filter_map(|r| r.digest.as_ref()).map(|d| d.headline().0).min();
@@ -2023,6 +2026,10 @@ enum Item {
     StandBySection,
     /// Settings › On-device model: a page of its own (local.rs).
     OnDeviceModel,
+    /// Settings › Sound and Settings › Bluetooth: pages of their own
+    /// (sound.rs, bluetooth.rs).
+    SoundSection,
+    BluetoothSection,
     /// Setup's page offered to a computer, outside first start.
     FromComputer,
     // Appearance.
@@ -2152,7 +2159,7 @@ fn glance_items(order: &[Widget]) -> Vec<Item> {
 
 /// Where everything in Settings is, for search: what it is called, the
 /// section it is in, and its place there (none: the section itself).
-const SETTING_PLACES: [(&str, Item, Option<usize>); 69] = [
+const SETTING_PLACES: [(&str, Item, Option<usize>); 75] = [
     ("Robot settings", Item::RobotSection, None),
     ("Open Robot on link", Item::RobotSection, Some(0)),
     ("Match report after a match", Item::RobotSection, Some(1)),
@@ -2199,6 +2206,12 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 69] = [
     ("Network", Item::Network, None),
     ("Wi-Fi networks", Item::Network, Some(0)),
     ("Tailscale", Item::Network, Some(1)),
+    ("Sound", Item::SoundSection, None),
+    ("Volume", Item::SoundSection, Some(0)),
+    ("Test sound", Item::SoundSection, Some(3)),
+    ("Microphone", Item::SoundSection, Some(4)),
+    ("Bluetooth", Item::BluetoothSection, None),
+    ("Bluetooth headphones and speakers", Item::BluetoothSection, Some(0)),
     ("Name & time", Item::NameSection, None),
     ("Handheld name", Item::NameSection, Some(0)),
     ("Time zone", Item::NameSection, Some(1)),
@@ -2272,6 +2285,12 @@ pub fn open_setting(index: usize) -> Box<dyn Screen> {
     if section == Item::OnDeviceModel {
         return Box::new(crate::local::ModelPage::new());
     }
+    if section == Item::SoundSection {
+        return Box::new(crate::sound::SoundScreen::new().at(place.unwrap_or(0)));
+    }
+    if section == Item::BluetoothSection {
+        return Box::new(crate::bluetooth::BluetoothScreen::new());
+    }
     match SettingsApp::section(section) {
         Some(mut page) => {
             page.list.focus = place.unwrap_or(0);
@@ -2295,7 +2314,7 @@ impl SettingsApp {
         use Item::*;
         Self::page(
             "Settings",
-            vec![RobotSection, Appearance, TextSection, HomeSection, Display, LockSection, StandBySection, BatterySection, Network, NameSection, UsbSection, KeysSection, OnDeviceModel, Access, UpdateSection, Help, About, FromComputer],
+            vec![RobotSection, Appearance, TextSection, HomeSection, Display, LockSection, StandBySection, BatterySection, Network, SoundSection, BluetoothSection, NameSection, UsbSection, KeysSection, OnDeviceModel, Access, UpdateSection, Help, About, FromComputer],
         )
     }
 
@@ -2458,6 +2477,8 @@ impl SettingsApp {
             LockSection => section("Lock screen", (if crate::passcode::file().exists() { "passcode" } else { "no passcode" }).to_owned()),
             StandBySection => section("StandBy", (if g.lock.standby { "on the charger" } else { "off" }).to_owned()),
             OnDeviceModel => section("On-device model", crate::local::summary()),
+            SoundSection => section("Sound", crate::sound::summary()),
+            BluetoothSection => section("Bluetooth", crate::bluetooth::summary()),
             Mode => ("Mode".into(), (if g.tokens.tone == bezel::Tone::Light { "light" } else { "dark" }).into(), true),
             AccentColor => ("Accent".into(), g.accent.name().into(), true),
             HomeScreen => ("Home screen".into(), g.home.name().into(), true),
@@ -2803,6 +2824,8 @@ impl Screen for SettingsApp {
             Key::Enter | Key::Right if item == Item::LockSection => return Nav::Push(Box::new(crate::lockpages::LockPage::new())),
             Key::Enter | Key::Right if item == Item::StandBySection => return Nav::Push(Box::new(crate::lockpages::StandByPage::new())),
             Key::Enter | Key::Right if item == Item::OnDeviceModel => return Nav::Push(Box::new(crate::local::ModelPage::new())),
+            Key::Enter | Key::Right if item == Item::SoundSection => return Nav::Push(Box::new(crate::sound::SoundScreen::new())),
+            Key::Enter | Key::Right if item == Item::BluetoothSection => return Nav::Push(Box::new(crate::bluetooth::BluetoothScreen::new())),
             // Lower voltage, switched on: what it does, and a restart to try it.
             Key::Enter | Key::Right if item == Item::Undervolt && crate::power::undervolt().asks_to_try() => return Nav::Push(Box::new(crate::power::TryUndervolt::new())),
             Key::Enter | Key::Right if item == Item::KeyboardLesson => return Nav::Push(Box::new(crate::setup::Setup::lesson())),
@@ -3399,7 +3422,7 @@ mod tests {
         pretend(Some(Found::Nothing));
         let shown = builtin(&Home::new());
         assert!(!shown.iter().any(|n| n == "Level" || n == "Compass"), "{shown:?}");
-        assert_eq!(shown.len(), 34, "the thirty-four the emulator's run counts on (all but Level and Compass are on every unit)");
+        assert_eq!(shown.len(), 35, "the thirty-five the emulator's run counts on (all but Level and Compass are on every unit)");
         assert_eq!(shown.last().map(String::as_str), Some("Settings"), "Settings stays last");
         assert_eq!(builtin_apps().position(|(_, _, n)| n == "Terminal"), Some(8), "Terminal where it was");
         assert!(!builtin_apps().any(|(_, _, n)| n == "Level"), "nor in search");

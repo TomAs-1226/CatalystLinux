@@ -328,7 +328,7 @@ def main():
 
 
 # Home's built-in apps, and Terminal's place among them (screens.rs, APPS).
-BUILT_IN = 34
+BUILT_IN = 35
 TERMINAL = 8
 
 
@@ -470,9 +470,9 @@ def tour(vm, folder):
     time.sleep(8)
     check("Home draws", shot("1-home") > 50)
 
-    # Left and Right go through the apps in order: thirty-four built in,
-    # Settings last; then the image's Processes (34) and the user's own by
-    # name: hello (35) and Paint (36).
+    # Left and Right go through the apps in order: thirty-five built in,
+    # Settings last; then the image's Processes (35) and the user's own by
+    # name: hello (36) and Paint (37).
     for key in ["right"] * BUILT_IN:
         vm.key(key)
     time.sleep(6)
