@@ -3302,8 +3302,10 @@ impl Shell {
         };
         self.spotlight.gone_now();
         self.spotlight_under = None;
-        // A screen still on its way lands first: the new one grows over a still one.
-        self.settle_transition();
+        // A screen still on its way gives way first (one leaving goes among
+        // the recent apps): the new one grows over the still picture
+        // Spotlight came down over, so no motion goes on beneath it.
+        drop(self.interrupt());
         let app = hit.item.weight == crate::spotlight::weight::APP;
         self.open_over(screen, from, backdrop, app);
         self.apply_settings();
@@ -3325,7 +3327,11 @@ impl Shell {
                 return self.bring_back(recent, from, Some(backdrop));
             }
         }
-        self.stack.push((screen, path));
+        // Where it arrives over: closed while still arriving, it turns round
+        // from there (see `close`) rather than leaving a motion with nothing
+        // to bring in.
+        let over = self.stack.len();
+        self.push(screen, path);
         self.gfx.reveal_start();
         self.moving = true;
         self.dirty = true;
@@ -3333,7 +3339,9 @@ impl Shell {
             self.transition = None;
             return;
         }
-        self.transition = Some(Transition::new(path, 0.0, 1.0, None, Some(backdrop)));
+        let mut transition = Transition::new(path, 0.0, 1.0, None, Some(backdrop));
+        transition.over = over;
+        self.transition = Some(transition);
     }
 
     /// Spotlight in time: its springs and results; gone at once if the
@@ -4736,6 +4744,28 @@ pub(crate) mod tests {
         frames(&mut shell, 3, FRAME);
         shell.key(Key::Right);
         assert!(!shell.spotlight.visible());
+    }
+
+    #[test]
+    fn a_result_closed_while_still_opening_turns_round_into_its_row() {
+        let mut shell = shell();
+        index_read();
+        shell.key(Key::Ctrl('\n'));
+        type_in(&mut shell, "calculatr");
+        frames(&mut shell, 30, FRAME);
+        shell.key(Key::Enter);
+        frames(&mut shell, 3, FRAME);
+        assert!(shell.transition.as_ref().is_some_and(|t| t.arriving()), "still growing out of its row");
+        // Closed before it has arrived: it turns round from where it is, and
+        // no motion is left over Home with nothing to bring in.
+        shell.key(Key::Back);
+        assert_eq!(shell.stack.len(), 1);
+        assert!(shell.transition.as_ref().is_none_or(|t| t.leaving.is_some()), "turned round, not left behind");
+        // A redraw from scratch (the text size changed) as it goes.
+        shell.settings.text = shell.settings.text.next();
+        shell.apply_settings();
+        frames(&mut shell, 90, FRAME);
+        assert_eq!(title(&shell), "Catalyst");
     }
 
     #[test]

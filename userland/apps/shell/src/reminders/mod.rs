@@ -882,7 +882,7 @@ pub fn search(query: &str, limit: usize) -> Vec<Found> {
             .iter()
             .filter_map(|r| {
                 let row = row(r, &n, s.h24);
-                let rank = crate::search::rank(&r.text, query).or_else(|| crate::search::rank(&row.when, query).map(|k| k.max(1)))?;
+                let rank = rank(&r.text, query).or_else(|| rank(&row.when, query).map(|k| k.max(1)))?;
                 let value = if row.done { "done".to_owned() } else { row.when };
                 Some(Found { id: r.id, icon: "notifications", name: r.text.clone(), value, rank })
             })
@@ -891,6 +891,22 @@ pub fn search(query: &str, limit: usize) -> Vec<Found> {
         found.truncate(limit);
         found
     })
+}
+
+/// How well `name` matches `query` (both compared in lower case): 0 when it
+/// starts with it, 1 when a word in it does, 2 anywhere; `None` if not at all.
+fn rank(name: &str, query: &str) -> Option<u8> {
+    let (name, query) = (name.to_lowercase(), query.trim().to_lowercase());
+    if query.is_empty() {
+        return None;
+    }
+    if name.starts_with(&query) {
+        return Some(0);
+    }
+    if name.split(|c: char| !c.is_alphanumeric()).any(|w| !w.is_empty() && w.starts_with(&query)) {
+        return Some(1);
+    }
+    name.contains(&query).then_some(2)
 }
 
 /// Reminders, open on one reminder (from Spotlight, the lock screen).

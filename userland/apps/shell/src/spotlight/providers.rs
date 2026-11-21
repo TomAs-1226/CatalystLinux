@@ -24,6 +24,7 @@ pub fn builtin() -> Vec<Arc<dyn Provider>> {
         Arc::new(Settings),
         Arc::new(Actions::default()),
         Arc::new(Notes),
+        Arc::new(Reminders),
         Arc::new(Contacts),
         Arc::new(Repos),
         Arc::new(Photos),
@@ -241,6 +242,32 @@ impl Provider for Actions {
 }
 
 // ------------------------------------------------------------------ notes ---
+
+/// Reminders, by their words, from the ones Reminders keeps in memory (so
+/// worked out as each key lands, with no disk), opening Reminders on the one
+/// picked.
+pub struct Reminders;
+
+impl Provider for Reminders {
+    fn name(&self) -> &'static str {
+        "reminders"
+    }
+
+    fn answer(&self, query: &Query, _robot: &Robot, out: &mut Vec<Item>) {
+        if query.text.is_empty() {
+            return;
+        }
+        for found in crate::reminders::search(&query.raw, 6) {
+            let Some(rank) = query.score(&found.name, "reminder", weight::OTHER, false) else { continue };
+            out.push(Item::new(format!("reminder:{}", found.id), found.name, found.icon, weight::OTHER).detail(format!("reminder · {}", found.value)).ranked(rank));
+        }
+    }
+
+    fn open(&self, item: &Item, _cx: &mut Cx) -> Result<Box<dyn Screen>, String> {
+        let id = item.id.strip_prefix("reminder:").and_then(|n| n.parse().ok()).ok_or_else(|| "that reminder is gone".to_owned())?;
+        Ok(crate::reminders::open(id))
+    }
+}
 
 /// Notes, by their titles and what they say.
 pub struct Notes;
@@ -1039,6 +1066,24 @@ mod tests {
 
     fn titles(items: &[Item]) -> Vec<String> {
         items.iter().map(|i| i.title.clone()).collect()
+    }
+
+    #[test]
+    fn reminders_are_found_by_their_words_and_open_reminders() {
+        use crate::reminders::plan::{Here, Now};
+        crate::reminders::with(|s| {
+            let n = Now { at: crate::reminders::now(), zone: &Here, view: None };
+            for p in crate::reminders::parse::parse("swap the battery in 10 min", &n).unwrap() {
+                s.book.add(p, &n);
+            }
+        });
+        let none = Robot::none();
+        let found = answers(&Reminders, "battery", &none);
+        assert_eq!(titles(&found), ["swap the battery"]);
+        assert!(found[0].detail.starts_with("reminder · "), "{}", found[0].detail);
+        assert!(found[0].id.starts_with("reminder:"));
+        assert!(answers(&Reminders, "", &none).is_empty(), "nothing typed: picks are shown instead");
+        assert!(answers(&Reminders, "zebra", &none).is_empty());
     }
 
     #[test]
