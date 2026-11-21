@@ -1,0 +1,25 @@
+From: Catalyst Linux
+Subject: [PATCH] panel-mipi-dbi-m: sleep the panel while it is blanked
+
+The pipe's disable only switched the backlight off; the ST7789 went on
+driving its glass. Display off and sleep in take it from milliamps to
+microamps. Enable already runs the panel's whole init sequence (the bus
+is write-only, so the panel is never found on and is always set up
+afresh), which starts with sleep out.
+
+--- a/modules/st7789v-1.0/panel-mipi-dbi-m.c	2026-11-20 16:32:27.234106725 -0800
++++ b/modules/st7789v-1.0/panel-mipi-dbi-m.c	2026-11-20 16:32:27.234106725 -0800
+@@ -426,6 +426,13 @@
+ 
+     mutex_lock(&panel->display_lock);
+     mipi_dbi_pipe_disable(pipe);
++    /*
++     * Catalyst Linux: blanked, the panel sleeps (microamps rather than
++     * milliamps). Enabling it again runs the whole init sequence, which
++     * begins with sleep out, as at boot.
++     */
++    mipi_dbi_command(&dbidev->dbi, MIPI_DCS_SET_DISPLAY_OFF);
++    mipi_dbi_command(&dbidev->dbi, MIPI_DCS_ENTER_SLEEP_MODE);
+     mutex_unlock(&panel->display_lock);
+ }
+ 

@@ -26,7 +26,7 @@ fi
 for f in etc/init.d/catalyst-early etc/init.d/catalyst-shell etc/init.d/catalyst-late etc/init.d/catalyst-net \
 	etc/init.d/catalyst-wifi etc/init.d/catalyst-ssh etc/init.d/catalyst-update etc/init.d/catalyst-usb \
 	usr/sbin/catalyst-ssh-toggle usr/sbin/catalyst-net usr/sbin/catalyst-grow-data usr/sbin/catalyst-wifi-toggle \
-	usr/sbin/catalyst-usb; do
+	usr/sbin/catalyst-usb usr/sbin/catalyst-power; do
 	chmod 0755 "$TARGET_DIR/$f"
 done
 mkdir -p "$TARGET_DIR/data"

@@ -20,6 +20,11 @@ image boot.vfat {
 image data.ext4 {
 	ext4 {
 		label = "data"
+		# Laid out for the card it grows into, not for its 64 MB start: 4 KB
+		# blocks and one inode per 64 KB (a small filesystem would get 1 KB
+		# blocks and one per 4 KB, which on a 128 GB card is ~8 GB of inode
+		# tables), and room in its tables to grow online to 256 GB.
+		extraargs = "-b 4096 -i 65536 -E resize=67108864"
 	}
 
 	empty = true
@@ -46,7 +51,7 @@ image sdcard.img {
 	# Empty until the first update is written into it.
 	partition system-b {
 		partition-type = 0x83
-		size = 160M
+		size = 1024M
 	}
 
 	partition data {

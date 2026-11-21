@@ -1904,6 +1904,11 @@ enum Item {
     DevMode,
     MotionScale,
     ShowKeys,
+    /// Developer options › Lower voltage: the processor's core a step lower,
+    /// tried before it is kept.
+    Undervolt,
+    /// Settings › Battery: a page of its own (power.rs).
+    BatterySection,
     /// Setup's page offered to a computer, outside first start.
     FromComputer,
     // Appearance.
@@ -2025,7 +2030,7 @@ fn glance_items(order: &[Widget]) -> Vec<Item> {
 
 /// Where everything in Settings is, for search: what it is called, the
 /// section it is in, and its place there (none: the section itself).
-const SETTING_PLACES: [(&str, Item, Option<usize>); 48] = [
+const SETTING_PLACES: [(&str, Item, Option<usize>); 52] = [
     ("Robot settings", Item::RobotSection, None),
     ("Open Robot on link", Item::RobotSection, Some(0)),
     ("Match report after a match", Item::RobotSection, Some(1)),
@@ -2056,6 +2061,10 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 48] = [
     ("Graphics and the GPU", Item::Display, Some(1)),
     ("Screen off after", Item::Display, Some(2)),
     ("Power saving", Item::Display, Some(3)),
+    ("Battery", Item::BatterySection, None),
+    ("Battery saver", Item::BatterySection, Some(0)),
+    ("Turn off at 5%", Item::BatterySection, Some(2)),
+    ("Red light", Item::BatterySection, Some(4)),
     ("Network", Item::Network, None),
     ("Wi-Fi networks", Item::Network, Some(0)),
     ("Keys for online services", Item::KeysSection, None),
@@ -2089,6 +2098,9 @@ pub fn open_setting(index: usize) -> Box<dyn Screen> {
         let kind = if place.is_some() { crate::about::Kind::Version } else { crate::about::Kind::Main };
         return Box::new(crate::about::About::new(kind));
     }
+    if section == Item::BatterySection {
+        return Box::new(crate::power::BatteryPage::new().at(place.unwrap_or(0)));
+    }
     match SettingsApp::section(section) {
         Some(mut page) => {
             page.list.focus = place.unwrap_or(0);
@@ -2110,7 +2122,7 @@ fn keys_file() -> std::path::PathBuf {
 impl SettingsApp {
     pub fn new() -> Self {
         use Item::*;
-        Self::page("Settings", vec![RobotSection, Appearance, TextSection, HomeSection, Display, Network, UsbSection, KeysSection, Access, UpdateSection, Help, About, FromComputer])
+        Self::page("Settings", vec![RobotSection, Appearance, TextSection, HomeSection, Display, BatterySection, Network, UsbSection, KeysSection, Access, UpdateSection, Help, About, FromComputer])
     }
 
     fn page(title: &'static str, items: Vec<Item>) -> Self {
@@ -2152,7 +2164,7 @@ impl SettingsApp {
             UpdateSection => Self::page("Updates", vec![UpdateState, UpdateAction, UpdateNote, UpdateChannel, UpdateAuto, UpdateOvernight]),
             Help => Self::page("Help", vec![TakeTour, KeyboardShortcuts]),
             UsbSection => Self::page("USB", vec![UsbMode, UsbLink]),
-            DeveloperSection => Self::page("Developer", vec![DevMode, MotionScale, ShowKeys]),
+            DeveloperSection => Self::page("Developer", vec![DevMode, MotionScale, ShowKeys, Undervolt]),
             _ => return None,
         })
     }
@@ -2249,6 +2261,11 @@ impl SettingsApp {
                 g.motion_scale != 1.0,
             ),
             ShowKeys => ("Show key presses".into(), onoff(g.show_keys), g.show_keys),
+            Undervolt => {
+                let state = crate::power::undervolt();
+                ("Lower voltage".into(), state.name().into(), matches!(state, crate::power::Undervolt::On | crate::power::Undervolt::Trying))
+            }
+            BatterySection => section("Battery", crate::power::summary()),
             Mode => ("Mode".into(), (if g.tokens.tone == bezel::Tone::Light { "light" } else { "dark" }).into(), true),
             AccentColor => ("Accent".into(), g.accent.name().into(), true),
             HomeScreen => ("Home screen".into(), g.home.name().into(), true),
@@ -2437,6 +2454,11 @@ impl SettingsApp {
                 cx.settings.motion_scale = all[(at + step).clamp(0, all.len() as i32 - 1) as usize];
             }
             ShowKeys => cx.settings.show_keys = !cx.settings.show_keys,
+            Undervolt => {
+                use crate::power::Undervolt as U;
+                let on = !matches!(crate::power::undervolt(), U::On | U::Trying);
+                *cx.say = Some(crate::power::set_undervolt(on).unwrap_or_else(|why| why));
+            }
             UsbMode => {
                 let n = crate::usb::MODES.len() as i32;
                 let next = (crate::usb::mode() as i32 + step).rem_euclid(n) as usize;
@@ -2556,6 +2578,7 @@ impl Screen for SettingsApp {
             Key::Enter | Key::Right if item == Item::About => return Nav::Push(Box::new(crate::about::About::new(crate::about::Kind::Main))),
             Key::Enter | Key::Right if item == Item::TakeTour => return Nav::Tour,
             Key::Enter | Key::Right if item == Item::KeyboardShortcuts => return Nav::Push(Box::new(crate::help::Shortcuts::new())),
+            Key::Enter | Key::Right if item == Item::BatterySection => return Nav::Push(Box::new(crate::power::BatteryPage::new())),
             // Switched off, developer options go, and their page with them.
             Key::Enter | Key::Right | Key::Left if item == Item::DevMode => {
                 let s = &mut *cx.settings;

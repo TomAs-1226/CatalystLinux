@@ -114,7 +114,11 @@ BR2_PACKAGE_MESA3D_GBM=y
 BR2_PACKAGE_M5STACK_CARDPUTER_ZERO=y
 BR2_TARGET_ROOTFS_EXT2=y
 BR2_TARGET_ROOTFS_EXT2_4=y
-BR2_TARGET_ROOTFS_EXT2_SIZE="160M"
+# Each system slot is 1 GB: room for more tools and apps than the first
+# images (about 100 MB) need. The root is read-only, so no blocks are held
+# back for root the way a writable filesystem keeps them.
+BR2_TARGET_ROOTFS_EXT2_SIZE="1024M"
+BR2_TARGET_ROOTFS_EXT2_RESBLKS=0
 # BR2_TARGET_ROOTFS_TAR is not set
 BR2_PACKAGE_HOST_DOSFSTOOLS=y
 BR2_PACKAGE_HOST_GENIMAGE=y

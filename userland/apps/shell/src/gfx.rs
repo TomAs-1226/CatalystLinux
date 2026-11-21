@@ -138,6 +138,8 @@ pub struct Gfx {
     /// and the processor's speed choice.
     pub screen_off: u32,
     pub power: crate::standby::Power,
+    /// Settings › Battery's choices, for the rows that show them.
+    pub battery: crate::power::Choices,
     /// The look chosen, its theme on its own for brevity, what every corner
     /// is multiplied by, and tiles across Home.
     pub look: crate::look::Look,
@@ -226,6 +228,7 @@ impl Gfx {
             show_keys: false,
             screen_off: 60,
             power: crate::standby::Power::Balanced,
+            battery: crate::power::Choices::default(),
             look: crate::look::Look::default(),
             theme: crate::look::Theme::Catalyst,
             corner: 1.0,

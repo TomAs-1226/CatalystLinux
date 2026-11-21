@@ -25,14 +25,15 @@ enum Item {
     Wifi,
     Ssh,
     Light,
-    Calm,
+    /// The battery saver (Settings › Battery has the rest of its choices).
+    Saver,
     Brightness,
     Recents,
     Screenshot,
 }
 
 /// In rows: two switches, two switches, the brightness bar, two actions.
-const ITEMS: [Item; 7] = [Item::Wifi, Item::Ssh, Item::Light, Item::Calm, Item::Brightness, Item::Recents, Item::Screenshot];
+const ITEMS: [Item; 7] = [Item::Wifi, Item::Ssh, Item::Light, Item::Saver, Item::Brightness, Item::Recents, Item::Screenshot];
 
 /// Each item's row and column.
 fn place(at: usize) -> (usize, usize) {
@@ -146,7 +147,7 @@ impl Control {
     }
 
     fn states(&self, settings: &Settings) -> [bool; 4] {
-        [self.wifi, self.ssh, settings.light, settings.calm]
+        [self.wifi, self.ssh, settings.light, settings.battery.saver]
     }
 
     /// A key while the sheet is down. `None` means "put it away".
@@ -203,8 +204,8 @@ impl Control {
                 settings.light = !settings.light;
                 Outcome::Settings
             }
-            Item::Calm => {
-                settings.calm = !settings.calm;
+            Item::Saver => {
+                settings.battery.saver = !settings.battery.saver;
                 Outcome::Settings
             }
             Item::Brightness | Item::Recents | Item::Screenshot => Outcome::Nothing,
@@ -244,7 +245,7 @@ impl Control {
         let inner = SHEET.inset(8.0).offset(0.0, dy);
         let gap = 5.0;
         let (tw, th) = ((inner.w - gap) * 0.5, 32.0);
-        let names = [("wifi", "Wi-Fi"), ("terminal", "SSH"), ("lightbulb", "Light"), ("tune", "Calm")];
+        let names = [("wifi", "Wi-Fi"), ("terminal", "SSH"), ("lightbulb", "Light"), ("battery_full", "Saver")];
         let mut focus_rect = None;
         for (i, ((icon, name), knob)) in names.iter().zip(&self.knobs).enumerate() {
             let r = Rect::new(inner.x + (i % 2) as f32 * (tw + gap), inner.y + (i / 2) as f32 * (th + gap), tw, th);
@@ -344,7 +345,7 @@ mod tests {
         let mut s = settings();
         let mut c = Control::new();
         c.set_open(true, &s);
-        // Right to SSH, down to Calm, left to Light: flip it.
+        // Right to SSH, down to Saver, left to Light: flip it.
         for key in [Key::Right, Key::Down, Key::Left] {
             assert!(c.key(key, &mut s).is_some());
         }
@@ -401,7 +402,7 @@ mod tests {
             for (_, name, _) in ACTIONS {
                 assert!(g.measure(name, body) <= tw - 56.0, "{name}");
             }
-            for name in ["Wi-Fi", "SSH", "Light", "Calm"] {
+            for name in ["Wi-Fi", "SSH", "Light", "Saver"] {
                 assert!(g.measure(name, body) <= tw - 66.0, "{name}");
             }
         }

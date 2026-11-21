@@ -59,11 +59,17 @@ class Machine:
         os.makedirs(WORK, exist_ok=True)
         self.card = f"{WORK}/card.img"
         if fresh or not os.path.exists(self.card):
-            shutil.copyfile(f"{IMAGES}/sdcard.img", self.card)
+            # Sparse: system B and most of the rest are empty.
+            subprocess.run(["cp", "--sparse=always", f"{IMAGES}/sdcard.img", self.card], check=True)
             # The emulated card reader wants a power-of-two size; the spare
-            # room is what the first boot grows /data into.
+            # room is what the first boot grows /data into. CATALYST_CARD_GB
+            # makes it a card of that size (sparse), e.g. 128 like Thomas's.
+            image = os.path.getsize(self.card)
+            size = 1 << (image + (512 << 20) - 1).bit_length()
+            if os.environ.get("CATALYST_CARD_GB"):
+                size = max(size, int(os.environ["CATALYST_CARD_GB"]) << 30)
             with open(self.card, "r+b") as card:
-                card.truncate(1024 << 20)
+                card.truncate(size)
         self.monitor_path = f"{WORK}/monitor"
         self.extra_args = extra_args
         self.quiet = quiet
@@ -350,6 +356,22 @@ def tools(vm):
     check("catalyst-usb says how it stands", out.startswith("off"), out)
     out = vm.run("busybox --list | grep -x udhcpd")
     check("BusyBox has its DHCP server for USB networking", out.strip() == "udhcpd", out)
+
+    print("== power")
+    out = vm.run("catalyst-power undervolt status")
+    check("catalyst-power answers; the lower voltage is off unless chosen", out.strip() == "off", out)
+    out = vm.run("ps | grep '[i]fplugd -n -i eth0' | grep -c -- '-m iff'")
+    check("the cable is watched from the interface's flags (the adapter can sleep)", out.strip() == "1", out)
+    out = vm.run("grep -c '^gpio=24=op,dl' /boot/config.txt 2>/dev/null || (mkdir -p /run/b && mount -o ro /dev/mmcblk0p1 /run/b && grep -c '^gpio=24=op,dl' /run/b/config.txt; umount /run/b)")
+    check("the speaker's amplifier is held off", out.strip().endswith("1"), out)
+    out = vm.run("df -k /data | tail -n1 | tr -s ' ' | cut -d' ' -f2")
+    want = int(os.environ.get("CATALYST_CARD_GB", "0") or 0)
+    grown = out.strip().isdigit() and (want == 0 or int(out) > (want - 6) * 1_000_000)
+    check(f"/data grew to the card ({want or 'emulator'} GB card)", grown, f"{int(out) // 1024 if out.strip().isdigit() else out} MB")
+    out = vm.run("stat -f -c '%S %b %c' /data")
+    f = out.split()
+    per_inode = int(f[0]) * int(f[1]) // max(1, int(f[2])) if len(f) == 3 and all(x.isdigit() for x in f) else 0
+    check("/data has 4 KB blocks and an inode per 64 KB", f[:1] == ["4096"] and per_inode >= 60_000, f"{out} ({per_inode} bytes an inode)")
     return failed
 
 

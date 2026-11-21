@@ -69,6 +69,9 @@ pub struct Settings {
     /// 0 never), and how the processor chooses its speed.
     pub screen_off: u32,
     pub power: crate::standby::Power,
+    /// Settings › Battery: the saver, low-battery care, Wi-Fi in standby,
+    /// the red light.
+    pub battery: crate::power::Choices,
 }
 
 /// The animation scales developer options offer.
@@ -181,6 +184,7 @@ impl Default for Settings {
             toured: false,
             screen_off: 60,
             power: crate::standby::Power::Balanced,
+            battery: crate::power::Choices::default(),
         }
     }
 }
@@ -536,7 +540,18 @@ pub struct Shell {
     flash: Option<Animated>,
     /// Standby: after a while with no key the screen dims, then goes off.
     standby: crate::standby::Standby,
+    /// The battery: its readings, the saver's rules, low-battery care, and
+    /// what deep standby switches off.
+    care: crate::power::Care,
+    /// The keyboard's lights, borrowed for notices and warnings.
+    lights: crate::lights::Lights,
+    /// Matches already warned about for queueing: (match, 0 soon / 1 now).
+    queue_warned: Vec<(String, u8)>,
+    queue_age: f32,
 }
+
+/// How long before the time to queue the island says it is coming.
+const QUEUE_AHEAD: i64 = 300;
 
 #[derive(Clone, Copy)]
 struct HelpHold {
@@ -645,6 +660,10 @@ impl Shell {
             saving: None,
             flash: None,
             standby: crate::standby::Standby::new(),
+            care: crate::power::Care::new(),
+            lights: crate::lights::Lights::new(),
+            queue_warned: Vec::new(),
+            queue_age: 0.0,
         }
     }
 
@@ -737,6 +756,10 @@ impl Shell {
     pub fn say(&mut self, text: impl Into<String>) {
         self.message = Some((text.into(), MESSAGE_SECONDS));
         self.dirty = true;
+        // Said with the screen off: the Fn light blinks until it wakes.
+        if self.standby.state() == crate::standby::State::Off {
+            self.lights.notice();
+        }
     }
 
     /// Play the start animation, with `caption` under the name.
@@ -924,8 +947,9 @@ impl Shell {
             }
         }
         // The living wallpaper: a move sets its light drifting the same way,
-        // and it settles back still.
-        if !self.settings.calm {
+        // and it settles back still. (Held still by the battery saver: each
+        // drift is a run of frames.)
+        if !self.settings.calm && !self.settings.battery.saver {
             let push = match plain(key) {
                 Key::Left => (-DRIFT_PUSH, 0.0),
                 Key::Right => (DRIFT_PUSH, 0.0),
@@ -991,7 +1015,9 @@ impl Shell {
         self.gfx.greeting = self.settings.greeting;
         (self.gfx.developer, self.gfx.motion_scale, self.gfx.show_keys) = (self.settings.developer, self.settings.motion_scale, self.settings.show_keys);
         (self.gfx.screen_off, self.gfx.power) = (self.settings.screen_off, self.settings.power);
-        self.standby.set_power(self.settings.power);
+        self.gfx.battery = self.settings.battery;
+        // The battery saver has the processor climb slowly, whatever is chosen.
+        self.standby.set_power(if self.settings.battery.saver { crate::standby::Power::Saving } else { self.settings.power });
         self.gfx.want_gpu(self.settings.gpu);
         let s = &self.settings;
         let look = crate::look::Look { theme: s.theme, wallpaper: s.wallpaper, corners: s.corners, letters: s.letters, width: s.width };
@@ -1308,7 +1334,7 @@ impl Shell {
                 let ended = self.transition.take().expect("in flight");
                 // The living wallpaper: once a screen has come or gone, its
                 // light drifts the way it went, and settles still.
-                if !self.settings.calm {
+                if !self.settings.calm && !self.settings.battery.saver {
                     let closing = ended.leaving.is_some();
                     let push = match (ended.path, closing) {
                         (Path::Slide, false) => (DRIFT_PUSH * 0.7, 0.0),
@@ -1328,6 +1354,7 @@ impl Shell {
             }
         }
         moving |= self.tick_recents_and_standby(dt, motion_dt);
+        self.tick_power(dt);
         if let Some(intro) = &mut self.intro {
             moving |= intro.tick(motion_dt);
             if intro.finished() && !intro.leaving() {
@@ -1418,7 +1445,9 @@ impl Shell {
     /// Whether to keep to the frame beat: something is moving, or the
     /// screen in front wants looking at often.
     pub fn animating(&self) -> bool {
-        self.moving || self.stack.last().is_some_and(|(s, _)| s.busy())
+        // With the screen off and dark, nothing keeps the frame beat: the
+        // shell looks in a few times a second, and the processor rests.
+        !self.standby.asleep() && (self.moving || self.stack.last().is_some_and(|(s, _)| s.busy()))
     }
 
     /// How far the transition in flight has come, if there is one.
@@ -2192,6 +2221,79 @@ impl Shell {
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     pub fn standby_state(&self) -> crate::standby::State {
         self.standby.state()
+    }
+
+    /// The battery and the lights, in time: the saver's rules, the
+    /// warnings, turning off when empty; and the queue for the next match.
+    fn tick_power(&mut self, dt: f32) {
+        use crate::power::Event;
+        let asleep = self.standby.asleep();
+        let busy = matches!(self.update.state.as_str(), "checking" | "downloading" | "installing");
+        for event in self.care.tick(dt, asleep, &mut self.settings.battery, busy) {
+            match event {
+                Event::Say(text) => self.say(text),
+                Event::Warn => self.lights.warning(),
+                Event::Saver => {
+                    self.apply_settings();
+                    crate::save_settings(&self.settings);
+                }
+                Event::Empty => {
+                    self.standby.wake_now();
+                    let card = crate::power::Empty::new(self.settings.calm);
+                    let card = if crate::power::postponed_floor(&self.care) { card.at_floor() } else { card };
+                    self.open(Box::new(card), Path::Slide);
+                }
+            }
+        }
+        if self.standby.state() == crate::standby::State::Awake {
+            self.lights.seen();
+        }
+        self.lights.tick(dt);
+        self.watch_queue(dt);
+    }
+
+    /// Time to queue for the team's next match (FRC Nexus, when its key is
+    /// set): the island says so five minutes ahead and again when it is
+    /// time, and the keyboard's lights blink with each.
+    fn watch_queue(&mut self, dt: f32) {
+        self.queue_age += dt;
+        if self.queue_age < 5.0 || self.robot.is_demo() {
+            return;
+        }
+        self.queue_age = 0.0;
+        let Some(view) = self.robot.schedule.view() else { return };
+        let now = chrono::Utc::now().timestamp();
+        let Some(m) = view.next(now) else { return };
+        let queuing = m.status.as_deref().is_some_and(|s| s.to_lowercase().contains("queu"));
+        let stage = match (queuing, m.queue_at) {
+            (true, _) => 1,
+            (false, Some(at)) if now >= at && now <= at + 900 => 1,
+            (false, Some(at)) if now >= at - QUEUE_AHEAD && now < at => 0,
+            _ => return,
+        };
+        if self.queue_warned.iter().any(|(key, s)| *key == m.key && *s >= stage) {
+            return;
+        }
+        self.queue_warned.push((m.key.clone(), stage));
+        let label = m.label.clone();
+        self.lights.warning();
+        self.say(if stage == 1 { format!("time to queue for {label}") } else { format!("queue for {label} in 5 min") });
+    }
+
+    /// The battery running out, as the gallery shows it.
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn show_battery_empty(&mut self) {
+        self.open(Box::new(crate::power::Empty::new(self.settings.calm)), Path::Slide);
+    }
+
+    /// The screen is off and dark: the panel itself can sleep.
+    pub fn panel_off(&self) -> bool {
+        self.standby.asleep()
+    }
+
+    /// The battery saver is on: frames come at 30 a second.
+    pub fn saving(&self) -> bool {
+        self.settings.battery.saver
     }
 
     /// Drawn over everything: a screenshot's flash, and (where there is no

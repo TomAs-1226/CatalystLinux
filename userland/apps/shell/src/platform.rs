@@ -137,6 +137,9 @@ pub trait Platform {
     fn framebuffer(&self) -> Option<String> {
         None
     }
+    /// Standby with the screen dark: the panel itself sleeps (`true`), or
+    /// wakes and shows the last frame again (`false`). Nothing on a computer.
+    fn panel_sleep(&mut self, _asleep: bool) {}
 }
 
 /// The rows that differ from the frame last shown, as first..end, and note
@@ -323,6 +326,8 @@ pub mod device {
                 _console: quiet_console(),
             };
             device.find_inputs();
+            // A shell restarted while the screen was off finds the panel asleep.
+            device.panel_sleep(false);
             Ok(device)
         }
 
@@ -484,6 +489,18 @@ pub mod device {
 
         fn framebuffer(&self) -> Option<String> {
             Some(self.fb_path.clone())
+        }
+
+        /// Blanking the framebuffer powers the display pipe down, and the
+        /// panel's driver puts the ST7789 to sleep (display off, sleep in);
+        /// unblanking runs its init sequence again and sends the frame it
+        /// holds, which is the last one shown.
+        fn panel_sleep(&mut self, asleep: bool) {
+            const FBIOBLANK: libc::c_ulong = 0x4611;
+            const FB_BLANK_UNBLANK: libc::c_ulong = 0;
+            const FB_BLANK_POWERDOWN: libc::c_ulong = 4;
+            let level = if asleep { FB_BLANK_POWERDOWN } else { FB_BLANK_UNBLANK };
+            unsafe { libc::ioctl(self.fb.as_raw_fd(), FBIOBLANK as _, level) };
         }
     }
 }

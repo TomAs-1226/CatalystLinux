@@ -48,11 +48,13 @@ mod graphs;
 mod help;
 mod intro;
 mod keys;
+mod lights;
 mod logs;
 mod look;
 mod monitor;
 mod nettools;
 mod pit;
+mod power;
 mod pty;
 mod platform;
 mod recents;
@@ -181,7 +183,7 @@ fn settings_text(s: &shell::Settings) -> String {
         ("screen_off", s.screen_off.to_string()),
         ("power", s.power.key().to_owned()),
     ];
-    lines.iter().map(|(k, v)| format!("{k}={v}\n")).collect()
+    lines.iter().chain(s.battery.lines().iter()).map(|(k, v)| format!("{k}={v}\n")).collect()
 }
 
 fn load_settings(settings: &mut shell::Settings) {
@@ -193,6 +195,9 @@ fn load_settings(settings: &mut shell::Settings) {
 /// Read settings from their file's text; anything not understood is left as it was.
 fn parse_settings(text: &str, settings: &mut shell::Settings) {
     for line in text.lines() {
+        if line.split_once('=').is_some_and(|(k, v)| settings.battery.parse(k, v)) {
+            continue;
+        }
         match line.split_once('=') {
             Some(("light", v)) => settings.light = v == "true",
             Some(("calm", v)) => settings.calm = v == "true",
@@ -419,6 +424,8 @@ fn main() {
     // rather than as fast as each frame happens to allow. Idle, nothing is
     // drawn at all.
     let mut next_frame = Instant::now();
+    // The panel asleep with the screen dark (deep standby).
+    let mut panel_asleep = false;
     loop {
         let moving = shell.animating();
         let timeout = if moving { next_frame.saturating_duration_since(Instant::now()) } else { Duration::from_millis(250) };
@@ -427,6 +434,12 @@ fn main() {
         for key in keys {
             shell.key(key);
         }
+        // A key that woke the screen wakes the panel before anything is drawn.
+        if panel_asleep && !shell.panel_off() {
+            platform.panel_sleep(false);
+            panel_asleep = false;
+        }
+        beat.set_floor(shell.saving().then_some(power::SAVER_FRAME_MS));
         if moving && Instant::now() < next_frame {
             continue;
         }
@@ -438,6 +451,10 @@ fn main() {
             shell.robot = Robot::demo_back_from_a_match();
         }
         let changed = shell.tick(dt);
+        if shell.panel_off() != panel_asleep {
+            panel_asleep = !panel_asleep;
+            platform.panel_sleep(panel_asleep);
+        }
         if changed {
             shell.draw();
         }
@@ -491,6 +508,8 @@ struct Beat {
     roomy: u32,
     /// Frames since one ran late.
     since_late: u32,
+    /// No faster than this (the battery saver), or zero.
+    floor: Duration,
 }
 
 impl Beat {
@@ -503,7 +522,22 @@ impl Beat {
     /// A beat whose fastest rate is a frame every `ms`.
     fn every(ms: f32) -> Beat {
         let base = Duration::from_secs_f32(ms.clamp(4.0, 100.0) / 1000.0);
-        Beat { steps: [base, base.mul_f32(4.0 / 3.0), base * 2, base * 4], level: 0, roomy: 0, since_late: u32::MAX }
+        Beat { steps: [base, base.mul_f32(4.0 / 3.0), base * 2, base * 4], level: 0, roomy: 0, since_late: u32::MAX, floor: Duration::ZERO }
+    }
+
+    /// The battery saver: no faster than a frame every `ms` (none: as fast
+    /// as the beat allows). Taken at once when it slows the beat; when it
+    /// is lifted, the beat quickens at rest, as ever.
+    fn set_floor(&mut self, ms: Option<f32>) {
+        // A little under, so 2 × 16.7 ms counts as 30 a second.
+        let floor = ms.map_or(Duration::ZERO, |ms| Duration::from_secs_f32((ms - 0.5).max(0.0) / 1000.0));
+        if floor == self.floor {
+            return;
+        }
+        self.floor = floor;
+        while self.interval() < floor && self.level + 1 < self.steps.len() {
+            self.level += 1;
+        }
     }
 
     fn interval(&self) -> Duration {
@@ -536,7 +570,7 @@ impl Beat {
     /// Motion has stopped. Only now may the beat quicken, so that it never
     /// changes pace in the middle of an animation.
     fn rest(&mut self) {
-        if self.roomy >= 40 && self.level > 0 {
+        if self.roomy >= 40 && self.level > 0 && self.steps[self.level - 1] >= self.floor {
             self.level -= 1;
             self.roomy = 0;
         }
@@ -1169,6 +1203,34 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     settle(&mut shell, 60 * 24);
     assert_eq!(shell.standby_state(), standby::State::Dim);
     save(&mut shell, "78-standby-dimmed");
+
+    // Settings › Battery: the charge and its day at the top, then the saver
+    // and the rest of the choices; the control centre's saver switch; and
+    // the card as the battery runs out.
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    let at_battery = std::iter::repeat_n(Right, steps_to("Settings")).chain([Enter, Down, Down, Down, Down, Down]);
+    for key in at_battery.chain([Enter]) {
+        shell.key(key);
+        settle(&mut shell, 40);
+    }
+    settle(&mut shell, 40);
+    save(&mut shell, "81-battery");
+    for key in [Enter, Down, Down, Down, Down, Down] {
+        shell.key(key);
+        settle(&mut shell, 30);
+    }
+    settle(&mut shell, 40);
+    save(&mut shell, "81b-battery-below");
+    shell.key(Ctrl(' '));
+    settle(&mut shell, 90);
+    save(&mut shell, "82-control-centre-saver");
+    shell.key(Back);
+    settle(&mut shell, 60);
+    shell.show_battery_empty();
+    settle(&mut shell, 70);
+    save(&mut shell, "83-battery-empty");
 
     // The developer's tools, each from a fresh Home. What they read comes
     // in real time (a reading a second, a ping a second), so real time is

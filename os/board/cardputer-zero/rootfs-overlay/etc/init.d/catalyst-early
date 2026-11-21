@@ -32,5 +32,7 @@ start() {
 	fi
 	# Once: grow /data over the whole card (restarts the machine the first time).
 	/usr/sbin/catalyst-grow-data
+	# A lower voltage being tried that never held is taken out (and restarts).
+	/usr/sbin/catalyst-power boot
 	eend 0
 }

@@ -103,6 +103,32 @@ pub fn check(dev: &Device) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether the release's system fits the spare system's partition. Cards
+/// flashed before 0.4.0 have 160 MB slots and later systems take 1 GB: such
+/// a card has to be flashed afresh, which is said before anything is fetched.
+fn fits(m: &Manifest, spare: &Path) -> Result<(), String> {
+    // Only a partition has a fixed size; the tests' files grow as written.
+    if !spare.starts_with("/dev") {
+        return Ok(());
+    }
+    let room = room_of(spare).ok_or_else(|| format!("could not read the size of {}", spare.display()))?;
+    if m.system_size > room {
+        return Err(format!(
+            "{} needs a {} MB system slot and this card's are {} MB: flash it fresh",
+            m.version,
+            m.system_size.div_ceil(1 << 20),
+            room >> 20
+        ));
+    }
+    Ok(())
+}
+
+/// A block device's size: where its end is.
+fn room_of(path: &Path) -> Option<u64> {
+    use std::io::{Seek, SeekFrom};
+    std::fs::File::open(path).ok()?.seek(SeekFrom::End(0)).ok()
+}
+
 /// One install at a time: a lock holding the installer's process id.
 struct Lock(PathBuf);
 
@@ -179,6 +205,7 @@ fn install_locked(dev: &Device) -> Result<(), String> {
     }
     let running = dev.running()?;
     let spare = 1 - running;
+    fits(&m, &dev.systems[spare])?;
     let (version, _) = dev.version();
     let dl = dev.state.join("dl");
     std::fs::create_dir_all(&dl).map_err(|e| e.to_string())?;

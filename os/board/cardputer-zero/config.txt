@@ -33,6 +33,10 @@ dtoverlay=disable-bt
 # USB device mode, for a link to the Systemcore or a PC over USB-C.
 dtoverlay=dwc2
 
+# The speaker's amplifier (enabled by GPIO24) held off from the first
+# instant: nothing plays sound yet, and idle it draws about 9 mA.
+gpio=24=op,dl
+
 # The board: I/O expander, panel, backlight, keyboard, fuel gauge.
 dtoverlay=cardputerzero-v5-overlay
 dtoverlay=bq27220_v5

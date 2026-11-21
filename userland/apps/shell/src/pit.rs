@@ -585,6 +585,8 @@ impl Screen for Timer {
         if running {
             if self.phase.is_some_and(|p| p != r.phase) {
                 *cx.say = Some(if r.over() { "match over".into() } else { r.phase_name().into() });
+                // And the keyboard's lights blink: a cue felt from the corner of an eye.
+                crate::lights::warn();
             }
             self.phase = Some(r.phase);
         }
