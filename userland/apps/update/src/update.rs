@@ -310,12 +310,7 @@ fn install_locked(dev: &Device) -> Result<(), String> {
             line.split_whitespace().map(|a| if a.starts_with("root=") { format!("root={root}") } else { a.to_owned() }).collect::<Vec<_>>().join(" ").into_bytes()
         };
         pack::unpack(&boot_pack, &boot.join(device::slot_dir(spare)), &edit)?;
-        let config_path = boot.join("config.txt");
-        let config = std::fs::read_to_string(&config_path).map_err(|e| format!("reading config.txt: {e}"))?;
-        let tmp = boot.join("config.new");
-        std::fs::write(&tmp, device::set_slots(&config, running, spare)).map_err(|e| format!("writing config.txt: {e}"))?;
-        std::fs::rename(&tmp, &config_path).map_err(|e| format!("writing config.txt: {e}"))?;
-        Ok(())
+        device::write_slots(boot, running, spare)
     })?;
     device::sync();
     std::fs::remove_dir_all(&dl).ok();
@@ -415,13 +410,7 @@ pub fn verify(dev: &Device) -> Result<(), String> {
             };
             if up {
                 // It works: from now on it is the system that starts.
-                dev.with_boot(|boot| {
-                    let path = boot.join("config.txt");
-                    let config = std::fs::read_to_string(&path).map_err(|e| format!("reading config.txt: {e}"))?;
-                    let tmp = boot.join("config.new");
-                    std::fs::write(&tmp, device::set_slots(&config, running, 1 - running)).map_err(|e| e.to_string())?;
-                    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
-                })?;
+                dev.with_boot(|boot| device::write_slots(boot, running, 1 - running))?;
                 std::fs::remove_file(saved(dev, "trying.json")).ok();
                 let from = t["from"].as_str().unwrap_or_default().to_owned();
                 status::write(dev, &Status { state: state::UPDATED.into(), version: new_version, detail: format!("from {from}"), checked: status::read(dev).checked, ..Status::default() });
@@ -547,6 +536,11 @@ mod tests {
         let config = std::fs::read_to_string(root.join("boot/config.txt")).unwrap();
         assert_eq!(device::slots_of(&config), Some((0, 1)));
         assert!(config.starts_with("kernel=Image"));
+        // The settings a try actually reads on this firmware: tryboot.txt,
+        // with the same board lines, starting system B.
+        let tryboot = std::fs::read_to_string(root.join("boot/tryboot.txt")).expect("a try has its own settings");
+        assert_eq!(device::slots_of(&tryboot), Some((1, 1)));
+        assert!(tryboot.starts_with("kernel=Image"), "the board's own settings come too");
         // Checking again does not lose it.
         check(&dev).unwrap();
         assert_eq!(status::read(&dev).state, state::READY);
@@ -564,6 +558,7 @@ mod tests {
         let s = status::read(&dev);
         assert_eq!((s.state.as_str(), s.version.as_str(), s.detail.as_str()), (state::UPDATED, "0.2.0", "from 0.1.0"));
         assert_eq!(device::slots_of(&std::fs::read_to_string(root.join("boot/config.txt")).unwrap()), Some((1, 0)), "B starts from now on");
+        assert_eq!(device::slots_of(&std::fs::read_to_string(root.join("boot/tryboot.txt")).unwrap()), Some((0, 0)), "and a later try would start A");
 
         // Another time: a try whose shell never comes up is restarted, and
         // the old system then says the update did not take.
