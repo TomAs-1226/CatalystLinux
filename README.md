@@ -992,16 +992,34 @@ it outlined and numbered, and beside it each tag, nearest first: how far away
 it is, how far to the left or right, and how far it is turned (its yaw).
 Space holds the picture. It checks what the robot's vision should be seeing.
 
-- The picture is 640 × 480 at 15 frames a second from the sensor's full-view
-  binned mode, so the lens is known: nominally 530 pixels of focal length,
+- The picture is 640 × 480 at up to 30 frames a second (down to 15 when the
+  light is low and the exposure long) from the sensor's full-view binned
+  mode, so the lens is known: nominally 530 pixels of focal length,
   or a calibration in `apriltag/lens.json` beside the settings
   (`{"fx": …, "fy": …, "cx": …, "cy": …}`, as PhotonVision's calibration gives
   them). Tags are taken to be FRC's, 6.5 inches across their black square.
+- **Which way up.** On the CardputerZero the IMX219 sits the other way round
+  from what the kernel's `imx219` overlay declares (the Raspberry Pi camera
+  board's 180°, which libcamera undoes), so left as it is the picture is
+  upside down, and a tag to the right is reported to the left. The camera is
+  asked for half a turn (`--orientation 180`): the sensor reads out flipped,
+  at no cost, or `catalyst-camera` turns each frame as it copies it where a
+  pipeline cannot. M5Stack's own camera app for the CardputerZero asks for the
+  same, and `config.txt` keeps M5Stack's plain `dtoverlay=imx219`, so apps
+  written for their image see what they expect.
 - `catalyst-camera` (`os/package/catalyst-camera`), a small libcamera program
   of the image's own, streams the brightness of each frame to the reader,
   only while it is open; rpicam-apps needs kernel headers newer than this
-  toolchain's, and Boost. The detector is AprilRobotics' (as PhotonVision
-  uses), on two of the four cores, looking at the picture halved.
+  toolchain's, and Boost. Each frame is copied out as it arrives and the
+  camera's buffer goes straight back; the newest copy is what is sent when
+  the reader is ready, so a busy reader skips frames rather than falling
+  behind.
+- The picture and the reading go at their own paces. Every picture is shown
+  as it comes; the detector (AprilRobotics', as PhotonVision uses, on two of
+  the four cores, looking at the picture halved) runs on a thread of its own,
+  a step lower in priority, and reads whichever picture is newest when it is
+  free. When the two went in step, the picture moved only as fast as tags
+  could be read, which on the CM0 is slower than the camera.
 - libcamera's Raspberry Pi pipeline needs the firmware's image processor (the
   ISP) as well as the sensor. The ISP is reached through `vchiq`, which the
   image does not load at start, so the reader loads `vchiq`, `vc-sm-cma` and
@@ -1012,9 +1030,9 @@ Space holds the picture. It checks what the robot's vision should be seeing.
   read by the same detector; its distance and turn come back within a few
   centimetres and degrees of where it was drawn (tested).
 
-Not yet checked on a CardputerZero: the camera's connection and power (the
-image names it `dtoverlay=imx219`, as M5Stack's own image does), the frame
-rate the CM0 reaches, and the lens figures.
+Not yet checked on a CardputerZero: the picture the right way up after the
+half turn, the frame rate the CM0 reaches at 30 a second, how often it reads
+tags, and the lens figures.
 
 ## Remote: a universal remote
 

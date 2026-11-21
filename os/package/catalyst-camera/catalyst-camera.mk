@@ -4,7 +4,9 @@
 #
 ################################################################################
 
-CATALYST_CAMERA_VERSION = 1.0
+# Raised with each change to the program: a new version is a new build
+# directory, so the next image build compiles it afresh by itself.
+CATALYST_CAMERA_VERSION = 1.1
 CATALYST_CAMERA_SITE = $(BR2_EXTERNAL_CATALYST_PATH)/package/catalyst-camera/src
 CATALYST_CAMERA_SITE_METHOD = local
 CATALYST_CAMERA_LICENSE = MIT

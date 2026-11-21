@@ -5,17 +5,25 @@
 //! On the handheld the picture comes from the IMX219 through libcamera
 //! (`catalyst-camera`, the image's own small program, started when the reader
 //! opens and stopped when it closes; `rpicam-vid` where a system has that
-//! instead), 640 × 480 at 15 frames a second from the sensor's full-view
-//! binned mode,
+//! instead), 640 × 480 at up to 30 frames a second (15 in dim light) from the
+//! sensor's full-view binned mode, turned the right way up for the
+//! CardputerZero (its sensor sits the other way round from what the kernel's
+//! overlay declares),
 //! so the lens is known: nominally 530 pixels of focal length, or a
 //! calibration in `apriltag/lens.json` beside the settings (`{"fx": …, "fy": …,
 //! "cx": …, "cy": …}`, as PhotonVision's calibration gives them). On a
 //! computer, a simulated camera shows a tag moving in front of it, read by the
 //! same detector.
+//!
+//! The picture and the reading go at their own paces: every picture is shown
+//! as it arrives, and the detector, on a thread of its own at a lower
+//! priority, reads whichever picture is newest each time it is ready for
+//! another. Reading a picture takes longer than a frame on the CM0, and when
+//! the two went in step the picture moved only as fast as the reading.
 
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use apriltag::{Detector, Lens, Tag, FRC_TAG_SIZE};
@@ -26,9 +34,12 @@ use crate::platform::Key;
 use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
 
-/// The picture read: 640 × 480, as the camera gives it.
+/// The picture read: 640 × 480, as the camera gives it, at up to 30 a second
+/// (and no fewer than 15 when the light is low and the exposure long).
 const CAM_W: usize = 640;
 const CAM_H: usize = 480;
+const CAM_FPS: &str = "30";
+const CAM_SLOWEST: &str = "15";
 /// The preview kept for the screen: a quarter each way.
 const PREVIEW_W: usize = 160;
 const PREVIEW_H: usize = 120;
@@ -44,9 +55,45 @@ struct View {
     preview: Vec<u8>,
     tags: Vec<Tag>,
     frames: u64,
+    /// Pictures a second, as shown.
     fps: f32,
+    /// Pictures read for tags so far.
+    readings: u64,
     /// What is wrong, if the camera cannot be read.
     trouble: Option<String>,
+}
+
+/// The newest picture for the detector. The reader leaves each picture here
+/// (swapping buffers, so nothing is copied or made anew), and the detector
+/// takes whichever is here when it is ready for another: it never works on
+/// a stale picture, and never holds the next one up.
+#[derive(Default)]
+struct Newest {
+    frame: Vec<u8>,
+    fresh: bool,
+    /// The camera has stopped: nothing more will come.
+    done: bool,
+}
+
+type Mailbox = Arc<(Mutex<Newest>, Condvar)>;
+
+/// A rate, smoothed: how many a second, from the time between each and the
+/// one before.
+#[derive(Default)]
+struct Rate {
+    last: Option<Instant>,
+    per_second: f32,
+}
+
+impl Rate {
+    fn tick(&mut self, now: Instant) -> f32 {
+        if let Some(last) = self.last {
+            let gap = now.duration_since(last).as_secs_f32().max(1e-3);
+            self.per_second = if self.per_second == 0.0 { 1.0 / gap } else { self.per_second * 0.85 + 0.15 / gap };
+        }
+        self.last = Some(now);
+        self.per_second
+    }
 }
 
 /// Where the lens comes from: a calibration file, or the nominal one.
@@ -105,10 +152,11 @@ impl Source {
         }
         ready_the_isp();
         // 640 × 480 frames on stdout, from the sensor's full-view binned mode,
-        // until stopped: catalyst-camera sends the brightness alone;
+        // turned half round (see the module's notes), until stopped:
+        // catalyst-camera sends the brightness alone, always the newest;
         // rpicam-vid (no preview window) whole YUV 4:2:0 frames.
-        let ours: &[&str] = &["--width", "640", "--height", "480", "--fps", "15"];
-        let rpicam: &[&str] = &["-t", "0", "-n", "--codec", "yuv420", "--width", "640", "--height", "480", "--framerate", "15", "--mode", "1640:1232:10:P", "--flush", "-o", "-"];
+        let ours: &[&str] = &["--width", "640", "--height", "480", "--fps", CAM_FPS, "--slowest", CAM_SLOWEST, "--orientation", "180"];
+        let rpicam: &[&str] = &["-t", "0", "-n", "--codec", "yuv420", "--width", "640", "--height", "480", "--framerate", CAM_FPS, "--rotation", "180", "--mode", "1640:1232:10:P", "--flush", "-o", "-"];
         let programs = [("catalyst-camera", ours, 0), ("rpicam-vid", rpicam, CAM_W * CAM_H / 2), ("libcamera-vid", rpicam, CAM_W * CAM_H / 2)];
         for (program, args, colour) in programs {
             // libcamera's own log only for what goes wrong: its standard
@@ -127,13 +175,14 @@ impl Source {
         Err("no camera program in this system".into())
     }
 
-    /// The next picture's brightness, 640 × 480, into `y`.
-    fn next(&mut self, y: &mut Vec<u8>) -> Result<(), String> {
+    /// The next picture's brightness, 640 × 480, into `y` (`rest` takes the
+    /// colour a program sends after it, if any, and is passed over).
+    fn next(&mut self, y: &mut Vec<u8>, rest: &mut Vec<u8>) -> Result<(), String> {
         match self {
             Source::Camera { child, stdout, colour } => {
                 y.resize(CAM_W * CAM_H, 0);
-                let mut rest = vec![0u8; *colour];
-                if stdout.read_exact(y).and_then(|()| stdout.read_exact(&mut rest)).is_err() {
+                rest.resize(*colour, 0);
+                if stdout.read_exact(y).and_then(|()| stdout.read_exact(rest)).is_err() {
                     let mut why = String::new();
                     if let Some(err) = child.stderr.as_mut() {
                         err.read_to_string(&mut why).ok();
@@ -144,8 +193,8 @@ impl Source {
                 Ok(())
             }
             Source::Simulated { started, scratch } => {
-                // At the camera's pace.
-                std::thread::sleep(Duration::from_millis(66));
+                // At the camera's pace: 30 a second.
+                std::thread::sleep(Duration::from_millis(33));
                 simulate(started.elapsed().as_secs_f32(), y, scratch);
                 Ok(())
             }
@@ -187,7 +236,8 @@ impl Reader {
     }
 }
 
-/// The reader's thread: pictures in, tags found, a preview kept.
+/// The reader's thread: every picture in and shown as it comes, and handed
+/// on to the detector's thread, which reads the newest it can.
 fn read(view: Arc<Mutex<View>>, stop: Arc<AtomicBool>, lens: Lens) {
     let mut source = match Source::open() {
         Ok(s) => s,
@@ -196,42 +246,104 @@ fn read(view: Arc<Mutex<View>>, stop: Arc<AtomicBool>, lens: Lens) {
             return;
         }
     };
-    // Two of the four cores, so the shell stays smooth while it looks.
-    let mut detector = Detector::new(2, 2.0);
-    let mut y = Vec::new();
+    let mailbox: Mailbox = Arc::default();
+    let reading = {
+        let (view, mailbox) = (view.clone(), mailbox.clone());
+        std::thread::Builder::new().name("apriltag-detect".into()).spawn(move || detect(&view, &mailbox, lens)).ok()
+    };
+    let (mut y, mut rest) = (Vec::new(), Vec::new());
     let mut preview = vec![0u8; PREVIEW_W * PREVIEW_H];
-    let mut last = Instant::now();
-    let mut fps = 0.0f32;
+    let mut rate = Rate::default();
     while !stop.load(Ordering::Relaxed) {
-        if let Err(why) = source.next(&mut y) {
+        if let Err(why) = source.next(&mut y, &mut rest) {
             view.lock().map(|mut v| v.trouble = Some(why)).ok();
             break;
         }
-        let tags = detector.detect(&y, CAM_W, CAM_H, FRC_TAG_SIZE, Some(lens));
-        // A quarter each way, averaged.
-        for py in 0..PREVIEW_H {
-            for px in 0..PREVIEW_W {
-                let mut sum = 0u32;
-                for dy in 0..4 {
-                    let row = (py * 4 + dy) * CAM_W + px * 4;
-                    sum += y[row..row + 4].iter().map(|&b| b as u32).sum::<u32>();
-                }
-                preview[py * PREVIEW_W + px] = (sum / 16) as u8;
-            }
-        }
-        let now = Instant::now();
-        let gap = now.duration_since(last).as_secs_f32().max(1e-3);
-        last = now;
-        fps = if fps == 0.0 { 1.0 / gap } else { fps * 0.85 + 0.15 / gap };
+        shrink(&y, &mut preview);
+        let fps = rate.tick(Instant::now());
         if let Ok(mut v) = view.lock() {
             v.preview.clone_from(&preview);
-            v.tags = tags;
             v.frames += 1;
             v.fps = fps;
             v.trouble = None;
         }
+        // The picture to the detector, in place of whatever it has not taken.
+        let (newest, ready) = &*mailbox;
+        if let Ok(mut newest) = newest.lock() {
+            std::mem::swap(&mut newest.frame, &mut y);
+            newest.fresh = true;
+        }
+        ready.notify_one();
     }
     source.stop();
+    let (newest, ready) = &*mailbox;
+    newest.lock().map(|mut n| n.done = true).ok();
+    ready.notify_one();
+    if let Some(reading) = reading {
+        reading.join().ok();
+    }
+}
+
+/// The detector's thread: the newest picture each time it is free, read for
+/// tags. A step behind the drawing in priority, so the picture keeps moving
+/// while it works.
+fn detect(view: &Mutex<View>, mailbox: &Mailbox, lens: Lens) {
+    lower_priority();
+    // Two of the four cores; quads looked for at half the size, which still
+    // finds a 6.5 in tag well past 4 m at 640 × 480.
+    let mut detector = Detector::new(2, 2.0);
+    let mut frame = Vec::new();
+    loop {
+        {
+            let (newest, ready) = &**mailbox;
+            let Ok(mut newest) = newest.lock() else { return };
+            while !newest.fresh && !newest.done {
+                newest = match ready.wait_timeout(newest, Duration::from_millis(200)) {
+                    Ok((n, _)) => n,
+                    Err(_) => return,
+                };
+            }
+            if newest.done {
+                return;
+            }
+            std::mem::swap(&mut newest.frame, &mut frame);
+            newest.fresh = false;
+        }
+        let tags = detector.detect(&frame, CAM_W, CAM_H, FRC_TAG_SIZE, Some(lens));
+        if let Ok(mut v) = view.lock() {
+            v.tags = tags;
+            v.readings += 1;
+        }
+    }
+}
+
+/// This thread a step behind the shell's (nice 5); the threads the detector
+/// starts for itself take the same, as Linux threads do from their maker.
+fn lower_priority() {
+    #[cfg(target_os = "linux")]
+    // SAFETY: plain call; on Linux, who = 0 is the calling thread alone.
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, 0, 5);
+    }
+}
+
+/// The picture a quarter each way for the screen, each pixel the average of
+/// the sixteen it stands for. Row by row, so it is a few hundred
+/// microseconds a picture on the CM0.
+fn shrink(y: &[u8], preview: &mut [u8]) {
+    let mut sums = [0u32; PREVIEW_W];
+    for (py, out) in preview.chunks_exact_mut(PREVIEW_W).enumerate().take(PREVIEW_H) {
+        sums.fill(0);
+        let band = &y[py * 4 * CAM_W..(py * 4 + 4) * CAM_W];
+        for row in band.chunks_exact(CAM_W) {
+            for (sum, four) in sums.iter_mut().zip(row.chunks_exact(4)) {
+                *sum += u32::from(four[0]) + u32::from(four[1]) + u32::from(four[2]) + u32::from(four[3]);
+            }
+        }
+        for (o, sum) in out.iter_mut().zip(sums) {
+            *o = (sum / 16) as u8;
+        }
+    }
 }
 
 impl Drop for Reader {
@@ -278,13 +390,17 @@ impl Screen for Reader {
             return false;
         }
         let Ok(mut v) = self.view.lock() else { return false };
-        if v.frames == self.seen && v.trouble == self.shown.trouble {
+        if v.frames == self.seen && v.readings == self.shown.readings && v.trouble == self.shown.trouble {
             return false;
         }
-        self.seen = v.frames;
-        self.shown.preview = std::mem::take(&mut v.preview);
+        // A new picture, or new tags read from one: the tags drawn are the
+        // newest read, over the newest picture.
+        if v.frames != self.seen {
+            self.seen = v.frames;
+            self.shown.preview = std::mem::take(&mut v.preview);
+        }
         self.shown.tags.clone_from(&v.tags);
-        (self.shown.frames, self.shown.fps, self.shown.trouble) = (v.frames, v.fps, v.trouble.clone());
+        (self.shown.frames, self.shown.fps, self.shown.readings, self.shown.trouble) = (v.frames, v.fps, v.readings, v.trouble.clone());
         true
     }
 
@@ -533,6 +649,55 @@ mod tests {
             assert!((yaw - drawn).abs() < 6.0, "at {t} s: turned {yaw}° read, {drawn}° drawn");
             assert!(found.iter().any(|tag| tag.id == 13), "and tag 13 behind it");
         }
+    }
+
+    #[test]
+    fn the_preview_is_each_four_by_four_averaged() {
+        // Each 4 × 4 block a level of its own, with a ripple inside it that
+        // averages out: the block's level plus 0..3 across, minus 1.5 back.
+        let mut y = vec![0u8; CAM_W * CAM_H];
+        for (i, p) in y.iter_mut().enumerate() {
+            let (r, c) = (i / CAM_W, i % CAM_W);
+            let level = ((r / 4) * 7 + (c / 4) * 3) % 200 + 20;
+            *p = (level + c % 4) as u8 - 1;
+        }
+        let mut preview = vec![0u8; PREVIEW_W * PREVIEW_H];
+        shrink(&y, &mut preview);
+        for (i, p) in preview.iter().enumerate() {
+            let (r, c) = (i / PREVIEW_W, i % PREVIEW_W);
+            // Plus 0, 1, 2, 3 and less 1 each: half a level up, rounded down.
+            let level = (r * 7 + c * 3) % 200 + 20;
+            assert_eq!(*p as usize, level, "at {r}, {c}");
+        }
+    }
+
+    #[test]
+    fn a_rate_settles_on_the_pace_it_is_given() {
+        let mut rate = Rate::default();
+        let start = Instant::now();
+        assert_eq!(rate.tick(start), 0.0, "nothing to go on from one");
+        let mut per_second = 0.0;
+        for i in 1..=60 {
+            per_second = rate.tick(start + Duration::from_micros(33_333 * i));
+        }
+        assert!((per_second - 30.0).abs() < 0.5, "{per_second}");
+    }
+
+    #[test]
+    fn the_picture_keeps_its_pace_while_tags_are_read() {
+        // The simulated camera, as the reader runs it: every picture shown,
+        // tags read on their own thread from the newest.
+        let reader = Reader::new();
+        std::thread::sleep(Duration::from_millis(1500));
+        let (frames, readings, tag7) = {
+            let v = reader.view.lock().unwrap();
+            (v.frames, v.readings, v.tags.iter().any(|t| t.id == 7))
+        };
+        drop(reader);
+        // 30 a second for a second and a half, less the start.
+        assert!(frames >= 30, "{frames} pictures in 1.5 s");
+        assert!(readings >= 1 && readings <= frames, "{readings} read of {frames}");
+        assert!(tag7, "tag 7 read");
     }
 
     #[test]
