@@ -14,6 +14,14 @@ fn main() {
             continue;
         }
         let svg = fs::read_to_string(&path).unwrap();
+        // The renderer draws every symbol in Material Symbols' 960-unit box.
+        // An older 20-unit file (as GitHub's copy of a few symbols still is)
+        // would draw 48 times too small: take it from Google Fonts instead.
+        assert!(
+            svg.contains("viewBox=\"0 -960 960 960\""),
+            "{} is not drawn in the 960-unit box: fetch it from fonts.gstatic.com/s/i/short-term/release/materialsymbolsrounded/<name>/default/20px.svg",
+            path.display()
+        );
         let mut d = String::new();
         let mut rest = svg.as_str();
         while let Some(at) = rest.find(" d=\"") {

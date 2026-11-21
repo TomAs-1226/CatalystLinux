@@ -1365,6 +1365,16 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     save(&mut shell, "24c-setup-receiving");
     settle(&mut shell, 150);
     save(&mut shell, "24d-setup-received");
+    // On first start, the pages left for the handheld follow what the
+    // computer sent: four steps, the hardware check first, then the lesson.
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    shell.show(Box::new(setup::Setup::after_computer(&sent)));
+    settle(&mut shell, 110);
+    save(&mut shell, "24e-setup-after-computer-hardware");
+    press(&mut shell, &[Tab], 110);
+    save(&mut shell, "24f-setup-after-computer-lesson");
     // The start the tear-free panel is tried in: keep it? (Counting down,
     // a few seconds in.)
     let mut shell = Shell::new(Robot::demo());
@@ -1580,8 +1590,29 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     save(&mut shell, "104-weather-place");
     press(&mut shell, &[Back, Char('u')], 90);
     save(&mut shell, "104b-weather-fahrenheit");
+
+    // The Graphs tile among its page's; Esc from there glides Home back to
+    // its first app (caught on the way, and arrived).
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    press(&mut shell, &vec![Right; steps_to("Graphs")], 20);
+    settle(&mut shell, 60);
+    save(&mut shell, "105-home-graphs-tile");
+    shell.key(Back);
+    settle(&mut shell, 4);
+    save(&mut shell, "105b-home-esc-gliding-back");
+    settle(&mut shell, 60);
+    save(&mut shell, "105c-home-esc-at-the-start");
     let written =std::fs::read_dir(dir).map_or(0, |d| d.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "png")).count());
     println!("{written} screens in {}, {frames} frames at {:.2} ms each", dir.display(), started.elapsed().as_secs_f64() * 1e3 / frames as f64);
+    // An icon asked for and never built in draws as nothing: a blank where
+    // a symbol should be. Any in the tour fails it.
+    let missing = shell.gfx.missing_icons();
+    if !missing.is_empty() {
+        eprintln!("icons asked for that are not built in: {}", missing.iter().cloned().collect::<Vec<_>>().join(", "));
+        std::process::exit(1);
+    }
 }
 
 /// The robot's top-level tables, as Tables lists them.

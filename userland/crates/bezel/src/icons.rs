@@ -33,11 +33,13 @@ impl Icons {
         ICONS.binary_search_by(|(n, _)| (*n).cmp(name)).is_ok()
     }
 
-    /// Draw `name` centred on (`cx`, `cy`) in a `size` px box.
-    pub fn draw(&mut self, canvas: &mut Canvas, name: &str, filled: bool, cx: f32, cy: f32, size: f32, color: Color, alpha: f32) {
+    /// Draw `name` centred on (`cx`, `cy`) in a `size` px box. False when
+    /// there is no icon of that name, and nothing was drawn.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw(&mut self, canvas: &mut Canvas, name: &str, filled: bool, cx: f32, cy: f32, size: f32, color: Color, alpha: f32) -> bool {
         let lookup = |n: &str| ICONS.binary_search_by(|(k, _)| (*k).cmp(n)).ok();
         let index = if filled { lookup(&format!("{name}_fill")).or_else(|| lookup(name)) } else { lookup(name) };
-        let Some(index) = index else { return };
+        let Some(index) = index else { return false };
 
         let key = (index, (size * 4.0) as u16);
         let raster = self.cache.entry(key).or_insert_with(|| {
@@ -51,5 +53,6 @@ impl Icons {
         let x = (cx - size * 0.5).round() as i32 + raster.left;
         let y = (cy - size * 0.5).round() as i32 + raster.top;
         canvas.mask(x, y, raster.w, raster.h, &raster.data, color, alpha);
+        true
     }
 }

@@ -480,6 +480,23 @@ impl Home {
         }
     }
 
+    /// Home's start: the first app in focus on the first page (the glance
+    /// page sent back out if it is in), the page or the carousel turning
+    /// there on the same springs as any turn. Already there: nothing moves.
+    fn to_start(&mut self, calm: bool) {
+        if self.on_glance() {
+            self.show_glance(false, calm);
+        }
+        self.focus = 0;
+        if calm {
+            self.page.jump(0.0);
+            self.turn.jump(0.0);
+        } else {
+            self.page.set(0.0);
+            self.turn.set(0.0);
+        }
+    }
+
     /// Keys on the glance page. Its pages run leftward from Home, two cards
     /// to a page: Left moves to the card on the left and on to the next page,
     /// Right back toward Home.
@@ -490,7 +507,7 @@ impl Home {
         self.card = self.card.min(count.saturating_sub(1));
         let page = self.glance_page;
         match key {
-            Key::Back => self.show_glance(false, calm),
+            // (Esc is Home's own: back to the first app, see `to_start`.)
             Key::Left if self.card % 2 == 1 => self.card -= 1,
             Key::Left if page < pages => {
                 self.card = (2 * page + 1).min(count - 1);
@@ -849,6 +866,13 @@ impl Screen for Home {
         // Space or / searches everything; the bare letters stay arrows here.
         if key == Key::Char(' ') || key == Key::Char('/') {
             return Nav::Push(Box::new(crate::search::Search::new(None)));
+        }
+        // Esc anywhere on Home: back to its start, the first app of the first
+        // page (or card), gliding there as a page turn does.
+        if key == Key::Back {
+            self.opening = None;
+            self.to_start(calm);
+            return Nav::Stay;
         }
         if self.on_glance() {
             return self.glance_key(key, cx);
@@ -3127,6 +3151,106 @@ mod tests {
         // And the lines under the tools' names, which never change.
         for line in ["cpu · memory", "find · ping", "ssh · serial", "one key", "pitch · roll", "heading"] {
             assert!(g.measure(line, g.ty.caption) <= room, "{line}");
+        }
+    }
+
+    #[test]
+    fn every_icon_home_an_app_or_a_settings_page_asks_for_is_built_in() {
+        crate::shell::tests::sandbox();
+        let robot = Robot::demo();
+        // Each app's tile icon by name, whatever Home draws.
+        for app in &APPS {
+            assert!(bezel::Icons::has(app.icon), "{}'s icon {:?} is not built in", app.name, app.icon);
+        }
+        let mut g = Gfx::new(bezel::Tokens::dark());
+        let look = |screen: &mut dyn Screen, g: &mut Gfx| {
+            for _ in 0..6 {
+                screen.tick(1.0 / 60.0);
+                screen.draw(g, &robot);
+            }
+        };
+        // Home, both styles, every page of it.
+        let mut home = Home::new();
+        for style in [crate::shell::HomeStyle::Grid, crate::shell::HomeStyle::Carousel] {
+            home.style = style;
+            for focus in 0..home.count() {
+                home.focus = focus;
+                look(&mut home, &mut g);
+            }
+        }
+        // Every built-in app as it opens (not those that start a shell or the
+        // camera; their icons are on Home's tiles above).
+        for app in APPS.iter().filter(|a| !matches!(a.name, "Terminal" | "AprilTag")) {
+            look((app.open)(&robot).as_mut(), &mut g);
+        }
+        // Settings and each of its pages.
+        let mut settings = SettingsApp::new();
+        look(&mut settings, &mut g);
+        for item in settings.items.clone() {
+            if let Some(mut page) = SettingsApp::section(item) {
+                look(&mut page, &mut g);
+            }
+        }
+        assert!(g.missing_icons().is_empty(), "asked for but not built in: {:?}", g.missing_icons());
+        // And a name that is not one is caught.
+        g.icon("no_such_symbol", false, 10.0, 10.0, 12.0, g.tokens.ink);
+        assert!(g.missing_icons().contains("no_such_symbol"));
+    }
+
+    #[test]
+    fn esc_on_home_glides_back_to_the_first_app_of_the_first_page() {
+        crate::shell::tests::sandbox();
+        let (mut robot, mut settings, mut say) = (Robot::demo(), crate::shell::Settings::default(), None);
+        for style in [crate::shell::HomeStyle::Grid, crate::shell::HomeStyle::Carousel] {
+            settings.home = style;
+            settings.calm = false;
+            let mut home = Home::new();
+            home.style = style;
+            let far = home.per_page() + 1;
+            let mut cx = Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true };
+            let along = |home: &Home| match style {
+                crate::shell::HomeStyle::Grid => home.page.value(),
+                crate::shell::HomeStyle::Carousel => home.turn.value(),
+            };
+            let settle = |home: &mut Home| {
+                for _ in 0..240 {
+                    home.tick(1.0 / 60.0);
+                }
+            };
+            // Along to an app on the second page (a card well along).
+            for _ in 0..far {
+                home.key(Key::Right, &mut cx);
+            }
+            settle(&mut home);
+            assert_eq!(home.focus, far);
+            let start = along(&home);
+            assert!(start >= 1.0 - 1e-3, "{style:?}: turned along, {start}");
+            // Esc: the first app, and the page glides back to it.
+            assert!(matches!(home.key(Key::Back, &mut cx), Nav::Stay), "{style:?}: Esc stays on Home");
+            assert_eq!(home.focus, 0, "{style:?}");
+            home.tick(1.0 / 60.0);
+            let mid = along(&home);
+            assert!(mid > 0.0 && mid < start, "{style:?}: on its way, not there at once: {mid}");
+            settle(&mut home);
+            assert!(along(&home).abs() < 1e-3, "{style:?}: at the start: {}", along(&home));
+            // At the start, Esc changes nothing.
+            home.key(Key::Back, &mut cx);
+            assert_eq!(home.focus, 0);
+            assert!(home.page.is_settled() && home.turn.is_settled() && !home.on_glance());
+            // From the glance page: out of it, onto the first app.
+            home.key(Key::Left, &mut cx);
+            assert!(home.on_glance(), "{style:?}: Left from the first app is the glance page");
+            settle(&mut home);
+            home.key(Key::Back, &mut cx);
+            assert!(!home.on_glance() && home.focus == 0, "{style:?}");
+            // The calm version goes there at once.
+            cx.settings.calm = true;
+            for _ in 0..far {
+                home.key(Key::Right, &mut cx);
+            }
+            home.key(Key::Back, &mut cx);
+            assert!(home.focus == 0 && along(&home).abs() < 1e-6, "{style:?}: calm, at once");
+            cx.settings.calm = false;
         }
     }
 
