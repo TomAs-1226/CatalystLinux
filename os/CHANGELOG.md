@@ -10,6 +10,27 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.5.6
+
+### Sound
+- The speaker and headphones work. The speaker plays both channels, and its amplifier is on only while something plays.
+- Volume on Fn+S and Fn+D, mute on Fn+A, a volume bar in the control centre, and Settings › Sound.
+- The microphone works, and any program can record from it. Settings › Sound shows its level.
+- Bluetooth headphones and speakers, off until switched on in Settings. The first time, the handheld restarts once; the serial console stays where it was.
+- Reminders chime through the speaker, with a brighter sound for pit reminders.
+
+### Music
+- Music: YouTube Music, signed out unless you choose to sign in. Search, quick picks, a song's radio and the queue, with the cover on the now-playing page.
+- It plays on behind other apps and with the screen off. Fn+Q, W and E play, pause and skip from anywhere, and Spotlight finds music.
+
+### Voice
+- Talk to the Assistant: hold Alt anywhere and speak; let go and it writes down what you said and asks it. While it listens, the island shows a microphone and a live level.
+- What you said sits in the question line for a moment before it sends: press any key to edit it first, or Enter to send now.
+- Dictate into Notes: hold Alt in a note to type what you say at the cursor; on the Notes list it starts a new note.
+- Spoken answers, off unless you turn them on in the Assistant's choices: for questions asked aloud, or for every answer. Long answers are said in two sentences, and any key stops it.
+- ai --listen in the Terminal: ask out loud and press Enter when you're done.
+- Titles and the status give way under a wide island, fading out and back instead of being cut short.
+
 ## 0.5.5
 
 ### Apps
