@@ -198,6 +198,13 @@ pub struct Gfx {
     gpu_awaiting_device: bool,
     /// The GPU being opened, on a thread of its own.
     gpu_opening: Option<std::sync::mpsc::Receiver<Result<crate::gpu::Gpu, String>>>,
+    /// After the GPU failed: the processor draws until this, when the GPU
+    /// is tried again; the wait last taken (30 s, doubling to half an hour);
+    /// and when the GPU last came up, to start the waits over once it has
+    /// held for a while.
+    gpu_retry_at: Option<std::time::Instant>,
+    gpu_wait: std::time::Duration,
+    gpu_since: Option<std::time::Instant>,
     /// How far the list on screen is scrolled, in rows. It glides to where
     /// the list was moved rather than jumping a row at a time.
     scroll: Animated,
@@ -371,6 +378,9 @@ impl Gfx {
             gpu_wanted: None,
             gpu_awaiting_device: false,
             gpu_opening: None,
+            gpu_retry_at: None,
+            gpu_wait: std::time::Duration::ZERO,
+            gpu_since: None,
             press: Animated::new(0.0, role::settle()).with_rest(0.01),
             scroll: Animated::new(0.0, role::hold()).with_rest(0.004),
             scroll_placed: false,
@@ -861,6 +871,7 @@ impl Gfx {
             self.gpu = None;
             self.gpu_opening = None;
             self.gpu_awaiting_device = false;
+            (self.gpu_retry_at, self.gpu_wait) = (None, std::time::Duration::ZERO);
             crate::gpu::set_choice("processor · your choice", "processor · chosen in Settings › Display › Graphics");
             return;
         }
@@ -909,12 +920,18 @@ impl Gfx {
                 if !gpu.worth_it() {
                     eprintln!("catalyst-shell: drawing with the processor, quicker than the gpu here ({})", gpu.jobs());
                     crate::gpu::set_choice("processor · faster here", format!("processor · faster than the {} here, reading back included: {}", gpu.renderer(), gpu.jobs()));
+                    self.gpu_retry_at = None;
                     return;
                 }
                 eprintln!("catalyst-shell: drawing with the gpu ({}; {})", crate::gpu::note(), gpu.jobs());
                 crate::gpu::set_choice("gpu", format!("{} · {}", gpu.renderer(), gpu.jobs()));
                 self.gpu = Some(gpu);
+                self.gpu_since = Some(std::time::Instant::now());
+                self.gpu_retry_at = None;
             }
+            // Tried again after a failure, and it would not come up (its
+            // memory still short, say): wait longer before the next try.
+            Err(why) if self.gpu_wait > std::time::Duration::ZERO => self.back_off(&format!("it would not come up again: {why}")),
             Err(why) => {
                 eprintln!("catalyst-shell: drawing with the processor: {why}");
                 crate::gpu::set_choice(crate::gpu::why_not(&why), format!("processor · {why}"));
@@ -924,16 +941,37 @@ impl Gfx {
         }
     }
 
-    /// The GPU went wrong mid-frame: the processor draws from now on.
+    /// The GPU went wrong mid-frame (its memory ran out, say): the frame is
+    /// finished on the processor, the GPU let go (its textures and context
+    /// back to the kernel), and the processor draws for a while before the
+    /// GPU is tried again: 30 s, doubling with each failure to half an
+    /// hour, and back to 30 s once it has held for ten minutes. Said once
+    /// for each failure, never for each frame.
     pub fn gpu_failed(&mut self, why: String) {
-        eprintln!("catalyst-shell: the gpu failed, drawing with the processor: {why}");
-        crate::gpu::set_choice("processor · gpu failed", format!("processor · the gpu failed while drawing: {why}"));
         self.gpu = None;
         self.gpu_awaiting_device = false;
+        if self.gpu_since.is_some_and(|since| since.elapsed() >= std::time::Duration::from_secs(600)) {
+            self.gpu_wait = std::time::Duration::ZERO;
+        }
+        self.back_off(&why);
     }
 
-    /// Every frame: has the GPU finished opening?
+    fn back_off(&mut self, why: &str) {
+        const FIRST: std::time::Duration = std::time::Duration::from_secs(30);
+        const LONGEST: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+        self.gpu_wait = if self.gpu_wait.is_zero() { FIRST } else { (self.gpu_wait * 2).min(LONGEST) };
+        self.gpu_retry_at = Some(std::time::Instant::now() + self.gpu_wait);
+        let wait = self.gpu_wait.as_secs();
+        eprintln!("catalyst-shell: the gpu failed ({why}); the processor draws, and the gpu is tried again in {wait} s");
+        crate::gpu::set_choice("processor · gpu failed", format!("processor · the gpu failed ({why}); tried again in {wait} s"));
+    }
+
+    /// Every frame: has the GPU finished opening? And textures it has not
+    /// drawn with for a while go back to the kernel's pool.
     pub fn tick_gpu(&mut self) {
+        if let Some(gpu) = &mut self.gpu {
+            gpu.idle(std::time::Instant::now());
+        }
         let Some(opening) = &self.gpu_opening else { return };
         match opening.try_recv() {
             Ok(opened) => {
@@ -951,6 +989,11 @@ impl Gfx {
         if self.gpu_awaiting_device && self.gpu_wanted() && self.gpu.is_none() && self.gpu_opening.is_none() && crate::gpu::device_present() {
             self.try_gpu();
         }
+        // After a failure, once its wait is over (on its own thread, as at start).
+        if self.gpu_retry_at.is_some_and(|at| std::time::Instant::now() >= at) && self.gpu_wanted() && self.gpu.is_none() && self.gpu_opening.is_none() {
+            self.gpu_retry_at = None;
+            self.try_gpu();
+        }
     }
 }
 
@@ -961,6 +1004,31 @@ mod tests {
     /// Where row `index` is drawn, if it is.
     fn row_y(rows: &[(usize, f32)], index: usize) -> Option<f32> {
         rows.iter().find(|(i, _)| *i == index).map(|(_, y)| *y)
+    }
+
+    #[test]
+    fn a_failing_gpu_is_tried_again_later_and_later() {
+        use std::time::{Duration, Instant};
+        let mut g = Gfx::new(Tokens::dark());
+        g.gpu_wanted = Some(true);
+        let waits: Vec<u64> = (0..8)
+            .map(|_| {
+                g.gpu_failed("gl error 0x505 drawing glass".into());
+                let at = g.gpu_retry_at.expect("tried again later");
+                (at - Instant::now()).as_secs_f32().round() as u64
+            })
+            .collect();
+        assert_eq!(waits, [30, 60, 120, 240, 480, 960, 1800, 1800], "30 s, doubling, half an hour at most");
+        // Not yet due: nothing is tried; the processor draws meanwhile.
+        g.look_for_gpu();
+        assert!(g.gpu_opening.is_none() && g.gpu_retry_at.is_some());
+        // Held for ten minutes since it last came up: the waits start over.
+        g.gpu_since = Some(Instant::now() - Duration::from_secs(601));
+        g.gpu_failed("gl error 0x505 drawing glass".into());
+        assert_eq!(g.gpu_wait, Duration::from_secs(30));
+        // Switched off in Settings: no more tries.
+        g.want_gpu(false);
+        assert!(g.gpu_retry_at.is_none());
     }
 
     #[test]

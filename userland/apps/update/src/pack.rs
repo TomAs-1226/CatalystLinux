@@ -61,6 +61,12 @@ fn open_target(path: &Path) -> Result<File, String> {
     OpenOptions::new().write(true).create(!path.starts_with("/dev")).truncate(false).open(path).map_err(io("opening the spare system"))
 }
 
+/// Written to the card in steps of this much, each flushed before the next:
+/// a whole system held back in memory and written at once filled it and
+/// left everything else waiting on the card (the handheld lagged while an
+/// update installed).
+const FLUSH_EVERY: usize = 4 << 20;
+
 /// Write a whole system: `gz` decompressed into `target`. Returns its hash.
 pub fn write_full(gz: &Path, target: &Path, size: u64, progress: Progress) -> Result<String, String> {
     let mut input = GzDecoder::new(std::io::BufReader::new(File::open(gz).map_err(io("reading the download"))?));
@@ -68,12 +74,18 @@ pub fn write_full(gz: &Path, target: &Path, size: u64, progress: Progress) -> Re
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     let mut done = 0u64;
+    let mut unflushed = 0usize;
     loop {
         let n = input.read(&mut buf).map_err(io("unpacking the system"))?;
         if n == 0 {
             break;
         }
         out.write_all(&buf[..n]).map_err(io("writing the spare system"))?;
+        unflushed += n;
+        if unflushed >= FLUSH_EVERY {
+            out.sync_data().map_err(io("writing the spare system"))?;
+            unflushed = 0;
+        }
         hasher.update(&buf[..n]);
         done += n as u64;
         progress(done as f32 / size.max(1) as f32);
@@ -169,6 +181,9 @@ pub fn write_delta(delta: &Path, base: &Path, target: &Path, progress: Progress)
             src.read_exact(&mut buf[..n]).map_err(io("reading the running system"))?;
         }
         out.write_all(&buf[..n]).map_err(io("writing the spare system"))?;
+        if (i + 1) % (FLUSH_EVERY / block).max(1) == 0 {
+            out.sync_data().map_err(io("writing the spare system"))?;
+        }
         hasher.update(&buf[..n]);
         if i % 32 == 0 {
             progress(i as f32 / blocks as f32);

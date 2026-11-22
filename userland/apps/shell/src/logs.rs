@@ -285,7 +285,11 @@ impl Logs {
         thread::Builder::new()
             .name("logs".into())
             .stack_size(512 * 1024)
-            .spawn(move || pull_loop(&thread_shared, &thread_dir, &host))
+            .spawn(move || {
+                // Behind the frames, its looks folded into other wakeups (sched.rs).
+                crate::sched::enter(crate::sched::Class::Background);
+                pull_loop(&thread_shared, &thread_dir, &host)
+            })
             .expect("spawn logs thread");
         Logs { dir: Some(dir), shared, demo: Vec::new(), listed: Mutex::new(None), demo_held: None }
     }
@@ -296,7 +300,14 @@ impl Logs {
     }
 
     pub fn generation(&self) -> u64 {
-        self.shared.generation.load(Ordering::Relaxed) + self.shared.pulled_bytes.load(Ordering::Relaxed) / (256 * 1024)
+        (self.shared.generation.load(Ordering::Relaxed) + self.shared.pulled_bytes.load(Ordering::Relaxed) / (256 * 1024)) ^ self.folder_stamp()
+    }
+
+    /// When the logs' folder last changed (a file came or went, from a pull
+    /// or copied in), as a number; 0 with no folder.
+    fn folder_stamp(&self) -> u64 {
+        let Some(dir) = &self.dir else { return 0 };
+        fs::metadata(dir).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos() as u64)
     }
 
     /// What the puller is doing, in a few words.
@@ -318,7 +329,10 @@ impl Logs {
             let held = if self.demo_held.is_some() { 1 } else { 0 };
             return self.demo[held.min(self.demo.len())..].to_vec();
         };
-        let generation = self.shared.generation.load(Ordering::Relaxed);
+        // Read again when a log was pulled, or when the folder changed some
+        // other way (logs copied in over USB or SSH, `--demo-logs`): its
+        // time moves on whenever a file comes or goes.
+        let generation = self.shared.generation.load(Ordering::Relaxed) ^ self.folder_stamp();
         if let Some((at, rows)) = &*self.listed.lock().unwrap() {
             if *at == generation {
                 return rows.clone();

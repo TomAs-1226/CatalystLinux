@@ -111,7 +111,7 @@ impl Shell {
             self.spotlight_under = None;
         }
         if self.control.visible() {
-            self.control.set_open(false, &self.settings);
+            self.control.set_open(false, &self.settings, &self.notes);
             self.control.shown.jump(0.0);
             self.control_under = None;
             self.control_glass = None;

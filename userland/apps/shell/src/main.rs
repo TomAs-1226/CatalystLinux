@@ -9,9 +9,12 @@
 //!                                handheld's estimated speed and at worse
 //! catalyst-shell --passcode-bench   what making and checking the lock screen's
 //!                                passcode takes on this processor
+//! catalyst-shell --sched-bench [clock|power|io]   the handheld's own figures for
+//!                                the processor's pace and the card (sched.rs)
 //! catalyst-shell --standby-shots <dir>   StandBy's faces and the lock screen, to PNG
 //! catalyst-shell --cjk-shots <dir>   Chinese, Japanese and Korean text on the screens, to PNG
 //! catalyst-shell --activity-shots <dir>  live activities, Tab held, the lock screen with a song
+//! catalyst-shell --notify-shots <dir>    notifications: the centre, Quiet, the island, the lock screen
 //! catalyst-shell --clip-shots <dir>   the clipboard's history, quick capture, copy mode, to PNG
 //! catalyst-shell clip …           the clipboard for scripts (`catalyst-clip`, a link to this)
 //!     --robot <team|ip|host>     robot to connect to (overrides the saved one)
@@ -92,6 +95,7 @@ mod monitor;
 mod music;
 mod nettools;
 mod notes;
+mod notify;
 mod nowplaying;
 mod object3d;
 mod offline;
@@ -100,6 +104,7 @@ mod offline;
 #[cfg(test)]
 #[global_allocator]
 static METERED: offline::meter::Metered = offline::meter::Metered;
+mod pacing;
 mod panel;
 mod passcode;
 mod photos;
@@ -113,6 +118,8 @@ mod remote;
 mod robot;
 mod robot3d;
 mod schedule;
+mod sched;
+mod schedbench;
 mod screens;
 mod screenshot;
 mod setup;
@@ -384,9 +391,41 @@ fn main() {
     let flag = |name: &str| args.iter().any(|a| a == name);
     let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     // What making and checking the lock screen's passcode takes here.
+    // A demo event's match logs (seven matches with known faults: brownouts,
+    // a hot elevator, loop overruns, CAN spikes), written where Logs reads
+    // them, to try Logs, Trends and the offline Assistant without a robot.
+    // `catalyst-shell --demo-logs` on the handheld; a folder may be given.
+    if flag("--demo-logs") {
+        let dir = value("--demo-logs").filter(|v| !v.starts_with("--")).map(std::path::PathBuf::from).unwrap_or_else(logs::kept_dir);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            eprintln!("catalyst-shell: making {}: {e}", dir.display());
+            std::process::exit(1);
+        }
+        for spec in offline::synth::demo_event() {
+            let path = dir.join(&spec.name);
+            match std::fs::write(&path, offline::synth::write(&spec)) {
+                Ok(()) => println!("{}", path.display()),
+                Err(e) => {
+                    eprintln!("catalyst-shell: writing {}: {e}", path.display());
+                    std::process::exit(1);
+                }
+            }
+        }
+        return;
+    }
     if flag("--passcode-bench") {
         println!("{}", passcode::bench());
         return;
+    }
+    // The clock, the battery and the card, measured for sched.rs's choices.
+    if let Some(at) = args.iter().position(|a| a == "--sched-bench") {
+        let what = args.get(at + 1).filter(|a| !a.starts_with("--")).cloned().unwrap_or_else(|| "clock".into());
+        return schedbench::run(&what, || {
+            let mut shell = Shell::new(Robot::none());
+            load_settings(&mut shell.settings);
+            shell.apply_settings();
+            shell
+        });
     }
     // The offline assistant's evaluation: its questions asked of the model
     // at CATALYST_LOCAL_URL (or the facts alone), the results to a file.
@@ -474,6 +513,10 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--activity-shots") {
         return activity_shots(std::path::Path::new(&dir));
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--notify-shots") {
+        return notify_shots(std::path::Path::new(&dir));
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--standby-shots") {
@@ -592,7 +635,9 @@ fn main() {
         Beat::new()
     };
     #[cfg(target_arch = "aarch64")]
-    let mut beat = Beat::new();
+    let mut beat = Beat::for_panel(platform.panel_frame());
+    // How long the panel takes over a whole frame, where that is known.
+    let panel_frame = platform.panel_frame().unwrap_or(Duration::ZERO);
     let mut meter = Meter::default();
     let perf = flag("--perf");
     let mut last = Instant::now();
@@ -604,8 +649,23 @@ fn main() {
     let mut panel_asleep = false;
     // The backlight is dark from power-on until the first picture is sent.
     let mut lit = false;
+    // The clock at speed from a key's first frame to the motion's end, the
+    // drawing thread's own timer slack, and the frames as the handheld
+    // drew them, when asked (sched.rs, pacing.rs).
+    let mut booster = sched::Booster::start();
+    let mut slack = sched::LoopSlack::default();
+    let mut pacing = pacing::Pacing::default();
     loop {
         let moving = shell.animating();
+        slack.wait(if moving {
+            sched::Wait::Frame
+        } else if shell.deep_asleep() {
+            sched::Wait::Deep
+        } else if shell.panel_off() {
+            sched::Wait::Dark
+        } else {
+            sched::Wait::Idle
+        });
         // Idle, a look four times a second; with the screen dark, every two
         // seconds (a lift wakes it sooner: see platform::wake); in deep or
         // music standby, once a minute (sooner when a reminder or the queue
@@ -620,9 +680,21 @@ fn main() {
             Duration::from_millis(250)
         };
         let Some(keys) = platform.poll(timeout) else { break };
+        slack.woke();
+        // A key going down on a lit screen raises the clock before it is
+        // handled, so its first frame is drawn at speed.
+        let keyed = !keys.is_empty();
+        if keyed {
+            booster.key(Instant::now(), shell.boost_place());
+            pacing.key(platform.key_time_ns());
+        }
         // Keys are taken in whenever they arrive; the frame waits for its beat.
         for key in keys {
             shell.key(key);
+        }
+        // One that woke the screen raises it now it is lit.
+        if keyed {
+            booster.key(Instant::now(), shell.boost_place());
         }
         // A key that woke the screen wakes the panel before anything is drawn.
         if panel_asleep && !shell.panel_off() {
@@ -634,6 +706,7 @@ fn main() {
             continue;
         }
         let work = Instant::now();
+        let work_ns = pacing::now_ns();
         // In deep standby a tick stands for the whole minute that passed,
         // and with the screen dark for the seconds between looks.
         let elapsed = (work - last).as_secs_f32();
@@ -660,6 +733,8 @@ fn main() {
         // An external app that draws for itself: once its page has arrived,
         // the panel is its own until it ends or is left.
         if let Some(app) = shell.take_launch() {
+            // The app's own pace is the governor's to set.
+            booster.release();
             let result = apps::run(&app, &shell.settings, platform.as_mut(), &shell.gfx.canvas);
             // What it left on the panel: its window closes from that picture.
             let left = platform.capture();
@@ -674,13 +749,26 @@ fn main() {
             if perf {
                 eprintln!("{line}");
             }
+            // Asked for at run time (`touch /run/catalyst-perf`): the same
+            // line, timed, into /run/catalyst-perf.log, for a test to read.
+            if cfg!(target_os = "linux") && std::path::Path::new("/run/catalyst-perf").exists() {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/run/catalyst-perf.log") {
+                    writeln!(f, "{} {line}", chrono::Local::now().format("%H:%M:%S")).ok();
+                }
+            }
         }
         // What this frame needed: its own work, and the panel taking what
         // was sent. The beat slows to one the handheld can hold, so frames
         // stay evenly spaced rather than alternating fast and slow.
-        let beats = if part > 0.0 { beat.frame_took(cost + speed.panel.mul_f32(part)) } else { 1 };
+        let beats = if part > 0.0 { beat.frame_and_panel_took(cost + speed.panel.mul_f32(part), panel_frame.mul_f32(part)) } else { 1 };
+        if part > 0.0 {
+            pacing.frame(work_ns, pacing::now_ns(), beats, booster.on());
+        }
+        booster.after(Instant::now(), shell.moving() && !shell.panel_off(), shell.boost_place());
         next_frame += beat.interval() * beats;
         if !shell.animating() {
+            pacing.settle(beat.interval());
             beat.rest();
             next_frame = Instant::now();
         } else if next_frame < Instant::now() {
@@ -693,13 +781,18 @@ fn main() {
 ///
 /// Frames evenly spaced look smooth; frames that alternate fast and slow do
 /// not, however good their average. So the beat is the fastest of a few
-/// steady rates that the handheld is actually holding: 40 frames a second
-/// (25 ms, or `CATALYST_FRAME_MS`), then 30, 20 and 10; the simulator at full
-/// speed starts from the computer's screen rate instead. One late frame is
+/// steady rates that the handheld is actually holding: from 60 frames a
+/// second where the panel takes a whole frame in time (its link at 62.5
+/// MHz), else 40 (25 ms, or `CATALYST_FRAME_MS`), then three slower; the
+/// simulator at full speed starts from the computer's screen rate instead. One late frame is
 /// let go: it takes an extra beat and the rhythm carries on. A second soon
 /// after means the beat is too fast, and it steps down. It steps back up only
 /// after a long run of frames with room to spare, so it settles rather than
 /// hunts.
+/// The room a whole frame on the panel must leave in a beat: the kernel's
+/// own time before it sends a frame varies by a millisecond or two.
+const PANEL_ROOM_MS: f32 = 1.5;
+
 struct Beat {
     steps: [Duration; 4],
     level: usize,
@@ -713,9 +806,29 @@ struct Beat {
 
 impl Beat {
     /// The handheld's beat: 25 ms, or `CATALYST_FRAME_MS`.
+    #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     fn new() -> Beat {
-        let ms = std::env::var("CATALYST_FRAME_MS").ok().and_then(|v| v.parse::<f32>().ok()).filter(|ms| (5.0..=100.0).contains(ms)).unwrap_or(25.0);
-        Beat::every(ms)
+        Beat::every(Beat::asked().unwrap_or(25.0))
+    }
+
+    /// `CATALYST_FRAME_MS`, when it is set to something sensible.
+    fn asked() -> Option<f32> {
+        std::env::var("CATALYST_FRAME_MS").ok().and_then(|v| v.parse::<f32>().ok()).filter(|ms| (5.0..=100.0).contains(ms))
+    }
+
+    /// The handheld's beat for its panel: the fastest of 60, 50 and 40
+    /// frames a second that the panel takes a whole frame within, with a
+    /// little room (a frame is sent while the next is drawn, so the panel
+    /// must be done by then). At 62.5 MHz a whole frame takes 15 ms: 60. Not
+    /// known (a system from before the core clock was held, the link's
+    /// speed moving with it): 40, as ever. `CATALYST_FRAME_MS` over all.
+    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+    fn for_panel(panel: Option<Duration>) -> Beat {
+        if let Some(ms) = Beat::asked() {
+            return Beat::every(ms);
+        }
+        let fits = |ms: f32| panel.is_some_and(|p| p.as_secs_f32() * 1000.0 + PANEL_ROOM_MS <= ms);
+        Beat::every([1000.0 / 60.0, 20.0].into_iter().find(|ms| fits(*ms)).unwrap_or(25.0))
     }
 
     /// A beat whose fastest rate is a frame every `ms`.
@@ -746,6 +859,15 @@ impl Beat {
     /// Note what a frame needed. Returns how many beats it takes up: one,
     /// unless it ran late.
     fn frame_took(&mut self, needed: Duration) -> u32 {
+        self.frame_and_panel_took(needed, Duration::ZERO)
+    }
+
+    /// As [`Beat::frame_took`], with the panel's time apart from the work:
+    /// the panel takes a frame while the next is drawn, so a frame needs the
+    /// longer of the two. Drawing wanders from frame to frame and is given
+    /// room before the beat quickens; the panel's time does not, and is not.
+    fn frame_and_panel_took(&mut self, work: Duration, panel: Duration) -> u32 {
+        let needed = work.max(panel);
         if needed > self.interval() {
             self.roomy = 0;
             if self.since_late < 8 && self.level + 1 < self.steps.len() {
@@ -757,7 +879,7 @@ impl Beat {
             }
         } else {
             self.since_late = self.since_late.saturating_add(1);
-            if self.level > 0 && needed.mul_f32(1.15) < self.steps[self.level - 1] {
+            if self.level > 0 && work.mul_f32(1.15) < self.steps[self.level - 1] && panel < self.steps[self.level - 1] {
                 self.roomy += 1;
             } else {
                 self.roomy = 0;
@@ -3824,6 +3946,226 @@ fn activity_shots(dir: &std::path::Path) {
     println!("live activity shots in {}", dir.display());
 }
 
+/// Notifications, to PNG: the notification centre (both tones, the Bezel
+/// look, every text size, empty, Quiet, scrolled, the page turning), the
+/// control centre's Quiet and Notifications, the island's count, the lock
+/// screen with notifications (words hidden and shown, one picked, under a
+/// song), and the lock screen charging with a song at every text size (the
+/// chip that used to clip into the card).
+#[cfg(not(target_arch = "aarch64"))]
+fn notify_shots(dir: &std::path::Path) {
+    use gfx::TextSize::{Compact, Large, Standard};
+    use notify::Notification;
+    use Key::*;
+    std::fs::create_dir_all(dir).expect("create the screenshot folder");
+    tour_fixtures();
+    photos::seed_demo();
+    let morning = chrono::NaiveDate::from_ymd_opt(2026, 11, 21).and_then(|d| d.and_hms_opt(9, 41, 0));
+    faces::pretend_time(morning);
+    let cover = photos::list().first().map(|p| p.path.clone());
+    let song = nowplaying::NowPlaying {
+        title: "Around the World".into(),
+        artist: "Daft Punk".into(),
+        album: "Homework".into(),
+        cover,
+        position: 83.0,
+        duration: 427.0,
+        playing: true,
+        at: std::time::Instant::now(),
+    };
+    let music = || liveactivity::music(Some(&song)).expect("music");
+    let now = chrono::Utc::now().timestamp();
+    // One from each source, as each would post it, over the last day.
+    let samples = || {
+        vec![
+            Notification::new("Reminders", "checklist", "swap the battery").body("after Q31").urgent().action("reminder:1").at(now - 40),
+            Notification::new("Schedule", "flag", "queue for Q31 in 5 min").tag("queue:q31").action("builtin:Schedule").at(now - 3 * 60),
+            Notification::new("Assistant", "auto_awesome", "your answer is written").action("builtin:Assistant").at(now - 18 * 60),
+            Notification::new("Logs", "insights", "how Q30 went").body("its summary is in Logs").at(now - 26 * 60),
+            Notification::new("Music", "download_done", "12 songs saved").body("in the library, to play offline").action("builtin:Music").at(now - 52 * 60),
+            Notification::new("Catalogue", "download_done", "Scouting installed").action("builtin:Catalogue").at(now - 2 * 3600),
+            Notification::new("Robot", "bolt", "Brownout").body("Atlas's battery at 6.8 V").action("builtin:Robot").at(now - 3 * 3600),
+            Notification::new("System update", "download", "update 0.6.2 ready").body("restart in settings").action("setting:System update").at(now - 5 * 3600),
+            Notification::new("Clock", "timer", "timer 5 min done").urgent().action("builtin:Clock").at(now - 26 * 3600),
+        ]
+    };
+    let settle = |shell: &mut Shell, frames: usize| {
+        for _ in 0..frames {
+            if shell.tick(1.0 / 60.0) {
+                shell.draw();
+            }
+        }
+    };
+    let save = |shell: &mut Shell, name: &str| {
+        shell.draw();
+        platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}.png")), 3);
+        println!("{name}");
+    };
+    let fresh = |light: bool, bezel: bool, text: gfx::TextSize, notes: usize| {
+        let mut shell = Shell::new(Robot::demo());
+        shell.settings.light = light;
+        if bezel {
+            (shell.settings.theme, shell.settings.wallpaper, shell.settings.accent) = (look::Theme::Bezel, look::Wallpaper::Glow, bezel::Accent::Orange);
+        }
+        shell.settings.text = text;
+        shell.apply_settings();
+        shell.notes.clear();
+        for n in samples().into_iter().take(notes) {
+            shell.notes.add(n, false);
+        }
+        settle(&mut shell, 100);
+        shell
+    };
+
+    // The notification centre: Ctrl-Backspace, over Home.
+    for (name, light, bezel, text, notes) in [
+        ("n01-centre", false, false, Standard, 9),
+        ("n02-centre-light", true, false, Standard, 9),
+        ("n03-centre-bezel", false, true, Standard, 9),
+        ("n04-centre-bezel-light", true, true, Standard, 9),
+        ("n05-centre-compact", false, false, Compact, 9),
+        ("n06-centre-large", false, false, Large, 9),
+        ("n07-centre-empty", false, false, Standard, 0),
+    ] {
+        let mut shell = fresh(light, bezel, text, notes);
+        shell.key(Ctrl(platform::NOTIFICATIONS));
+        settle(&mut shell, 90);
+        save(&mut shell, name);
+    }
+    // Scrolled down the list, and coming down.
+    let mut shell = fresh(false, false, Standard, 9);
+    shell.key(Ctrl(platform::NOTIFICATIONS));
+    settle(&mut shell, 7);
+    save(&mut shell, "n08-centre-coming-down");
+    settle(&mut shell, 80);
+    for _ in 0..6 {
+        shell.key(Down);
+        settle(&mut shell, 12);
+    }
+    settle(&mut shell, 60);
+    save(&mut shell, "n09-centre-scrolled");
+    // Quiet on: the heading says so; empty, it says they wait.
+    let mut shell = fresh(false, false, Standard, 4);
+    shell.notes.set_quiet(true);
+    shell.key(Ctrl(platform::NOTIFICATIONS));
+    settle(&mut shell, 90);
+    save(&mut shell, "n10-centre-quiet");
+    let mut shell = fresh(true, false, Standard, 0);
+    shell.notes.set_quiet(true);
+    shell.key(Ctrl(platform::NOTIFICATIONS));
+    settle(&mut shell, 90);
+    save(&mut shell, "n11-centre-quiet-empty");
+    // The control centre: Quiet, and Notifications beside it (a dot on the
+    // bell while some are new); the page turning to them.
+    for (name, light, text) in [("n12-control-centre", false, Standard), ("n13-control-centre-light", true, Standard), ("n14-control-centre-large", false, Large), ("n15-control-centre-compact", false, Compact)] {
+        let mut shell = fresh(light, false, text, 3);
+        shell.notes.set_quiet(true);
+        shell.key(Ctrl(' '));
+        settle(&mut shell, 60);
+        for key in [Down, Down, Right] {
+            shell.key(key);
+            settle(&mut shell, 12);
+        }
+        settle(&mut shell, 60);
+        save(&mut shell, name);
+    }
+    let mut shell = fresh(false, false, Standard, 3);
+    shell.key(Ctrl(' '));
+    settle(&mut shell, 60);
+    shell.key(Char('n'));
+    settle(&mut shell, 6);
+    save(&mut shell, "n16-control-centre-turning");
+
+    // The island: how many are new, at rest (no live activity carrying
+    // it); one said as it comes; with Quiet, kept and counted, unsaid.
+    for (name, light, text) in [("n17-island-count", false, Standard), ("n18-island-count-light", true, Standard), ("n19-island-count-large", false, Large)] {
+        let mut shell = fresh(light, false, text, 3);
+        shell.pretend_activities(Vec::new());
+        settle(&mut shell, 300);
+        save(&mut shell, name);
+    }
+    for (name, quiet) in [("n20-island-said", false), ("n21-island-quiet", true)] {
+        let mut shell = fresh(false, false, Standard, 2);
+        shell.pretend_activities(Vec::new());
+        shell.notes.set_quiet(quiet);
+        settle(&mut shell, 300);
+        shell.notify(Notification::new("Music", "download_done", "12 songs saved").body("in the library").action("builtin:Music"));
+        settle(&mut shell, 40);
+        save(&mut shell, name);
+    }
+
+    // The lock screen with notifications (a passcode set: locked).
+    let (phc, _, _) = passcode::make("2468").expect("hashes");
+    passcode::keep(&phc).expect("kept");
+    // (`acts`: the demo's next match, as it comes; or none; or a song.)
+    for (name, light, bezel, text, notes, words, acts, pick) in [
+        ("n30-lock-notifications", false, false, Standard, 3, false, "none", false),
+        ("n31-lock-notifications-words", false, false, Standard, 3, true, "none", false),
+        ("n32-lock-one-picked", false, false, Standard, 3, true, "none", true),
+        ("n33-lock-song-and-a-notification", false, false, Standard, 3, true, "song", false),
+        ("n34-lock-match-and-a-notification", false, false, Standard, 3, true, "match", false),
+        ("n35-lock-notifications-light", true, false, Standard, 3, true, "none", false),
+        ("n36-lock-notifications-bezel", false, true, Standard, 3, true, "none", false),
+        ("n37-lock-notifications-compact", false, false, Compact, 4, true, "none", false),
+        ("n38-lock-notifications-large", false, false, Large, 3, true, "none", false),
+        ("n39-lock-song-and-a-notification-large", false, false, Large, 3, true, "song", false),
+    ] {
+        let mut shell = fresh(light, bezel, text, notes);
+        shell.settings.lock.previews = words;
+        shell.apply_settings();
+        match acts {
+            "none" => shell.pretend_activities(Vec::new()),
+            "song" => {
+                shell.pretend_activities(Vec::new());
+                shell.pretend_activities(vec![music()]);
+            }
+            _ => {}
+        }
+        settle(&mut shell, 120);
+        if pick {
+            shell.key(Down);
+        }
+        settle(&mut shell, 60);
+        save(&mut shell, name);
+    }
+    // Charging with a song: the chip under the date, the card below it
+    // (it used to run into the card), at every text size and in each tone,
+    // locked and as the curtain.
+    for (name, light, text) in [
+        ("n40-lock-charging-song", false, Standard),
+        ("n41-lock-charging-song-compact", false, Compact),
+        ("n42-lock-charging-song-large", false, Large),
+        ("n43-lock-charging-song-light", true, Standard),
+        ("n44-lock-charging-song-two", false, Standard),
+    ] {
+        let mut shell = fresh(light, false, text, 0);
+        shell.pretend_charger(Some(true));
+        shell.pretend_activities(Vec::new());
+        let list = if name.ends_with("two") { vec![liveactivity::timers(Some((272.0, 300.0, 1)), None).remove(0), music()] } else { vec![music()] };
+        shell.pretend_activities(list);
+        settle(&mut shell, 180);
+        save(&mut shell, name);
+    }
+    passcode::remove().ok();
+    let mut shell = fresh(false, false, Standard, 0);
+    shell.pretend_charger(Some(true));
+    shell.pretend_activities(Vec::new());
+    shell.pretend_activities(vec![music()]);
+    settle(&mut shell, 10);
+    shell.close_island_for_gallery();
+    shell.lock_as_if_held();
+    settle(&mut shell, 120);
+    save(&mut shell, "n45-curtain-charging-song");
+    let mut shell = fresh(false, false, Standard, 3);
+    shell.lock_as_if_held();
+    settle(&mut shell, 120);
+    shell.key(Down);
+    settle(&mut shell, 30);
+    save(&mut shell, "n46-curtain-one-picked");
+    faces::pretend_time(None);
+    println!("notification shots in {}", dir.display());
+}
+
 /// Home's tiles come in the order of the built-in apps, and Left and Right go
 /// through them in turn: from the first tile, this many Rights reach `name`.
 fn steps_to(name: &str) -> usize {
@@ -3904,14 +4246,19 @@ impl Speed {
     }
 }
 
-/// Once a second: frames drawn, what a frame costs, and how busy the
-/// processor was. An idle screen should read 0 fps and about 0%.
+/// Once a second: frames drawn, what a frame costs, the longest wait
+/// between two frames of the same motion (a stutter is one long wait), and
+/// how busy the processor was. An idle screen should read 0 fps and about 0%.
 #[derive(Default)]
 struct Meter {
     since: Option<Instant>,
     frames: u32,
     busy: Duration,
     frame_cost: Duration,
+    /// The last frame sent, carried across seconds, and the longest gap
+    /// between two frames under half a second apart (longer is rest).
+    last_drawn: Option<Instant>,
+    worst_gap: Duration,
 }
 
 impl Meter {
@@ -3921,6 +4268,11 @@ impl Meter {
         if drew {
             self.frames += 1;
             self.frame_cost += cost;
+            let now = Instant::now();
+            if let Some(gap) = self.last_drawn.map(|t| now - t).filter(|g| *g < Duration::from_millis(500)) {
+                self.worst_gap = self.worst_gap.max(gap);
+            }
+            self.last_drawn = Some(now);
         }
         let elapsed = since.elapsed();
         if elapsed < Duration::from_secs(1) {
@@ -3928,11 +4280,13 @@ impl Meter {
         }
         let frame_ms = if self.frames > 0 { self.frame_cost.as_secs_f32() * 1e3 / self.frames as f32 } else { 0.0 };
         let line = format!(
-            "{:.0} fps · {frame_ms:.1} ms a frame · processor {:.0}% busy",
+            "{:.0} fps · {frame_ms:.1} ms a frame · worst gap {:.0} ms · processor {:.0}% busy",
             self.frames as f32 / elapsed.as_secs_f32(),
+            self.worst_gap.as_secs_f32() * 1e3,
             (self.busy.as_secs_f32() / elapsed.as_secs_f32() * 100.0).min(100.0)
         );
-        *self = Meter::default();
+        let last_drawn = self.last_drawn;
+        *self = Meter { last_drawn, ..Meter::default() };
         Some(line)
     }
 }
@@ -3958,10 +4312,14 @@ fn smooth(mut shell: Shell) {
     /// Measure one kind of motion: press `key`, follow it frame by frame as
     /// the handheld's loop would, then `undo` it; several times over. With
     /// `leave`, the step is left done for the one after it.
-    fn measure(shell: &mut Shell, beat: &mut Beat, speed: &Speed, label: &str, key: Key, undo: Key, leave: bool) {
+    fn measure(shell: &mut Shell, beat: &mut Beat, speed: &Speed, label: &str, key: Key, undo: Key, leave: bool, kept: &mut Vec<(String, Vec<(f32, f32)>)>) {
         // Several runs, because a 0.5 ms frame on a PC is easily disturbed.
         let (mut firsts, mut rest, mut counts) = (Vec::new(), Vec::new(), Vec::new());
+        // Each run's frames (ms of processor at the top clock, ms of panel),
+        // for the clock's model.
+        let mut runs: Vec<Vec<(f32, f32)>> = Vec::new();
         for _ in 0..7 {
+            let mut costs = Vec::new();
             let mut shown = Vec::new();
             platform::changed_rows(&mut shown, &shell.gfx.canvas);
             shell.key(key);
@@ -3975,6 +4333,7 @@ fn smooth(mut shell: Shell) {
                 }
                 let work = started.elapsed().as_secs_f32() * speed.cpu;
                 let part = platform::changed_rows(&mut shown, &shell.gfx.canvas).map_or(0.0, |(first, end)| (end - first) as f32 / gfx::H);
+                costs.push((work * 1e3, speed.panel.as_secs_f32() * part * 1e3));
                 // The beat in force once this frame's needs are known.
                 let beats = if part > 0.0 { beat.frame_took(Duration::from_secs_f32(work + speed.panel.as_secs_f32() * part)) } else { 1 };
                 let interval = beat.interval().as_secs_f32() * beats as f32;
@@ -3986,6 +4345,7 @@ fn smooth(mut shell: Shell) {
                 }
             }
             counts.push(frames);
+            runs.push(costs);
             beat.rest();
             settle(shell);
             // Undo, so every run starts from the same place.
@@ -4010,6 +4370,55 @@ fn smooth(mut shell: Shell) {
         let even = rest.iter().filter(|i| (**i * 1e3 - typical).abs() < 0.5).count() as f32 / rest.len().max(1) as f32;
         counts.sort();
         println!("  {label:<20} {:>6} {:>8.0}ms {:>8.0}ms {:>8.0}ms {:>8.0}%", counts[counts.len() / 2], median(&mut firsts), typical, worst, even * 100.0);
+        // For the clock's model, each frame's median over the runs (a frame
+        // on a PC is easily disturbed), as many frames as the median run.
+        let frames = counts[counts.len() / 2];
+        let costs = (0..frames)
+            .map(|i| {
+                let mut at: Vec<(f32, f32)> = runs.iter().filter_map(|r| r.get(i).copied()).collect();
+                at.sort_by(|a, b| (a.0 + a.1).total_cmp(&(b.0 + b.1)));
+                at.get(at.len() / 2).copied().unwrap_or((0.0, 0.0))
+            })
+            .collect();
+        kept.push((label.to_owned(), costs));
+    }
+
+    /// A motion's frames replayed on the handheld's clock as `policy` would
+    /// set it from rest (sched::model): the key to the first frame on the
+    /// panel, the frames that ran late, the typical and worst gap, and the
+    /// beat it ends on, in ms.
+    fn replay(frames: &[(f32, f32)], policy: sched::model::Policy) -> (f32, usize, f32, f32, f32) {
+        let mut beat = Beat::new();
+        let mut clock = sched::model::Clock::new(policy);
+        let (mut start, mut first, mut late, mut gaps) = (0.0f32, 0.0f32, 0usize, Vec::new());
+        for (i, &(work, panel)) in frames.iter().enumerate() {
+            clock.idle_until(start);
+            let needed = clock.run(work) + panel;
+            if i == 0 {
+                first = needed;
+            }
+            let beats = if work + panel > 0.0 { beat.frame_took(Duration::from_secs_f32(needed / 1e3)) } else { 1 };
+            late += usize::from(beats > 1);
+            let gap = beat.interval().as_secs_f32() * 1e3 * beats as f32;
+            gaps.push(gap);
+            start += gap;
+        }
+        gaps.sort_by(f32::total_cmp);
+        let typical = gaps.get(gaps.len() / 2).copied().unwrap_or(0.0);
+        (first, late, typical, gaps.last().copied().unwrap_or(0.0), beat.interval().as_secs_f32() * 1e3)
+    }
+
+    /// The same motions on the handheld's clock: boosted as the key goes
+    /// down, and schedutil alone from rest. A model (sched.rs says what it
+    /// assumes), so its figures compare the two, not the handheld's own.
+    fn clock_table(kept: &[(String, Vec<(f32, f32)>)]) {
+        use sched::model::Policy;
+        println!("  the clock from rest at 600 MHz, modelled: boosted | schedutil alone");
+        println!("  {:<20} {:>16} {:>10} {:>16} {:>16}", "", "key to frame", "late", "typical", "beat at end");
+        for (label, frames) in kept.iter().filter(|(_, f)| !f.is_empty()) {
+            let (b, s) = (replay(frames, Policy::Boost), replay(frames, Policy::Schedutil));
+            println!("  {label:<20} {:>6.1} | {:>5.1} ms {:>4} | {:<3} {:>6.0} | {:>3.0} ms {:>6.0} | {:>3.0} ms", b.0, s.0, b.1, s.1, b.2, s.2, b.4, s.4);
+        }
     }
 
     // Each kind of motion: the keys that get to where it starts, its name,
@@ -4035,6 +4444,7 @@ fn smooth(mut shell: Shell) {
     for name in ["device", "worse"] {
         let speed = Speed::named(Some(name));
         let mut beat = Beat::new();
+        let mut kept = Vec::new();
         // Home, the Settings tile focused: first on the third page.
         for _ in 0..steps_to("Settings") {
             shell.key(Right);
@@ -4047,19 +4457,20 @@ fn smooth(mut shell: Shell) {
                 shell.key(*key);
                 settle(&mut shell);
             }
-            measure(&mut shell, &mut beat, &speed, label, key, undo, leave);
+            measure(&mut shell, &mut beat, &speed, label, key, undo, leave, &mut kept);
         }
         // The other Home.
         shell.settings.home = shell::HomeStyle::Carousel;
         shell.apply_settings();
         settle(&mut shell);
-        measure(&mut shell, &mut beat, &speed, "carousel turns", Right, Left, false);
+        measure(&mut shell, &mut beat, &speed, "carousel turns", Right, Left, false, &mut kept);
         // And Flow: a card on, and one turned over.
         shell.settings.home = shell::HomeStyle::Flow;
         shell.apply_settings();
         settle(&mut shell);
-        measure(&mut shell, &mut beat, &speed, "flow turns", Right, Left, false);
-        measure(&mut shell, &mut beat, &speed, "flow turns over", Enter, Back, false);
+        measure(&mut shell, &mut beat, &speed, "flow turns", Right, Left, false, &mut kept);
+        measure(&mut shell, &mut beat, &speed, "flow turns over", Enter, Back, false, &mut kept);
+        clock_table(&kept);
         // Back to the grid, on the first tile, for the next speed.
         shell.settings.home = shell::HomeStyle::Grid;
         shell.apply_settings();
@@ -4157,6 +4568,35 @@ mod tests {
         assert_eq!(beat.level, 3);
         beat.rest();
         assert_eq!(beat.level, 2);
+    }
+
+    #[test]
+    fn the_beat_is_as_fast_as_the_panel_takes_whole_frames() {
+        // The link at 62.5 MHz: a whole frame in 15 ms, so 60 a second.
+        let fast = platform::panel_frame_time(Some(62_500_000), 320 * 170 * 2);
+        assert!((Beat::for_panel(fast).interval().as_secs_f32() * 1000.0 - 16.7).abs() < 0.1);
+        // At 50 MHz (18.4 ms): 50 a second. Not known: 40, as before.
+        let slower = platform::panel_frame_time(Some(50_000_000), 320 * 170 * 2);
+        assert_eq!(Beat::for_panel(slower).interval(), ms(20.0));
+        assert_eq!(Beat::for_panel(None).interval(), ms(25.0));
+        // A frame needs the longer of its drawing and the panel's sending
+        // (the panel sends one while the next is drawn), not the two added.
+        let mut beat = Beat::for_panel(fast);
+        for _ in 0..50 {
+            assert_eq!(beat.frame_and_panel_took(ms(12.0), ms(14.9)), 1);
+        }
+        assert_eq!(beat.level, 0, "both fit: 60 a second held");
+        // Slowed by drawing, the panel's steady 15 ms does not keep the beat
+        // from quickening again; drawing needs its room.
+        for _ in 0..3 {
+            beat.frame_and_panel_took(ms(20.0), ms(14.9));
+        }
+        assert_eq!(beat.level, 1);
+        for _ in 0..40 {
+            beat.frame_and_panel_took(ms(12.0), ms(14.9));
+        }
+        beat.rest();
+        assert_eq!(beat.level, 0);
     }
 
     #[test]

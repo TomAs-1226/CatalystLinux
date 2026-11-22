@@ -901,15 +901,11 @@ impl Index {
     }
 }
 
-/// The index's thread gives way to the frames: on the handheld, at a lower
-/// priority than the UI thread.
+/// The index's thread gives way to the frames: on the handheld, SCHED_BATCH
+/// at nice 19 with timer slack (sched.rs). Not SCHED_IDLE: the drawing
+/// thread takes the index's locks too, and one held must never be starved.
 fn lower_priority() {
-    #[cfg(target_os = "linux")]
-    // SAFETY: plain system calls on this thread's own id.
-    unsafe {
-        let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
-        libc::setpriority(libc::PRIO_PROCESS, tid, 10);
-    }
+    crate::sched::enter(crate::sched::Class::Background);
 }
 
 #[cfg(test)]

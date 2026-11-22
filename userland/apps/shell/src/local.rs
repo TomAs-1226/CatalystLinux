@@ -535,6 +535,9 @@ impl ModelPage {
         std::thread::Builder::new()
             .name("model-download".into())
             .spawn(move || {
+                // Nobody waits on a gigabyte: SCHED_IDLE, the card's idle
+                // class, and the curl it starts the same (sched.rs).
+                crate::sched::enter(crate::sched::Class::Idle);
                 tx.send(download(model, &dir, &shared)).ok();
             })
             .ok();
