@@ -393,6 +393,33 @@ impl Buffer {
         }
     }
 
+    /// A paste: `text` in at the cursor exactly as it is, its own line breaks
+    /// and tabs kept (no indent added), other control characters left out.
+    pub fn insert_raw(&mut self, text: &str) {
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\r' if chars.peek() == Some(&'\n') => {}
+                '\n' | '\r' => {
+                    let (line, col) = self.cursor;
+                    let at = self.byte_at(line, col);
+                    let rest = self.lines[line].split_off(at);
+                    self.lines.insert(line + 1, rest);
+                    self.cursor = (line + 1, 0);
+                    self.modified = true;
+                }
+                '\t' => self.insert('\t'),
+                c if c.is_control() => {}
+                c => self.insert(c),
+            }
+        }
+    }
+
+    /// The line the cursor is on: what Copy takes, with nothing chosen.
+    pub fn current_line(&self) -> &str {
+        &self.lines[self.cursor.0]
+    }
+
     /// Remove the whole line the cursor is on.
     pub fn delete_line(&mut self) {
         let line = self.cursor.0;
@@ -486,6 +513,18 @@ impl Screen for Editor {
         Some("ctrl-s saves · ctrl-q closes")
     }
 
+    /// Copy, with nothing chosen: the line the cursor is on.
+    fn copy(&mut self, _robot: &Robot) -> Option<String> {
+        Some(self.buffer.current_line().to_owned())
+    }
+
+    /// A paste goes in at the cursor as it is, lines and all.
+    fn paste(&mut self, text: &str, _cx: &mut Cx) -> Nav {
+        self.leaving = false;
+        self.buffer.insert_raw(text);
+        Nav::Stay
+    }
+
     /// Push-to-talk here dictates: the words are typed at the cursor.
     fn dictation(&self) -> Option<crate::voice::Dictation> {
         Some(crate::voice::Dictation::Text)
@@ -515,6 +554,17 @@ impl Screen for Editor {
             Key::Ctrl('s') if !b.modified => *cx.say = Some("no changes to save".into()),
             Key::Ctrl('s') => *cx.say = Some(if self.save() { "saved".into() } else { "could not save".into() }),
             Key::Ctrl('k') => b.delete_line(),
+            // Cut: the line, onto the clipboard (Ctrl-C copies it, Ctrl-V puts it back).
+            Key::Ctrl('x') => {
+                let line = b.current_line().to_owned();
+                if line.trim().is_empty() {
+                    b.delete_line();
+                } else {
+                    crate::clipboard::copy_quietly(&line, crate::clipboard::Sensitivity::Normal);
+                    b.delete_line();
+                    *cx.say = Some("line cut".into());
+                }
+            }
             Key::Ctrl('a') => b.cursor.1 = 0,
             Key::Ctrl('e') => b.cursor.1 = b.line_len(b.cursor.0),
             Key::Char(c) if !c.is_control() => b.insert(c),
@@ -593,6 +643,17 @@ impl Screen for Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_paste_goes_in_at_the_cursor_with_its_own_lines_and_tabs() {
+        let mut b = Buffer::from_text("    intake();\n");
+        b.cursor = (0, 4);
+        b.insert_raw("one\r\n\ttwo\nthree \x1b");
+        assert_eq!(b.lines, ["    one", "\ttwo", "three intake();"], "no indent added, CRLF as one break, ESC left out");
+        assert_eq!(b.cursor, (2, 6));
+        assert!(b.modified);
+        assert_eq!(b.current_line(), "three intake();");
+    }
 
     #[test]
     fn dictated_words_go_in_at_the_cursor_as_typed_ones_would() {

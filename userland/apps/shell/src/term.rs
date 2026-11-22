@@ -45,7 +45,14 @@ pub struct Term {
     parser: vte::Parser,
     /// Answers to queries, to be written back to the program.
     replies: Vec<u8>,
+    /// The program asked for pastes marked as such (bracketed paste, `?2004`).
+    pub bracketed: bool,
+    /// What the program put on the clipboard (OSC 52), not yet taken.
+    clip: Option<String>,
 }
+
+/// The most an OSC 52 copy may be, as base64: a little over the clipboard's 64 kb.
+const OSC52_MOST: usize = 96 * 1024;
 
 impl Term {
     pub fn new(cols: usize, rows: usize) -> Self {
@@ -64,7 +71,32 @@ impl Term {
             cursor_visible: true,
             parser: vte::Parser::new(),
             replies: Vec::new(),
+            bracketed: false,
+            clip: None,
         }
+    }
+
+    /// What the program put on the clipboard (OSC 52), once.
+    pub fn take_clip(&mut self) -> Option<String> {
+        self.clip.take()
+    }
+
+    /// Lines there are, the history's and the screen's: a line's number
+    /// counts from the oldest kept.
+    pub fn lines_total(&self) -> usize {
+        self.scrollback.len() + self.rows
+    }
+
+    /// The words of line `at` (counted as `lines_total`), without the
+    /// spaces after them.
+    pub fn line_text(&self, at: usize) -> String {
+        let cells: &[Cell] = if at < self.scrollback.len() {
+            &self.scrollback[at]
+        } else {
+            let y = (at - self.scrollback.len()).min(self.rows - 1);
+            &self.grid[y * self.cols..(y + 1) * self.cols]
+        };
+        cells.iter().map(|c| c.ch).collect::<String>().trim_end().to_owned()
     }
 
     /// Take in what the program printed.
@@ -314,6 +346,7 @@ impl vte::Perform for Term {
                     match mode {
                         25 => self.cursor_visible = action == 'h',
                         47 | 1047 | 1049 => self.alternate(action == 'h'),
+                        2004 => self.bracketed = action == 'h',
                         _ => {}
                     }
                 }
@@ -394,6 +427,23 @@ impl vte::Perform for Term {
             'n' if p.first() == Some(&6) => self.replies.extend(format!("\x1b[{};{}R", y + 1, x + 1).bytes()),
             'c' => self.replies.extend(b"\x1b[?6c"),
             _ => {}
+        }
+    }
+
+    /// OSC 52: a program sets the clipboard (`ESC ] 52 ; c ; <base64> BEL`),
+    /// as tmux, vim and neovim can. Asking for it back (`?`) is not
+    /// answered, as xterm by default: a program printing to the screen does
+    /// not learn what was copied elsewhere.
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        let [b"52", _, data, ..] = params else { return };
+        if data.is_empty() || *data == b"?" || data.len() > OSC52_MOST {
+            return;
+        }
+        let Ok(text) = std::str::from_utf8(data) else { return };
+        if let Ok(bytes) = speech::base64_decode(text) {
+            if let Ok(text) = String::from_utf8(bytes) {
+                self.clip = Some(text);
+            }
         }
     }
 
@@ -515,6 +565,34 @@ mod tests {
         assert_eq!(t.take_replies(), b"\x1b[1;3R");
         t.feed(b"\x1b[c");
         assert_eq!(t.take_replies(), b"\x1b[?6c");
+    }
+
+    #[test]
+    fn a_program_sets_the_clipboard_by_osc_52_but_cannot_read_it() {
+        // "10.58.5.2" in base64, ended by BEL, then by ST.
+        let mut t = term("\x1b]52;c;MTAuNTguNS4y\x07");
+        assert_eq!(t.take_clip().as_deref(), Some("10.58.5.2"));
+        assert_eq!(t.take_clip(), None, "taken once");
+        t.feed(b"\x1b]52;;aMOpbGxv\x1b\\");
+        assert_eq!(t.take_clip().as_deref(), Some("h\u{e9}llo"));
+        t.feed(b"\x1b]52;c;?\x07");
+        assert!(t.take_clip().is_none() && t.take_replies().is_empty(), "asking for it is not answered");
+        t.feed(b"\x1b]52;c;not base64!\x07");
+        assert!(t.take_clip().is_none());
+        assert_eq!(t.text(0), "", "nothing of it printed");
+    }
+
+    #[test]
+    fn bracketed_paste_is_followed_and_lines_are_read_by_number() {
+        let mut t = term("\x1b[?2004h");
+        assert!(t.bracketed);
+        t.feed(b"\x1b[?2004l");
+        assert!(!t.bracketed);
+        let t = term("one\r\ntwo\r\nthree\r\nfour\r\nfive");
+        assert_eq!(t.lines_total(), t.history() + t.rows);
+        let last = t.history() + t.cursor.1;
+        assert_eq!(t.line_text(last), "five");
+        assert_eq!(t.line_text(last - 4), "one");
     }
 
     #[test]

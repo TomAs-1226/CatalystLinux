@@ -15,6 +15,8 @@
 //! catalyst-shell --cjk-shots <dir>   Chinese, Japanese and Korean text on the screens, to PNG
 //! catalyst-shell --activity-shots <dir>  live activities, Tab held, the lock screen with a song
 //! catalyst-shell --notify-shots <dir>    notifications: the centre, Quiet, the island, the lock screen
+//! catalyst-shell --clip-shots <dir>   the clipboard's history, quick capture, copy mode, to PNG
+//! catalyst-shell clip …           the clipboard for scripts (`catalyst-clip`, a link to this)
 //!     --robot <team|ip|host>     robot to connect to (overrides the saved one)
 //!     --demo                     a scripted robot instead of a real one
 //!     --arrive <seconds>         the scripted robot, plugged in that long after start
@@ -48,8 +50,10 @@ mod apriltags;
 mod brand;
 mod camera;
 mod calc;
+mod capture;
 mod catalogue;
 mod changelog;
+mod clipboard;
 #[cfg(not(target_arch = "aarch64"))]
 mod cjk_shots;
 mod clock;
@@ -120,6 +124,7 @@ mod screens;
 mod screenshot;
 mod setup;
 mod share;
+mod sheet;
 mod shell;
 mod sound;
 mod spotlight;
@@ -368,6 +373,13 @@ fn main() {
     #[cfg(all(windows, feature = "packed"))]
     attach_console();
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // `catalyst-clip` is this program by another name (a link to it), and
+    // `catalyst-shell clip …` the same: the clipboard for scripts.
+    let called = std::env::args_os().next().map(std::path::PathBuf::from).and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()));
+    if called.as_deref() == Some("catalyst-clip") || args.first().is_some_and(|a| a == "clip") {
+        let rest = if called.as_deref() == Some("catalyst-clip") { &args[..] } else { &args[1..] };
+        std::process::exit(clipboard::serve::cli(rest));
+    }
     // The packed simulator is always the simulator, double-clicked or started
     // from a terminal with options of its own (`--no-intro`, `--light`). It
     // runs at the computer's full speed, in step with its screen, unless asked
@@ -493,6 +505,11 @@ fn main() {
         let look = value("--look").unwrap_or_else(|| "catalyst".into());
         return fullheight::gallery(std::path::Path::new(&dir), &look, size);
     }
+    // The clipboard's history, quick capture and copy mode, in both looks at each text size.
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--clip-shots") {
+        return shell::clip_gallery(std::path::Path::new(&dir));
+    }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--activity-shots") {
         return activity_shots(std::path::Path::new(&dir));
@@ -589,6 +606,8 @@ fn main() {
     if !flag("--sim") {
         keep_in_memory();
     }
+    // `catalyst-clip` and the Terminal's programs reach the clipboard here.
+    clipboard::serve::serve();
     let mut platform: Box<dyn Platform> = open_platform(flag("--sim"));
     // The time zone chosen, in use for every clock this draws (on the handheld).
     device::apply_saved();

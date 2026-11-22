@@ -2447,6 +2447,14 @@ impl Screen for Assistant {
         self.service.is_some()
     }
 
+    /// Copy: what is typed, else the newest answer (clipboard.rs).
+    fn copy(&mut self, _robot: &Robot) -> Option<String> {
+        if !self.input.trim().is_empty() {
+            return Some(self.input.clone());
+        }
+        self.entries.iter().rev().find_map(|(e, _)| if let Entry::Said(text) = e { Some(text.clone()) } else { None })
+    }
+
     fn keeps_awake(&self) -> bool {
         !self.idle()
     }

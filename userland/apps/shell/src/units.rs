@@ -188,6 +188,12 @@ impl Screen for Converter {
         true
     }
 
+    /// Copy: the amount typed, with its unit (clipboard.rs).
+    fn copy(&mut self, _robot: &Robot) -> Option<String> {
+        let unit = KINDS[self.kind].units.get(self.from)?;
+        Some(format!("{} {}", self.typed, unit.name))
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         let len = KINDS[self.kind].units.len();
         match key {

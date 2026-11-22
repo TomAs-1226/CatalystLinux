@@ -422,6 +422,11 @@ impl Screen for Checklist {
         self.naming.is_some()
     }
 
+    /// Copy: the item being named (else the shell copies the one in focus).
+    fn copy(&mut self, _robot: &Robot) -> Option<String> {
+        self.naming.clone()
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         if let Some(name) = &mut self.naming {
             match key {

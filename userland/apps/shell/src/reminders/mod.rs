@@ -37,7 +37,7 @@ use std::time::Instant;
 use chrono::NaiveDateTime;
 use serde_json::{json, Value};
 
-pub use app::{Compose, Reminders};
+pub use app::{capture_add, capture_reading, Compose, Reminders};
 use parse::Parsed;
 use plan::{when_text, Here, Now, Occ};
 

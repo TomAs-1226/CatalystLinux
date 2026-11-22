@@ -213,6 +213,12 @@ pub struct Gfx {
     /// this is how far off they are, so the focus ring can head for the
     /// focused row's resting place instead of chasing it.
     ring_shift: f32,
+    /// What Copy takes on the screen last drawn, where the screen does not
+    /// say (`Screen::copy`): the text of the field being typed in, and the
+    /// value (else the name) of the row in focus. Started afresh for each
+    /// screen drawn.
+    pub copy_field: Option<String>,
+    pub copy_row: Option<String>,
 }
 
 /// The focus ring's place, its size and its corners. It glides to whatever is
@@ -379,6 +385,8 @@ impl Gfx {
             scroll: Animated::new(0.0, role::hold()).with_rest(0.004),
             scroll_placed: false,
             ring_shift: 0.0,
+            copy_field: None,
+            copy_row: None,
         }
     }
 
@@ -753,6 +761,7 @@ impl Gfx {
         }
         if focused {
             self.focus_ring(r, radius);
+            self.copy_row = crate::clipboard::row_copy(name, value);
         }
     }
 

@@ -1345,6 +1345,11 @@ impl Screen for RobotScreen {
         self.editing.is_some()
     }
 
+    /// Copy: the address being typed, else the robot's.
+    fn copy(&mut self, robot: &Robot) -> Option<String> {
+        self.editing.clone().or_else(|| Some(robot.address.clone()))
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         if let Some(text) = &mut self.editing {
             match key {
@@ -1594,6 +1599,17 @@ impl Screen for LogsScreen {
         "Logs"
     }
 
+    /// Copy: the match in focus and what stood out in it (clipboard.rs).
+    fn copy(&mut self, robot: &Robot) -> Option<String> {
+        let rows = robot.logs.list();
+        let first = crate::trends::available(&rows) as usize;
+        let row = rows.get(self.list.focus.checked_sub(first)?)?;
+        Some(match &row.digest {
+            Some(digest) => format!("{} · {}", row.title(), digest.headline().1),
+            None => row.title(),
+        })
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let rows = cx.robot.logs.list();
         let trends = crate::trends::available(&rows);
@@ -1801,6 +1817,15 @@ impl Tables {
 impl Screen for Tables {
     fn title(&self) -> &str {
         &self.title
+    }
+
+    /// Copy: the focused value as it is now, whole (its row may cut it
+    /// short); on a table, its key.
+    fn copy(&mut self, robot: &Robot) -> Option<String> {
+        match self.nodes(robot).into_iter().nth(self.list.focus)? {
+            Node::Value(_, value) => Some(value),
+            Node::Table(name, _) => Some(format!("{}{name}", self.path)),
+        }
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {

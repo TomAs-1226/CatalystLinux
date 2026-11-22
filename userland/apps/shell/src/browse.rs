@@ -501,6 +501,11 @@ impl Screen for Browse {
         self.service.is_some()
     }
 
+    /// Copy: the address or question typed (clipboard.rs).
+    fn copy(&mut self, _robot: &Robot) -> Option<String> {
+        Some(self.input.clone()).filter(|t| !t.trim().is_empty())
+    }
+
     fn busy(&self) -> bool {
         self.job.is_some()
     }

@@ -588,6 +588,14 @@ impl Screen for Calculator {
         true
     }
 
+    /// Copy: what is typed, else the answer as it shows.
+    fn copy(&mut self, _robot: &Robot) -> Option<String> {
+        if !self.input.trim().is_empty() {
+            return Some(self.input.clone());
+        }
+        self.answer.as_ref().map(|(_, v)| shown(*v))
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         match key {
             Key::Back if self.input.is_empty() && self.answer.is_none() => return Nav::Pop,

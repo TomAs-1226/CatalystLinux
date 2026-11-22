@@ -29,6 +29,7 @@ windows that grow out of tiles whenever it is there.
 | `shots/start/` | The start animation as an animated PNG, and stills of it. |
 | `shots/tour/` | Screenshots of every screen, rendered by `catalyst-shell --shots`. |
 | `shots/looks/` | Home, Robot and Settings › Appearance in eight looks (`--looks`). |
+| `shots/clipboard/` | The clipboard's history, quick capture, the Terminal's copy mode and their shortcuts, in both looks at each text size, dark and light, and their motion (`--clip-shots`). |
 | `shots/flasher/` | Catalyst Flasher's screens (`catalyst-flasher --shot`). |
 | `shots/motion/` | Each kind of motion as a strip of frames 50 ms apart and an animated PNG, and the Home settings (`--motion`). |
 | `shots/vm/` | The same shell as the ARM build on the image's own kernel, in the emulator. |
@@ -83,7 +84,10 @@ Cardputer) move, Enter opens, Esc goes back. On Home, Left and Right go
 through the apps in order (on to the next row, and the next page), Up and
 Down within a page. Ctrl-Enter searches from any screen (Space on Home too).
 Ctrl-Space brings the control centre down over any screen, and Ctrl-Tab the
-recent apps; Left from Home's first tile is the glance page. `?` held for five seconds on any screen that
+recent apps; Left from Home's first tile is the glance page. Ctrl-C and
+Ctrl-V copy and paste (Ctrl-Shift-C and V in a terminal), Ctrl-Shift-H
+brings up the clipboard's history and Ctrl-Shift-N quick capture, from any
+screen. `?` held for five seconds on any screen that
 is not taking text brings up the list of shortcuts (the island counts down
 from the first second; a `?` typed in passing does nothing). The window
 shows what the panel shows: 16-bit colour, dithered as on the device.
@@ -378,6 +382,81 @@ let go as a new one comes.
 - An app **opened again from Home** comes back as it was too, as Android
   brings a task back, rather than as a new copy.
 - Memory stays small: a card's picture is the panel at 0.425 (39 kB).
+
+## Clipboard and quick capture
+
+One clipboard for the whole handheld: every screen, the Terminal's programs
+and shell scripts share it.
+
+- **Copy and paste** are **Ctrl-C** and **Ctrl-V** in every text field, the
+  editor, search and the Assistant. In a terminal Ctrl-C stays the
+  interrupt and Ctrl-V the next key as it is, so there they are
+  **Ctrl-Shift-C** and **Ctrl-Shift-V** (which work everywhere else too).
+  Ctrl-Shift and a letter is the shell's to take: a program in a terminal
+  is sent the same byte for it as for Ctrl and the letter, so it loses
+  nothing, as with Ctrl-Tab and Ctrl-Enter. On the handheld's keyboard Shift
+  counts for it while fresh (tapped or held just before), and for one
+  Ctrl-letter: with Shift locked for capitals, Ctrl-C is still the
+  interrupt.
+- **What is copied**, with nothing chosen (there is no selection: the
+  fields are one line, most with no cursor to move): the whole field being
+  typed in; in the editor, the line the cursor is on (Ctrl-X cuts it); on a
+  list, the value of the row in focus (a table's value whole, an address, a
+  version); in Robot, its address; in the Calculator, the expression or the
+  answer; in the Assistant, what is typed or its newest answer; in search,
+  the answer in focus (a sum's, a conversion's, a value, a file's path) or
+  what is typed. The island says what was copied. A paste goes in where the
+  typing is: on one line in a field, as it is (lines and tabs) in the
+  editor.
+- **The Terminal**: Ctrl-Shift-C starts picking lines, on the last one the
+  last command printed; ↑ ↓ move, Space marks the start of more, Enter
+  copies them. A paste is typed in with its lines as Enter, control
+  characters left out, and marked as a paste for programs that ask
+  (bracketed paste). A program can set the clipboard with OSC 52 (tmux,
+  vim, neovim); reading it back that way is refused, as xterm does.
+- **History**: **Ctrl-Shift-H** from anywhere brings up the last twenty
+  clips (and up to twenty pinned) in a sheet of glass grown out of the
+  island, as search is; it comes down as far as the foot of the screen
+  behind, above its hint line. Enter pastes one into the field in front,
+  or only copies it where nothing takes text; Tab shows all of it; `p`
+  pins; `d` removes (a pinned one on a second `d`). It is kept in
+  `/data/catalyst/clipboard.json`, readable by root alone, written through
+  a file beside it on a thread of its own; the clips besides the pinned
+  ones hold 256 kB at most, so a few big copies let the oldest go.
+- **Secrets** (`catalyst-clip set --secret`, or an app copying a password)
+  are never written anywhere, never join the history and are never handed
+  to a script; they clear themselves after 30 seconds, and at once when
+  the handheld locks. The history shows one as dots with its seconds left.
+- **The lock**: nothing of the clipboard shows on the lock screen. Both
+  sheets go the moment it locks (before the lock screen has come down),
+  the island stops saying what was copied, and no key on the lock screen
+  reaches them or pastes into the passcode.
+- **`catalyst-clip`** for scripts: `get` (or `get 3`, the third in the
+  history), `set` (words, or what comes in), `set --secret`, `history`,
+  `clear`. It talks to the shell over a socket only root can open.
+- **For other apps**: `crate::clipboard::copy(text, Sensitivity::Normal)`
+  or `Sensitivity::Secret` (`userland/apps/shell/src/clipboard/mod.rs`);
+  `copy_as` names what was copied ("password copied · clears in 30 s").
+
+**Quick capture**: **Ctrl-Shift-N** from anywhere, the Terminal and
+full-screen pages included (never under the lock), brings up a sheet to
+type into; Enter puts it where it belongs:
+
+- **a note** by default (in Notes, stamped as a new note is);
+- **a reminder** when it starts with "remind" or says a time ("swap battery
+  in 10 min", "before Q42 charge the spare"), read by Reminders' own quick
+  add; the sheet shows which, and when, as it is typed, and Tab switches;
+- **a photo**: Ctrl-P opens the camera out of the sheet; Enter (or Ctrl-P)
+  takes it into Photos and the camera gives way at once;
+- held Alt dictates into it; Ctrl-V pastes the clipboard into it.
+
+The island then says where it went, and the screen in front stays as it
+was; Ctrl-Enter in the sheet saves and opens it there instead (outside the
+sheet Ctrl-Enter is search, as from anywhere). Esc keeps what was typed for
+next time. Each sheet's key over the other turns one into the other, and
+Ctrl-Tab, Ctrl-Space and Ctrl-Backspace put either away for what they
+bring. `catalyst-shell --clip-shots <dir>` renders all of it in both looks
+at each text size, dark and light (`shots/clipboard/`).
 
 ## Screenshots
 
@@ -1408,14 +1487,16 @@ behind it handles what shells, `vi` and the usual tools print: cursor
 movement, colours, scrolling regions, the alternate screen. The session
 outlives the screen, so going Home and back finds it as it was. Esc belongs
 to the programs in it; Ctrl-Q (or Esc held) returns Home. Page Up and Page
-Down scroll back.
+Down scroll back. Ctrl-Shift-C picks lines to copy and Ctrl-Shift-V pastes
+(see *Clipboard and quick capture*).
 
 Files browses the storage (starting in `/data`), makes a file with `n` and
 deletes one with `d` pressed twice. A link to a folder opens the folder;
 devices, pipes and sockets are listed but never opened. Enter opens a text
 file in the editor: arrows move, Ctrl-S saves (through a temporary file put
 on the card before it replaces the old one, so a power cut cannot leave half
-a file), Ctrl-Q closes, Ctrl-K removes a line. A file comes back out as it
+a file), Ctrl-Q closes, Ctrl-K removes a line; Ctrl-C copies the line,
+Ctrl-X cuts it and Ctrl-V pastes at the cursor. A file comes back out as it
 went in apart from what was changed: tabs stay tabs (shown as →, and Tab
 types one in a file indented with them), Windows line endings stay, a missing
 final newline is not added, a script keeps its permissions, and saving
@@ -2693,7 +2774,8 @@ From the Terminal (and over SSH): Python 3 (with zlib, ssl, readline,
 curses, sqlite3, xml and the xz and bzip2 archives), vim (with its syntax
 files) and nano, htop, tmux, rsync, jq, strace, i2c-tools, picocom for serial
 ports, and Dropbear's SSH client (`dbclient`, with `dropbearkey`), beside
-BusyBox's own small tools and git. Nothing of them runs until called;
+BusyBox's own small tools and git; and `catalyst-clip`, the handheld's
+clipboard for scripts (see *Clipboard and quick capture*). Nothing of them runs until called;
 together they take about 50 MB. Since 0.4.0 each system partition is 1 GB
 (it was 160 MB, 18 MB of it spare): about 830 MB is free for more.
 

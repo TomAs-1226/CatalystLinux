@@ -78,6 +78,8 @@ impl Field {
         if focused {
             g.surface(Rect::new(field.x + 11.0 + w, cy - ty.label.size * 0.5, 1.5, ty.label.size), 0.5, t.signal);
             g.focus_ring(field, 14.0);
+            // Copy here takes what is typed (clipboard.rs).
+            g.copy_field = Some(self.text.clone());
         }
     }
 }
