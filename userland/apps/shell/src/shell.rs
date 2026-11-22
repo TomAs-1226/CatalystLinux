@@ -337,6 +337,10 @@ pub trait Screen {
     }
     /// The screen is on top again after one above it closed.
     fn resume(&mut self) {}
+    /// The screen has been left (it may wait among the recent apps): what it
+    /// was doing only for whoever looks at it stops (the on-device model's
+    /// answer under way).
+    fn set_aside(&mut self) {}
     /// The screen is seen for the first time, now that the start animation
     /// is giving way to it: Home's tiles arrive then, not unseen beneath it.
     fn appear(&mut self) {}
@@ -2758,7 +2762,8 @@ impl Shell {
 
     /// A screen gone: an app gone back to Home is kept among the recent apps,
     /// with the picture it last showed; any other page is done with.
-    fn left(&mut self, screen: Box<dyn Screen>, path: Path, picture: Option<Vec<u32>>) {
+    fn left(&mut self, mut screen: Box<dyn Screen>, path: Path, picture: Option<Vec<u32>>) {
+        screen.set_aside();
         if self.stack.len() == 1 && screen.keep_in_recents() {
             self.recents.remember(vec![(screen, path)], picture.as_deref());
         }
@@ -2876,7 +2881,10 @@ impl Shell {
         // It grows out of its card, over the cards as they showed.
         let backdrop = self.gfx.canvas.px.clone();
         if let Some(start) = self.app_start() {
-            let pages = self.stack.split_off(start);
+            let mut pages = self.stack.split_off(start);
+            for (page, _) in &mut pages {
+                page.set_aside();
+            }
             let thumb = switcher.cards.swap_remove(0).thumb;
             self.recents.keep(pages, thumb);
         }
@@ -3182,6 +3190,12 @@ impl Shell {
             self.lights.seen();
         }
         self.lights.tick(dt);
+        // Nobody looking (the screen off, StandBy's faces, locked): the
+        // on-device model gives its memory back, after the answer it is
+        // writing if it is writing one.
+        if matches!(self.standby.state(), crate::standby::State::Off | crate::standby::State::Faces) || self.lock.engaged() {
+            crate::local::away();
+        }
         self.watch_queue(dt);
         self.watch_reminders(dt);
         // A Clock timer run out, wherever the handheld is: said, and the
@@ -4592,6 +4606,19 @@ pub(crate) mod tests {
         frames(&mut shell, 40 * 4, 0.25);
         assert!(shell.stack.last().unwrap().0.keeps_awake());
         assert_eq!(shell.standby_state(), State::Awake);
+    }
+
+    #[test]
+    fn the_on_device_model_is_let_go_once_the_screen_is_off() {
+        use crate::standby::State;
+        let mut shell = shell();
+        shell.settings.screen_off = 30;
+        // A model loaded (this process stands in for it).
+        crate::local::pretend_loaded(Some(std::process::id()));
+        frames(&mut shell, 32 * 4, 0.25);
+        assert_eq!(shell.standby_state(), State::Off);
+        assert!(crate::local::let_go(), "the screen off: the model is to go");
+        crate::local::pretend_loaded(None);
     }
 
     /// Seconds of ticks, one a second (as the main loop's idle looks add
