@@ -14,6 +14,7 @@
 //! catalyst-shell --standby-shots <dir>   StandBy's faces and the lock screen, to PNG
 //! catalyst-shell --cjk-shots <dir>   Chinese, Japanese and Korean text on the screens, to PNG
 //! catalyst-shell --activity-shots <dir>  live activities, Tab held, the lock screen with a song
+//! catalyst-shell --music-shots <dir>     lyrics, music on the island and the sleep timer, at each text size
 //! catalyst-shell --notify-shots <dir>    notifications: the centre, Quiet, the island, the lock screen
 //! catalyst-shell --usb-audio-shots <dir> USB headphones: the island, Settings › Sound, its USB page
 //! catalyst-shell --clip-shots <dir>   the clipboard's history, quick capture, copy mode, to PNG
@@ -88,6 +89,7 @@ mod irremote;
 mod keys;
 mod lights;
 mod liveactivity;
+mod livemusic;
 mod level;
 mod local;
 mod lock;
@@ -594,6 +596,10 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--activity-shots") {
         return activity_shots(std::path::Path::new(&dir));
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--music-shots") {
+        return lyrics_island_shots(std::path::Path::new(&dir));
     }
     // The widgets at each size, and Home showing them (on the demo robot).
     #[cfg(not(target_arch = "aarch64"))]
@@ -4020,6 +4026,189 @@ fn standby_shots(dir: &std::path::Path) {
 /// and StandBy (now playing, by night, a card coming down), in both looks
 /// and at the largest text, at 9:41.
 #[cfg(not(target_arch = "aarch64"))]
+/// Music's lyrics, the island playing it and the sleep timer, at each text
+/// size: the lyrics page (in time, gliding after a seek, in a pause, plain,
+/// none); the island compact and open, playing and paused, and a song
+/// changing; the sleep timer counting down on the island and in Music, and
+/// its choices. Contact sheets of each size (six to a sheet) go in
+/// `sheets/` beside them, for looking them over.
+#[cfg(not(target_arch = "aarch64"))]
+fn lyrics_island_shots(dir: &std::path::Path) {
+    use liveactivity::Kind;
+    use Key::*;
+    std::fs::create_dir_all(dir.join("sheets")).expect("create the screenshot folder");
+    tour_fixtures();
+    let morning = chrono::NaiveDate::from_ymd_opt(2026, 11, 21).and_then(|d| d.and_hms_opt(9, 41, 0));
+    faces::pretend_time(morning);
+    music::sleep::pretend(None);
+    fn settle(shell: &mut Shell, frames: usize) {
+        for _ in 0..frames {
+            if shell.tick(1.0 / 60.0) {
+                shell.draw();
+            }
+        }
+    }
+    fn real_time(shell: &mut Shell, seconds: f32) {
+        let until = Instant::now() + Duration::from_secs_f32(seconds);
+        while Instant::now() < until {
+            settle(shell, 6);
+            std::thread::sleep(Duration::from_millis(40));
+        }
+    }
+    fn fresh(light: bool, text: gfx::TextSize) -> Shell {
+        let mut shell = Shell::new(Robot::none());
+        shell.settings.light = light;
+        shell.settings.text = text;
+        shell.apply_settings();
+        settle(&mut shell, 100);
+        shell
+    }
+    let save = |shell: &mut Shell, name: &str, sheet: &mut Vec<Vec<u32>>| {
+        shell.draw();
+        platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}.png")), 3);
+        sheet.push(shell.gfx.canvas.px.clone());
+        println!("{name}");
+    };
+    // The player's own thread takes a key a moment after it is sent.
+    let after_player = |shell: &mut Shell, frames: usize| {
+        std::thread::sleep(Duration::from_millis(60));
+        shell.refresh_activities_for_gallery();
+        settle(shell, frames);
+    };
+    let sizes = [("compact", gfx::TextSize::Compact), ("standard", gfx::TextSize::Standard), ("large", gfx::TextSize::Large)];
+    for (tag, size) in sizes {
+        let mut sheet = Vec::new();
+        // The lyrics, in time: the line sung large, those round it dimmed.
+        music::play_for_shots("Harbour Lights", 39.0, true);
+        let mut shell = fresh(false, size);
+        shell.show(Box::new(music::MusicScreen::new()));
+        settle(&mut shell, 60);
+        shell.key(Char('y'));
+        real_time(&mut shell, 0.5);
+        settle(&mut shell, 60);
+        save(&mut shell, &format!("l01-lyrics-synced-{tag}"), &mut sheet);
+        // A seek ten seconds on: the words glide there (part way), then rest.
+        shell.key(Char('.'));
+        after_player(&mut shell, 7);
+        save(&mut shell, &format!("l02-lyrics-gliding-{tag}"), &mut sheet);
+        real_time(&mut shell, 0.8);
+        // A pause in the singing: its dots fill as it passes.
+        music::play_for_shots("Harbour Lights", 34.5, false);
+        settle(&mut shell, 60);
+        save(&mut shell, &format!("l03-lyrics-pause-{tag}"), &mut sheet);
+        // Plain words, scrolled by hand.
+        music::play_for_shots("Slow Signal", 20.0, true);
+        real_time(&mut shell, 0.6);
+        settle(&mut shell, 60);
+        save(&mut shell, &format!("l04-lyrics-plain-{tag}"), &mut sheet);
+        shell.key(Down);
+        settle(&mut shell, 50);
+        save(&mut shell, &format!("l05-lyrics-plain-scrolled-{tag}"), &mut sheet);
+        // None, said calmly; an instrumental.
+        music::play_for_shots("Paper Satellites", 10.0, true);
+        real_time(&mut shell, 0.6);
+        settle(&mut shell, 60);
+        save(&mut shell, &format!("l06-lyrics-none-{tag}"), &mut sheet);
+        music::play_for_shots("Glasshouse", 10.0, true);
+        real_time(&mut shell, 0.6);
+        settle(&mut shell, 60);
+        save(&mut shell, &format!("l07-lyrics-instrumental-{tag}"), &mut sheet);
+
+        // The island over Home, compact: the cover and its bars, dancing.
+        music::play_for_shots("Harbour Lights", 39.0, true);
+        let mut shell = fresh(false, size);
+        real_time(&mut shell, 0.4);
+        shell.close_island_for_gallery();
+        settle(&mut shell, 45);
+        save(&mut shell, &format!("i01-island-compact-playing-{tag}"), &mut sheet);
+        // Paused: the bars lie flat.
+        nowplaying::control(nowplaying::Control::PlayPause);
+        after_player(&mut shell, 30);
+        shell.close_island_for_gallery();
+        settle(&mut shell, 60);
+        save(&mut shell, &format!("i02-island-compact-paused-{tag}"), &mut sheet);
+        // Open: the song, its progress in its cover's colour, the keys, the line to come.
+        shell.open_island_for_gallery(Kind::Music);
+        settle(&mut shell, 60);
+        save(&mut shell, &format!("i03-island-open-paused-{tag}"), &mut sheet);
+        // Playing, open: the line being sung.
+        nowplaying::control(nowplaying::Control::PlayPause);
+        after_player(&mut shell, 60);
+        real_time(&mut shell, 0.7);
+        shell.open_island_for_gallery(Kind::Music);
+        settle(&mut shell, 40);
+        save(&mut shell, &format!("i04-island-open-playing-{tag}"), &mut sheet);
+        // The next song: it comes in as this one goes (part way), then rests.
+        nowplaying::control(nowplaying::Control::Next);
+        after_player(&mut shell, 8);
+        save(&mut shell, &format!("i05-island-next-song-{tag}"), &mut sheet);
+        settle(&mut shell, 50);
+        save(&mut shell, &format!("i06-island-next-song-settled-{tag}"), &mut sheet);
+
+        // The sleep timer: counting down on the island, compact and open.
+        music::play_for_shots("Harbour Lights", 39.0, true);
+        music::sleep::pretend(Some((music::sleep::Choice::Minutes(15), Duration::from_secs(12 * 60 + 34))));
+        shell.close_island_for_gallery();
+        after_player(&mut shell, 70);
+        shell.close_island_for_gallery();
+        settle(&mut shell, 60);
+        save(&mut shell, &format!("s01-island-sleep-compact-{tag}"), &mut sheet);
+        shell.open_island_for_gallery(Kind::Music);
+        settle(&mut shell, 60);
+        save(&mut shell, &format!("s02-island-sleep-open-{tag}"), &mut sheet);
+        // In Music: between the times, and its choices (T).
+        shell.close_island_for_gallery();
+        shell.show(Box::new(music::MusicScreen::new()));
+        settle(&mut shell, 70);
+        save(&mut shell, &format!("s03-music-sleep-countdown-{tag}"), &mut sheet);
+        shell.key(Char('t'));
+        settle(&mut shell, 60);
+        save(&mut shell, &format!("s04-sleep-timer-{tag}"), &mut sheet);
+        music::sleep::pretend(None);
+        contact_sheets(&dir.join("sheets"), tag, &sheet);
+    }
+    // Light: the lyrics and the island open, in the light look's colours.
+    let mut sheet = Vec::new();
+    music::play_for_shots("Harbour Lights", 39.0, true);
+    let mut shell = fresh(true, gfx::TextSize::Standard);
+    shell.show(Box::new(music::MusicScreen::new()));
+    settle(&mut shell, 60);
+    shell.key(Char('y'));
+    real_time(&mut shell, 0.4);
+    settle(&mut shell, 60);
+    save(&mut shell, "l08-lyrics-synced-light", &mut sheet);
+    let mut shell = fresh(true, gfx::TextSize::Standard);
+    real_time(&mut shell, 0.4);
+    shell.open_island_for_gallery(Kind::Music);
+    settle(&mut shell, 60);
+    save(&mut shell, "i07-island-open-light", &mut sheet);
+    shell.close_island_for_gallery();
+    settle(&mut shell, 60);
+    save(&mut shell, "i08-island-compact-light", &mut sheet);
+    contact_sheets(&dir.join("sheets"), "light", &sheet);
+    music::stop_for_shots();
+}
+
+/// Frames side by side, two to a row and six to a sheet, at twice the size.
+#[cfg(not(target_arch = "aarch64"))]
+fn contact_sheets(dir: &std::path::Path, name: &str, frames: &[Vec<u32>]) {
+    const GAP: usize = 6;
+    let (w, h) = (gfx::W as usize, gfx::H as usize);
+    for (k, chunk) in frames.chunks(6).enumerate() {
+        let rows = chunk.len().div_ceil(2);
+        let (sw, sh) = (2 * w + 3 * GAP, rows * h + (rows + 1) * GAP);
+        let mut sheet = bezel::Canvas::new(sw as i32, sh as i32);
+        sheet.px.fill(0x808080);
+        for (i, frame) in chunk.iter().enumerate() {
+            let (ox, oy) = (GAP + (i % 2) * (w + GAP), GAP + (i / 2) * (h + GAP));
+            for y in 0..h {
+                sheet.px[(oy + y) * sw + ox..][..w].copy_from_slice(&frame[y * w..][..w]);
+            }
+        }
+        platform::sim::save_png(&sheet, &dir.join(format!("{name}-{}.png", k + 1)), 2);
+    }
+}
+
 fn activity_shots(dir: &std::path::Path) {
     use liveactivity::{Activity, Kind};
     use Key::*;

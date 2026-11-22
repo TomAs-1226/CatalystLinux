@@ -15,6 +15,8 @@ use super::account;
 use super::downloads::{self, State};
 use super::library::{self, Meta};
 use super::player::{self, Phase, Repeat};
+use super::lyricsview::LyricsView;
+use super::sleep::{self, Choice};
 use super::{covers, polite, store, Collection, Kind, Opened, Track};
 use crate::gfx::{Gfx, ListState, PAD, W};
 use crate::git::Job;
@@ -79,6 +81,10 @@ enum Page {
     /// Your library on YouTube Music, and its albums or artists.
     Yours,
     YoursList(Kind),
+    /// The words of the song playing (lyricsview.rs).
+    Lyrics,
+    /// The sleep timer's choices.
+    Sleep,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -194,6 +200,10 @@ pub struct MusicScreen {
     yours_seen: u64,
     second_seen: u32,
     last_phase: Phase,
+    lyrics: LyricsView,
+    /// The lyrics are moving (their spring, or words coming in).
+    lyrics_moving: bool,
+    sleep_seen: Option<u32>,
     changed: bool,
 }
 
@@ -261,6 +271,9 @@ impl MusicScreen {
             yours_seen: 0,
             second_seen: u32::MAX,
             last_phase: Phase::Empty,
+            lyrics: LyricsView::new(),
+            lyrics_moving: false,
+            sleep_seen: None,
             changed: true,
         }
     }
@@ -499,7 +512,15 @@ impl Screen for MusicScreen {
             Page::Yours => "Your library",
             Page::YoursList(Kind::Album) => "Albums",
             Page::YoursList(_) => "Artists",
+            Page::Lyrics => "Lyrics",
+            Page::Sleep => "Sleep timer",
         }
+    }
+
+    /// The lyrics, titled by the song, show it as the playing page does: a
+    /// song changing (or seeking) does not open the island over them.
+    fn shows_activity(&self) -> Option<crate::liveactivity::Kind> {
+        matches!(self.page, Page::Lyrics).then_some(crate::liveactivity::Kind::Music)
     }
 
     /// The start page, search and the library's lists take letters: typing
@@ -558,11 +579,43 @@ impl Screen for MusicScreen {
                 Key::Down | Key::Char('u') => self.push(Page::Queue),
                 Key::Up | Key::Tab => self.go(Page::Start),
                 Key::Char('l') => self.push(Page::Library),
+                Key::Char('y') => self.push(Page::Lyrics),
+                Key::Char('t') => {
+                    self.push(Page::Sleep);
+                    // On the choice that runs, if one does.
+                    let on = sleep::get().and_then(|t| sleep::CHOICES.iter().position(|c| *c == t.choice));
+                    self.list.focus = on.map_or(0, |i| i + 1);
+                }
                 Key::Char('/') => {
                     self.push(Page::Search);
                     self.typing = true;
                 }
                 _ => {}
+            },
+            Page::Lyrics => match key {
+                Key::Back | Key::Char('y') => self.pop(Page::Playing),
+                Key::Enter | Key::Char(' ') => player::toggle(),
+                Key::Left => player::previous(),
+                Key::Right => player::next(),
+                Key::Char(',') => player::seek(-10.0),
+                Key::Char('.') => player::seek(10.0),
+                Key::Up => self.lyrics.scroll_by(-1.0),
+                Key::Down => self.lyrics.scroll_by(1.0),
+                _ => {}
+            },
+            Page::Sleep => match key {
+                Key::Back => self.pop(Page::Playing),
+                Key::Enter | Key::Right => {
+                    let choice = sleep::CHOICES.get(self.list.focus.wrapping_sub(1)).copied();
+                    sleep::set(choice);
+                    *cx.say = Some(match choice {
+                        Some(Choice::SongEnd) => "music stops at the end of this song".into(),
+                        Some(c) => format!("music stops in {}", c.words()),
+                        None => "sleep timer off".into(),
+                    });
+                    self.pop(Page::Playing);
+                }
+                other => crate::screens::list_key(&mut self.list, other, sleep::CHOICES.len() + 1),
             },
             Page::Start => {
                 let rows = self.start_rows();
@@ -1023,11 +1076,23 @@ impl Screen for MusicScreen {
             }
         }
         self.gliding = self.bar.tick(dt);
+        self.lyrics_moving = false;
+        if matches!(self.page, Page::Lyrics) {
+            let (moving, changed) = self.lyrics.tick(dt, &n);
+            self.lyrics_moving = moving;
+            self.changed |= changed;
+        }
+        // The sleep timer's countdown, a second at a time (paused too).
+        let sleep = super::sleep_left().map(|l| l.ceil() as u32);
+        if sleep != self.sleep_seen {
+            self.sleep_seen = sleep;
+            self.changed |= matches!(self.page, Page::Playing | Page::Sleep);
+        }
         // Drawn again only when what shows changes: the second shown, a
         // cover arriving, the library or the downloads moving on.
         let mut changed = std::mem::take(&mut self.changed) | self.gliding;
         let second = n.position as u32;
-        if second != self.second_seen && matches!(self.page, Page::Playing | Page::Start) {
+        if second != self.second_seen && matches!(self.page, Page::Playing | Page::Start | Page::Sleep) {
             self.second_seen = second;
             changed = true;
         }
@@ -1044,7 +1109,7 @@ impl Screen for MusicScreen {
     /// Kept to the frame beat only while the bar glides; otherwise looked
     /// at four times a second, which the clock's seconds need.
     fn busy(&self) -> bool {
-        self.gliding
+        self.gliding || self.lyrics_moving
     }
 
     fn keeps_awake(&self) -> bool {
@@ -1065,6 +1130,11 @@ impl Screen for MusicScreen {
             Page::Downloads => self.draw_downloads(g),
             Page::Yours => self.draw_yours(g),
             Page::YoursList(kind) => self.draw_yours_list(g, kind),
+            Page::Lyrics => {
+                let n = player::now();
+                self.lyrics.draw(g, &n);
+            }
+            Page::Sleep => self.draw_sleep(g),
         }
     }
 }
@@ -1168,15 +1238,46 @@ impl MusicScreen {
         };
         if let Some(s) = status {
             g.text_at(mid, cy - 25.0, Align::Center, &s, ty.caption, t.dim);
+        } else if let Some(left) = super::sleep_left() {
+            // The sleep timer, counting down between the times.
+            draw_sleep_left(g, mid, cy - 25.0, left);
         }
         let upcoming = n.queue.get(n.at + 1).map(|t| format!("next: {}", t.title.to_lowercase()));
         let hint = match (&n.phase, upcoming) {
             (Phase::Failed(_), _) => vec!["enter: try again · ←→: skip".to_owned(), "enter: try again".to_owned()],
-            (_, Some(next)) => vec![format!("{next} · ↓ up next"), "enter: pause · s: shuffle · r: repeat".to_owned(), "enter · ←→ · ↓".to_owned()],
-            _ => vec!["enter: pause · l: library · /: search".to_owned(), "enter · ← · /".to_owned()],
+            (_, Some(next)) => vec![format!("y: lyrics · t: sleep · {next}"), format!("y: lyrics · {next}"), "y: lyrics · t: sleep · ↓: up next".to_owned(), "y: lyrics · t: sleep".to_owned(), "enter · ←→ · ↓".to_owned()],
+            _ => vec!["y: lyrics · t: sleep timer · /: search".to_owned(), "y: lyrics · t: sleep".to_owned(), "enter · ← · /".to_owned()],
         };
         let choices: Vec<&str> = hint.iter().map(String::as_str).collect();
         g.hint_any(&choices);
+    }
+
+    /// The sleep timer's choices: off, a time, or the end of this song; the
+    /// one running says how long it has left.
+    fn draw_sleep(&mut self, g: &mut Gfx) {
+        let t = g.tokens;
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
+        let width = W - 2.0 * PAD - 5.0;
+        let running = sleep::get();
+        let left = super::sleep_left();
+        let mut rows: Vec<(String, String, bool)> = vec![("Off".into(), String::new(), running.is_none())];
+        for c in sleep::CHOICES {
+            let on = running.is_some_and(|r| r.choice == c);
+            let value = match (on, left) {
+                (true, Some(l)) => format!("{} left", crate::liveactivity::clock_text(l as f64)),
+                (true, None) => "on".into(),
+                _ => String::new(),
+            };
+            let name = c.words();
+            let name = name[..1].to_uppercase() + &name[1..];
+            rows.push((name, value, on));
+        }
+        for (i, y) in self.list.layout(g, rows.len(), top, row_h, 3.0, bottom) {
+            let (name, value, lit) = &rows[i];
+            g.row(Rect::new(PAD, y, width, row_h), name, value, if *lit { t.ink } else { t.dim }, i == self.list.focus);
+        }
+        self.list.scrollbar(g, rows.len(), top, bottom);
+        g.hint_any(&["the last half minute fades out, then it pauses", "fades out, then pauses", "enter: set"]);
     }
 
     fn draw_start(&mut self, g: &mut Gfx) {
@@ -1661,6 +1762,18 @@ impl MusicScreen {
 }
 
 /// A song in a list: its cover small, its title, and artist with length.
+/// The sleep timer's time left, a moon before it, centred on (`cx`, `cy`).
+fn draw_sleep_left(g: &mut Gfx, cx: f32, cy: f32, left: f32) {
+    let t = g.tokens;
+    let style = g.ty.caption;
+    let words = crate::liveactivity::clock_text(left as f64);
+    let icon = style.size + 1.0;
+    let w = icon + 4.0 + g.measure(&words, style);
+    let x = (cx - w * 0.5).round();
+    g.icon("bedtime", true, x + icon * 0.5, cy, icon, t.dim);
+    g.text_at(x + icon + 4.0, cy, Align::Left, &words, style, t.dim);
+}
+
 pub fn song_row(g: &mut Gfx, r: Rect, track: &Track, focused: bool) {
     let length = track.seconds.map(|s| super::clock(s as f32)).unwrap_or_default();
     let byline = track.artist.to_lowercase();
@@ -1719,6 +1832,8 @@ mod tests {
         let shortest = [
             "enter · ←→ · ↓",
             "enter · ← · /",
+            "y: lyrics · t: sleep",
+            "enter: set",
             "enter: try again",
             "enter: play",
             "enter: now playing",

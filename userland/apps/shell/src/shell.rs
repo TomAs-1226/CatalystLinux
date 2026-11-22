@@ -295,6 +295,12 @@ pub trait Screen {
     fn app(&self) -> &str {
         self.title()
     }
+    /// The live activity this page shows for itself under another title
+    /// (Music's lyrics, titled by the song): a change to it does not open
+    /// the island over the page. (By title, "Music" and "Assistant" are.)
+    fn shows_activity(&self) -> Option<crate::liveactivity::Kind> {
+        None
+    }
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav;
     fn draw(&mut self, g: &mut Gfx, robot: &Robot);
     /// True while a text field is being edited, so letters are not treated
@@ -2298,6 +2304,8 @@ impl Shell {
     }
 
     pub fn draw(&mut self) {
+        // Music's bars run only while the island shows them: it says so as it draws.
+        self.activities.bars_seen = false;
         // While the start animation covers the panel, nothing beneath is drawn.
         if let Some(intro) = &self.intro {
             if !intro.leaving() {
@@ -2756,7 +2764,8 @@ impl Shell {
         let opened = if quiet { self.activities.opened().cloned() } else { None };
         let second = if activity.is_some() { self.activities.list().get(1).cloned() } else { None };
         let open = if opened.is_some() { self.activities.open.value().clamp(0.0, 1.08) } else { 0.0 };
-        let level = self.activities.level.value();
+        let look = self.activities.look(g, self.settings.calm);
+        let mut bars_seen = false;
         let label = activity.as_ref().map_or(label, |a| a.short.clone());
         let caption = g.ty.caption;
         let island_h = g.island_h();
@@ -2825,7 +2834,8 @@ impl Shell {
             self.island_w.jump(want);
         }
         let iw = self.island_w.value().max(island_h);
-        let ih = island_h + (crate::liveactivity::OPEN_H - island_h) * open;
+        let open_h = self.activities.open_h(g);
+        let ih = island_h + (open_h - island_h) * open;
         let island = Rect::new((W - iw) * 0.5, 4.0, iw, ih);
         let island_radius = island_h * 0.5 + (crate::liveactivity::OPEN_RADIUS - island_h * 0.5) * open.min(1.0);
         self.places.island = Some(island);
@@ -2892,12 +2902,13 @@ impl Shell {
             // way there; closed: compact, its words in as the island settles.
             if let (Some(o), true) = (&opened, open > 0.02) {
                 let card = ((open - 0.5) / 0.4).clamp(0.0, 1.0);
-                crate::liveactivity::draw_card(g, island.inset(4.0), o, level, card * shown);
+                crate::liveactivity::draw_card_look(g, island.inset(4.0), o, &look, card * shown);
             }
             let compact = (1.0 - open / 0.45).clamp(0.0, 1.0);
             if compact > 0.0 {
                 let compact_rect = Rect::new(island.x, island.y, island.w, island_h);
-                crate::liveactivity::draw_compact(g, compact_rect, a, level, words * compact * shown);
+                crate::liveactivity::draw_compact(g, compact_rect, a, &look, words * compact * shown);
+                bars_seen = a.kind == crate::liveactivity::Kind::Music && words * compact * shown > 0.0;
             }
         } else {
             let dot = if icon || unread > 0 { t.signal } else if linked { t.ice } else { t.faint };
@@ -2909,6 +2920,7 @@ impl Shell {
             }
         }
         g.canvas.clear_clip();
+        self.activities.bars_seen |= bars_seen;
         if let (Some(b), true) = (&second, open < 0.5) {
             crate::liveactivity::draw_bubble(g, bubble_rect, b, shown * (1.0 - open * 2.0));
         }
@@ -3610,6 +3622,20 @@ impl Shell {
         self.activities.close_now();
     }
 
+    /// The island opened on an activity, read afresh (for the galleries).
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn open_island_for_gallery(&mut self, kind: crate::liveactivity::Kind) {
+        self.activities.refresh();
+        let _ = self.tick(1.0 / 60.0);
+        self.activities.show(kind, self.settings.calm);
+    }
+
+    /// Read the activities afresh at the next frame (for the galleries).
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn refresh_activities_for_gallery(&mut self) {
+        self.activities.refresh();
+    }
+
     /// The lock screen, as Tab held brings it (for the galleries).
     #[cfg(not(target_arch = "aarch64"))]
     pub fn lock_as_if_held(&mut self) {
@@ -3742,10 +3768,12 @@ impl Shell {
         // Music in front shows the song itself: no card over it; nor over
         // the Assistant, whose steps show in the conversation (the island
         // keeps its compact line).
-        self.activities.quiet = self.stack.last().and_then(|(s, _)| match s.title() {
-            "Music" => Some(crate::liveactivity::Kind::Music),
-            "Assistant" => Some(crate::liveactivity::Kind::Assistant),
-            _ => None,
+        self.activities.quiet = self.stack.last().and_then(|(s, _)| {
+            s.shows_activity().or(match s.title() {
+                "Music" => Some(crate::liveactivity::Kind::Music),
+                "Assistant" => Some(crate::liveactivity::Kind::Assistant),
+                _ => None,
+            })
         });
         let (acts_moving, acts_changed) = self.activities.tick(dt, motion_dt, lit, calm, &sources);
         // Tab held towards a lock: the cue fills as it is held, and draws
@@ -6201,6 +6229,53 @@ pub(crate) mod tests {
         assert_eq!(shell.status_shown.target(), 1.0, "the time and the battery in view");
         assert!(island.right() + 2.0 <= shell.status_left, "clear of them: {} and {}", island.right(), shell.status_left);
         crate::nowplaying::set(None);
+    }
+
+    #[test]
+    fn musics_bars_and_sleep_timer_keep_the_compact_island_clear_of_the_time_and_battery_at_every_size() {
+        use crate::gfx::TextSize;
+        let np = crate::nowplaying::NowPlaying {
+            title: "Harbour Lights".into(),
+            artist: "Wren & the Tide".into(),
+            album: "Low Water".into(),
+            cover: None,
+            position: 39.0,
+            duration: 214.0,
+            playing: true,
+            at: std::time::Instant::now(),
+        };
+        for size in [TextSize::Compact, TextSize::Standard, TextSize::Large] {
+            let mut shell = shell();
+            shell.settings.text = size;
+            shell.apply_settings();
+            frames(&mut shell, 10, FRAME);
+            // Compact, music is its cover and its bars: no wider than before.
+            let mut music = crate::liveactivity::music(Some(&np)).expect("music");
+            assert!(crate::liveactivity::compact_w(&mut shell.gfx, &music) <= 70.0, "{size:?}");
+            // With the sleep timer, its countdown too, and still clear.
+            crate::liveactivity::with_sleep(&mut music, Some(12.0 * 60.0 + 34.0));
+            assert_eq!(music.short, "12:34");
+            shell.pretend_activities(vec![music.clone()]);
+            frames(&mut shell, 60 * 5, FRAME);
+            let island = shell.places.island.expect("the island");
+            assert!(shell.activities.opened().is_none() || shell.activities.open.value() < 0.01, "closed again");
+            assert_eq!(shell.status_shown.target(), 1.0, "the time and the battery in view at {size:?}");
+            assert!(island.right() + 2.0 <= shell.status_left, "clear of them at {size:?}: {} and {}", island.right(), shell.status_left);
+            assert!(island.w >= crate::liveactivity::compact_w(&mut shell.gfx, &music) - 1.0, "the countdown whole at {size:?}");
+            // Shown and playing, the bars move from frame to frame.
+            let mut seen = Vec::new();
+            for _ in 0..30 {
+                frames(&mut shell, 1, FRAME);
+                seen.push(shell.activities.bars.heights());
+            }
+            assert!(seen.windows(2).filter(|w| w[0] != w[1]).count() > 20, "the bars dance at {size:?}");
+            assert!(shell.moving(), "frames kept coming while they do");
+            // Paused, they settle flat, and stop asking for frames.
+            shell.pretend_activities(vec![crate::liveactivity::music(Some(&crate::nowplaying::NowPlaying { playing: false, ..np.clone() })).expect("music")]);
+            frames(&mut shell, 60 * 6, FRAME);
+            assert!(shell.activities.bars.heights().iter().all(|h| *h < 0.01), "flat at {size:?}");
+            assert!(!shell.activities.bars.tick(FRAME, FRAME, false, 0), "still");
+        }
     }
 
     #[test]

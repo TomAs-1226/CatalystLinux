@@ -31,6 +31,11 @@
 //!   to curl and yt-dlp in files, never on a command line, and never into a
 //!   log. Signed in, your library there (account.rs) shows in Music too:
 //!   your playlists, saved albums and artists.
+//! - **Lyrics** (lyrics.rs, lyricsview.rs): time-synced from LRCLIB, else
+//!   YouTube Music's own (signed in), kept beside each song for offline;
+//!   Y on what is playing shows them, the line sung large.
+//! - **The sleep timer** (sleep.rs): 15 to 60 minutes or the song's end,
+//!   faded over its last half minute, then paused.
 //!
 //! On a computer (the simulator) a made-up catalogue stands in, with covers
 //! drawn from each song's name, and songs "play" silently.
@@ -41,10 +46,13 @@ mod downloads;
 mod fetch;
 mod library;
 pub mod lookup;
+pub mod lyrics;
+mod lyricsview;
 mod player;
 pub mod polite;
 mod screen;
 mod settings;
+pub mod sleep;
 mod store;
 
 use std::io::Write;
@@ -60,7 +68,21 @@ use crate::photos::Picture;
 use crate::robot::Robot;
 use crate::shell::{Cx, Screen};
 
-pub use player::{media_key, moved, paused_unplugged, playing, tile};
+pub use player::{media_key, moved, paused_unplugged, playing, tile, LEVEL_FILE};
+
+/// The synced lyrics of the song in the player, if they are held and the
+/// island is to show them (Settings › Music › Lyrics on the island).
+pub fn sung_now() -> Option<std::sync::Arc<lyrics::Lyrics>> {
+    if !store::choices().lyrics_island {
+        return None;
+    }
+    lyrics::synced_for(&player::current_id()?)
+}
+
+/// The sleep timer's seconds left, if it runs.
+pub fn sleep_left() -> Option<f32> {
+    sleep::left_now(player::song_left())
+}
 
 /// The assistant's shots: no downloads asked for and none saved, so each
 /// set starts as the first did.
@@ -81,6 +103,37 @@ pub fn signed_in_for_shots(on: bool) {
         account::seed_demo_for_shots();
     } else {
         account::forget();
+    }
+}
+
+/// The shots: one of the simulator's songs in the player, `at` seconds in,
+/// playing or paused (its lyrics asked for as it starts).
+#[cfg(not(target_arch = "aarch64"))]
+pub fn play_for_shots(title: &str, at: f32, playing: bool) {
+    let wait = |want: &dyn Fn(&player::Now) -> bool| {
+        for _ in 0..150 {
+            if want(&player::now()) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let list = demo_catalogue();
+    let i = list.iter().position(|t| t.title == title).unwrap_or(0);
+    // Their covers kept, as playing them on the handheld keeps them.
+    for t in &list {
+        let (big, small) = covers::cache_pair(&t.id);
+        covers::fetch_pair(t, &big, &small);
+    }
+    player::play(list, i, false);
+    wait(&|n| n.phase == player::Phase::Playing && n.track().is_some_and(|t| t.title == title));
+    player::toggle();
+    wait(&|n| n.phase == player::Phase::Paused);
+    player::seek(at - player::now().position);
+    wait(&|n| (n.position - at).abs() < 0.5);
+    if playing {
+        player::toggle();
+        wait(&|n| n.phase == player::Phase::Playing);
     }
 }
 

@@ -306,6 +306,8 @@ pub fn run_next() {
             if let Some(name) = &item.playlist {
                 library::add_to_playlist(name, std::path::Path::new(&path));
             }
+            // Its lyrics beside it, for offline (lyrics.rs).
+            super::lyrics::keep_for_saved(&item.track, std::path::Path::new(&path));
             set(item.n, State::Done(path));
         }
         // Stopped for something before it: waits its turn again, keeping what it has.

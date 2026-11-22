@@ -40,6 +40,7 @@ mod opus;
 mod probe;
 mod resample;
 mod source;
+mod taps;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -252,6 +253,8 @@ fn play(a: &PlayArgs) -> Result<(), Fail> {
     let mut written: u64 = 0;
     let mut next_say = SAY_EVERY;
     let mut xruns_said = 0;
+    // The sleep timer's fade and the island's level, if asked for (taps.rs).
+    let mut taps = taps::Taps::from_env();
     loop {
         let packet = match format.next_packet() {
             Ok(p) => p,
@@ -287,6 +290,7 @@ fn play(a: &PlayArgs) -> Result<(), Fail> {
         if pcm.is_empty() {
             continue;
         }
+        let pcm = taps.pass(pcm);
         out.write(pcm).map_err(Fail::Other)?;
         written += (pcm.len() / 2) as u64;
         let at = a.start + written as f64 / RATE as f64;
