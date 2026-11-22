@@ -44,13 +44,12 @@ pub fn plain(wanted: bool, using: Option<&Gpu>) -> String {
         return "processor · your choice".into();
     }
     if let Some(gpu) = using {
-        return match gpu.uses() {
-            (true, true) => "gpu · glass, windows",
-            (true, false) => "gpu · glass",
-            (false, true) => "gpu · windows",
-            (false, false) => "processor",
-        }
-        .into();
+        let (glass, windows) = gpu.uses();
+        // Windows are apps opening; with Flow too, "apps" says it in less room.
+        let flow = gpu.uses_flow();
+        let windows_word = if glass && flow { "apps" } else { "windows" };
+        let jobs: Vec<&str> = [(glass, "glass"), (windows, windows_word), (flow, "flow")].into_iter().filter(|(on, _)| *on).map(|(_, job)| job).collect();
+        return if jobs.is_empty() { "processor".into() } else { format!("gpu · {}", jobs.join(", ")) };
     }
     match SHORT.lock().map(|s| s.clone()).unwrap_or_default() {
         s if s.is_empty() => "processor".into(),
@@ -111,6 +110,12 @@ mod stub {
         }
         #[allow(clippy::too_many_arguments)]
         pub fn grow(&mut self, _: &mut Canvas, _: &[u32], _: &[u32], _: u64, _: Rect, _: f32, _: bezel::Color, _: Option<&crate::shell::Morph>) -> Result<bool, String> {
+            Ok(false)
+        }
+        pub fn uses_flow(&self) -> bool {
+            false
+        }
+        pub fn flow(&mut self, _: &mut Canvas, _: &crate::flow::Scene, _: [&crate::flow::art::Atlas; 2]) -> Result<bool, String> {
             Ok(false)
         }
     }
@@ -236,6 +241,8 @@ mod vc {
         glEnableVertexAttribArray: fn(u32);
         glDrawArrays: fn(u32, i32, i32);
         glReadPixels: fn(i32, i32, i32, i32, u32, u32, *mut c_void);
+        glEnable: fn(u32);
+        glBlendFuncSeparate: fn(u32, u32, u32, u32);
     });
 
     const EGL_PLATFORM_SURFACELESS_MESA: u32 = 0x31DD;
@@ -274,6 +281,9 @@ mod vc {
     const GL_DEPTH_TEST: u32 = 0x0B71;
     const GL_SCISSOR_TEST: u32 = 0x0C11;
     const GL_DITHER: u32 = 0x0BD0;
+    const GL_ZERO: u32 = 0;
+    const GL_ONE: u32 = 1;
+    const GL_ONE_MINUS_SRC_ALPHA: u32 = 0x0303;
 
     // ---- the shaders ----
     //
@@ -522,6 +532,122 @@ void main() {
 }
 ";
 
+    /// Flow's ground: the glow of the card in the middle, the floor, and the
+    /// enlarged card's shadow; `flow::render::background`, a pixel at a time.
+    fn flow_ground_source() -> String {
+        format!(
+            "
+uniform vec3 u_ground;
+uniform vec3 u_glow;
+uniform float u_strength;
+uniform vec2 u_glow_at;
+uniform vec2 u_glow_reach;
+uniform float u_horizon;
+uniform float u_floor_dim;
+uniform float u_floor_reach;
+uniform vec4 u_shadow;
+uniform vec2 u_shadow_k;
+
+const float SHADOW_REACH = {reach:.4};
+
+float bump(float u) {{ float q = clamp(1.0 - u * u, 0.0, 1.0); return q * q; }}
+
+float sd(vec2 p, vec4 r, float radius) {{
+    float k = min(radius, min(r.z, r.w) * 0.5);
+    vec2 q = abs(p - (r.xy + r.zw * 0.5)) - (r.zw * 0.5 - k);
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - k;
+}}
+
+void main() {{
+    vec2 p = gl_FragCoord.xy;
+    float a = bump((p.x - u_glow_at.x) / u_glow_reach.x) * (u_strength * bump((p.y - u_glow_at.y) / u_glow_reach.y));
+    float t = clamp((p.y - u_horizon) / u_floor_reach, 0.0, 1.0);
+    float lit = 1.0 - u_floor_dim * t * t * (3.0 - 2.0 * t);
+    if (u_shadow_k.y > 0.0) {{
+        float s = clamp(1.0 - sd(p, u_shadow, u_shadow_k.x) / SHADOW_REACH, 0.0, 1.0);
+        lit = lit * (1.0 - u_shadow_k.y * s * s);
+    }}
+    vec3 c = (u_ground + (u_glow - u_ground) * a) * lit;
+    gl_FragColor = vec4(floor(c).bgr / 255.0, 0.0);
+}}
+",
+            reach = crate::flow::render::SHADOW_REACH
+        )
+    }
+
+    /// One of Flow's cards, or its reflection: `flow::render::draw`, a pixel
+    /// at a time. Its column's sums give where on the card it is and which
+    /// of the card's narrower levels to read; the result is premultiplied
+    /// and blended over what is there.
+    fn flow_card_source() -> String {
+        format!(
+            "
+uniform sampler2D u_tex;
+uniform vec2 u_tex_size;
+uniform vec2 u_view;
+uniform vec4 u_card;
+uniform vec2 u_size;
+uniform vec2 u_sprite;
+uniform float u_row;
+uniform vec3 u_level_x;
+uniform vec3 u_level_w;
+uniform vec4 u_look;
+uniform vec3 u_ground;
+uniform float u_reflection;
+
+const float FOCAL = {focal:.4};
+const float REACH = {reach:.4};
+
+vec4 tap(float l, float along, float v) {{
+    float lw = l < 0.5 ? u_level_w.x : (l < 1.5 ? u_level_w.y : u_level_w.z);
+    float lx = l < 0.5 ? u_level_x.x : (l < 1.5 ? u_level_x.y : u_level_x.z);
+    float u = clamp(along * u_sprite.x / u_size.x / exp2(l) + 1.0, 0.5, lw - 0.5);
+    // The atlas is kept a column at a time: its columns are the texture's rows.
+    return texture2D(u_tex, vec2(u_row + v, lx + u) / u_tex_size);
+}}
+
+void main() {{
+    vec2 p = gl_FragCoord.xy;
+    float c = cos(u_card.w);
+    float s = sin(u_card.w);
+    float half_w = u_size.x * 0.5 + 4.0 * u_size.x / u_sprite.x;
+    float px = p.x - u_view.x;
+    float den = FOCAL * c - px * s;
+    if (abs(den) < 1e-4) discard;
+    float t = (px * (FOCAL + u_card.z) - FOCAL * u_card.x) / den;
+    if (t < -half_w || t > half_w) discard;
+    float z = u_card.z + t * s;
+    if (FOCAL + z <= 1.0) discard;
+    float k = FOCAL / (FOCAL + z);
+    float dt = FOCAL * ((FOCAL + u_card.z) * c - u_card.x * s) / (den * den);
+    float texels = abs(dt) * u_sprite.x / u_size.x;
+    float along = u_look.w > 0.5 ? u_size.x * 0.5 - t : t + u_size.x * 0.5;
+    float yw = (p.y - u_view.y) / k;
+    float q;
+    float strength = 1.0;
+    if (u_reflection > 0.5) {{
+        float d = yw - (u_card.y + u_size.y * 0.5);
+        float fall = clamp(1.0 - d / (u_size.y * REACH), 0.0, 1.0);
+        q = u_size.y - d;
+        strength = u_look.z * fall * fall;
+    }} else {{
+        q = yw - u_card.y + u_size.y * 0.5;
+    }}
+    if (strength <= 0.0) discard;
+    float v = clamp(q * u_sprite.y / u_size.y + 1.0, 0.5, u_sprite.y + 1.5);
+    float lf = min(log2(max(texels, 1.0)), 2.0);
+    float l = floor(lf);
+    // The nearer level alone (`blend_levels`).
+    vec4 col = lf - l >= 0.5 ? tap(min(l + 1.0, 2.0), along, v) : tap(l, along, v);
+    vec3 rgb = col.bgr * (u_look.x * (1.0 - u_look.y) * strength) + u_ground * (u_look.y * strength * col.a);
+    gl_FragColor = vec4(rgb.bgr, col.a * strength);
+}}
+",
+            focal = crate::flow::render::FOCAL,
+            reach = crate::flow::render::REFLECTION_REACH
+        )
+    }
+
     // ---- the renderer ----
 
     const W: i32 = crate::gfx::W as i32;
@@ -574,6 +700,17 @@ void main() {
         use_grow: bool,
         glass_ms: (f32, f32),
         grow_ms: (f32, f32),
+        /// Flow (Home's album covers): its two programs (0 if they would not
+        /// build here, `flow_why` saying why), its two atlases as last sent
+        /// up (the cards, and the enlarged card's back), and whether and why
+        /// it is the GPU's to draw.
+        flow_ground: u32,
+        flow_card: u32,
+        flow_why: Option<String>,
+        flow_tex: [u32; 2],
+        flow_sent: [(usize, usize, u64); 2],
+        use_flow: bool,
+        flow_ms: (f32, f32),
     }
 
     impl Gpu {
@@ -665,6 +802,13 @@ void main() {
                 use_grow: false,
                 glass_ms: (0.0, 0.0),
                 grow_ms: (0.0, 0.0),
+                flow_ground: 0,
+                flow_card: 0,
+                flow_why: None,
+                flow_tex: [0; 2],
+                flow_sent: [(0, 0, 0); 2],
+                use_flow: false,
+                flow_ms: (0.0, 0.0),
             };
             let software = ["softpipe", "llvmpipe", "swrast", "software"].iter().any(|s| gpu.renderer.to_lowercase().contains(s));
             if software && !allow_software {
@@ -697,7 +841,7 @@ void main() {
 
         /// Whether it does any job faster than the processor.
         pub fn worth_it(&self) -> bool {
-            self.use_glass || self.use_grow
+            self.use_glass || self.use_grow || self.use_flow
         }
 
         /// Which jobs it takes: (the glass, a window growing).
@@ -705,16 +849,26 @@ void main() {
             (self.use_glass, self.use_grow)
         }
 
+        /// Whether it draws Flow, Home's album covers.
+        pub fn uses_flow(&self) -> bool {
+            self.use_flow
+        }
+
         /// Every job, however long it takes (for testing the path).
         pub fn use_everything(&mut self) {
             (self.use_glass, self.use_grow) = (true, true);
+            self.use_flow = self.flow_card != 0;
         }
 
         /// Which jobs it does, and the timings that decided it (the GPU's
         /// with handing it the picture and reading the result back).
         pub fn jobs(&self) -> String {
             let job = |name: &str, used: bool, (gpu, cpu): (f32, f32)| format!("{name} {} ({gpu:.2} ms gpu, {cpu:.2} ms processor)", if used { "on the gpu" } else { "on the processor" });
-            format!("{} · {}", job("glass", self.use_glass, self.glass_ms), job("windows", self.use_grow, self.grow_ms))
+            let flow = match &self.flow_why {
+                Some(why) => format!("flow on the processor ({why})"),
+                None => job("flow", self.use_flow, self.flow_ms),
+            };
+            format!("{} · {} · {flow}", job("glass", self.use_glass, self.glass_ms), job("windows", self.use_grow, self.grow_ms))
         }
 
         fn build(&mut self) -> Result<(), String> {
@@ -727,6 +881,12 @@ void main() {
             self.out = self.target(W, H, false)?;
             self.under = self.texture(W, H, true);
             self.over = self.texture(W, H, true);
+            // Flow's programs: if this GPU cannot build them, Flow is the
+            // processor's and everything else carries on.
+            match self.program(&flow_ground_source()).and_then(|ground| Ok((ground, self.program(&flow_card_source())?))) {
+                Ok((ground, card)) => (self.flow_ground, self.flow_card) = (ground, card),
+                Err(why) => self.flow_why = Some(why.lines().next().unwrap_or("its shaders would not build").to_owned()),
+            }
             unsafe {
                 let gl = &self.gl;
                 for cap in [GL_BLEND, GL_DEPTH_TEST, GL_SCISSOR_TEST, GL_DITHER] {
@@ -1060,6 +1220,108 @@ void main() {
             Ok(true)
         }
 
+        /// A frame of Flow (`flow::render`, the same sums a pixel at a time):
+        /// the ground, the reflections and the cards, back to front, over
+        /// the columns the flow is on, read back into `canvas`. The atlases
+        /// go up only when they have changed.
+        pub fn flow(&mut self, canvas: &mut Canvas, scene: &crate::flow::Scene, atlases: [&crate::flow::art::Atlas; 2]) -> Result<bool, String> {
+            if !self.use_flow || self.flow_card == 0 || canvas.px.len() != (W * H) as usize {
+                return Ok(false);
+            }
+            let (x0, x1) = (scene.cols.0.clamp(0, W), scene.cols.1.clamp(0, W));
+            if x0 >= x1 {
+                return Ok(true);
+            }
+            for (i, atlas) in atlases.iter().enumerate() {
+                let sent = (atlas.w, atlas.h, atlas.generation);
+                if self.flow_sent[i] == sent && self.flow_tex[i] != 0 {
+                    continue;
+                }
+                if atlas.w > 2048 || atlas.h > 2048 {
+                    return Ok(false);
+                }
+                if self.flow_tex[i] == 0 {
+                    self.flow_tex[i] = self.texture(1, 1, true);
+                }
+                // Kept a column at a time: `h` texels across, `w` down.
+                unsafe {
+                    (self.gl.glBindTexture)(GL_TEXTURE_2D, self.flow_tex[i]);
+                    (self.gl.glTexImage2D)(GL_TEXTURE_2D, 0, GL_RGBA as i32, atlas.h as i32, atlas.w as i32, 0, GL_RGBA, GL_UNSIGNED_BYTE, atlas.px.as_ptr() as *const c_void);
+                }
+                self.flow_sent[i] = sent;
+            }
+            // The ground.
+            let p = self.flow_ground;
+            self.begin(p, self.out.fbo, W, H);
+            let rgb = |c: bezel::Color| (c.0 as f32, c.1 as f32, c.2 as f32);
+            let set3 = |name: &str, (r, g, b): (f32, f32, f32)| unsafe { (self.gl.glUniform3f)(self.location(p, name), r, g, b) };
+            set3("u_ground", rgb(scene.ground));
+            set3("u_glow", rgb(scene.glow));
+            self.uniform1(p, "u_strength", scene.glow_strength);
+            self.uniform2(p, "u_glow_at", scene.glow_at.0, scene.glow_at.1);
+            self.uniform2(p, "u_glow_reach", scene.glow_reach.0, scene.glow_reach.1);
+            self.uniform1(p, "u_horizon", scene.cy);
+            self.uniform1(p, "u_floor_dim", scene.floor_dim);
+            self.uniform1(p, "u_floor_reach", scene.floor_reach);
+            let (shadow, k) = scene.shadow.map_or(([0.0; 4], (0.0, 0.0)), |(r, radius, strength)| ([r.x, r.y, r.w, r.h], (radius, strength)));
+            self.uniform4(p, "u_shadow", shadow);
+            self.uniform2(p, "u_shadow_k", k.0, k.1);
+            self.rect(x0 as f32, 0.0, x1 as f32, H as f32);
+            // The reflections, then the cards, blended over it.
+            let p = self.flow_card;
+            self.begin(p, self.out.fbo, W, H);
+            unsafe {
+                (self.gl.glEnable)(GL_BLEND);
+                (self.gl.glBlendFuncSeparate)(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+            }
+            self.uniform2(p, "u_view", scene.cx, scene.cy);
+            unsafe { (self.gl.glUniform3f)(self.location(p, "u_ground"), scene.ground.0 as f32 / 255.0, scene.ground.1 as f32 / 255.0, scene.ground.2 as f32 / 255.0) };
+            let passes = [true, false];
+            for reflection in passes {
+                self.uniform1(p, "u_reflection", if reflection { 1.0 } else { 0.0 });
+                for c in &scene.cards {
+                    if reflection && c.reflect <= 0.003 {
+                        continue;
+                    }
+                    let atlas = atlases[c.atlas];
+                    let Some((xa, xb, half)) = crate::flow::render::span(scene, c, atlas) else { continue };
+                    let (xa, xb) = ((xa.floor() as i32).max(x0), (xb.ceil() as i32).min(x1));
+                    if xa >= xb {
+                        continue;
+                    }
+                    // The rows it can cover: those at either end, the nearer the larger.
+                    let sin = c.angle.sin();
+                    let (mut ya, mut yb) = (f32::MAX, f32::MIN);
+                    for t in [-half, half] {
+                        let k = crate::flow::render::FOCAL / (crate::flow::render::FOCAL + c.z + t * sin);
+                        let (a, b) = crate::flow::render::rows(scene, c, atlas, k, reflection);
+                        (ya, yb) = (ya.min(a), yb.max(b));
+                    }
+                    let (ya, yb) = (ya.floor().max(0.0), yb.ceil().min(H as f32));
+                    if ya >= yb {
+                        continue;
+                    }
+                    self.sampler(p, "u_tex", 0, self.flow_tex[c.atlas]);
+                    self.uniform2(p, "u_tex_size", atlas.h as f32, atlas.w as f32);
+                    self.uniform4(p, "u_card", [c.x, c.y, c.z, c.angle]);
+                    self.uniform2(p, "u_size", c.w, c.h);
+                    self.uniform2(p, "u_sprite", atlas.sw as f32, atlas.sh as f32);
+                    let levels: Vec<(usize, usize, usize)> = (0..crate::flow::art::LEVELS).map(|l| atlas.level(c.sprite, l)).collect();
+                    self.uniform1(p, "u_row", levels[0].1 as f32);
+                    unsafe {
+                        (self.gl.glUniform3f)(self.location(p, "u_level_x"), levels[0].0 as f32, levels[1].0 as f32, levels[2].0 as f32);
+                        (self.gl.glUniform3f)(self.location(p, "u_level_w"), levels[0].2 as f32, levels[1].2 as f32, levels[2].2 as f32);
+                    }
+                    self.uniform4(p, "u_look", [c.shade, c.fog, c.reflect * scene.reflection, if c.mirror { 1.0 } else { 0.0 }]);
+                    self.rect(xa as f32, ya, xb as f32, yb);
+                }
+            }
+            unsafe { (self.gl.glDisable)(GL_BLEND) };
+            self.read_back(canvas, (x0, 0, x1, H));
+            self.check("drawing flow")?;
+            Ok(true)
+        }
+
         /// Draw the same glass and the same growing window on both, and
         /// compare: the GPU is used only if it draws them as the processor does.
         fn self_test(&mut self) -> Result<(), String> {
@@ -1134,8 +1396,54 @@ void main() {
             self.pictures = None;
             (self.glass_ms, self.grow_ms) = ((gpu_glass, cpu_glass), (gpu_grow, cpu_grow));
             (self.use_glass, self.use_grow) = (gpu_glass < cpu_glass, gpu_grow < cpu_grow);
-            set_note(format!("{} · glass {glass} · windows {grow}", self.renderer));
+            let flow = self.test_flow();
+            set_note(format!("{} · glass {glass} · windows {grow} · flow {flow}", self.renderer));
             Ok(())
+        }
+
+        /// Flow's test frame on both: drawn as the processor draws it, Flow
+        /// is the GPU's when it is quicker (best of three, sending the frame
+        /// back included). A GPU that draws it otherwise keeps its other jobs.
+        fn test_flow(&mut self) -> String {
+            if self.flow_card == 0 {
+                return self.flow_why.clone().unwrap_or_default();
+            }
+            let (scene, cards, face) = crate::flow::render::test_scene();
+            let mut cpu = Canvas::new(W, H);
+            crate::flow::render::render(&mut cpu.px, &scene, [&cards, &face]);
+            let mut gpu = Canvas::new(W, H);
+            self.use_flow = true;
+            let drawn = self.flow(&mut gpu, &scene, [&cards, &face]);
+            let difference = Difference::of(&cpu.px, &gpu.px);
+            match drawn {
+                Ok(true) if difference.close() => {}
+                Ok(_) => {
+                    self.use_flow = false;
+                    self.flow_why = Some(format!("its flow is not the processor's ({difference})"));
+                    return difference.to_string();
+                }
+                Err(why) => {
+                    self.use_flow = false;
+                    self.flow_why = Some(why.clone());
+                    return why;
+                }
+            }
+            let best = |f: &mut dyn FnMut()| -> f32 {
+                (0..3)
+                    .map(|_| {
+                        let t = std::time::Instant::now();
+                        f();
+                        t.elapsed().as_secs_f32() * 1e3
+                    })
+                    .fold(f32::MAX, f32::min)
+            };
+            let cpu_ms = best(&mut || crate::flow::render::render(&mut cpu.px, &scene, [&cards, &face]));
+            let gpu_ms = best(&mut || {
+                self.flow(&mut gpu, &scene, [&cards, &face]).ok();
+            });
+            self.flow_ms = (gpu_ms, cpu_ms);
+            self.use_flow = gpu_ms < cpu_ms;
+            difference.to_string()
         }
     }
 
@@ -1249,6 +1557,22 @@ void main() {
                 let d = Difference::of(&cpu.px, &on_gpu.px);
                 assert!(d.close(), "calm {calm}, light {}: {d}", tokens.tone == bezel::Tone::Light);
             }
+            // Flow: the GPU's frame is the processor's, in the dark and in
+            // the light, the strip moved aside, and again with its pictures
+            // already sent up.
+            assert!(gpu.flow_card != 0, "flow's shaders build: {:?}", gpu.flow_why);
+            let (flow, cards, face) = crate::flow::render::test_scene();
+            let light = crate::flow::Scene { ground: bezel::Color(232, 234, 237), glow_strength: 0.32, floor_dim: 0.08, shadow: None, ..flow.clone() };
+            let aside = crate::flow::Scene { cx: flow.cx - 70.0, glow_at: (flow.glow_at.0 - 70.0, flow.glow_at.1), cols: (0, 250), ..flow.clone() };
+            for (name, frame) in [("dark", &flow), ("light", &light), ("aside", &aside), ("again", &flow)] {
+                let mut cpu = Canvas::new(W, H);
+                crate::flow::render::render(&mut cpu.px, frame, [&cards, &face]);
+                let mut on_gpu = Canvas::new(W, H);
+                assert!(gpu.flow(&mut on_gpu, frame, [&cards, &face]).unwrap(), "{name}: drawn on the gpu");
+                let d = Difference::of(&cpu.px[..], &on_gpu.px[..]);
+                eprintln!("flow {name}: {d}");
+                assert!(d.close(), "flow {name}: {d}");
+            }
             // As the shell does it: opened on a thread of its own, drawn with on this one.
             drop(gpu);
             let mut handed = std::thread::spawn(|| Gpu::open(true).inspect(|g| g.release())).join().unwrap().unwrap();
@@ -1288,6 +1612,8 @@ mod plain_tests {
             "processor · gpu error",
             "processor · gpu failed",
             "gpu · glass, windows",
+            "gpu · glass, apps, flow",
+            "gpu · windows, flow",
         ]
         .map(str::to_owned);
         crate::panel::row_fits("Graphics", &all);

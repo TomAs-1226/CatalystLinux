@@ -263,25 +263,38 @@ pub enum HomeStyle {
     Grid,
     /// One large card at a time, turned through like a dial.
     Carousel,
+    /// Album covers in a cover flow, on the GPU when it helps (flow.rs).
+    Flow,
 }
 
 impl HomeStyle {
+    pub const ALL: [HomeStyle; 3] = [HomeStyle::Grid, HomeStyle::Carousel, HomeStyle::Flow];
+
     pub fn name(self) -> &'static str {
         match self {
             HomeStyle::Grid => "grid",
             HomeStyle::Carousel => "carousel",
+            HomeStyle::Flow => "flow",
         }
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
-        [HomeStyle::Grid, HomeStyle::Carousel].into_iter().find(|style| style.name() == name)
+        Self::ALL.into_iter().find(|style| style.name() == name)
     }
 
     pub fn next(self) -> Self {
-        match self {
-            HomeStyle::Grid => HomeStyle::Carousel,
-            HomeStyle::Carousel => HomeStyle::Grid,
-        }
+        self.step(1)
+    }
+
+    /// The style `step` along (−1 the one before), round and round.
+    pub fn step(self, step: i32) -> Self {
+        let at = Self::ALL.iter().position(|s| *s == self).unwrap_or(0) as i32;
+        Self::ALL[(at + step).rem_euclid(Self::ALL.len() as i32) as usize]
+    }
+
+    /// One app at a time in the middle (the carousel and the flow), not a grid.
+    pub fn one_at_a_time(self) -> bool {
+        self != HomeStyle::Grid
     }
 }
 
@@ -414,6 +427,11 @@ pub trait Screen {
 }
 
 const MESSAGE_SECONDS: f32 = 2.4;
+
+/// The most stops the pager shows a dot each for; past that, a track
+/// `SCRUB_W` wide with the place marked on it.
+const PAGER_DOTS: usize = 23;
+const SCRUB_W: f32 = 64.0;
 
 /// A link that was gone for less than this and came back is the same visit,
 /// not a robot arriving: a loose cable must not keep opening the Robot app.
@@ -2307,6 +2325,7 @@ impl Shell {
         }
         g.canvas.px.copy_from_slice(&self.background);
         g.pager = None;
+        g.pager_at = None;
         // A title runs up to the island as it rests. An island grown wider
         // than that (a message, push-to-talk) passes over the title, which
         // fades out under its glass and back, rather than being cut shorter.
@@ -2328,6 +2347,7 @@ impl Shell {
                     if rising && g.revealing() && !screen.full_screen() {
                         rise_in(g, &self.background, scratch);
                     }
+                    g.pager_at = None;
                     (g.canvas.px.clone(), g.pager.take().map(|(pages, current, _)| (pages, current)))
                 };
                 // The screen that was showing was drawn last frame. Keeping that
@@ -2379,6 +2399,7 @@ impl Shell {
                     rise_in(g, &self.background, &mut self.rise_scratch);
                 }
                 let dots = g.pager.take().map(|(pages, current, _)| (pages, current));
+                g.pager_at = None;
                 if let Some([_, over]) = &mut transition.pictures {
                     over.0.copy_from_slice(&g.canvas.px);
                     over.1 = dots;
@@ -2574,8 +2595,11 @@ impl Shell {
         let island_glass = bar.map_or(1.0, |b| 1.0 - b.strength);
         let mut shapes: Vec<GlassShape> = bar.into_iter().collect();
         shapes.push(GlassShape { strength: island_glass, ..GlassShape::new(island, island_h * 0.5, 0) });
+        // Too many stops for a dot each (Flow's apps): a short track, with
+        // the place marked on it as it moves.
+        let along = g.pager_at.take();
         let pager = g.pager.map(|(pages, current, ox)| {
-            let w = pages as f32 * 9.0 + 7.0;
+            let w = if pages > PAGER_DOTS { SCRUB_W } else { pages as f32 * 9.0 + 7.0 };
             (Rect::new((W - w) * 0.5 + ox, H - 13.0, w, 10.0), pages, current)
         });
         if let Some((platter, ..)) = pager {
@@ -2587,7 +2611,17 @@ impl Shell {
         g.glass(&shapes);
         self.spent.0 += before_glass - began;
         self.spent.1 += before_glass.elapsed();
-        if let Some((platter, pages, current)) = pager {
+        if let Some((platter, pages, current)) = pager.filter(|(_, pages, _)| *pages > PAGER_DOTS) {
+            // Faint dots along the track, and the place: Bezel's current dot,
+            // a short ink capsule, sliding along it.
+            let (x0, x1) = (platter.x + 8.0, platter.right() - 8.0);
+            for i in 0..7 {
+                g.canvas.circle(x0 + (x1 - x0) * i as f32 / 6.0, platter.cy(), 1.5, t.faint, 1.0 - hide);
+            }
+            let at = along.unwrap_or(current as f32 / (pages - 1).max(1) as f32).clamp(0.0, 1.0);
+            let thumb = Rect::new(x0 - 5.0 + (x1 - x0) * at, platter.cy() - 2.0, 10.0, 4.0);
+            g.canvas.rrect(thumb, 2.0, t.ink, 1.0 - hide);
+        } else if let Some((platter, pages, current)) = pager {
             for i in 0..pages {
                 let color = if i == current { t.ink } else { t.faint };
                 g.canvas.circle(platter.x + 8.0 + i as f32 * 9.0, platter.cy(), 2.0, color, 1.0 - hide);
@@ -2614,17 +2648,20 @@ impl Shell {
     }
 
     fn draw_screen(g: &mut Gfx, screen: &mut dyn Screen, robot: &Robot, _home: bool) {
-        let t = g.tokens;
-        let ty = g.ty;
-        // The title shares the island's line; it gives way to a wide island.
-        let bar_cy = 4.0 + g.island_h() * 0.5;
-        let room = g.title_room;
         if !screen.full_screen() {
-            let title = g.text.fit(&shown_title(g.theme, screen.title()), &ty.title, room.max(0.0));
-            g.text_alpha(PAD + 2.0, bar_cy, &title, ty.title, t.ink, g.title_alpha);
+            draw_title(g, screen.title());
         }
         screen.draw(g, robot);
     }
+}
+
+/// A screen's title, on the island's line; it gives way to a wide island.
+/// (A screen that paints the whole panel, Flow, draws it again over that.)
+pub(crate) fn draw_title(g: &mut Gfx, title: &str) {
+    let (t, ty) = (g.tokens, g.ty);
+    let bar_cy = 4.0 + g.island_h() * 0.5;
+    let title = g.text.fit(&shown_title(g.theme, title), &ty.title, g.title_room.max(0.0));
+    g.text_alpha(PAD + 2.0, bar_cy, &title, ty.title, t.ink, g.title_alpha);
 }
 
 /// A screen's title as the look writes it: Bezel's headings are lowercase,
@@ -3023,6 +3060,7 @@ impl Shell {
         (g.focus_static, g.pager) = (true, None);
         Self::draw_screen(g, screen, robot, home);
         let dots = g.pager.take().map(|(pages, current, _)| (pages, current));
+        g.pager_at = None;
         g.focus_static = false;
         (std::mem::replace(&mut g.canvas.px, shown), dots)
     }
@@ -4131,6 +4169,142 @@ pub(crate) mod tests {
         let Some(Transition { path: Path::Grow(from), .. }) = &shell.transition else { panic!("the app opens out of a card") };
         assert!((from.cx() - W * 0.5).abs() < 1.0, "the middle card: {from:?}");
         assert_eq!(shell.stack.last().unwrap().0.title(), "Health");
+    }
+
+    /// A shell on Home in Flow, at rest.
+    fn flow() -> Shell {
+        let mut shell = shell();
+        shell.settings.home = HomeStyle::Flow;
+        shell.apply_settings();
+        frames(&mut shell, 120, FRAME);
+        shell
+    }
+
+    /// Where Home's focused card is: the middle one, or the enlarged one.
+    fn spot(shell: &Shell) -> Rect {
+        shell.stack[0].0.spot().expect("Home shows its cards")
+    }
+
+    #[test]
+    fn flow_turns_the_card_over_opens_the_app_out_of_it_and_esc_steps_back() {
+        let mut shell = flow();
+        shell.key(Key::Right);
+        shell.key(Key::Right);
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(spot(&shell).w, 96.0, "the middle card");
+        // Enter: the card comes forward and turns over; nothing opens yet.
+        shell.key(Key::Enter);
+        frames(&mut shell, 3, FRAME);
+        assert!(shell.transition.is_none() && shell.stack.len() == 1);
+        frames(&mut shell, 60, FRAME);
+        let enlarged = spot(&shell);
+        assert_eq!((enlarged.w, enlarged.h), (236.0, 116.0), "turned over and grown");
+        // Enter again: the app opens out of the enlarged card.
+        open(&mut shell, FRAME);
+        let Some(Transition { path: Path::Grow(from), .. }) = &shell.transition else { panic!("the app grows out of the card") };
+        assert_eq!(*from, enlarged);
+        assert_eq!(shell.stack.last().unwrap().0.title(), "Logs");
+        frames(&mut shell, 60, FRAME);
+        // Esc in the app: it goes back into the card, which then turns back
+        // into the flow, still on Logs.
+        shell.key(Key::Back);
+        frames(&mut shell, 3, FRAME);
+        assert!(matches!(&shell.transition, Some(Transition { path: Path::Grow(into), .. }) if *into == enlarged), "back into the enlarged card");
+        frames(&mut shell, 90, FRAME);
+        assert_eq!(shell.stack.len(), 1);
+        assert_eq!(spot(&shell).w, 96.0, "turned back into the flow");
+        // Esc on an enlarged card turns it back, and the flow stays where it is.
+        shell.key(Key::Enter);
+        frames(&mut shell, 60, FRAME);
+        shell.key(Key::Back);
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(spot(&shell).w, 96.0);
+        shell.key(Key::Enter);
+        frames(&mut shell, 60, FRAME);
+        open(&mut shell, FRAME);
+        assert_eq!(shell.stack.last().unwrap().0.title(), "Logs", "the flow stayed on Logs");
+        frames(&mut shell, 60, FRAME);
+        shell.key(Key::Back);
+        frames(&mut shell, 120, FRAME);
+        // Esc in the flow: back to the first app, gliding there.
+        shell.key(Key::Back);
+        frames(&mut shell, 120, FRAME);
+        shell.key(Key::Enter);
+        frames(&mut shell, 60, FRAME);
+        open(&mut shell, FRAME);
+        assert_eq!(shell.stack.last().unwrap().0.title(), "Robot");
+        // The calm version: no glide, no turning, and the same steps.
+        let mut shell = flow();
+        shell.settings.calm = true;
+        shell.apply_settings();
+        shell.key(Key::Right);
+        shell.key(Key::Enter);
+        frames(&mut shell, 1, FRAME);
+        assert_eq!(spot(&shell).w, 236.0, "turned over at once");
+        shell.key(Key::Enter);
+        frames(&mut shell, 1, FRAME);
+        assert_eq!(title(&shell), "Health");
+    }
+
+    #[test]
+    fn over_the_flow_the_control_centre_spotlight_recents_and_a_robot_linking_all_work() {
+        // Up: the control centre comes down; Esc puts it away.
+        let mut shell = flow();
+        shell.key(Key::Up);
+        frames(&mut shell, 60, FRAME);
+        assert!(shell.control_open());
+        shell.key(Key::Back);
+        frames(&mut shell, 60, FRAME);
+        assert!(!shell.control_open());
+        // Space: Spotlight, over it; Esc back to the flow.
+        shell.key(Key::Char(' '));
+        frames(&mut shell, 60, FRAME);
+        assert!(shell.spotlight_open());
+        shell.key(Key::Back);
+        frames(&mut shell, 60, FRAME);
+        assert!(!shell.spotlight_open());
+        // An app left is among the recent apps, over the flow.
+        shell.key(Key::Enter);
+        frames(&mut shell, 30, FRAME);
+        open(&mut shell, FRAME);
+        frames(&mut shell, 60, FRAME);
+        shell.key(Key::Back);
+        frames(&mut shell, 90, FRAME);
+        shell.key(Key::Ctrl('\t'));
+        frames(&mut shell, 60, FRAME);
+        assert!(shell.recents_open());
+        shell.key(Key::Back);
+        frames(&mut shell, 60, FRAME);
+        // A robot linking while the flow is turned away from Robot: it turns
+        // there, then Robot opens out of the middle card.
+        let mut shell = waiting();
+        shell.settings.home = HomeStyle::Flow;
+        shell.apply_settings();
+        frames(&mut shell, 60, FRAME);
+        for _ in 0..4 {
+            shell.key(Key::Right);
+        }
+        frames(&mut shell, 120, FRAME);
+        shell.robot = Robot::demo();
+        frames(&mut shell, 120, FRAME);
+        let Some((screen, Path::Grow(from))) = shell.stack.last() else { panic!("out of the middle card") };
+        assert_eq!(screen.title(), "Robot");
+        assert_eq!((from.cx(), from.w), (W * 0.5, 96.0));
+        // And the page track: the place along it, as the flow turns.
+        let mut shell = flow();
+        shell.draw();
+        assert!(shell.places.pager.is_some_and(|p| (p.w - SCRUB_W).abs() < 0.5), "a track, not 39 dots");
+        // At rest nothing moves, so nothing is drawn and standby comes as ever.
+        shell.key(Key::Right);
+        frames(&mut shell, 90, FRAME);
+        assert!(!shell.tick(FRAME) && !shell.moving(), "the flow at rest asks for no frames");
+        let mut shell = flow();
+        shell.settings.screen_off = 30;
+        frames(&mut shell, 40 * 4, 0.25);
+        assert_eq!(shell.standby_state(), crate::standby::State::Off, "the screen dims and goes off over the flow");
+        shell.key(Key::Enter);
+        frames(&mut shell, 30, FRAME);
+        assert_eq!(spot(&shell).w, 96.0, "the key that wakes it does not also turn the card over");
     }
 
     /// A shell with no robot yet, settled on Home.

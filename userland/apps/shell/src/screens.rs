@@ -181,6 +181,8 @@ pub struct Home {
     lift: Vec<Animated>,
     pulse: Vec<Animated>,
     seen: Vec<Option<String>>,
+    /// Flow, the third style: album covers turning (flow.rs).
+    flow: crate::flow::Flow,
 }
 
 /// The focused tile lifts on Bezel's detent spring: a touch larger and
@@ -309,6 +311,7 @@ impl Home {
             lift: Vec::new(),
             pulse: Vec::new(),
             seen: Vec::new(),
+            flow: crate::flow::Flow::new(),
         }
         .arranged(&crate::shell::Arrangement::default())
     }
@@ -372,6 +375,7 @@ impl Home {
             self.focus = at;
             self.page.jump((at / self.per_page()) as f32);
             self.turn.jump(at as f32);
+            self.flow.place(at);
         }
     }
 
@@ -530,6 +534,8 @@ impl Home {
             self.page.set(0.0);
             self.turn.set(0.0);
         }
+        self.flow.close(calm);
+        self.flow.turn_to(&mut self.focus, 0, calm);
     }
 
     /// Keys on the glance page. Its pages run leftward from Home, two cards
@@ -580,10 +586,127 @@ impl Home {
         let from = match self.style {
             HomeStyle::Grid => self.rects.get(self.focus).copied(),
             HomeStyle::Carousel => Some(self.middle),
+            // Out of the enlarged card, carrying on its motion; or the middle one.
+            HomeStyle::Flow => Some(if self.flow.open_on(self.focus) { self.flow.enlarged() } else { self.flow.middle() }),
         };
         match from {
             Some(tile) if tile.w > 0.0 => Nav::Open(screen, tile),
             _ => Nav::Push(screen),
+        }
+    }
+
+    /// Keys on the flow: Left and Right turn it (held, faster and faster);
+    /// Tab, the page keys, Home and End move further.
+    fn flow_key(&mut self, key: Key, calm: bool) {
+        let count = self.count();
+        let moved = match key {
+            Key::Left => self.flow.step(&mut self.focus, count, -1, calm),
+            Key::Right => self.flow.step(&mut self.focus, count, 1, calm),
+            Key::Tab => {
+                let to = if self.focus + 1 < count { self.focus + 1 } else { 0 };
+                self.flow.close(calm);
+                self.flow.turn_to(&mut self.focus, to, calm);
+                crate::flow::Moved::Stay
+            }
+            Key::PageDown | Key::PageUp | Key::Home | Key::End => {
+                let last = count.saturating_sub(1);
+                let to = match key {
+                    Key::PageDown => (self.focus + 6).min(last),
+                    Key::PageUp => self.focus.saturating_sub(6),
+                    Key::Home => 0,
+                    _ => last,
+                };
+                self.flow.close(calm);
+                self.flow.turn_to(&mut self.focus, to, calm);
+                crate::flow::Moved::Stay
+            }
+            _ => crate::flow::Moved::Stay,
+        };
+        if moved == crate::flow::Moved::Glance {
+            self.show_glance(true, calm);
+        }
+        self.turn.jump(self.focus as f32);
+        self.page.jump((self.focus / self.per_page()) as f32);
+    }
+
+    /// Flow's frame: the cards, made for these apps; the enlarged one's
+    /// back; then the title again over the ground, and what the card in
+    /// the middle says, under it.
+    fn draw_flow(&mut self, g: &mut Gfx, robot: &Robot) {
+        let count = self.count();
+        // Home in front again after the app opened out of the enlarged card
+        // went back into it: now the card turns back into the flow.
+        if self.flow.close_on_return && !g.focus_static {
+            self.flow.close_on_return = false;
+            self.flow.close(g.calm);
+            g.started_moving();
+        }
+        let specs: Vec<crate::flow::art::CardSpec> = (0..count)
+            .map(|i| {
+                let (icon, name) = self.icon_and_name(i);
+                let hue = crate::flow::hue_of(&name, &icon);
+                crate::flow::art::CardSpec { icon, name, hue }
+            })
+            .collect();
+        self.flow.make_cards(g, &specs);
+        if self.flow.waiting() {
+            // Painting the covers: look again next frame.
+            g.started_moving();
+        } else if std::mem::take(&mut self.flow.arrive_when_ready) {
+            // Here now: they sweep in.
+            self.flow.arrive(self.focus);
+            g.started_moving();
+        }
+        if let Some(at) = self.flow.opened().filter(|at| *at < count) {
+            let (status, attention) = self.status(at, robot);
+            let about = match self.tiles.get(at) {
+                Some(Tile::External(i)) => self.external.get(*i).map(|a| a.about.clone()).unwrap_or_default(),
+                _ => crate::flow::about(&specs[at].name).unwrap_or_default().to_owned(),
+            };
+            let face = crate::flow::art::FaceSpec {
+                card: specs[at].clone(),
+                about,
+                reading: split_reading(&status).map(|(v, u)| (v.to_owned(), u.to_owned())),
+                status,
+                attention: attention.map(|s| severity_color(g, s)),
+                hint: "enter · open".into(),
+            };
+            self.flow.make_face(g, &face);
+        }
+        let colours: Vec<Color> = specs.iter().map(|s| crate::flow::art::colours(s.hue).3).collect();
+        let press = if self.on_glance() { 0.0 } else { g.press() };
+        let mut scene = self.flow.scene(g, count, self.focus, &colours, press);
+        if self.flow.waiting() {
+            scene.cards.clear();
+        }
+        g.flow(&scene, self.flow.atlases());
+        self.middle = self.flow.middle();
+        // The title, again over the ground the flow painted (only there).
+        let ox = g.ox;
+        g.ox = 0.0;
+        g.canvas.set_clip(Rect::new(scene.cols.0 as f32, 0.0, (scene.cols.1 - scene.cols.0) as f32, H));
+        crate::shell::draw_title(g, self.title());
+        g.canvas.clear_clip();
+        g.ox = ox;
+        // What the card in the middle says, under its reflection: while the
+        // flow is at rest on it, and not while one is enlarged.
+        let (t, ty) = (g.tokens, g.ty);
+        let off = (self.flow.pos.value() - self.focus as f32).abs();
+        let speed = self.flow.pos.velocity().abs();
+        let shown = (1.0 - off * 2.0).clamp(0.0, 1.0) * (1.0 - 3.0 * self.flow.openness()).clamp(0.0, 1.0) * (1.0 - speed / 6.0).clamp(0.0, 1.0);
+        if shown > 0.01 && count > 0 {
+            let (status, attention) = self.status(self.focus, robot);
+            let status = g.text.fit(&status, &ty.caption, W - 4.0 * PAD);
+            // Clear of the page track at the bottom (its platter starts 13 px up).
+            let cy = (scene.cy + crate::flow::CARD as f32 * 0.5 + 23.0).min(H - 16.0 - ty.caption.size * 0.5);
+            let w = g.measure(&status, ty.caption);
+            let dot = if attention.is_some() { 10.0 } else { 0.0 };
+            let x = (W - w - dot) * 0.5;
+            if let Some(severity) = attention {
+                let c = severity_color(g, severity);
+                g.canvas.circle(x + 3.0 + g.ox, cy, 3.0, c, shown);
+            }
+            g.text_alpha(x + dot, cy, &status, ty.caption, t.dim, shown);
         }
     }
 
@@ -884,6 +1007,7 @@ impl Screen for Home {
         match self.style {
             HomeStyle::Grid => self.rects.get(self.focus).copied().filter(|r| r.w > 0.0),
             HomeStyle::Carousel => Some(self.middle).filter(|r| r.w > 0.0),
+            HomeStyle::Flow => Some(if self.flow.open_on(self.focus) { self.flow.enlarged() } else { self.flow.middle() }).filter(|r| r.w > 0.0),
         }
     }
 
@@ -901,7 +1025,7 @@ impl Screen for Home {
         // The style in the settings, which a draw may not have caught up with yet.
         let style = cx.settings.home;
         // Up from the top of Home pulls the control centre down.
-        let at_top = self.on_glance() || style == HomeStyle::Carousel || (self.focus % self.per_page()) < self.columns;
+        let at_top = self.on_glance() || style.one_at_a_time() || (self.focus % self.per_page()) < self.columns;
         if key == Key::Up && at_top {
             return Nav::Control;
         }
@@ -909,6 +1033,12 @@ impl Screen for Home {
         // bare letters stay arrows here.
         if key == Key::Char(' ') || key == Key::Char('/') {
             return Nav::Spotlight;
+        }
+        // Flow: Esc first turns an enlarged card back, the flow staying where it is.
+        if key == Key::Back && style == HomeStyle::Flow && !self.on_glance() && self.flow.is_open() {
+            self.opening = None;
+            self.flow.close(calm);
+            return Nav::Stay;
         }
         // Esc anywhere on Home: back to its start, the first app of the first
         // page (or card), gliding there as a page turn does.
@@ -924,6 +1054,16 @@ impl Screen for Home {
         if key != Key::Enter {
             self.opening = None;
         }
+        // Flow: Enter first brings the card forward and turns it over; only
+        // Enter on the card turned over opens the app.
+        if key == Key::Enter && style == HomeStyle::Flow && !self.flow.open_on(self.focus) {
+            self.flow.enlarge(self.focus, calm);
+            return Nav::Stay;
+        }
+        if style == HomeStyle::Flow && key != Key::Enter {
+            self.flow_key(key, calm);
+            return Nav::Stay;
+        }
         if key == Key::Enter {
             // Pressed in for an instant, then the app grows out of the tile.
             // (At once in the calm version, and while a window is still on
@@ -936,7 +1076,7 @@ impl Screen for Home {
         }
         let pushed = match style {
             HomeStyle::Grid => self.grid_key(key, calm),
-            HomeStyle::Carousel => self.carousel_key(key, calm),
+            HomeStyle::Carousel | HomeStyle::Flow => self.carousel_key(key, calm),
         };
         let (page, turn) = ((self.focus / self.per_page()) as f32, self.focus as f32);
         if calm {
@@ -966,6 +1106,7 @@ impl Screen for Home {
         let (at, stops) = match self.style {
             HomeStyle::Grid => (self.page.value(), self.count().div_ceil(self.per_page()) as f32),
             HomeStyle::Carousel => (self.turn.value(), self.count() as f32),
+            HomeStyle::Flow => (self.flow.pos.value(), self.count() as f32),
         };
         let place = at - self.glance.value() + glance_pages;
         Some((place / (glance_pages + stops - 1.0).max(1.0)).clamp(0.0, 1.0))
@@ -985,6 +1126,8 @@ impl Screen for Home {
         let Some(at) = self.tiles.iter().position(|t| matches!(t, Tile::Builtin(i) if APPS[*i].name == "Robot")) else {
             return Nav::Push(robot());
         };
+        // An enlarged card in the flow turns back first.
+        self.flow.close(calm);
         if self.focus != at {
             // Turn to Robot's tile first, so the app comes out of it and
             // goes back into it.
@@ -997,14 +1140,17 @@ impl Screen for Home {
                 self.page.set(page);
                 self.turn.set(turn);
             }
+            self.flow.turn_to(&mut self.focus, at, calm);
             return Nav::Stay;
         }
-        if !(self.page.is_settled() && self.turn.is_settled() && self.glance.is_settled()) {
+        let flow_still = self.style != HomeStyle::Flow || self.flow.settled();
+        if !(self.page.is_settled() && self.turn.is_settled() && self.glance.is_settled() && flow_still) {
             return Nav::Stay;
         }
         let from = match self.style {
             HomeStyle::Grid => self.rects.get(at).copied().unwrap_or_default(),
             HomeStyle::Carousel => self.middle,
+            HomeStyle::Flow => self.flow.middle(),
         };
         // Not drawn there yet: ask again after the next frame.
         let on_screen = from.w > 0.0 && from.x >= 0.0 && from.right() <= W;
@@ -1027,6 +1173,12 @@ impl Screen for Home {
             self.focus = focus;
             self.page.jump((focus / self.per_page()) as f32);
             self.turn.jump(focus as f32);
+            self.flow.place(focus);
+        }
+        // Back from an app opened out of an enlarged card: once the app has
+        // gone back into it, the card turns back into the flow.
+        if self.style == HomeStyle::Flow && self.flow.is_open() {
+            self.flow.close_on_return = true;
         }
     }
 
@@ -1043,6 +1195,9 @@ impl Screen for Home {
     fn tick(&mut self, dt: f32) -> bool {
         // Each spring must be advanced, so no short-circuit.
         let mut moving = self.page.tick(dt) | self.turn.tick(dt) | self.glance.tick(dt);
+        if self.style == HomeStyle::Flow {
+            moving |= self.flow.tick(dt, self.focus);
+        }
         if let Some(pressed) = &mut self.opening {
             *pressed += dt.max(0.001);
             moving = true;
@@ -1081,6 +1236,7 @@ impl Screen for Home {
         if columns != self.columns || g.home != self.style {
             // A different Home: everything is where the focus is, at once.
             let first = self.arrived == 0.0;
+            let was = self.style;
             self.columns = columns;
             self.style = g.home;
             self.page.jump((self.focus / self.per_page()) as f32);
@@ -1093,6 +1249,17 @@ impl Screen for Home {
                     self.turn.set(self.focus as f32);
                     g.started_moving();
                 }
+            }
+            if self.style == HomeStyle::Flow && was != HomeStyle::Flow {
+                // Nor here: arriving, the covers sweep in from the right.
+                self.arrived = CASCADE_OVER;
+                self.flow.close(true);
+                self.flow.place(self.focus);
+                self.flow.arrive_when_ready = first && !g.calm && !g.focus_static;
+            }
+            if was == HomeStyle::Flow && self.style != HomeStyle::Flow {
+                // Its pictures are let go.
+                self.flow.forget();
             }
         }
         // The pager counts the glance pages first (the farthest leftmost),
@@ -1107,15 +1274,21 @@ impl Screen for Home {
         self.card = self.card.min(g.glance.len().saturating_sub(1));
         let stops = match self.style {
             HomeStyle::Grid => self.count().div_ceil(self.per_page()),
-            HomeStyle::Carousel => self.count(),
+            HomeStyle::Carousel | HomeStyle::Flow => self.count(),
         };
         let at = match self.style {
             HomeStyle::Grid => self.focus / self.per_page(),
-            HomeStyle::Carousel => self.focus,
+            HomeStyle::Carousel | HomeStyle::Flow => self.focus,
         };
+        let current = if self.on_glance() { glance_pages - self.glance_page } else { glance_pages + at };
         if stops + glance_pages < 24 {
-            let current = if self.on_glance() { glance_pages - self.glance_page } else { glance_pages + at };
             g.pager = Some((stops + glance_pages, current, g.ox));
+        } else if self.style == HomeStyle::Flow {
+            // Too many for dots: the flow's place along its track, as it moves.
+            let total = (stops + glance_pages).saturating_sub(1).max(1) as f32;
+            let place = glance_pages as f32 - self.glance.value() + crate::flow::rubber(self.flow.pos.value(), self.count()).clamp(0.0, (stops - 1) as f32);
+            g.pager = Some((stops + glance_pages, current, g.ox));
+            g.pager_at = Some((place / total).clamp(0.0, 1.0));
         }
         // The apps and the glance pages are one strip: the glance pages to the left.
         let base = g.ox;
@@ -1125,6 +1298,7 @@ impl Screen for Home {
             match self.style {
                 HomeStyle::Grid => self.draw_grid(g, robot),
                 HomeStyle::Carousel => self.draw_carousel(g, robot),
+                HomeStyle::Flow => self.draw_flow(g, robot),
             }
         }
         for page in 1..=glance_pages {
@@ -2133,6 +2307,39 @@ fn arrange_items(apps: &[String], arrangement: &crate::shell::Arrangement) -> Ve
     at.into_iter().map(Item::AppTile).collect()
 }
 
+/// A Home style as a small picture of itself in `r` (Settings › Home): the
+/// grid's tiles, the carousel's three cards, the flow's turned covers. The
+/// chosen one is in ink and the signal, and ringed; the others are faint.
+fn home_swatch(g: &mut Gfx, style: HomeStyle, r: Rect, chosen: bool) {
+    let t = g.tokens;
+    let (ink, accent) = if chosen { (t.ink, t.signal) } else { (t.faint, t.faint) };
+    let r = r.offset(g.ox, 0.0);
+    match style {
+        HomeStyle::Grid => {
+            let (w, h) = ((r.w - 4.0) / 3.0, (r.h - 2.0) / 2.0);
+            for i in 0..6 {
+                let cell = Rect::new(r.x + (i % 3) as f32 * (w + 2.0), r.y + (i / 3) as f32 * (h + 2.0), w, h);
+                g.canvas.rrect(cell, 1.5, if i == 0 { accent } else { ink }, if i == 0 { 1.0 } else { 0.55 });
+            }
+        }
+        HomeStyle::Carousel => {
+            let side = Rect::new(r.x, r.y + 2.5, 4.0, r.h - 5.0);
+            g.canvas.rrect(side, 1.5, ink, 0.55);
+            g.canvas.rrect(side.offset(r.w - 4.0, 0.0), 1.5, ink, 0.55);
+            g.canvas.rrect(Rect::new(r.x + 6.0, r.y, r.w - 12.0, r.h), 2.0, accent, 1.0);
+        }
+        HomeStyle::Flow => {
+            let ox = g.ox;
+            g.ox = 0.0;
+            crate::flow::swatch(g, r, ink, accent);
+            g.ox = ox;
+        }
+    }
+    if chosen {
+        g.canvas.stroke_rrect(r.inset(-2.5), 4.0, 1.0, t.ink, 0.9);
+    }
+}
+
 /// The hue of "your own colour" nearest a named accent's own, to start from.
 fn nearest_hue(accent: bezel::Accent) -> u8 {
     let c = accent.seed();
@@ -2562,7 +2769,7 @@ impl SettingsApp {
                 let at = all.iter().position(|a| *a == cx.settings.accent).unwrap_or(0) as i32;
                 cx.settings.accent = all[(at + step).rem_euclid(all.len() as i32) as usize];
             }
-            HomeScreen => cx.settings.home = cx.settings.home.next(),
+            HomeScreen => cx.settings.home = cx.settings.home.step(step),
             Columns => cx.settings.columns = if cx.settings.columns == 3 { 2 } else { 3 },
             ClockFormat => cx.settings.clock24 = !cx.settings.clock24,
             Seconds => cx.settings.seconds = !cx.settings.seconds,
@@ -2913,6 +3120,18 @@ impl Screen for SettingsApp {
                     if self.apps.get(j).is_some_and(|n| g.arrangement.favourites.contains(n)) {
                         let value_w = g.measure(&value, g.ty.label);
                         g.icon("star", true, r.right() - 10.0 - value_w - 10.0, r.cy(), 12.0, t.ink);
+                    }
+                }
+                // The three Homes as pictures of themselves, the chosen one
+                // lit and ringed, its name beside them.
+                Item::HomeScreen => {
+                    g.row(r, &name, &value, t.ink, focused);
+                    let value_w = g.measure(&value, if g.theme == crate::look::Theme::Bezel { g.ty.body } else { g.ty.label });
+                    let (cw, gap) = (22.0, 5.0);
+                    let styles = HomeStyle::ALL;
+                    for (n, style) in styles.iter().enumerate() {
+                        let x = r.right() - 10.0 - value_w - 10.0 - (styles.len() - n) as f32 * (cw + gap) + gap;
+                        home_swatch(g, *style, Rect::new(x, r.cy() - 7.0, cw, 14.0), *style == g.home);
                     }
                 }
                 // The accents themselves, the chosen one ringed.
@@ -3296,9 +3515,9 @@ mod tests {
                 screen.draw(g, &robot);
             }
         };
-        // Home, both styles, every page of it.
+        // Home, every style, every page of it.
         let mut home = Home::new();
-        for style in [crate::shell::HomeStyle::Grid, crate::shell::HomeStyle::Carousel] {
+        for style in crate::shell::HomeStyle::ALL {
             home.style = style;
             for focus in 0..home.count() {
                 home.focus = focus;
@@ -3328,7 +3547,7 @@ mod tests {
     fn esc_on_home_glides_back_to_the_first_app_of_the_first_page() {
         crate::shell::tests::sandbox();
         let (mut robot, mut settings, mut say) = (Robot::demo(), crate::shell::Settings::default(), None);
-        for style in [crate::shell::HomeStyle::Grid, crate::shell::HomeStyle::Carousel] {
+        for style in crate::shell::HomeStyle::ALL {
             settings.home = style;
             settings.calm = false;
             let mut home = Home::new();
@@ -3338,6 +3557,7 @@ mod tests {
             let along = |home: &Home| match style {
                 crate::shell::HomeStyle::Grid => home.page.value(),
                 crate::shell::HomeStyle::Carousel => home.turn.value(),
+                crate::shell::HomeStyle::Flow => home.flow.pos.value(),
             };
             let settle = |home: &mut Home| {
                 for _ in 0..240 {
@@ -3460,5 +3680,83 @@ mod tests {
         let arrangement = crate::shell::Arrangement { order: vec!["C".into(), "A".into(), "gone".into()], hidden: vec![], favourites: vec!["D".into()] };
         let items = arrange_items(&apps, &arrangement);
         assert!(items == vec![Item::AppTile(3), Item::AppTile(2), Item::AppTile(0), Item::AppTile(1)]);
+    }
+
+    #[test]
+    fn every_app_has_a_card_in_the_flow_one_of_your_own_and_the_catalogues_too() {
+        crate::shell::tests::sandbox();
+        let robot = Robot::demo();
+        let mut g = Gfx::new(bezel::Tokens::dark());
+        g.home = HomeStyle::Flow;
+        let mut home = Home::new();
+        // An app of your own (or from the catalogue or the store) beside the built-in ones.
+        home.external.push(crate::apps::App {
+            name: "Sudoku".into(),
+            icon: "grid_on".into(),
+            about: "one answer, three levels".into(),
+            run: "./catalyst-sudoku".into(),
+            dir: std::env::temp_dir(),
+            kind: crate::apps::Kind::Own,
+            id: "sudoku".into(),
+            version: "1.0.0".into(),
+            permissions: Vec::new(),
+        });
+        home.arrange(&crate::shell::Arrangement::default());
+        home.draw(&mut g, &robot);
+        let atlas = home.flow.cards.as_ref().expect("the cards are made");
+        let count = home.count();
+        assert_eq!(home.icon_and_name(count - 1).1, "Sudoku");
+        // Each has its picture: opaque in its middle, clear at its corner.
+        for i in 0..count {
+            let (x, y, _) = atlas.level(i, 0);
+            let at = |dx: usize, dy: usize| atlas.texel(x + 1 + dx, y + 1 + dy);
+            assert_eq!(at(48, 48) >> 24, 255, "{}'s card", home.icon_and_name(i).1);
+            assert_eq!(at(0, 0) >> 24, 0, "{}'s rounded corner", home.icon_and_name(i).1);
+        }
+        // Turned over, the app of your own says what it does in its own words.
+        home.focus = count - 1;
+        home.flow.place(count - 1);
+        home.flow.enlarge(count - 1, true);
+        home.draw(&mut g, &robot);
+        assert!(home.flow.face.is_some());
+        assert!(g.missing_icons().is_empty(), "{:?}", g.missing_icons());
+    }
+
+    #[test]
+    fn settings_offers_flow_beside_grid_and_carousel() {
+        crate::shell::tests::sandbox();
+        assert_eq!(HomeStyle::from_name("flow"), Some(HomeStyle::Flow));
+        assert_eq!(HomeStyle::Grid.step(1), HomeStyle::Carousel);
+        assert_eq!(HomeStyle::Carousel.step(1), HomeStyle::Flow);
+        assert_eq!(HomeStyle::Flow.step(1), HomeStyle::Grid);
+        assert_eq!(HomeStyle::Grid.step(-1), HomeStyle::Flow, "Left goes the other way round");
+        let mut page = SettingsApp::section(Item::HomeSection).unwrap();
+        assert!(page.items[0] == Item::HomeScreen);
+        let (mut robot, mut settings, mut say) = (Robot::demo(), crate::shell::Settings::default(), None);
+        let mut cx = Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true };
+        page.key(Key::Right, &mut cx);
+        page.key(Key::Right, &mut cx);
+        assert_eq!(cx.settings.home, HomeStyle::Flow);
+        page.key(Key::Left, &mut cx);
+        assert_eq!(cx.settings.home, HomeStyle::Carousel);
+        // Each style's name fits its row beside the three pictures, at every
+        // size, in both looks (the pictures take 3 × 27 px and a gap).
+        let mut g = Gfx::new(bezel::Tokens::dark());
+        let width = W - 2.0 * PAD - 5.0;
+        for theme in [crate::look::Theme::Catalyst, crate::look::Theme::Bezel] {
+            g.theme = theme;
+            for size in [TextSize::Compact, TextSize::Standard, TextSize::Large] {
+                g.set_text_size(size);
+                let ty = g.ty;
+                let (name_w, value_style) = match theme {
+                    crate::look::Theme::Bezel => (g.measure("home screen", ty.label), ty.body),
+                    _ => (g.measure("Home screen", ty.body), ty.label),
+                };
+                for style in HomeStyle::ALL {
+                    let room = name_w + 30.0 + g.measure(style.name(), value_style) + 10.0 + 3.0 * 27.0;
+                    assert!(room <= width, "{style:?} at {size:?} in {theme:?}: {room} of {width}");
+                }
+            }
+        }
     }
 }
