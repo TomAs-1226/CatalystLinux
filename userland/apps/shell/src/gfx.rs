@@ -104,6 +104,8 @@ pub struct Gfx {
     pub canvas: Canvas,
     pub text: Text,
     pub icons: Icons,
+    /// The objects rendered beforehand in three dimensions (`object3d`).
+    pub objects: crate::object3d::Objects,
     /// Icon names asked for that were never built in: drawn as nothing, so
     /// kept to be caught (the gallery and the tests fail on any).
     missing_icons: std::collections::BTreeSet<String>,
@@ -307,6 +309,7 @@ impl Gfx {
             canvas: Canvas::new(W as i32, H as i32),
             text: Text::new(),
             icons: Icons::new(),
+            objects: crate::object3d::Objects::shipped(),
             missing_icons: Default::default(),
             glass: Glass::new(),
             tokens,
@@ -482,6 +485,16 @@ impl Gfx {
     /// The icon names asked for that are not built in.
     pub fn missing_icons(&self) -> &std::collections::BTreeSet<String> {
         &self.missing_icons
+    }
+
+    /// The robot in three dimensions (`object3d`), centred on (`cx`, `cy`),
+    /// turned and posed as `view` says, `scale` times the size it was
+    /// rendered at, its parts and the whole as `looks` says. False if there
+    /// is no such object, so the caller can draw something else.
+    #[allow(clippy::too_many_arguments)]
+    pub fn object_looking(&mut self, name: &str, size: &str, cx: f32, cy: f32, view: crate::object3d::View, scale: f32, alpha: f32, looks: &crate::object3d::Looks) -> bool {
+        let fault = self.fault();
+        self.objects.draw_looking(&mut self.canvas, &self.tokens, fault, name, size, cx + self.ox, cy, view, scale, alpha, looks)
     }
 
     /// Drawing set something moving: frames should follow at once.

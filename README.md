@@ -32,6 +32,8 @@ windows that grow out of tiles whenever it is there.
 | `shots/flasher/` | Catalyst Flasher's screens (`catalyst-flasher --shot`). |
 | `shots/motion/` | Each kind of motion as a strip of frames 50 ms apart and an animated PNG, and the Home settings (`--motion`). |
 | `shots/vm/` | The same shell as the ARM build on the image's own kernel, in the emulator. |
+| `tools/bake3d/` | The Robot app's robot in 3D: Numbers' bake, the packer, and a team's own from its CAD (see *The robot in three dimensions*). |
+| `shots/3d-preview/` | The robot in 3D to look at before it ships: `index.html`. |
 
 ## Decisions
 
@@ -164,7 +166,10 @@ accelerates, since it is thrown rather than placed. Any key skips it.
 The first start continues into **setup**, which owns the whole panel the way
 a computer's own setup does: no island, no status, the brand's ground, each
 page's title, words and rows rising in one after another from the side the
-page came from. "Hi." offers three ways on:
+page came from. Pages of choices already made (keys, choices, power, the
+look, the hardware found) start on Next, so Enter goes straight on and Up
+goes into them; once Wi-Fi joins, its page says so a moment and setup
+carries on by itself. "Hi." offers three ways on:
 
 - **Set up here**: Wi-Fi first (its radio is switched on as the page
   arrives, so the networks are listed by the time they are asked for, and
@@ -942,6 +947,127 @@ The boot configuration turns on the VideoCore's kernel driver
 The panel is found by its size, so the second graphics device this brings does
 not confuse it. `scripts/test-arm.sh` runs the GPU test through Mesa's
 software renderer under emulation, which stands in for the VideoCore there.
+
+## The robot in three dimensions
+
+Only the Robot app's robot is in three dimensions; every other icon, page
+and empty page is flat. The handheld renders nothing in 3D: it lays down
+pictures rendered beforehand, posed and coloured by what the robot says
+(`apps/shell/src/object3d.rs`, `robot3d.rs`).
+
+The robot is **Numbers**, FRC 5805's, from the team website's own model
+(`TomAs-1226/smblyrequired`, `public/models/robot.glb` and its manifest
+`robot.json`); its name on the page is the robot's own
+(`Robot/Identity/Name`). It stands on its stage at the left of the Robot
+page:
+
+- **Its mechanisms move as the robot's do.** The intake's carriage slides
+  out and in (`/Catalyst/Deploy/LengthInches`, stowed at 5.0, out at 11.8)
+  and the hood rises and falls (`/Catalyst/Hood/AngleDegrees`; until it is
+  homed, at rest). Each is shown at the nearest step it was rendered at (the
+  intake stowed or out, the hood at 11°, 25° and 40°) and moved between
+  them on a spring, the two steps blended as it goes. The
+  flywheel shines as it spins (`/Catalyst/Shooter/VelocityRPS`): bands of
+  light run across it, quicker as it spins up. The swerve modules are not
+  steered in the picture: at 112 pixels a module is a few pixels across, and
+  each angle would be another set of views.
+- **Each part shows what the robot says of it** (drivetrain, intake,
+  hopper, shooter, flywheel, hood, bumpers, frame): running hot or warned
+  about, it glows amber; in fault, red; at work, a faint ice. The bumpers
+  take the alliance's red or blue (the accent until it is known). Disabled,
+  the robot is dimmed; with no link, grey and faded. Which part is which
+  comes from the subsystem's name a health check, a temperature or a
+  current is published under: "Hood" the hood, "Deploy" and "Intake" the
+  intake, "Conveyor" the hopper, "Feeder" and "Shooter" the shooter.
+- **Around it**: its mode (disabled, auto, teleop, test, e-stopped) on a
+  chip at the top, read from the Driver Station's control bits
+  (`/FMSInfo/FMSControlData`, else Catalyst's own opmode), its link's round
+  trip beside it, the battery large at the bottom (amber under 11.8 V, red
+  under 11 V or browned out) and what needs attention beside the battery.
+- **It turns slowly at rest**; when a part turns warm or faults it turns to
+  show it, and when a mechanism moves it turns to show it three quarters on
+  (a slide seen head-on hardly moves); it holds there six seconds and turns
+  on. The calm version keeps it still: the picture changes, nothing moves.
+
+**How it is made.** `tools/bake3d/numbers.sh` fetches the model and its
+manifest from the website at a pinned commit, checked by their SHA-256
+(5 MB, kept out of this repository), into `tools/bake3d/numbers/`. Then
+`blender -b --factory-startup -P tools/bake3d/bake.py -- OUT robot`
+(Blender 5.2, Cycles) renders it every 4° all the way round, under Bezel's
+one light resting above and to the left (an area light fixed to the
+camera), with soft shadows and ambient occlusion, in neutral greys that say
+what a surface is rather than its colour, in each of its six poses (the
+intake's two steps by the hood's three, posed as the website's own code
+poses them). The CAD has no bumpers, so they are added at the size the
+manifest gives; its polycarbonate is left out, as clear. Each view is kept
+as planes: lightness, which parts take a tint, cover, shadow, and which
+part each pixel is; colour is put on at run time, Numbers' anodised blue as
+its own (`#0057b8`), the rest from the palette (dark, light, any accent,
+your own colour). `pack.py` keeps the rest pose whole and every other pose
+only where it differs from it: a patch of the 8-pixel tiles it changes, each
+byte kept as its difference from what it is laid over, so what a tile kept
+deflates to almost nothing. Two mechanisms moved are their two patches
+together, then a patch of the tiles where they meet.
+`tools/bake3d/previews.sh BAKED` packs a bake and runs `catalyst-shell
+--objects shots/3d-preview` for the previews (`shots/3d-preview/index.html`).
+
+**What it costs.** The pack is 2.5 MB in the program file, read in place:
+Numbers alone, 1.1 MB of it the rest pose's 90 views and 1.4 MB the
+patches for its other five poses (six whole turns would be about 6.6 MB).
+Frames are decoded and coloured only when first wanted, into a cache of at
+most 384 kB, the least recently used let go first: the Robot page turning
+holds about 370 kB and decodes two or three frames a second; every other
+page none. On the development PC a frame takes 230 µs to decode and colour
+at rest and 300 µs posed (its patches laid over it), and 45 µs to draw
+while it turns (two views blended): about twenty times that on the
+handheld by the simulator's factor, which only the device can confirm.
+
+### Your own robot in the Robot app
+
+The Robot app shows Numbers until a team installs its own robot, made
+from its CAD with one command (its mechanisms stay as the CAD has them:
+posing them takes the steps Numbers' bake renders, `numbers()` in
+`tools/bake3d/models.py`):
+
+    tools/bake3d/robot.sh ROBOT.glb [robot.map] [robot3d.pack]
+
+and copied to the handheld as `/data/catalyst/robot3d.pack` (with SSH
+switched on: `scp robot3d.pack root@<handheld>:/data/catalyst/`).
+The Robot app reads it the next time it opens; a newer file replaces it. No
+system update is needed, and an update leaves it where it is.
+
+1. **Export from Onshape.** Open the robot's **Assembly** tab (not a Part
+   Studio), right-click the tab and choose **Export**. Either:
+   - **GLTF** (best: every part keeps its name and colour). Tick **Export
+     models oriented Y axis up**; leave **Export unique parts as individual
+     files** and **Include hidden instances in export** unticked;
+     **Resolution: Medium** (Coarse is enough for a 112-pixel picture);
+     **Compress** off; **Options: Download**. Or
+   - **STEP**: leave **Export models oriented Y axis up** and **Export unique
+     parts as individual files** unticked; **Version**: use the latest;
+     **Preprocessing: Remove small entities only (basic)**; units as they
+     come; **Options: Download**. A STEP is read with gmsh, which `robot.sh`
+     sets up in `tools/bake3d/.venv` the first time; screws and other parts
+     too small to see are left out before it is meshed.
+2. **Say which part is which.** Copy `tools/bake3d/robot.map` beside the
+   model. Each line names a part of the robot (drivetrain, intake, elevator,
+   shooter, bumpers, frame, or one of your own, such as climber) and globs
+   matched against the CAD's names: `shooter = *shooter* *flywheel*`. A
+   solid goes by the outermost assembly it sits in that a line matches (the
+   robot's own top assembly passed over), else the next one in, down to its
+   own name: a "Drive Pulley" in the Intake is the intake's. Where two lines
+   match one name the first wins; what matches nothing is the frame. `hide =
+   *screw* *washer* …` leaves fasteners out, matched against a solid's own
+   name only; `turn = 90` turns the robot so its front (the intake side)
+   faces the camera. Naming the subassemblies in Onshape after what they are
+   (Swerve Module, Intake, Elevator) makes this a few lines.
+3. **Run it.** `robot.sh` imports the model, leaves out what is too small to
+   see (under 1.2% of the robot across) and whatever `hide` names, reduces
+   the rest to about 250,000 triangles, renders it all the way round with
+   its parts marked (90 views, as the shell's own robot), and packs it: about
+   a minute and a half and 1 MB for a simple robot, longer for a large
+   assembly. It prints how many solids went to each part: a part with none
+   means a glob to fix.
 
 ## External apps
 

@@ -53,6 +53,8 @@ mod deep;
 mod device;
 mod faces;
 mod files;
+#[cfg(not(target_arch = "aarch64"))]
+mod gallery3d;
 mod gfx;
 mod git;
 mod github;
@@ -79,6 +81,7 @@ mod monitor;
 mod music;
 mod nettools;
 mod notes;
+mod object3d;
 mod offline;
 
 // The tests count each thread's heap, for what the offline answers cost.
@@ -96,6 +99,7 @@ mod recents;
 mod reminders;
 mod remote;
 mod robot;
+mod robot3d;
 mod schedule;
 mod screens;
 mod screenshot;
@@ -445,6 +449,10 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--motion") {
         return motion(std::path::Path::new(&dir));
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--objects") {
+        return gallery3d::run(std::path::Path::new(&dir));
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(path) = value("--start-movie") {

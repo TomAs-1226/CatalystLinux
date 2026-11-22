@@ -5,3 +5,6 @@
 /scripts/__pycache__/
 /.claude/worktrees/
 /catalyst-apps/dist/
+/tools/bake3d/__pycache__/
+/tools/bake3d/.venv/
+/tools/bake3d/numbers/

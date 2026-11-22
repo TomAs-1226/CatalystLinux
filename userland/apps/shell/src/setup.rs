@@ -110,6 +110,9 @@ const CHOICES: [(&str, &str); 4] = [
 
 /// How long "just a moment" stays, then "all set", before Home.
 const WORKING: f32 = 1.5;
+/// After Wi-Fi joins, how long its page stays to say so before setup
+/// carries on by itself.
+const JOINED_HOLD: f32 = 1.1;
 const ALL_SET: f32 = 2.6;
 
 // ------------------------------------------------------------------ lesson ---
@@ -361,6 +364,8 @@ pub struct Setup {
     /// A computer sent the answers on first start: setup goes on from what
     /// it received, and never back to the welcome.
     sent_from_computer: bool,
+    /// Wi-Fi joined from its page: when, so setup carries on by itself.
+    joined: Option<f32>,
 }
 
 /// What is left to do on the handheld once a computer has sent its answers
@@ -412,6 +417,7 @@ impl Setup {
             received_scroll: detent::Animated::new(0.0, role::release()).with_rest(0.01),
             flow: FLOW.to_vec(),
             sent_from_computer: false,
+            joined: None,
         }
     }
 
@@ -512,6 +518,7 @@ impl Setup {
         self.from = if forward { 1.0 } else { -1.0 };
         self.typing = None;
         self.note = None;
+        self.joined = None;
         // The radio takes seconds to start: on as the page arrives, so the
         // networks are listed by the time "Choose a network" is pressed.
         if page == Page::Wifi && !crate::wifi::switched_on() {
@@ -527,6 +534,13 @@ impl Setup {
             Page::Place => self.name = crate::device::suggested_name(&self.team),
             Page::Hardware if self.hardware.is_none() => self.hardware = Some(crate::hwcheck::Check::run()),
             _ => {}
+        }
+        // Pages that offer what is already chosen (fine as it is) start on
+        // Next, so Enter goes on and setup goes quickly; Up goes into them.
+        // So does Wi-Fi once there is a network.
+        let online = self.wifi.as_ref().is_some_and(|w| w.state().online()) || crate::sys::address("wlan0").is_some_and(|a| a.contains('.'));
+        if matches!(page, Page::Hardware | Page::Keys | Page::Choices | Page::Power | Page::Look) || (page == Page::Wifi && online) {
+            self.focus = self.rows();
         }
     }
 
@@ -1173,10 +1187,14 @@ impl Screen for Setup {
     fn resume(&mut self) {
         // Back from choosing a network or a time zone: say how it went.
         self.entered = 0.0;
-        // Back from joining a network: the next step is Next.
+        // Back from joining a network: it says so a moment, and setup
+        // carries on by itself (see `update`).
         let online = self.wifi.as_ref().is_some_and(|w| w.state().online()) || crate::sys::address("wlan0").is_some_and(|a| a.contains('.'));
         if self.page == Page::Wifi && online {
             self.focus = self.rows();
+            if self.joined.is_none() {
+                self.joined = Some(0.0);
+            }
         }
         // Back from typing the line: the keys' chip says how it went.
         if let Some(check) = &mut self.hardware {
@@ -1278,6 +1296,12 @@ impl Screen for Setup {
     }
 
     fn update(&mut self, cx: &mut Cx) -> Nav {
+        // A network joined: on to the next page by itself, once the page
+        // has said so.
+        if self.page == Page::Wifi && self.joined.is_some_and(|at| self.entered - at >= JOINED_HOLD) {
+            self.joined = None;
+            return self.next(cx);
+        }
         let Some(answers) = self.remote.as_mut().and_then(|r| r.take()) else { return Nav::Stay };
         self.take_answers(answers, cx);
         Nav::Stay
@@ -1291,7 +1315,7 @@ impl Screen for Setup {
         // when what it shows has changed: the computer page's status, the
         // Wi-Fi page's connection. The lesson's first card blinks its
         // lights, and a key just pressed on the second fades.
-        let mut changed = self.entered < 0.8 || self.page == Page::Finishing;
+        let mut changed = self.entered < 0.8 || self.page == Page::Finishing || self.joined.is_some();
         if self.page == Page::Lesson {
             changed |= self.lesson.card() == Card::Modifiers || self.lesson.pressed.iter().any(|p| self.clock - p < 0.4);
         }
@@ -1570,6 +1594,43 @@ mod tests {
         let mut say = None;
         let mut cx = Cx { robot, settings, say: &mut say, at_rest: true };
         setup.key(key, &mut cx)
+    }
+
+    #[test]
+    fn pages_of_choices_already_made_start_on_next_so_enter_goes_on() {
+        let (mut setup, mut settings, mut robot) = on_the_lesson();
+        for page in [Page::Keys, Page::Choices, Page::Power, Page::Look, Page::Hardware] {
+            setup.go(page, true);
+            assert_eq!(setup.focus, setup.rows(), "{page:?} starts on Next");
+        }
+        // Enter, Enter, Enter: through keys, choices and power to the look.
+        setup.go(Page::Keys, true);
+        for _ in 0..3 {
+            press(&mut setup, &mut settings, &mut robot, Key::Enter);
+        }
+        assert_eq!(setup.page, Page::Look);
+        // Up goes into the rows.
+        press(&mut setup, &mut settings, &mut robot, Key::Up);
+        assert_eq!(setup.focus, setup.rows() - 1);
+        // A page asking for something starts on it.
+        setup.go(Page::Team, true);
+        assert_eq!(setup.focus, 0);
+    }
+
+    #[test]
+    fn once_wi_fi_joins_setup_carries_on_by_itself() {
+        let (mut setup, mut settings, mut robot) = on_the_lesson();
+        setup.go(Page::Wifi, true);
+        // Joined, back from the list of networks.
+        setup.joined = Some(0.0);
+        let mut say = None;
+        let mut cx = Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true };
+        assert!(setup.tick(0.5), "drawn while it waits");
+        assert!(matches!(setup.update(&mut cx), Nav::Stay));
+        assert_eq!(setup.page, Page::Wifi, "a moment to say so");
+        setup.tick(JOINED_HOLD);
+        setup.update(&mut cx);
+        assert_eq!(setup.page, Page::Hardware, "then on by itself");
     }
 
     #[test]

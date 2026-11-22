@@ -1140,11 +1140,18 @@ impl Screen for Home {
 
 // ----------------------------------------------------------------- robot ---
 
-/// Link, identity and the Systemcore's vital signs; the robot's address is
-/// set here.
+/// The robot itself, in three dimensions, each part coloured by what it
+/// reports, with its mode, link, battery and what needs attention around
+/// it (`robot3d`); the Systemcore's vital signs beside it; the robot's
+/// address is set here.
 #[derive(Default)]
 pub struct RobotScreen {
     editing: Option<String>,
+    hero: crate::robot3d::Hero,
+    /// As last drawn: the calm version, and whether a robot is linked (it
+    /// turns only then).
+    calm: bool,
+    linked: bool,
 }
 
 /// A team number becomes the Systemcore's static address, 10.TE.AM.2.
@@ -1194,29 +1201,44 @@ impl Screen for RobotScreen {
         Nav::Stay
     }
 
+    fn tick(&mut self, dt: f32) -> bool {
+        // It turns slowly on its stand while a robot is linked.
+        self.hero.tick(dt, self.calm, self.linked)
+    }
+
     fn draw(&mut self, g: &mut Gfx, robot: &Robot) {
         let t = g.tokens;
         let ty = g.ty;
         let top = g.top();
         let bottom = H - PAD - g.hint_h();
-        let left_w = 122.0;
+        (self.calm, self.linked) = (g.calm, robot.linked());
 
-        // Address: the one thing set on this screen.
+        // The robot on its stage: the team's own if one is installed, each
+        // part as the robot reports it, its mode, link and battery around it.
+        let stage = Rect::new(PAD, top, 166.0, bottom - top);
+        g.surface(stage, g.tile_radius(), t.surface1);
+        let object = self.hero.object(g);
+        let parts: Vec<String> = g.objects.parts(object).into_iter().map(|(name, _)| name).collect();
+        let state = crate::robot3d::read(robot, &parts);
+        g.canvas.set_clip(stage.offset(g.ox, 0.0));
+        let size = if g.objects.px(object, "hero").is_some() { "hero" } else { "m" };
+        self.hero.draw(g, object, size, stage.cx(), stage.cy() + 4.0, &state, 1.0);
+        g.canvas.clear_clip();
+        crate::robot3d::draw_captions(g, stage, &state, robot);
+
+        // Beside it: the code on the robot and the Systemcore's vital
+        // signs, and the address, the one thing set on this screen.
+        let x = stage.right() + GAP;
+        let w = W - PAD - x;
         let field_h = ty.caption.size + ty.label.size + 14.0;
-        let field = Rect::new(PAD, bottom - field_h, left_w, field_h);
-        let battery = Rect::new(PAD, top, left_w, field.y - GAP - top);
-        g.stat(battery, "battery", robot.f64("Systemcore/BatteryVolts").map(|v| format!("{v:.1}")), "v", (battery.h - ty.caption.size - 14.0).min(36.0));
-        if robot.bool("Systemcore/BrownedOut") == Some(true) {
-            // On its tile, rising in with it.
-            let fault = g.fault();
-            g.text_at(battery.right() - 9.0, battery.y + 5.0 + ty.caption.size * 0.5, Align::Right, "brownout", ty.caption, fault);
-        }
+        let field = Rect::new(x, bottom - field_h, w, field_h);
         g.surface(field, g.tile_radius(), if self.editing.is_some() { t.surface2 } else { t.surface1 });
         g.text_at(field.x + 9.0, field.y + 5.0 + ty.caption.size * 0.5, Align::Left, "address", ty.caption, t.dim);
         let value_cy = field.bottom() - 5.0 - ty.label.size * 0.5;
         match &self.editing {
             Some(text) => {
-                let w = g.text_at(field.x + 9.0, value_cy, Align::Left, text, ty.label, t.ink);
+                let shown = g.text.fit(text, &ty.label, field.w - 22.0);
+                let w = g.text_at(field.x + 9.0, value_cy, Align::Left, &shown, ty.label, t.ink);
                 g.surface(Rect::new(field.x + 10.0 + w, value_cy - ty.label.size * 0.5, 1.5, ty.label.size), 0.5, t.signal);
                 g.focus_ring(field, g.tile_radius());
             }
@@ -1225,14 +1247,10 @@ impl Screen for RobotScreen {
                 g.text_fit(field.x + 9.0, value_cy, &shown, ty.label, t.ink, field.w - 18.0);
             }
         }
-
-        let x = PAD + left_w + GAP;
-        let w = W - PAD - x;
         let can = robot.get("Systemcore/CanUtilization").and_then(|v| v.as_f64s().map(|u| u.iter().cloned().fold(0.0, f64::max)));
         let cpu = robot.f64("Systemcore/CpuPercent");
         let temp = robot.f64("Systemcore/TempCelsius");
-        let rows: [(&str, String, Option<f32>); 5] = [
-            ("link", if robot.linked() { dash(robot.rtt_ms().map(|ms| format!("{ms:.1} ms"))) } else { robot.status() }, None),
+        let rows: [(&str, String, Option<f32>); 4] = [
             // The code on the robot: its commit, and against the repository
             // marked as the robot's code, how far behind it is.
             ("code", dash(robot.string("Robot/Software/RobotCodeVersion").map(|v| crate::git::robot_code_line(&v).unwrap_or_else(|| v.chars().take(9).collect()))), None),
@@ -1241,18 +1259,19 @@ impl Screen for RobotScreen {
             ("can", dash(can.map(|v| format!("{:.0}%", v * 100.0))), can.map(|v| v as f32)),
         ];
         let gap = 3.0;
-        let row_h = (bottom - top - gap * 4.0) / 5.0;
-        let label_w = g.measure("temp", ty.label) + 18.0;
-        let value_w = g.measure("100 °c", ty.label) + 16.0;
+        let rows_bottom = field.y - GAP;
+        let row_h = (rows_bottom - top - gap * 3.0) / 4.0;
+        let label_w = g.measure("temp", ty.label) + 16.0;
+        let value_w = g.measure("100 °c", ty.label) + 14.0;
         for (i, (label, value, fraction)) in rows.iter().enumerate() {
             let r = Rect::new(x, top + i as f32 * (row_h + gap), w, row_h);
             g.surface(r, (row_h * 0.5).min(11.0), t.surface1);
-            g.text_at(r.x + 10.0, r.cy(), Align::Left, label, ty.label, t.dim);
+            g.text_at(r.x + 9.0, r.cy(), Align::Left, label, ty.label, t.dim);
             match fraction {
                 Some(f) => {
-                    g.text_at(r.right() - 10.0, r.cy(), Align::Right, value, ty.label, t.ink);
+                    g.text_at(r.right() - 9.0, r.cy(), Align::Right, value, ty.label, t.ink);
                     let fill = if *f > 0.85 { t.signal } else { t.ice };
-                    g.meter(Rect::new(r.x + label_w, r.cy() - 3.0, r.w - label_w - value_w, 6.0), *f, fill);
+                    g.meter(Rect::new(r.x + label_w, r.cy() - 3.0, (r.w - label_w - value_w).max(8.0), 6.0), *f, fill);
                 }
                 None => {
                     g.text_fit(r.x + label_w, r.cy(), value, ty.label, t.ink, r.w - label_w - 8.0);
