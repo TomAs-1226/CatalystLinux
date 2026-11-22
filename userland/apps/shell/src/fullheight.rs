@@ -157,8 +157,6 @@ mod tests {
     #[test]
     fn every_list_runs_to_the_foot_of_the_panel_or_to_what_is_drawn_there() {
         crate::shell::tests::sandbox();
-        // Its shells tick for a while: they would take a timer's announcement.
-        let _timers = crate::clock::TIMERS_ANNOUNCED.lock().unwrap_or_else(|e| e.into_inner());
         let mut wrong = Vec::new();
         let mut lists = 0;
         for size in [TextSize::Compact, TextSize::Standard, TextSize::Large] {
