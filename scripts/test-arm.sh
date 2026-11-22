@@ -27,5 +27,12 @@ export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-cpu=cortex-a
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUNNER="$HERE/scripts/arm-run.sh"
 
 cd "$HERE/userland"
-# The shell, and the renderer (whose NEON paths only an ARM build has).
-cargo test --target aarch64-unknown-linux-musl -p catalyst-shell -p bezel -p catalyst-update -p apriltag "$@"
+# The shell, and the renderer (whose NEON paths only an ARM build has), and
+# Catalyst Companion's service (TLS through ring's ARM code). `--only -p X`
+# tests just the packages named.
+if [ "${1:-}" = --only ]; then
+	shift
+	cargo test --target aarch64-unknown-linux-musl "$@"
+else
+	cargo test --target aarch64-unknown-linux-musl -p catalyst-shell -p bezel -p catalyst-update -p apriltag -p catalyst-companiond -p catalyst-companion-proto "$@"
+fi

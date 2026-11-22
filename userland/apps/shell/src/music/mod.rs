@@ -470,8 +470,14 @@ fn sapisidhash(sapisid: &str, now: i64) -> String {
     format!("SAPISIDHASH {now}_{hex}")
 }
 
+/// The library's index brought up to date: songs a computer added
+/// (Catalyst Companion) are Music's own from then on.
+pub fn rescan_library() {
+    library::refresh(false);
+}
+
 /// The cookies forgotten, and with them your library's lists.
-fn sign_out() -> Result<(), String> {
+pub(crate) fn sign_out() -> Result<(), String> {
     std::fs::remove_file(cookies_file()).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(format!("could not sign out: {e}")) })?;
     SIGNED_IN_FOR_SHOTS.store(false, Ordering::Relaxed);
     account::forget();

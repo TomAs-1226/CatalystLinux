@@ -8,8 +8,9 @@ UPDATE_BIN="$BUILD/out/catalyst-update"
 AI_BIN="$BUILD/out/ai"
 UI_BIN="$BUILD/out/catalyst-ui"
 PLAY_BIN="$BUILD/out/catalyst-play"
+COMPANION_BIN="$BUILD/out/catalyst-companiond"
 
-if [ ! -x "$SHELL_BIN" ] || [ ! -x "$UPDATE_BIN" ] || [ ! -x "$AI_BIN" ] || [ ! -x "$UI_BIN" ] || [ ! -x "$PLAY_BIN" ]; then
+if [ ! -x "$SHELL_BIN" ] || [ ! -x "$UPDATE_BIN" ] || [ ! -x "$AI_BIN" ] || [ ! -x "$UI_BIN" ] || [ ! -x "$PLAY_BIN" ] || [ ! -x "$COMPANION_BIN" ]; then
 	echo "catalyst-shell has not been built: run scripts/build-image.sh toolchain, then scripts/build-shell.sh" >&2
 	exit 1
 fi
@@ -22,6 +23,8 @@ install -D -m 0755 "$AI_BIN" "$TARGET_DIR/usr/bin/ai"
 install -D -m 0755 "$UI_BIN" "$TARGET_DIR/usr/bin/catalyst-ui"
 # Music's player (decodes and plays a song; reads and writes its tags).
 install -D -m 0755 "$PLAY_BIN" "$TARGET_DIR/usr/bin/catalyst-play"
+# Catalyst Companion's side: the Windows app finds, pairs with and talks to it.
+install -D -m 0755 "$COMPANION_BIN" "$TARGET_DIR/usr/bin/catalyst-companiond"
 # The key the app catalogue is signed with: without it the catalogue
 # installs nothing (scripts/pack-catalogue.sh makes one).
 if [ ! -s "$TARGET_DIR/etc/catalyst/apps.pub" ]; then
@@ -59,7 +62,8 @@ for f in etc/init.d/catalyst-early etc/init.d/catalyst-shell etc/init.d/catalyst
 	usr/sbin/catalyst-ssh-toggle usr/sbin/catalyst-net usr/sbin/catalyst-grow-data usr/sbin/catalyst-wifi-toggle \
 	usr/sbin/catalyst-usb usr/sbin/catalyst-power usr/sbin/catalyst-time usr/share/udhcpc/default.script.d/50-catalyst-time \
 	usr/libexec/catalyst/git-credential etc/init.d/catalyst-tailscale usr/sbin/catalyst-tailscale \
-	etc/init.d/catalyst-zram etc/init.d/catalyst-audio usr/sbin/catalyst-audio etc/init.d/catalyst-bluetooth usr/sbin/catalyst-bluetooth; do
+	etc/init.d/catalyst-zram etc/init.d/catalyst-audio usr/sbin/catalyst-audio etc/init.d/catalyst-bluetooth usr/sbin/catalyst-bluetooth \
+	etc/init.d/catalyst-companion; do
 	chmod 0755 "$TARGET_DIR/$f"
 done
 mkdir -p "$TARGET_DIR/data"
@@ -139,6 +143,7 @@ link default catalyst-usb
 link default catalyst-tailscale
 link default catalyst-zram
 link default catalyst-bluetooth
+link default catalyst-companion
 link default agetty.ttyAMA0
 link shutdown killprocs
 link shutdown mount-ro

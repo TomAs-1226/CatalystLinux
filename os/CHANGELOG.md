@@ -10,6 +10,17 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.7.0
+
+### Computer companion
+- Catalyst Companion for Windows (catalyst-companion.exe, in each release) reaches the handheld from a computer. It finds it by itself on Wi-Fi or over the USB cable, and pairs once with the code Settings › Computer companion shows.
+- YouTube Music signs in with one click: a sign-in window opens on the computer and closes once you are signed in, and the handheld checks and keeps the sign-in. The computer keeps it only in that window's own profile, which Sign out clears.
+- GitHub signs in with the computer's own sign-in (GitHub CLI or Git Credential Manager, asked first), a pasted token, or a code on github.com when the app has an OAuth client ID.
+- Songs dropped on the window go into the library, and Music indexes them as its own. Match logs, photos, screenshots and notes download to the computer.
+- The team, Wi-Fi, keys and the look change from the computer, as Set up from a computer changes them. System updates check, install and restart from there too.
+- Back up the handheld to a zip on the computer, and restore it. Caches, downloaded updates and YouTube Music's sign-in are left out.
+- Safe on a shared network: TLS to the handheld's own certificate, pinned when pairing; the code never crosses the network, and five wrong tries end it; each computer's token is kept on the handheld only as a hash. Unpair a computer in Settings › Computer companion, or switch it off there and nothing listens.
+
 ## 0.6.9
 
 ### Fixed
