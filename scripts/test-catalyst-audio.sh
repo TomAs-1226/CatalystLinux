@@ -26,11 +26,18 @@ for a in "\$@"; do
 	"name=Headphones Jack") control=jack ;;
 	"name=PGAL Select") control=pgal ;;
 	"name=ADCL PGA Volume") control=gain ;;
+	"name=IF DACL Mixer DACR DACL Mixer") control=mix ;;
+	"name=DACL Playback Volume") control=dacl ;;
+	controls) verb=controls ;;
 	cget) verb=cget ;;
 	cset) verb=cset ;;
 	*) value="\$a" ;;
 	esac
 done
+if [ "\$verb" = controls ]; then
+	printf "numid=31,iface=MIXER,name='DACL Playback Volume'\\nnumid=52,iface=MIXER,name='IF DACL Mixer DACR DACL Mixer'\\n"
+	exit 0
+fi
 if [ "\$verb" = cget ]; then
 	[ -e "$T/\$control" ] && echo "  : values=\$(cat "$T/\$control")"
 	exit 0
@@ -75,6 +82,8 @@ check "the volume control made before any sound" "$(grep -c catalyst_volume_init
 check "and set to the level it starts at" "$(cat "$T/master")" "65,65"
 check "the handheld's own microphone" "$(cat "$T/pgal")" "DifferentialL"
 check "at M5Stack's gain" "$(cat "$T/gain")" "8"
+check "the speaker plays both channels, 6 dB down" "$(cat "$T/mix"):$(cat "$T/dacl")" "on:179"
+check "status says so" "$(status_of speaker_mix)" "on"
 check "ALSA's configuration in place" "$(cmp -s "$T/run/asound.conf" "$T/share/asound.conf" && echo same)" "same"
 check "the speaker" "$(cat "$T/run/output")" "local"
 $P start
@@ -113,6 +122,7 @@ echo "== outputs"
 check "the speaker, with nothing plugged in" "$(status_of output)" "speaker"
 echo on >"$T/jack"
 check "headphones, once plugged in" "$(status_of output)" "headphones"
+check "each ear its own channel, at 0 dB" "$($P speaker):$(cat "$T/dacl")" "speaker_mix=off:191"
 rm "$T/jack"
 check "an address that is not one is refused" "$($P output bluetooth nope 2>/dev/null || echo refused)" "refused"
 $P output bluetooth 0c:a6:94:12:34:56
