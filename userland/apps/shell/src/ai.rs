@@ -345,6 +345,30 @@ pub(crate) fn demo() -> bool {
 // ----------------------------------------------------------------- tools ---
 
 /// The tools, as (name, what it does, its input's JSON schema).
+/// The most tools Claude takes marked strict in one request: its API refuses
+/// a request with more, and the assistant then answered nothing at all (0.6.3
+/// brought its tools to 25).
+const CLAUDE_STRICT_MOST: usize = 20;
+
+/// Which of the tools go to Claude strict: those that take something (strict
+/// makes their arguments fit the schema; a tool that takes nothing has none
+/// to fit), in the list's order, up to the most it takes. The rest go as
+/// ordinary tools, their arguments checked as they are read.
+fn claude_strict(specs: &[(&str, &str, Value)]) -> Vec<bool> {
+    let mut left = CLAUDE_STRICT_MOST;
+    specs
+        .iter()
+        .map(|(_, _, schema)| {
+            let takes = schema["properties"].as_object().is_some_and(|p| !p.is_empty());
+            let strict = takes && left > 0;
+            if strict {
+                left -= 1;
+            }
+            strict
+        })
+        .collect()
+}
+
 fn tool_specs() -> Vec<(&'static str, &'static str, Value)> {
     let nothing = || json!({"type": "object", "properties": {}, "required": [], "additionalProperties": false});
     let mut specs = vec![
@@ -991,7 +1015,17 @@ impl Chat {
                 })
             }
             Service::Claude => {
-                let mut tools: Vec<Value> = specs.iter().map(|(name, about, schema)| json!({"name": name, "description": about, "input_schema": schema, "strict": true})).collect();
+                let mut tools: Vec<Value> = specs
+                    .iter()
+                    .zip(claude_strict(&specs))
+                    .map(|((name, about, schema), strict)| {
+                        let mut tool = json!({"name": name, "description": about, "input_schema": schema});
+                        if strict {
+                            tool["strict"] = json!(true);
+                        }
+                        tool
+                    })
+                    .collect();
                 tools.push(json!({"type": "web_search_20260209", "name": "web_search", "max_uses": WEB_USES}));
                 tools.push(json!({"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": WEB_USES, "citations": {"enabled": true}, "max_content_tokens": FETCH_TOKENS}));
                 json!({
@@ -5329,8 +5363,9 @@ mod tests {
     }
 
     #[test]
-    fn requests_carry_every_tool_strict_and_the_memory_in_a_stable_prompt() {
+    fn requests_carry_tools_strict_as_each_service_takes_them_and_the_memory_in_a_stable_prompt() {
         let remembered = vec!["The robot is called Numbers".to_owned()];
+        assert!(tool_specs().len() > CLAUDE_STRICT_MOST, "the case the handheld met: more tools than Claude takes strict");
         for service in [Service::OpenAi, Service::Claude] {
             let mut chat = Chat::with_memory(service, Mode::Assistant, &remembered);
             chat.ask("brief me");
@@ -5340,9 +5375,18 @@ mod tests {
             assert_eq!(named.len(), tool_specs().len());
             for t in &named {
                 let schema = if service == Service::OpenAi { &t["parameters"] } else { &t["input_schema"] };
-                assert_eq!(t["strict"], true);
                 assert_eq!(schema["additionalProperties"], false);
                 assert_eq!(schema["required"].as_array().unwrap().len(), schema["properties"].as_object().unwrap().len(), "{}", t["name"]);
+                let takes = schema["properties"].as_object().is_some_and(|p| !p.is_empty());
+                match service {
+                    Service::OpenAi => assert_eq!(t["strict"], true, "{}", t["name"]),
+                    // Claude: never strict for a tool that takes nothing.
+                    _ => assert!(takes || t.get("strict").is_none(), "{}", t["name"]),
+                }
+            }
+            if service == Service::Claude {
+                let strict = named.iter().filter(|t| t["strict"] == true).count();
+                assert!(strict > 0 && strict <= CLAUDE_STRICT_MOST, "{strict} strict: Claude refuses more than {CLAUDE_STRICT_MOST}");
             }
             // A recorded reply with two calls: both taken, both answered.
             let reply = match service {

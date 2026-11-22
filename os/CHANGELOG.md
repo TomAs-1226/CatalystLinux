@@ -13,6 +13,7 @@ the first section (this introduction) is not shown.
 ## 0.6.5
 
 ### Fixed
+- The Assistant answers with Claude again: 0.6.3's new tasks took it past the 20 tools Claude checks strictly in one question, and every question was refused.
 - An update cut off part way (the handheld switched off, the installer stopped) no longer keeps the handheld from ever checking for updates again.
 
 ## 0.6.4
