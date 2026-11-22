@@ -8,3 +8,5 @@
 /tools/bake3d/__pycache__/
 /tools/bake3d/.venv/
 /tools/bake3d/numbers/
+# The CJK font, made from pinned inputs by scripts/cjk-font.py.
+/userland/assets/fonts/cjk/

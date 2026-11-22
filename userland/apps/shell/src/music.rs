@@ -327,7 +327,7 @@ fn search(query: &str) -> Result<Vec<Track>, String> {
     if !on_device() {
         std::thread::sleep(Duration::from_millis(700));
         let q = query.to_lowercase();
-        let found: Vec<Track> = demo_catalogue().into_iter().filter(|t| t.title.to_lowercase().contains(&q) || t.artist.to_lowercase().contains(&q)).collect();
+        let found: Vec<Track> = demo_catalogue().into_iter().chain(demo_cjk()).filter(|t| t.title.to_lowercase().contains(&q) || t.artist.to_lowercase().contains(&q)).collect();
         return Ok(if found.is_empty() { demo_catalogue().into_iter().rev().take(6).collect() } else { found });
     }
     Ok(parse_list(&innertube("search", json!({"query": query, "params": SONGS_ONLY}))?))
@@ -369,7 +369,7 @@ fn start_page() -> Result<(String, Vec<Track>), String> {
 /// What plays after a song: its radio.
 fn up_next(id: &str) -> Result<Vec<Track>, String> {
     if !on_device() {
-        let all = demo_catalogue();
+        let all = if demo_cjk().iter().any(|t| t.id == id) { demo_cjk() } else { demo_catalogue() };
         let at = all.iter().position(|t| t.id == id).unwrap_or(0);
         return Ok(all.iter().cycle().skip(at).take(all.len()).cloned().collect());
     }
@@ -1231,6 +1231,20 @@ fn demo_catalogue() -> Vec<Track> {
         t("demo08", "Static Bloom", "Wren & the Tide", "Low Water", 179),
         t("demo09", "Midnight Telemetry", "The Pit Crew", "Match Day", 232),
         t("demo10", "Afterglow Avenue", "Mara Ellis", "Night Bus", 207),
+    ]
+}
+
+/// Made-up songs with Japanese, Chinese and Korean names, which only a
+/// search finds (their artists' names in Latin letters: "hoshino", "chen").
+fn demo_cjk() -> Vec<Track> {
+    let t = |id: &str, title: &str, artist: &str, album: &str, s: u32| Track { id: id.into(), title: title.into(), artist: artist.into(), album: album.into(), seconds: Some(s), art: String::new() };
+    vec![
+        t("demo21", "夜明けのシグナル", "Aoi Hoshino 星野あおい", "灯台の歌", 223),
+        t("demo22", "星屑ドライブ", "Aoi Hoshino 星野あおい", "灯台の歌", 241),
+        t("demo23", "東京の灯り (Tokyo Lights)", "Aoi Hoshino 星野あおい", "灯台の歌", 208),
+        t("demo24", "晴天的回声", "Chen Ruoqing 陈若晴", "雨后的城市", 236),
+        t("demo25", "海邊的風", "Chen Ruoqing 陳若晴", "島嶼日記", 212),
+        t("demo26", "서울의 밤", "Haneul 하늘", "Night City", 198),
     ]
 }
 

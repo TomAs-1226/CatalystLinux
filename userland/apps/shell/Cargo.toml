@@ -10,7 +10,8 @@ build = "build.rs"
 # The simulator packed for a computer with nothing installed (each release's
 # catalyst-sim.exe): started with nothing, it opens the window with the demo
 # robot; on Windows it is a windowed program, with no console of its own.
-packed = []
+# It carries the CJK font in itself (when scripts/cjk-font.py has made it).
+packed = ["bezel/embed-cjk"]
 
 [dependencies]
 bezel = { workspace = true }

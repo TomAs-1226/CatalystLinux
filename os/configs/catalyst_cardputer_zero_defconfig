@@ -186,6 +186,10 @@ BR2_PACKAGE_FFMPEG_BSFS=""
 BR2_PACKAGE_FFMPEG_PROTOCOLS="file pipe http https tcp tls"
 BR2_PACKAGE_FFMPEG_FILTERS="aresample aformat anull atrim volume"
 # BR2_PACKAGE_FFMPEG_INDEVS is not set
+# Chinese, Japanese and Korean text (song titles, file names, notes): Noto
+# Sans CJK cut to the 13,483 characters in everyday use, 5.5 MB of image.
+# The shell maps it and reads it only once such a character is drawn.
+BR2_PACKAGE_CATALYST_FONTS_CJK=y
 BR2_TARGET_ROOTFS_EXT2=y
 BR2_TARGET_ROOTFS_EXT2_4=y
 # Each system slot is 1 GB: room for more tools and apps than the first

@@ -727,34 +727,17 @@ impl AboutApp {
     }
 }
 
-/// Words broken into lines no wider than `width`, at spaces, or inside a
-/// word too long for a line (an address).
+/// Words broken into lines no wider than `width`, at spaces (and between
+/// Chinese and Japanese characters), or inside a word too long for a line
+/// (an address). Each paragraph starts a line; an empty one is a blank line.
 fn wrap(g: &mut Gfx, text: &str, style: bezel::TextStyle, width: f32) -> Vec<String> {
     let mut lines = Vec::new();
     for para in text.split('\n') {
-        let mut line = String::new();
-        for word in para.split_whitespace() {
-            let candidate = if line.is_empty() { word.to_owned() } else { format!("{line} {word}") };
-            if g.measure(&candidate, style) <= width {
-                line = candidate;
-                continue;
-            }
-            if !line.is_empty() {
-                lines.push(std::mem::take(&mut line));
-            }
-            // A word longer than the line is broken where it must be.
-            let mut piece = String::new();
-            for c in word.chars() {
-                piece.push(c);
-                if g.measure(&piece, style) > width {
-                    piece.pop();
-                    lines.push(std::mem::take(&mut piece));
-                    piece.push(c);
-                }
-            }
-            line = piece;
+        let wrapped = g.text.wrap(para, &style, width, true);
+        if wrapped.is_empty() {
+            lines.push(String::new());
         }
-        lines.push(line);
+        lines.extend(wrapped);
     }
     lines
 }

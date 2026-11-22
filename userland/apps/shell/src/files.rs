@@ -254,6 +254,16 @@ impl Screen for Files {
 
 // ---------------------------------------------------------------- editor ---
 
+/// The cells a character takes in the editor's grid: two for a wide one
+/// (Chinese, Japanese, Korean, full-width forms), as a terminal gives it.
+fn cells(c: char) -> usize {
+    if bezel::lines::is_wide(c) {
+        2
+    } else {
+        1
+    }
+}
+
 /// A text file being edited: its lines, and where the cursor is in them.
 /// The file comes back out as it went in, apart from what was changed: its
 /// tabs stay tabs, its line endings stay what they were, and a file that did
@@ -539,11 +549,15 @@ impl Screen for Editor {
         let cols = ((panel.w - 8.0) / cell_w).floor().max(2.0) as usize;
         self.cols = cols;
         self.rows = ((panel.h - 6.0) / cell_h).floor().max(1.0) as usize;
-        // Keep the cursor in view, both ways.
+        // Keep the cursor in view, both ways. Across, the view is counted in
+        // cells: a Chinese or Japanese character takes two.
         let (line, col) = self.buffer.cursor;
         let (mut first, mut left) = self.view;
         first = first.clamp((line + 1).saturating_sub(self.rows), line);
-        left = left.clamp((col + 1).saturating_sub(cols), col);
+        let cursor_line = self.buffer.lines.get(line).map_or("", String::as_str);
+        let at = cursor_line.chars().take(col).map(cells).sum::<usize>();
+        let under = cursor_line.chars().nth(col).map_or(1, cells);
+        left = left.clamp((at + under).saturating_sub(cols), at);
         self.view = (first, left);
         let (x0, y0) = (panel.x + 4.0, panel.y + 3.0);
         for row in 0..self.rows {
@@ -551,17 +565,24 @@ impl Screen for Editor {
             let cy = y0 + (row as f32 + 0.5) * cell_h;
             if first + row == line {
                 // The cursor: a block in the signal colour, behind its character.
-                g.surface(Rect::new(x0 + (col - left) as f32 * cell_w, cy - cell_h * 0.5, cell_w + 0.5, cell_h), 2.0, t.signal);
+                g.surface(Rect::new(x0 + (at - left) as f32 * cell_w, cy - cell_h * 0.5, under as f32 * cell_w + 0.5, cell_h), 2.0, t.signal);
             }
-            // A tab takes one cell, shown as an arrow, so it can be seen and
-            // the cursor counts it as the one character it is.
-            let shown: String = text.chars().skip(left).take(cols).map(|c| if c == '\t' { '→' } else { c }).collect();
-            g.text_at(x0, cy, Align::Left, &shown, style, t.ink);
-            if first + row == line {
-                if let Some(under) = text.chars().nth(col).map(|c| if c == '\t' { '→' } else { c }) {
-                    let mut utf8 = [0u8; 4];
-                    g.text_at(x0 + (col - left) as f32 * cell_w, cy, Align::Left, under.encode_utf8(&mut utf8), style, t.on_signal);
+            // Each character in its cells, so the grid holds whatever the
+            // characters are. A tab takes one cell, shown as an arrow, so it
+            // can be seen and the cursor counts it as the one character it is.
+            let mut cell = 0;
+            let mut utf8 = [0u8; 4];
+            for (i, c) in text.chars().enumerate() {
+                let w = cells(c);
+                if cell >= left + cols {
+                    break;
                 }
+                if cell >= left && cell + w <= left + cols && c != ' ' {
+                    let shown = if c == '\t' { '→' } else { c };
+                    let ink = if first + row == line && i == col { t.on_signal } else { t.ink };
+                    g.text_at(x0 + (cell - left) as f32 * cell_w, cy, Align::Left, shown.encode_utf8(&mut utf8), style, ink);
+                }
+                cell += w;
             }
         }
         let status = format!("line {} of {} · col {}{}", line + 1, self.buffer.lines.len(), col + 1, if self.buffer.modified { " · unsaved" } else { "" });

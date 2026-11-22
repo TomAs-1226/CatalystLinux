@@ -1333,6 +1333,8 @@ fn http_failure(service: Service, code: u16, body: &str) -> String {
 
 const DEMO_ANSWER: &str = "The robot is linked and running well. Two things stand out: the intake reached 38 A of its 40 A limit at 10:09 and then cleared, and CAN bus can_s0 is busy with 14 devices on it. The ping came back 4 of 4 at about 2 ms.\n\nWorth moving the intake off can_s0 before the next match.";
 
+const DEMO_ANSWER_JA: &str = "ロボットはつながっていて、調子は良好です。インテークが10時09分に上限40 Aのうち38 Aに達しましたが、その後は戻りました。「can_s0」には14台の機器がつながっていて混んでいます。\n\n次の試合の前に、インテークを別のバスへ移すことをおすすめします。";
+
 /// The scripted service: from the conversation so far, the next reply, in
 /// the service's own shape (so the simulator goes through the real parsing).
 fn demo_reply(service: Service, body: &Value) -> Value {
@@ -1371,7 +1373,10 @@ fn demo_reply(service: Service, body: &Value) -> Value {
         return demo_web(service, Some("2026 FRC REBUILT match timing autonomous"), None, DEMO_WEB_ANSWER, &[(DEMO_MANUAL_TITLE, DEMO_MANUAL_URL)]);
     }
     let deploy = lower.contains("deploy");
+    // Asked in Japanese (or Chinese): answered in Japanese, at once.
+    let japanese = question.chars().any(bezel::lines::breaks_anywhere);
     let (text, calls): (&str, Vec<(&str, Value)>) = match (deploy, rounds) {
+        _ if japanese => (DEMO_ANSWER_JA, vec![]),
         (true, 0) => ("", vec![("run_action", json!({"name": "Deploy robot code", "reason": "you asked for the code to be deployed"}))]),
         (true, _) if last.contains("declined") => ("Left it: nothing was deployed. Say when the robot is on its cart and disabled, and I'll run it then.", vec![]),
         (true, _) => ("Deployed: the build passed in 41 seconds and the robot program restarted.", vec![]),

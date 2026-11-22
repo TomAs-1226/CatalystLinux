@@ -1,9 +1,25 @@
 //! Turns `assets/icons/*.svg` (Material Symbols Rounded, 20 px optical size)
 //! into a sorted table of SVG path strings the renderer rasterizes on demand.
+//!
+//! With the `embed-cjk` feature (the packed simulator, one file on a
+//! computer with nothing installed), the CJK font is built in, if
+//! scripts/cjk-font.py has made it; without it, CJK draws as boxes.
 
 use std::{env, fs, path::Path};
 
 fn main() {
+    println!("cargo::rustc-check-cfg=cfg(cjk_embedded)");
+    if env::var_os("CARGO_FEATURE_EMBED_CJK").is_some() {
+        let font = Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../assets/fonts/cjk/NotoSansCJK-Catalyst.otf");
+        println!("cargo:rerun-if-changed={}", font.display());
+        if font.is_file() {
+            println!("cargo:rustc-cfg=cjk_embedded");
+            println!("cargo:rustc-env=CATALYST_CJK_EMBEDDED={}", font.canonicalize().unwrap_or(font).display());
+        } else {
+            println!("cargo:warning=no CJK font to build in at {}: scripts/cjk-font.py makes it; until then CJK draws as boxes", font.display());
+        }
+    }
+
     let dir = Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../assets/icons");
     println!("cargo:rerun-if-changed={}", dir.display());
 
