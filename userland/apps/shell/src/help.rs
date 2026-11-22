@@ -337,7 +337,7 @@ const SHORTCUTS: &[Line] = &[
     Line::Keys("Note or reminder", "tab"),
     Line::Keys("A photo", "ctrl p"),
     Line::Keys("Say it", "alt held"),
-    Line::Keys("Open where it went", "ctrl enter"),
+    Line::Keys("Save and open it", "ctrl enter"),
     Line::Head("control centre"),
     Line::Keys("Recent apps", "r"),
     Line::Keys("Screenshot", "s"),

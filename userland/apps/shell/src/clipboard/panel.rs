@@ -17,7 +17,7 @@ use detent::Animated;
 
 use crate::gfx::{Fade, Gfx, RING_ROOM};
 use crate::platform::Key;
-use crate::sheet::{first_fitting, keys_line, text_right, Grown, INSET, TOP, FOOT};
+use crate::sheet::{first_fitting, keys_line, keys_shown, text_right, Grown, FOOT, INSET, TOP};
 
 use super::Item;
 
@@ -66,6 +66,9 @@ pub struct Panel {
     fade: Fade,
     /// What a key just did, said in the bar for a moment, and for how long more.
     note: Option<(String, f32)>,
+    /// The foot of the screen behind (`Gfx::foot`): above its hint line, if
+    /// it has one, else the panel's own. The sheet comes down no further.
+    foot: f32,
 }
 
 /// How long the bar says what a key did.
@@ -77,13 +80,19 @@ impl Default for Panel {
     }
 }
 
-/// The panel's measures: its bar's height, a row's, the keys' line, and how
-/// many rows it holds (the last perhaps in part).
-fn metrics(g: &Gfx) -> (f32, f32, f32, f32) {
+/// Where the sheet's foot may come down to over a screen whose foot is at
+/// `foot`: clear of its hint line, and its own gap above the panel's edge.
+fn lowest(foot: f32) -> f32 {
+    foot.min(crate::gfx::H - FOOT)
+}
+
+/// The panel's measures down to `foot`: its bar's height, a row's, the
+/// keys' line, and how many rows it holds (the last perhaps in part).
+fn metrics(g: &Gfx, foot: f32) -> (f32, f32, f32, f32) {
     let bar = (g.ty.name.size + 15.0).round();
     let row = g.row_h();
     let keys = (g.ty.caption.size + 10.0).round();
-    let room = crate::gfx::H - TOP - FOOT - bar - keys - LIST_ABOVE - LIST_BELOW;
+    let room = lowest(foot) - TOP - bar - keys - LIST_ABOVE - LIST_BELOW;
     (bar, row, keys, (room + ROW_GAP) / (row + ROW_GAP))
 }
 
@@ -103,6 +112,7 @@ impl Panel {
             rows_most: 4,
             fade: Fade::default(),
             note: None,
+            foot: crate::gfx::H,
         }
     }
 
@@ -126,10 +136,18 @@ impl Panel {
         self.sheet.glass(g, island)
     }
 
+    /// Its sheet of glass, for quick capture's to take over.
+    pub fn grown(&self) -> &Grown {
+        &self.sheet
+    }
+
     /// Bring it up, on the newest clip (or, on its way back into the
-    /// island, turned round where it was).
-    pub fn summon(&mut self, g: &Gfx, calm: bool) {
+    /// island, turned round where it was); in place of quick capture's
+    /// sheet, `over`, if that is showing.
+    pub fn summon(&mut self, g: &Gfx, calm: bool, over: Option<&Grown>) {
         let returning = self.sheet.returning();
+        // The screen in front, as it was last drawn.
+        self.foot = g.foot;
         self.read();
         if !returning {
             self.focus = 0;
@@ -139,7 +157,7 @@ impl Panel {
             self.armed = None;
         }
         let height = self.height_for(g, self.rows.len());
-        self.sheet.summon(calm, height);
+        self.sheet.summon(calm, height, over);
     }
 
     pub fn dismiss(&mut self) {
@@ -176,13 +194,19 @@ impl Panel {
     }
 
     /// Its height for `rows` rows: its bar, the rows (or the line saying
-    /// there are none), and the keys along its foot. Whole rows only, the
-    /// keys sitting under them; more than it holds scroll, with a thumb.
+    /// there are none), and the keys along its foot. With more than it
+    /// holds whole, or one clip in whole, it runs on to the foot of the
+    /// screen behind, as search's results do: they scroll, with a thumb,
+    /// and the next row fades out above the keys. That foot is above the
+    /// screen's hint line, if it has one: the sheet never comes down on it.
     fn height_for(&self, g: &Gfx, rows: usize) -> f32 {
-        let (bar, row, keys, most) = metrics(g);
-        let most = most.floor().max(1.0);
-        let shown = if self.previewing { most } else { (rows.max(1) as f32).min(most) };
-        bar + LIST_ABOVE + shown * row + (shown - 1.0).max(0.0) * ROW_GAP + LIST_BELOW + keys
+        let (bar, row, keys, most) = metrics(g, self.foot);
+        let full = lowest(self.foot) - TOP;
+        let shown = rows.max(1) as f32;
+        if self.previewing || shown > most.floor().max(1.0) {
+            return full;
+        }
+        (bar + LIST_ABOVE + shown * row + (shown - 1.0) * ROW_GAP + LIST_BELOW + keys).min(full)
     }
 
     /// A key while it is open. What it says is said in the bar too.
@@ -244,7 +268,12 @@ impl Panel {
                     if let Some(at) = self.rows.iter().position(|r| matches!(r, Row::Clip(i) if i.text == text)) {
                         self.focus = at;
                     }
-                    return Outcome::Say(if now == Some(true) { "pinned".into() } else { "unpinned".into() });
+                    return Outcome::Say(match now {
+                        Ok(true) => "pinned".into(),
+                        Ok(false) => "unpinned".into(),
+                        Err(super::Unpinnable::Full) => format!("{} pinned already · unpin one", super::PINS),
+                        Err(super::Unpinnable::Gone) => "that clip is gone".into(),
+                    });
                 }
                 Some(Row::Secret(_)) => return Outcome::Say("a secret is never kept".into()),
                 None => {}
@@ -311,9 +340,11 @@ impl Panel {
         moving
     }
 
-    /// What sits on the glass: the bar, the clips or one in whole, the keys.
-    pub fn draw(&mut self, g: &mut Gfx, island: Rect) {
-        let (bar_h, row_h, keys_h, room) = metrics(g);
+    /// What sits on the glass: the bar, the clips or one in whole, the keys;
+    /// over a screen whose foot (`Gfx::foot`, as it was drawn) is at `foot`.
+    pub fn draw(&mut self, g: &mut Gfx, island: Rect, foot: f32) {
+        self.foot = foot;
+        let (bar_h, row_h, keys_h, room) = metrics(g, foot);
         self.rows_most = room.floor().max(1.0) as usize;
         let height = self.height_for(g, self.rows.len());
         self.sheet.set_height(g, height);
@@ -334,9 +365,9 @@ impl Panel {
         let clips = self.rows.iter().filter(|r| matches!(r, Row::Clip(_))).count();
         let (said, ink) = match &self.note {
             Some((note, _)) => (note.clone(), t.ink),
-            None if clips == 0 => (String::new(), t.faint),
-            None if clips == 1 => ("1 clip".to_owned(), t.faint),
-            None => (format!("{clips} clips"), t.faint),
+            None if clips == 0 => (String::new(), t.dim),
+            None if clips == 1 => ("1 clip".to_owned(), t.dim),
+            None => (format!("{clips} clips"), t.dim),
         };
         let title_end = panel.x + 30.0 + g.measure("Clipboard", ty.name) + 10.0;
         let said = g.text.fit(&said, &ty.caption, (panel.right() - 14.0 - title_end).max(0.0));
@@ -357,7 +388,7 @@ impl Panel {
             }
             g.canvas.set_clip(panel.inset(1.0));
         }
-        // The keys, along its foot (as it rests).
+        // The keys, along its foot (as it rests), in once the glass reaches them.
         let keys_cy = panel.y + rest_h - keys_h * 0.5 - 1.0;
         let focused_secret = matches!(self.rows.get(self.focus), Some(Row::Secret(_)));
         let keys: &[(&str, &str)] = match (self.rows.is_empty(), self.previewing, focused_secret) {
@@ -366,7 +397,7 @@ impl Panel {
             (_, _, true) => &[("enter", "paste"), ("d", "forget")],
             _ => &[("enter", "paste"), ("p", "pin"), ("d", "remove"), ("tab", "all")],
         };
-        keys_line(g, panel.x + 12.0, panel.right() - 12.0, keys_cy, keys, words);
+        keys_line(g, panel.x + 12.0, panel.right() - 12.0, keys_cy, keys, words * keys_shown(panel, keys_cy, keys_h));
         g.canvas.clear_clip();
     }
 
@@ -503,7 +534,7 @@ impl Panel {
         ];
         let choices: Vec<&str> = foot.iter().map(String::as_str).collect();
         let foot = first_fitting(g, &choices, ty.caption, area.w);
-        g.text_alpha(area.x, area.bottom() - line_h * 0.5, foot, ty.caption, t.faint, alpha);
+        g.text_alpha(area.x, area.bottom() - line_h * 0.5, foot, ty.caption, t.dim, alpha);
     }
 }
 
@@ -546,7 +577,7 @@ mod tests {
     fn panel() -> (Panel, Gfx) {
         let g = Gfx::new(bezel::Tokens::dark());
         let mut p = Panel::new();
-        p.summon(&g, true);
+        p.summon(&g, true, None);
         (p, g)
     }
 
@@ -596,16 +627,24 @@ mod tests {
     }
 
     #[test]
-    fn its_height_holds_its_rows_and_never_runs_past_the_panel() {
+    fn its_height_holds_its_rows_and_never_comes_down_on_a_hint_line() {
         for size in [crate::gfx::TextSize::Compact, crate::gfx::TextSize::Standard, crate::gfx::TextSize::Large] {
             let mut g = Gfx::new(bezel::Tokens::dark());
             g.set_text_size(size);
-            let p = Panel::new();
-            for rows in [0, 1, 3, 40] {
-                let h = p.height_for(&g, rows);
-                assert!(TOP + h <= crate::gfx::H - FOOT + 0.5, "{rows} rows at {}: {h}", size.name());
+            // Over a screen with a hint along its foot, and one without (the Terminal).
+            for foot in [g.above_hint(), crate::gfx::H] {
+                let mut p = Panel::new();
+                p.foot = foot;
+                for rows in 0..40 {
+                    let h = p.height_for(&g, rows);
+                    assert!(TOP + h <= crate::gfx::H - FOOT + 0.5, "{rows} rows at {}: {h}", size.name());
+                    assert!(TOP + h <= foot + 0.5, "{rows} rows at {}: its foot at {} comes down on the hint at {foot}", size.name(), TOP + h);
+                }
+                assert!(p.height_for(&g, 1) < p.height_for(&g, 2));
+                assert_eq!(TOP + p.height_for(&g, 40), lowest(foot), "more than it holds: on to the foot");
+                p.previewing = true;
+                assert_eq!(TOP + p.height_for(&g, 1), lowest(foot), "one clip in whole: all the room there is");
             }
-            assert!(p.height_for(&g, 1) < p.height_for(&g, 2));
         }
     }
 

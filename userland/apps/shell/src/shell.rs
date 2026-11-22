@@ -3647,6 +3647,8 @@ impl Shell {
         self.switcher_under = None;
         self.help_hold = None;
         self.message = None;
+        // The clipboard's history and quick capture, and a secret copied (shell/clip.rs).
+        self.sheets_at_the_lock();
         self.dirty = true;
     }
 
@@ -5571,7 +5573,7 @@ pub(crate) mod tests {
     // ----------------------------------------------- StandBy and the lock ---
 
     /// A shell with `code` as its passcode (kept for this test alone).
-    fn with_passcode(code: &str) -> Shell {
+    pub(crate) fn with_passcode(code: &str) -> Shell {
         crate::passcode::test_store();
         let (phc, _, _) = crate::passcode::make(code).unwrap();
         crate::passcode::keep(&phc).unwrap();
@@ -5579,7 +5581,7 @@ pub(crate) mod tests {
     }
 
     /// Type a passcode and Enter, and wait for it to be checked.
-    fn type_code(shell: &mut Shell, code: &str) {
+    pub(crate) fn type_code(shell: &mut Shell, code: &str) {
         for c in code.chars() {
             shell.key(Key::Char(c));
         }

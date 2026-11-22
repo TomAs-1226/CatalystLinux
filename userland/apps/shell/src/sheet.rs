@@ -7,7 +7,8 @@
 //! shrinks back on the smooth spring and its glass dematerializes 240 ms
 //! later. Its height glides as what it holds changes. Every spring can be
 //! turned round mid-flight: brought up again as it goes, it grows back from
-//! where it is.
+//! where it is. Brought up over the other sheet, it takes that one's glass
+//! as it is: the height glides to its own and its words fade in.
 
 use bezel::{Align, Color, GlassShape, Rect, TextStyle};
 use detent::{role, Animated};
@@ -38,6 +39,8 @@ pub struct Grown {
     since_closed: f32,
     /// Its height at rest, gliding as what it holds changes.
     height: Animated,
+    /// Its words, fading in over the glass of the sheet it took over (else 1).
+    words_in: Animated,
     pub calm: bool,
 }
 
@@ -55,6 +58,7 @@ impl Grown {
             glass: Animated::new(0.0, role::layer()).with_rest(0.004),
             since_closed: f32::MAX,
             height: Animated::new(30.0, role::release()).with_rest(0.2),
+            words_in: Animated::new(1.0, role::effect()).with_rest(0.004),
             calm: false,
         }
     }
@@ -81,7 +85,7 @@ impl Grown {
 
     /// How far its words have come in: from halfway grown, as the island's.
     pub fn words(&self) -> f32 {
-        ((self.grow.value() - 0.55) / 0.45).clamp(0.0, 1.0)
+        ((self.grow.value() - 0.55) / 0.45).clamp(0.0, 1.0) * self.words_in.value().clamp(0.0, 1.0)
     }
 
     /// Whether it was on its way back into the island: brought up again, it
@@ -90,14 +94,23 @@ impl Grown {
         !self.open && self.visible()
     }
 
-    /// Bring it up `height` tall: out of the island, or turned round from
-    /// where it is on its way back.
-    pub fn summon(&mut self, calm: bool, height: f32) {
+    /// Bring it up `height` tall: out of the island, turned round from
+    /// where it is on its way back, or in place of the sheet `over` (on
+    /// screen still), from its glass as it is.
+    pub fn summon(&mut self, calm: bool, height: f32, over: Option<&Grown>) {
         let returning = self.returning();
         self.calm = calm;
         self.open = true;
         self.since_closed = f32::MAX;
-        if !returning {
+        self.words_in.jump(1.0);
+        if let Some(over) = over.filter(|o| o.visible() && !calm) {
+            self.grow.jump(over.grow.value());
+            self.glass.jump(over.glass.value());
+            self.height.jump(over.height.value());
+            self.height.set_with(height, role::release());
+            self.words_in.jump(0.0);
+            self.words_in.set_with(1.0, role::effect());
+        } else if !returning {
             self.height.jump(height);
         }
         if calm {
@@ -151,7 +164,7 @@ impl Grown {
 
     /// Advance its motion; true while anything moves.
     pub fn tick(&mut self, dt: f32) -> bool {
-        let mut moving = self.grow.tick(dt) | self.glass.tick(dt) | self.height.tick(dt);
+        let mut moving = self.grow.tick(dt) | self.glass.tick(dt) | self.height.tick(dt) | self.words_in.tick(dt);
         // The glass lingers as the sheet shrinks, then dematerializes.
         if !self.open && self.since_closed < f32::MAX {
             self.since_closed += dt.max(0.001);
@@ -217,6 +230,13 @@ pub fn first_fitting<'a>(g: &mut Gfx, choices: &[&'a str], style: TextStyle, wid
     choices.iter().copied().find(|s| g.measure(s, style) <= width).or_else(|| choices.last().copied()).unwrap_or("")
 }
 
+/// How far the keys along a sheet's foot have come in, 0 to 1: as its glass
+/// grows down over where they rest, not before, so they are never seen cut
+/// by its edge.
+pub fn keys_shown(glass: Rect, keys_cy: f32, keys_h: f32) -> f32 {
+    ((glass.bottom() - (keys_cy + keys_h * 0.5)) / 8.0 + 1.0).clamp(0.0, 1.0)
+}
+
 /// Keys along a sheet's foot, each as a quiet keycap and what it does
 /// ("enter" "paste"), from `left`; those that do not fit before `right`
 /// are left out, from the last (they are given most needed first). Where
@@ -241,4 +261,41 @@ pub fn keys_line(g: &mut Gfx, left: f32, right: f32, cy: f32, keys: &[(&str, &st
         x = cap.right() + 4.0 + words_w + 10.0;
     }
     x
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_keys_come_in_only_as_the_glass_reaches_them() {
+        // Keys resting 90 to 110 down.
+        let glass = |bottom: f32| Rect::new(0.0, 0.0, 100.0, bottom);
+        assert_eq!(keys_shown(glass(110.0), 100.0, 20.0), 1.0, "covered: in");
+        assert_eq!(keys_shown(glass(150.0), 100.0, 20.0), 1.0);
+        assert_eq!(keys_shown(glass(102.0), 100.0, 20.0), 0.0, "8 short: not yet");
+        assert!((keys_shown(glass(106.0), 100.0, 20.0) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_sheet_brought_up_over_the_other_takes_its_glass_as_it_is() {
+        let mut history = Grown::new();
+        history.summon(false, 150.0, None);
+        for _ in 0..90 {
+            history.tick(1.0 / 60.0);
+        }
+        let mut capture = Grown::new();
+        capture.summon(false, 80.0, Some(&history));
+        assert!(capture.shown() > 0.99, "not grown again out of the island");
+        assert!((capture.rest().h - 150.0).abs() < 0.5, "from the history's height");
+        assert!(capture.words() < 0.01, "its words still to come");
+        for _ in 0..90 {
+            capture.tick(1.0 / 60.0);
+        }
+        assert!((capture.rest().h - 80.0).abs() < 0.5 && capture.words() > 0.99, "its own height, its words in");
+        // Calm: at once.
+        let mut calm = Grown::new();
+        calm.summon(true, 80.0, Some(&history));
+        assert_eq!((calm.rest().h, calm.words()), (80.0, 1.0));
+    }
 }

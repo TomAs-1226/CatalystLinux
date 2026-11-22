@@ -13,12 +13,13 @@
 //!   Ctrl-P again) takes it into Photos, and the camera gives way at once.
 //! - **Spoken**: the talk key (Alt) held in the sheet writes down what is
 //!   said, there.
-//! - **The clipboard**: Ctrl-V puts it in; Ctrl-C copies what is typed.
+//! - **The clipboard**: Ctrl-V puts it in; Ctrl-C copies what is typed;
+//!   Ctrl-Shift-H turns the sheet into the clipboard's history.
 //!
-//! Afterwards the island says where it went for a few seconds, and Ctrl-Enter
-//! meanwhile opens it there (Ctrl-Enter in the sheet saves and opens it at
-//! once). Esc puts the sheet away with what was typed kept for next time;
-//! Fn-Backspace clears it.
+//! Afterwards the island says where it went, and the screen in front is as
+//! it was. Ctrl-Enter in the sheet saves and opens it there instead (outside
+//! the sheet Ctrl-Enter is search, as ever). Esc puts the sheet away with
+//! what was typed kept for next time; Fn-Backspace clears it.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -28,7 +29,7 @@ use bezel::Rect;
 use crate::gfx::Gfx;
 use crate::platform::Key;
 use crate::robot::Robot;
-use crate::sheet::{first_fitting, fit_tail, keys_line, text_right, Grown, INSET};
+use crate::sheet::{first_fitting, fit_tail, keys_line, keys_shown, text_right, Grown, INSET};
 
 /// The most a capture holds.
 const MOST: usize = 2000;
@@ -36,8 +37,8 @@ const MOST: usize = 2000;
 const LINES: usize = 3;
 /// The title quick capture's dictation goes by (`voice::Target`).
 pub const TITLE: &str = "Quick capture";
-/// How long the island says where a capture went, and Ctrl-Enter opens it.
-pub const RECEIPT_SECONDS: f32 = 4.5;
+/// How long the island says where a capture went.
+pub const RECEIPT_SECONDS: f32 = 3.5;
 
 /// Where a capture goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,7 +57,8 @@ struct Reading {
     trouble: Option<String>,
 }
 
-/// Where something captured went, for the island to say and Ctrl-Enter to open.
+/// Where something captured went, for the island to say and Ctrl-Enter in
+/// the sheet to open.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Place {
     Note(PathBuf),
@@ -78,8 +80,7 @@ impl Receipt {
             Place::Reminder(_) => (format!("reminder{said}"), "in reminders"),
             Place::Photo(_) => (format!("saved to photos{said}"), "in photos"),
         };
-        let words = vec![format!("{said} · ctrl enter opens"), format!("{short} · ctrl enter opens"), said, short.to_owned()];
-        Receipt { place, words }
+        Receipt { place, words: vec![said, short.to_owned()] }
     }
 
     /// What it was saved in, open on it.
@@ -220,11 +221,17 @@ impl Capture {
         self.reading.dest
     }
 
-    /// Bring it up, with what was typed last time still there.
-    pub fn summon(&mut self, g: &Gfx, calm: bool, robot: &Robot, h24: bool) {
+    /// Its sheet of glass, for the clipboard's history to take over.
+    pub fn grown(&self) -> &Grown {
+        &self.sheet
+    }
+
+    /// Bring it up, with what was typed last time still there; in place of
+    /// the clipboard's history, `over`, if that is showing.
+    pub fn summon(&mut self, g: &Gfx, calm: bool, robot: &Robot, h24: bool, over: Option<&Grown>) {
         self.reread(robot, h24);
         let height = self.height_for(g, self.lines);
-        self.sheet.summon(calm, height);
+        self.sheet.summon(calm, height, over);
     }
 
     pub fn dismiss(&mut self) {
@@ -305,7 +312,10 @@ impl Capture {
                 Some(text) => self.put(&text, robot, h24),
                 None => return Outcome::Say("the clipboard is empty".into()),
             },
-            Key::Ctrl('c' | 'C') if !self.text.trim().is_empty() => crate::clipboard::copy(self.text.trim(), crate::clipboard::Sensitivity::Normal),
+            Key::Ctrl('c' | 'C') if !self.text.trim().is_empty() => {
+                crate::clipboard::copy_quietly(self.text.trim(), crate::clipboard::Sensitivity::Normal);
+                return Outcome::Say("copied".into());
+            }
             Key::Char(c) if !c.is_control() && self.text.chars().count() < MOST => self.text.push(c),
             Key::Backspace => {
                 self.text.pop();
@@ -475,10 +485,11 @@ impl Capture {
         let detail_room = row.w - 26.0 - name_w - 12.0 - 9.0;
         let detail = g.text.fit(&detail, &ty.caption, detail_room.max(0.0));
         text_right(g, row.right() - 9.0, row.cy(), &detail, ty.caption, detail_ink, words);
-        // The keys, along its foot (as it rests).
+        // The keys, along its foot (as it rests), in once the glass reaches them.
         let keys_cy = panel.y + rest_h - keys_h * 0.5 - 1.0;
         let other = if self.reading.dest == Dest::Note { "reminder" } else { "note" };
-        keys_line(g, panel.x + 12.0, panel.right() - 12.0, keys_cy, &[("enter", "save"), ("tab", other), ("ctrl p", "photo"), ("ctrl v", "paste"), ("alt", "talk")], words);
+        let keys_in = words * keys_shown(panel, keys_cy, keys_h);
+        keys_line(g, panel.x + 12.0, panel.right() - 12.0, keys_cy, &[("enter", "save"), ("tab", other), ("ctrl p", "photo"), ("ctrl v", "paste"), ("alt", "talk")], keys_in);
         g.canvas.clear_clip();
     }
 }
@@ -555,7 +566,7 @@ mod tests {
         typed(&mut c, &robot, "swap battery in 10 min");
         let Outcome::Saved(receipt, false) = c.key(Key::Enter, &robot, true) else { panic!("saved") };
         let Place::Reminder(id) = receipt.place else { panic!("a reminder") };
-        assert_eq!(receipt.words[0], "reminder · in 10 min · ctrl enter opens");
+        assert_eq!(receipt.words, ["reminder · in 10 min", "in reminders"]);
         assert!(crate::reminders::with(|s| s.book.get(id).is_some_and(|r| r.text == "swap battery")));
         assert!(c.text().is_empty(), "ready for the next");
         assert_eq!(c.key(Key::Enter, &robot, true), Outcome::Say("type something first".into()));
@@ -584,7 +595,8 @@ mod tests {
             g.set_text_size(size);
             let c = Capture::new();
             let most = c.height_for(&g, 10);
-            assert!(crate::sheet::TOP + most <= crate::gfx::H - crate::sheet::FOOT, "{}: {most}", size.name());
+            // Clear of the hint line of any screen behind it, too.
+            assert!(crate::sheet::TOP + most <= g.above_hint(), "{}: {most}", size.name());
         }
     }
 }

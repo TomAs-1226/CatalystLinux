@@ -468,19 +468,20 @@ impl Screen for Terminal {
         let (x0, y0) = (panel.x + 4.0, panel.y + ((panel.h - rows as f32 * cell_h) * 0.5).round());
         let bold = TextStyle { wght: 700.0, ..style };
         let mut utf8 = [0u8; 4];
-        // Copy mode: the lines picked under a state layer, the one the
-        // highlight is on ringed.
+        // Copy mode: the lines picked under one state layer, and the line
+        // the highlight is on tinted with the focus ring's colour. The lines
+        // touch, so a ring round one would run into the next.
         let first_line = term.history() - back;
         if let Some(c) = self.copying {
             let (from, to) = c.range();
-            for row in 0..rows {
-                let at = first_line + row;
-                if (from..=to).contains(&at) {
-                    let r = Rect::new(x0 - 2.0, y0 + row as f32 * cell_h, cols as f32 * cell_w + 4.0, cell_h);
-                    g.canvas.rrect(r, 2.0, t.ink, 0.12);
-                    if at == c.at {
-                        g.canvas.stroke_rrect(r.inset(-1.0), 3.0, 1.5, g.ring_color(), 1.0);
-                    }
+            let picked: Vec<usize> = (0..rows).filter(|row| (from..=to).contains(&(first_line + row))).collect();
+            if let (Some(&top), Some(&bottom)) = (picked.first(), picked.last()) {
+                let (left, width) = (x0 - 3.0, cols as f32 * cell_w + 5.0);
+                let block = Rect::new(left, y0 + top as f32 * cell_h, width, (bottom - top + 1) as f32 * cell_h);
+                g.canvas.rrect(block, 3.0_f32.min(block.h * 0.5), t.ink, 0.10);
+                if let Some(row) = c.at.checked_sub(first_line).filter(|row| *row < rows) {
+                    let line = Rect::new(left, y0 + row as f32 * cell_h, width, cell_h);
+                    g.canvas.rrect(line, 3.0_f32.min(cell_h * 0.5), g.ring_color(), 0.24);
                 }
             }
         }

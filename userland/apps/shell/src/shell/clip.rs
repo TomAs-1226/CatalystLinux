@@ -4,11 +4,16 @@
 //!
 //! The order the keys go in (see `Shell::key`): past the lock and the tour,
 //! Ctrl-Shift-H and Ctrl-Shift-N bring their sheets up from anywhere (the
-//! recent apps, Spotlight and the control centre give way to them); while
-//! one is up it takes the keys, as Spotlight does, giving way itself to
-//! Ctrl-Tab, Ctrl-Space and (the history) Ctrl-Enter. Copy and paste come
-//! last, just before the screen in front: Ctrl-C and Ctrl-V there, or
-//! Ctrl-Shift-C and V, which a terminal (`Screen::keeps_ctrl`) takes itself.
+//! recent apps, Spotlight and the control centre give way to them, and each
+//! sheet to the other); while one is up it takes the keys, as Spotlight
+//! does, giving way itself to Ctrl-Tab, Ctrl-Space, Ctrl-Backspace and (the
+//! history) Ctrl-Enter. Copy and paste come last, just before the screen in
+//! front: Ctrl-C and Ctrl-V there, or Ctrl-Shift-C and V, which a terminal
+//! (`Screen::keeps_ctrl`) takes itself.
+//!
+//! At the lock both sheets go at once, a secret on the clipboard with them,
+//! and the island stops saying what was copied (`at_the_lock`): nothing of
+//! either is drawn on the lock screen, not even as it comes down.
 
 use super::*;
 use crate::capture::{Capture, Receipt};
@@ -25,17 +30,15 @@ pub enum Sheet {
 pub struct Sheets {
     pub panel: Panel,
     pub capture: Capture,
-    /// While one is out: the frame it came up over, and the page dots that
-    /// frame asked for (held still behind it, as Spotlight's).
-    under: Option<(Vec<u32>, Option<(usize, usize, f32)>)>,
-    /// Where the last capture went, while the island says so: Ctrl-Enter
-    /// opens it there.
-    receipt: Option<(Receipt, f32)>,
+    /// While one is out: the frame it came up over, the page dots that
+    /// frame asked for (held still behind it, as Spotlight's), and where
+    /// the screen's foot was (above its hint line, if it has one).
+    under: Option<(Vec<u32>, Option<(usize, usize, f32)>, f32)>,
 }
 
 impl Sheets {
     pub fn new() -> Sheets {
-        Sheets { panel: Panel::new(), capture: Capture::new(), under: None, receipt: None }
+        Sheets { panel: Panel::new(), capture: Capture::new(), under: None }
     }
 
     pub fn visible(&self) -> bool {
@@ -72,26 +75,20 @@ impl Shell {
             s.panel.gone_now();
             s.under = None;
         }
-        // The recent apps and the control centre in their place; Spotlight
-        // in the history's (in quick capture, Ctrl-Enter saves and opens).
-        let gives_way = matches!(key, Key::Ctrl('\t') | Key::Ctrl(' ')) || (key == Key::Ctrl('\n') && self.sheets.panel.is_open());
+        // The recent apps, the control centre and the notifications in their
+        // place; search in the history's (in quick capture, Ctrl-Enter saves
+        // and opens what it saved).
+        let gives_way = matches!(key, Key::Ctrl('\t') | Key::Ctrl(' ') | Key::Ctrl(crate::platform::NOTIFICATIONS)) || (key == Key::Ctrl('\n') && self.sheets.panel.is_open());
         if self.sheets.open() && gives_way {
             self.sheets.gone_now();
             return false;
         }
-        if self.sheets.capture.is_open() {
-            self.capture_key(key);
-            return true;
-        }
-        if self.sheets.panel.is_open() {
-            self.panel_key(key);
-            return true;
-        }
+        // Each sheet's key over the other turns one into the other.
         match key {
-            HISTORY_KEY => self.summon_sheet(Sheet::Clipboard),
-            CAPTURE_KEY => self.summon_sheet(Sheet::Capture),
-            // Where the last capture went, while the island says it.
-            Key::Ctrl('\n') if self.sheets.receipt.is_some() => self.open_receipt(),
+            HISTORY_KEY if !self.sheets.panel.is_open() => self.summon_sheet(Sheet::Clipboard),
+            CAPTURE_KEY if !self.sheets.capture.is_open() => self.summon_sheet(Sheet::Capture),
+            _ if self.sheets.capture.is_open() => self.capture_key(key),
+            _ if self.sheets.panel.is_open() => self.panel_key(key),
             _ => return false,
         }
         true
@@ -116,28 +113,38 @@ impl Shell {
             self.control_under = None;
             self.control_glass = None;
         }
-        // The island no longer says where the last capture went: a sheet
-        // comes out of it now.
-        if self.sheets.receipt.take().is_some() {
-            self.message = None;
-        }
         let calm = self.settings.calm;
         let s = &mut self.sheets;
         if !s.visible() {
             s.under = None;
         }
+        // Over the other sheet, it takes that one's glass as it is.
         match which {
             Sheet::Clipboard => {
+                s.panel.summon(&self.gfx, calm, Some(s.capture.grown()));
                 s.capture.gone_now();
-                s.panel.summon(&self.gfx, calm);
             }
             Sheet::Capture => {
+                s.capture.summon(&self.gfx, calm, &self.robot, self.settings.clock24, Some(s.panel.grown()));
                 s.panel.gone_now();
-                s.capture.summon(&self.gfx, calm, &self.robot, self.settings.clock24);
             }
         }
         self.moving = true;
         self.dirty = true;
+    }
+
+    /// The handheld locked: both sheets gone at once, the frame they held
+    /// let go, a secret on the clipboard forgotten. Nothing of them is left
+    /// to show on the lock screen, even as it comes down.
+    pub(super) fn sheets_at_the_lock(&mut self) {
+        if self.sheets.visible() {
+            self.sheets.gone_now();
+            self.dirty = true;
+        }
+        self.sheets.under = None;
+        crate::clipboard::lock();
+        // What the island was about to say of a copy goes unsaid.
+        crate::clipboard::take_words();
     }
 
     /// Whether a sheet is up (the tests, the gallery).
@@ -160,12 +167,9 @@ impl Shell {
             Outcome::Close => self.sheets.capture.dismiss(),
             Outcome::Saved(receipt, false) => {
                 self.sheets.capture.dismiss();
-                self.show_receipt(receipt);
+                self.say_fitting(&receipt.words, crate::capture::RECEIPT_SECONDS);
             }
-            Outcome::Saved(receipt, true) => {
-                self.sheets.receipt = Some((receipt, 0.0));
-                self.open_receipt();
-            }
+            Outcome::Saved(receipt, true) => self.open_receipt(&receipt),
             Outcome::Photo => {
                 // Over the camera already: that is where photos are taken.
                 if self.top_title() == "Camera" {
@@ -203,28 +207,23 @@ impl Shell {
         }
     }
 
-    /// The island says where a capture went, for a few seconds, and Ctrl-Enter
-    /// meanwhile opens it there.
-    fn show_receipt(&mut self, receipt: Receipt) {
-        self.say_fitting(&receipt.words, crate::capture::RECEIPT_SECONDS);
-        self.sheets.receipt = Some((receipt, crate::capture::RECEIPT_SECONDS));
-    }
-
-    /// What the last capture went into, opened on it, growing out of the
-    /// island over the screen in front (Esc comes back to it).
-    fn open_receipt(&mut self) {
-        let Some((receipt, _)) = self.sheets.receipt.take() else { return };
-        self.message = None;
+    /// What a capture went into, opened on it (Ctrl-Enter in the sheet),
+    /// growing out of the sheet over the screen in front: Esc comes back to
+    /// that screen.
+    fn open_receipt(&mut self, receipt: &Receipt) {
         match receipt.open() {
             Ok(screen) => {
-                let from = self.places.island.unwrap_or_else(|| self.island_rect());
+                let from = self.sheets.capture.rect();
                 let backdrop = self.gfx.canvas.px.clone();
                 self.sheets.gone_now();
                 drop(self.interrupt());
                 self.open_over(screen, from, backdrop, false);
                 self.apply_settings();
             }
-            Err(why) => self.say(why),
+            Err(why) => {
+                self.sheets.capture.dismiss();
+                self.say(why);
+            }
         }
         self.moving = true;
         self.dirty = true;
@@ -289,12 +288,7 @@ impl Shell {
         crate::clipboard::tick();
         let locked = self.locked();
         if locked {
-            crate::clipboard::lock();
-            if self.sheets.visible() {
-                self.sheets.gone_now();
-                self.dirty = true;
-            }
-            self.sheets.receipt = None;
+            self.sheets_at_the_lock();
         }
         // Said only to someone looking: a copy from a script, or a secret
         // clearing, with the screen off is no notice to blink the light for.
@@ -305,13 +299,7 @@ impl Shell {
         }
         if let Some(receipt) = crate::capture::take_photo() {
             if !locked {
-                self.show_receipt(receipt);
-            }
-        }
-        if let Some((_, left)) = &mut self.sheets.receipt {
-            *left -= dt;
-            if *left <= 0.0 {
-                self.sheets.receipt = None;
+                self.say_fitting(&receipt.words, crate::capture::RECEIPT_SECONDS);
             }
         }
         let moving = self.sheets.panel.tick(dt, motion_dt) | self.sheets.capture.tick(dt, motion_dt);
@@ -332,19 +320,21 @@ impl Shell {
         if self.transition.is_some() {
             self.sheets.under = None;
         }
-        match &self.sheets.under {
-            Some((under, pager)) if under.len() == self.gfx.canvas.px.len() => {
+        let foot = match &self.sheets.under {
+            Some((under, pager, foot)) if under.len() == self.gfx.canvas.px.len() => {
                 self.gfx.canvas.px.copy_from_slice(under);
                 self.gfx.pager = *pager;
+                *foot
             }
             _ => {
                 // Drawn without the island's glass: the sheet is drawn with it.
                 self.draw_frame();
                 if self.transition.is_none() {
-                    self.sheets.under = Some((self.gfx.canvas.px.clone(), self.gfx.pager));
+                    self.sheets.under = Some((self.gfx.canvas.px.clone(), self.gfx.pager, self.gfx.foot));
                 }
+                self.gfx.foot
             }
-        }
+        };
         let began = std::time::Instant::now();
         let capture = self.sheets.capture.visible();
         let dim = if capture { self.sheets.capture.dim() } else { self.sheets.panel.dim() };
@@ -363,7 +353,7 @@ impl Shell {
             let talk = self.voice.island();
             self.sheets.capture.draw(&mut self.gfx, island, talk.as_ref());
         } else {
-            self.sheets.panel.draw(&mut self.gfx, island);
+            self.sheets.panel.draw(&mut self.gfx, island, foot);
         }
         if self.gfx.take_motion_started() {
             self.moving = true;
@@ -435,10 +425,11 @@ impl Shell {
 
 // ---------------------------------------------------------------- gallery ---
 
-/// `--clip-shots <dir>`: the clipboard's history, quick capture, the
-/// receipt, the Terminal's copy mode and the shortcut list, each as a sheet
-/// of both looks (Catalyst, Bezel: across) at the three text sizes (down);
-/// and the sheets' motion, as frames and an animated PNG.
+/// `--clip-shots <dir>`: the clipboard's history, quick capture, what the
+/// island says after it, the Terminal's copy mode and the shortcut list,
+/// each as a sheet of both looks (Catalyst, Bezel: across) at the three text
+/// sizes (down), dark and again light (`-light`); and the sheets' motion, as
+/// frames and an animated PNG.
 #[cfg(not(target_arch = "aarch64"))]
 pub fn gallery(dir: &std::path::Path) {
     use crate::gfx::TextSize;
@@ -462,7 +453,7 @@ pub fn gallery(dir: &std::path::Path) {
         }
     };
     // The history as a day at an event leaves it: a pinned login, a link,
-    // a note's lines, a value and an address, and a password from the vault.
+    // a note's lines, a value and an address, and a password copied as a secret.
     let fill = |secret: bool| {
         crate::clipboard::with(|b| {
             b.clear();
@@ -471,7 +462,7 @@ pub fn gallery(dir: &std::path::Path) {
             }
             let (now, unix) = (std::time::Instant::now(), chrono::Utc::now().timestamp());
             b.copy("ssh admin@10.58.5.2", Sensitivity::Normal, now, unix - 3 * 86_400);
-            b.toggle_pin("ssh admin@10.58.5.2");
+            b.toggle_pin("ssh admin@10.58.5.2").ok();
             b.copy("https://frc-events.firstinspires.org/2026/cmptx", Sensitivity::Normal, now, unix - 7200);
             b.copy("Swap the intake belt before Q32,\ncheck the CAN wiring at the PDH,\nand charge battery 3 for the next match.", Sensitivity::Normal, now, unix - 1500);
             b.copy("12.42", Sensitivity::Normal, now, unix - 240);
@@ -500,9 +491,9 @@ pub fn gallery(dir: &std::path::Path) {
     ];
     let (w, h) = (W as usize, H as usize);
     let gap = 4usize;
-    for (name, scene) in &scenes {
+    for ((name, scene), light) in scenes.iter().flat_map(|s| [(s, false), (s, true)]) {
         let mut sheet = bezel::Canvas::new((2 * w + gap) as i32, (3 * h + 2 * gap) as i32);
-        sheet.px.fill(0x202124);
+        sheet.px.fill(if light { 0xc8c9cc } else { 0x202124 });
         for (column, theme) in [Theme::Catalyst, Theme::Bezel].into_iter().enumerate() {
             for (row, size) in [TextSize::Compact, TextSize::Standard, TextSize::Large].into_iter().enumerate() {
                 fill(!name.ends_with("empty"));
@@ -517,6 +508,7 @@ pub fn gallery(dir: &std::path::Path) {
                 shell.settings.theme = theme;
                 (shell.settings.wallpaper, shell.settings.accent) = theme.defaults();
                 shell.settings.text = size;
+                shell.settings.light = light;
                 shell.apply_settings();
                 frames(&mut shell, 100);
                 scene(&mut shell);
@@ -564,13 +556,15 @@ pub fn gallery(dir: &std::path::Path) {
                         let (cols, rows) = crate::terminal::Terminal::grid_for(&mut shell.gfx);
                         shell.show(Box::new(crate::terminal::Terminal::showing(printed, cols, rows, 2)));
                     }
+                    // On Clipboard history, among the keys that work everywhere.
                     "shortcuts-everywhere" => {
-                        for _ in 0..11 {
+                        for _ in 0..13 {
                             shell.key(Key::Down);
                         }
                     }
+                    // On quick capture's photo key, the history's keys above it.
                     "shortcuts-sheets" => {
-                        for _ in 0..27 {
+                        for _ in 0..29 {
                             shell.key(Key::Down);
                         }
                     }
@@ -588,11 +582,13 @@ pub fn gallery(dir: &std::path::Path) {
                 }
             }
         }
-        crate::platform::sim::save_png(&sheet, &dir.join(format!("clip-{name}.png")), 2);
+        let file = if light { format!("clip-{name}-light.png") } else { format!("clip-{name}.png") };
+        crate::platform::sim::save_png(&sheet, &dir.join(file), 2);
     }
     // The motion: quick capture grows out of the island over the Terminal,
     // is typed into, saves, and shrinks back into the island, which says
-    // where it went; then the history comes and goes. Every frame at 30 a second.
+    // where it went; then the history comes, turns into quick capture and
+    // back, and goes. Every frame at 30 a second.
     for theme in [Theme::Catalyst, Theme::Bezel] {
         fill(true);
         let mut shell = Shell::new(crate::robot::Robot::demo());
@@ -629,21 +625,30 @@ pub fn gallery(dir: &std::path::Path) {
         roll(&mut shell, 6, &mut film);
         shell.key(Key::Down);
         roll(&mut shell, 10, &mut film);
+        let turned = film.len();
+        shell.key(CAPTURE_KEY);
+        roll(&mut shell, 14, &mut film);
+        shell.key(HISTORY_KEY);
+        roll(&mut shell, 14, &mut film);
         shell.key(Key::Back);
         roll(&mut shell, 16, &mut film);
         crate::platform::sim::save_apng(&film, w, h, &dir.join(format!("clip-motion-{}.png", theme.name())), 2, 33);
-        // The first frames of the sheet growing, as stills side by side.
-        let grow: Vec<&Vec<u32>> = film.iter().skip(3).take(8).collect();
-        let mut strip = bezel::Canvas::new((4 * w + 3 * gap) as i32, (2 * h + gap) as i32);
-        strip.px.fill(0x202124);
-        for (k, frame) in grow.iter().enumerate() {
-            let (cx, cy) = (k % 4, k / 4);
-            for y in 0..h {
-                let at = (cy * (h + gap) + y) * (4 * w + 3 * gap) + cx * (w + gap);
-                strip.px[at..at + w].copy_from_slice(&frame[y * w..(y + 1) * w]);
+        // Eight frames as stills side by side: the sheet growing out of the
+        // island, and the history turning into quick capture (from the frame before).
+        let strip = |from: usize, file: String| {
+            let mut strip = bezel::Canvas::new((4 * w + 3 * gap) as i32, (2 * h + gap) as i32);
+            strip.px.fill(0x202124);
+            for (k, frame) in film.iter().skip(from).take(8).enumerate() {
+                let (cx, cy) = (k % 4, k / 4);
+                for y in 0..h {
+                    let at = (cy * (h + gap) + y) * (4 * w + 3 * gap) + cx * (w + gap);
+                    strip.px[at..at + w].copy_from_slice(&frame[y * w..(y + 1) * w]);
+                }
             }
-        }
-        crate::platform::sim::save_png(&strip, &dir.join(format!("clip-grow-{}.png", theme.name())), 2);
+            crate::platform::sim::save_png(&strip, &dir.join(file), 2);
+        };
+        strip(3, format!("clip-grow-{}.png", theme.name()));
+        strip(turned - 1, format!("clip-turn-{}.png", theme.name()));
     }
     std::fs::remove_dir_all(&own).ok();
 }
@@ -675,30 +680,125 @@ mod tests {
         }
     }
 
+    /// The note in Notes that starts with `words`, if one does.
+    fn note_saying(words: &str) -> Option<std::path::PathBuf> {
+        std::fs::read_dir(crate::notes::dir()).ok()?.flatten().map(|e| e.path()).find(|p| std::fs::read_to_string(p).is_ok_and(|t| t.starts_with(&format!("{words}\n"))))
+    }
+
+    fn said(shell: &Shell) -> String {
+        shell.message.as_ref().map(|(m, _)| m.clone()).unwrap_or_default()
+    }
+
     #[test]
-    fn ctrl_shift_n_captures_a_note_from_inside_the_terminal() {
+    fn ctrl_shift_n_captures_a_note_from_inside_the_terminal_and_leaves_it_there() {
         let mut shell = shell_for_tests();
         shell.show(Box::new(crate::terminal::Terminal::new()));
         settle(&mut shell);
         shell.key(CAPTURE_KEY);
         settle(&mut shell);
         assert_eq!(shell.sheet_open(), Some(Sheet::Capture));
-        for c in "belt slips".chars() {
+        for c in "belt slips at q12".chars() {
             shell.key(Key::Char(c));
         }
-        assert_eq!(shell.sheets.capture.text(), "belt slips", "typed into the sheet, not the terminal");
+        assert_eq!(shell.sheets.capture.text(), "belt slips at q12", "typed into the sheet, not the terminal");
         shell.key(Key::Enter);
         settle(&mut shell);
         assert_eq!(shell.sheet_open(), None);
-        let said = shell.message.as_ref().map(|(m, _)| m.clone()).unwrap_or_default();
-        assert!(said.contains("notes"), "the island says where it went: {said}");
-        let Some((Receipt { place: crate::capture::Place::Note(path), .. }, _)) = shell.sheets.receipt.clone() else { panic!("a note") };
-        assert!(std::fs::read_to_string(&path).unwrap().starts_with("belt slips\n"));
-        // Ctrl-Enter meanwhile opens it there.
+        assert_eq!(said(&shell), "saved to notes", "the island says where it went");
+        assert_eq!(shell.top_title(), "Terminal", "and the terminal is where it was");
+        let path = note_saying("belt slips at q12").expect("the note is in Notes");
+        // Ctrl-Enter afterwards is search, as from anywhere: it opens nothing of the capture's.
         shell.key(Key::Ctrl('\n'));
         settle(&mut shell);
-        assert_eq!(shell.top_title(), path.file_name().unwrap().to_string_lossy());
+        assert!(shell.spotlight_open(), "Ctrl-Enter is search");
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn ctrl_enter_in_quick_capture_saves_and_opens_what_it_saved() {
+        let mut shell = shell_for_tests();
+        shell.show(Box::new(crate::calc::Calculator::new()));
+        settle(&mut shell);
+        shell.key(CAPTURE_KEY);
+        settle(&mut shell);
+        for c in "torque the swerve bolts 42".chars() {
+            shell.key(Key::Char(c));
+        }
+        shell.key(Key::Ctrl('\n'));
+        settle(&mut shell);
+        assert!(!shell.spotlight_open() && shell.sheet_open().is_none());
+        let path = note_saying("torque the swerve bolts 42").expect("saved");
+        assert_eq!(shell.top_title(), path.file_name().unwrap().to_string_lossy(), "open on the note");
+        // Closed (the editor's Ctrl-Q), it comes back to the screen it was captured over.
+        shell.key(Key::Ctrl('q'));
+        settle(&mut shell);
+        assert_eq!(shell.top_title(), "Calculator");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn the_sheets_turn_into_each_other_and_give_way_to_the_notifications() {
+        let mut shell = shell_for_tests();
+        crate::clipboard::copy("10.58.5.2", Sensitivity::Normal);
+        shell.key(HISTORY_KEY);
+        settle(&mut shell);
+        assert_eq!(shell.sheet_open(), Some(Sheet::Clipboard));
+        // Quick capture's key over the history: the one sheet becomes the other.
+        shell.key(CAPTURE_KEY);
+        frames_of(&mut shell, 2);
+        assert_eq!(shell.sheet_open(), Some(Sheet::Capture));
+        assert!(shell.sheets.capture.shown() > 0.9, "it takes the history's glass as it is, not grown again from the island");
+        settle(&mut shell);
+        shell.key(HISTORY_KEY);
+        settle(&mut shell);
+        assert_eq!(shell.sheet_open(), Some(Sheet::Clipboard));
+        assert!(!shell.sheets.capture.visible());
+        // Ctrl-Backspace: the notifications in its place, as over any screen.
+        shell.key(Key::Ctrl(crate::platform::NOTIFICATIONS));
+        settle(&mut shell);
+        assert!(shell.sheet_open().is_none() && !shell.sheets.visible());
+        assert!(shell.control_open(), "the notification centre came down");
+    }
+
+    #[test]
+    fn nothing_of_the_clipboard_reaches_the_lock_screen() {
+        let mut shell = crate::shell::tests::with_passcode("1357");
+        crate::shell::tests::type_code(&mut shell, "1357");
+        assert!(!shell.locked());
+        crate::clipboard::copy("the pit wifi is robots-in-the-pit", Sensitivity::Normal);
+        crate::clipboard::copy("hunter2", Sensitivity::Secret);
+        shell.key(HISTORY_KEY);
+        settle(&mut shell);
+        assert_eq!(shell.sheet_open(), Some(Sheet::Clipboard));
+        // Locked by hand: gone at once, before a frame can draw it under the lock coming down.
+        shell.key(Key::Lock);
+        assert!(shell.locked());
+        assert!(!shell.sheets.visible() && shell.sheets.under.is_none(), "the history and the frame it held are gone at once");
+        assert_eq!(crate::clipboard::paste_text(), None, "the secret went with the lock");
+        // A copy made while locked (a script, a program in the terminal) is not said on it.
+        crate::clipboard::copy("10.58.5.2", Sensitivity::Normal);
+        settle(&mut shell);
+        assert!(!said(&shell).contains("copied") && !said(&shell).contains("10.58"), "said on the lock screen: {}", said(&shell));
+        // Neither sheet comes up over it, from any of their keys.
+        for key in [HISTORY_KEY, CAPTURE_KEY, Key::Ctrl('v'), Key::Ctrl('V')] {
+            shell.key(key);
+            settle(&mut shell);
+            assert!(!shell.sheets.visible(), "{key:?} over the lock");
+        }
+        assert_eq!(shell.lock.field.len(), 0, "nothing pasted into the passcode");
+        // Unlocked, they come as before.
+        crate::shell::tests::type_code(&mut shell, "1357");
+        assert!(!shell.locked());
+        shell.key(HISTORY_KEY);
+        settle(&mut shell);
+        assert_eq!(shell.sheet_open(), Some(Sheet::Clipboard));
+    }
+
+    fn frames_of(shell: &mut Shell, n: usize) {
+        for _ in 0..n {
+            shell.tick(FRAME);
+            shell.draw();
+        }
     }
 
     #[test]

@@ -29,7 +29,7 @@ windows that grow out of tiles whenever it is there.
 | `shots/start/` | The start animation as an animated PNG, and stills of it. |
 | `shots/tour/` | Screenshots of every screen, rendered by `catalyst-shell --shots`. |
 | `shots/looks/` | Home, Robot and Settings › Appearance in eight looks (`--looks`). |
-| `shots/clipboard/` | The clipboard's history, quick capture, the Terminal's copy mode and their shortcuts, in both looks at each text size, and their motion (`--clip-shots`). |
+| `shots/clipboard/` | The clipboard's history, quick capture, the Terminal's copy mode and their shortcuts, in both looks at each text size, dark and light, and their motion (`--clip-shots`). |
 | `shots/flasher/` | Catalyst Flasher's screens (`catalyst-flasher --shot`). |
 | `shots/motion/` | Each kind of motion as a strip of frames 50 ms apart and an animated PNG, and the Home settings (`--motion`). |
 | `shots/vm/` | The same shell as the ARM build on the image's own kernel, in the emulator. |
@@ -395,8 +395,9 @@ and shell scripts share it.
   Ctrl-Shift and a letter is the shell's to take: a program in a terminal
   is sent the same byte for it as for Ctrl and the letter, so it loses
   nothing, as with Ctrl-Tab and Ctrl-Enter. On the handheld's keyboard Shift
-  counts for it while fresh (tapped or held just before): with Shift locked
-  for capitals and typing on, Ctrl-C is still the interrupt.
+  counts for it while fresh (tapped or held just before), and for one
+  Ctrl-letter: with Shift locked for capitals, Ctrl-C is still the
+  interrupt.
 - **What is copied**, with nothing chosen (there is no selection: the
   fields are one line, most with no cursor to move): the whole field being
   typed in; in the editor, the line the cursor is on (Ctrl-X cuts it); on a
@@ -414,14 +415,22 @@ and shell scripts share it.
   (bracketed paste). A program can set the clipboard with OSC 52 (tmux,
   vim, neovim); reading it back that way is refused, as xterm does.
 - **History**: **Ctrl-Shift-H** from anywhere brings up the last twenty
-  clips (and any pinned) in a sheet of glass grown out of the island, as
-  search is. Enter pastes one into the field in front, or only copies it
-  where nothing takes text; Tab shows all of it; `p` pins; `d` removes. It
-  is kept in `/data/catalyst/clipboard`, readable by root alone.
-- **Secrets** (a password the vault copies) are never written anywhere,
-  never join the history and are never handed to a script; they clear
-  themselves after 30 seconds, and at once when the handheld locks. The
-  history shows one as dots with its seconds left.
+  clips (and up to twenty pinned) in a sheet of glass grown out of the
+  island, as search is; it comes down as far as the foot of the screen
+  behind, above its hint line. Enter pastes one into the field in front,
+  or only copies it where nothing takes text; Tab shows all of it; `p`
+  pins; `d` removes (a pinned one on a second `d`). It is kept in
+  `/data/catalyst/clipboard.json`, readable by root alone, written through
+  a file beside it on a thread of its own; the clips besides the pinned
+  ones hold 256 kB at most, so a few big copies let the oldest go.
+- **Secrets** (`catalyst-clip set --secret`, or an app copying a password)
+  are never written anywhere, never join the history and are never handed
+  to a script; they clear themselves after 30 seconds, and at once when
+  the handheld locks. The history shows one as dots with its seconds left.
+- **The lock**: nothing of the clipboard shows on the lock screen. Both
+  sheets go the moment it locks (before the lock screen has come down),
+  the island stops saying what was copied, and no key on the lock screen
+  reaches them or pastes into the passcode.
 - **`catalyst-clip`** for scripts: `get` (or `get 3`, the third in the
   history), `set` (words, or what comes in), `set --secret`, `history`,
   `clear`. It talks to the shell over a socket only root can open.
@@ -441,11 +450,13 @@ type into; Enter puts it where it belongs:
   takes it into Photos and the camera gives way at once;
 - held Alt dictates into it; Ctrl-V pastes the clipboard into it.
 
-The island then says where it went for a few seconds, and Ctrl-Enter
-meanwhile opens it there (Ctrl-Enter in the sheet saves and opens at
-once). Esc keeps what was typed for next time. `catalyst-shell
---clip-shots <dir>` renders all of it in both looks at each text size
-(`shots/clipboard/`).
+The island then says where it went, and the screen in front stays as it
+was; Ctrl-Enter in the sheet saves and opens it there instead (outside the
+sheet Ctrl-Enter is search, as from anywhere). Esc keeps what was typed for
+next time. Each sheet's key over the other turns one into the other, and
+Ctrl-Tab, Ctrl-Space and Ctrl-Backspace put either away for what they
+bring. `catalyst-shell --clip-shots <dir>` renders all of it in both looks
+at each text size, dark and light (`shots/clipboard/`).
 
 ## Screenshots
 

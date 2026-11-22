@@ -149,9 +149,9 @@ pub fn fn_key(code: u16) -> Option<Key> {
 /// The handheld's keyboard driver keeps Shift down for the next key when it
 /// is tapped, and for every key while it is locked (tapped twice, for
 /// capitals): so on its own keyboard Shift only counts for a Ctrl-letter
-/// while it is fresh, down since the last key typed with it. Locked for
-/// capitals and typing on, Ctrl-C stays the terminal's interrupt. A USB
-/// keyboard's Shift is only ever held.
+/// while it is fresh, down since the last key typed with it, and for one
+/// Ctrl-letter. Locked for capitals, Ctrl-C stays the terminal's interrupt.
+/// A USB keyboard's Shift is only ever held.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn shifted_ctrl(shift: bool, fresh: bool, own: bool) -> bool {
     shift && (fresh || !own)
@@ -952,7 +952,12 @@ pub mod device {
                     let row = if self.shift { shifted } else { plain };
                     let ch = row.as_bytes()[(code - base) as usize] as char;
                     if self.ctrl && ch.is_ascii_alphabetic() {
-                        Key::Ctrl(if shifted_ctrl(self.shift, self.shift_fresh, own) { ch.to_ascii_uppercase() } else { ch.to_ascii_lowercase() })
+                        let shifted = shifted_ctrl(self.shift, self.shift_fresh, own);
+                        // Spent on this one: with Shift locked, the next Ctrl-C is the interrupt again.
+                        if shifted {
+                            self.shift_fresh = false;
+                        }
+                        Key::Ctrl(if shifted { ch.to_ascii_uppercase() } else { ch.to_ascii_lowercase() })
                     } else {
                         // A key typed with Shift: Shift is spent (see `shifted_ctrl`).
                         self.shift_fresh = false;
