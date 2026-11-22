@@ -1,0 +1,35 @@
+#!/sbin/openrc-run
+# Catalyst Companion's side on the handheld (catalyst-companiond): found by
+# the Windows app on Wi-Fi and the USB cable, paired with the code
+# Settings › Computer companion shows. On unless switched off there, which
+# leaves /data/companion/off and stops it (and starts it again with
+# "restart": the service counts as started even while it is off). It sleeps
+# until a computer asks, at a low priority.
+
+description="Catalyst Companion's service, unless switched off"
+pidfile="/run/catalyst-companiond.pid"
+
+depend() {
+	need catalyst-early
+	after catalyst-late catalyst-net
+}
+
+start() {
+	if [ -e /data/companion/off ]; then
+		einfo "Computer companion is switched off"
+		return 0
+	fi
+	ebegin "Starting the computer companion"
+	mkdir -p /run/catalyst /data/companion
+	chmod 0700 /data/companion
+	start-stop-daemon -S -b -m -p "$pidfile" -x /usr/bin/catalyst-companiond
+	eend $?
+}
+
+stop() {
+	[ -e "$pidfile" ] || return 0
+	ebegin "Stopping the computer companion"
+	start-stop-daemon -K -q -p "$pidfile"
+	rm -f "$pidfile" /run/catalyst/companion-pair
+	eend 0
+}

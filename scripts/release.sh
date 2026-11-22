@@ -148,6 +148,16 @@ if command -v cmd.exe >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1; the
 	else
 		echo "   (Windows' Rust could not build it: the release goes without it)"
 	fi
+	# Catalyst Companion: the handheld from a Windows computer (sign-ins,
+	# music, files, settings, updates, backups). Its sign-in window is
+	# WebView2, which Windows 10 and 11 have. A GitHub OAuth app's client ID
+	# in CATALYST_GITHUB_CLIENT_ID is built in, for signing in with a code.
+	echo "== Catalyst Companion for Windows"
+	if (cd /mnt/c && cmd.exe /c "cd /d $WIN_USERLAND && set CATALYST_GITHUB_CLIENT_ID=${CATALYST_GITHUB_CLIENT_ID:-} && %USERPROFILE%\\.cargo\\bin\\cargo.exe build --profile sim -p catalyst-companion") >/dev/null 2>&1; then
+		cp "$HERE/userland/target/sim/catalyst-companion.exe" "$OUT/"
+	else
+		echo "   (Windows' Rust could not build it: the release goes without it)"
+	fi
 	# Packed: double-clicked, it opens the simulator with the demo robot. Built
 	# apart from the everyday simulator, which stays a console program.
 	echo "== the simulator for Windows"
@@ -164,7 +174,7 @@ ls -1dt "$BUILD/releases/$CHANNEL"/*/ | tail -n +4 | xargs -r rm -rf
 if [ "$PUBLISH" = 1 ]; then
 	echo "== publishing $TAG to $REPO"
 	FILES=("$OUT"/manifest.json "$OUT"/manifest.sig "$OUT"/system.img.gz "$OUT"/boot.pack "$OUT"/catalyst-linux-*.img.gz "$OUT"/os_list_catalyst.json)
-	for extra in "$OUT"/system-from-*.cdelta "$OUT"/catalyst-flasher.exe "$OUT"/catalyst-sim.exe; do
+	for extra in "$OUT"/system-from-*.cdelta "$OUT"/catalyst-flasher.exe "$OUT"/catalyst-companion.exe "$OUT"/catalyst-sim.exe; do
 		[ -e "$extra" ] && FILES+=("$extra")
 	done
 	ASSETS=()

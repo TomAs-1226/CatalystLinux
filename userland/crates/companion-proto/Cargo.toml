@@ -1,0 +1,13 @@
+[package]
+name = "catalyst-companion-proto"
+description = "What the handheld's companion service and the computer's companion app agree on: the ports, pairing (SPAKE2 bound to the TLS certificate) and the backup stream."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Pairing with a six-digit code that an eavesdropper cannot try offline:
+# SPAKE2 (RustCrypto's, pure Rust, on Curve25519).
+spake2 = "0.4"
+hmac = "0.12"
+sha2 = "0.10"

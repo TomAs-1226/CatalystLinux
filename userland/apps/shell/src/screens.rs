@@ -2944,6 +2944,8 @@ enum Item {
     MusicSection,
     /// Setup's page offered to a computer, outside first start.
     FromComputer,
+    /// Settings › Computer companion: a page of its own (companion.rs).
+    CompanionSection,
     // Appearance.
     ThemeChoice,
     Mode,
@@ -3096,7 +3098,7 @@ fn nearest_hue(accent: bezel::Accent) -> u8 {
 
 /// Where everything in Settings is, for search: what it is called, the
 /// section it is in, and its place there (none: the section itself).
-const SETTING_PLACES: [(&str, Item, Option<usize>); 80] = [
+const SETTING_PLACES: [(&str, Item, Option<usize>); 82] = [
     ("Robot settings", Item::RobotSection, None),
     ("Open Robot on link", Item::RobotSection, Some(0)),
     ("Match report after a match", Item::RobotSection, Some(1)),
@@ -3172,6 +3174,8 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 80] = [
     ("About this handheld", Item::About, None),
     ("Version", Item::About, Some(0)),
     ("USB", Item::UsbSection, None),
+    ("Computer companion", Item::CompanionSection, None),
+    ("Pair a computer", Item::CompanionSection, Some(1)),
     ("Help", Item::Help, None),
     ("Take the tour", Item::Help, Some(0)),
     ("Keyboard shortcuts", Item::Help, Some(1)),
@@ -3233,6 +3237,9 @@ pub fn open_setting(index: usize) -> Box<dyn Screen> {
     if section == Item::BluetoothSection {
         return Box::new(crate::bluetooth::BluetoothScreen::new());
     }
+    if section == Item::CompanionSection {
+        return Box::new(crate::companion::CompanionScreen::new().at(place.unwrap_or(0)));
+    }
     if section == Item::MusicSection {
         return Box::new(crate::music::MusicSettings::new().at(place.unwrap_or(0)));
     }
@@ -3262,7 +3269,7 @@ impl SettingsApp {
         use Item::*;
         Self::page(
             "Settings",
-            vec![RobotSection, Appearance, TextSection, HomeSection, Display, LockSection, StandBySection, BatterySection, Network, SoundSection, BluetoothSection, MusicSection, NameSection, UsbSection, KeysSection, OnDeviceModel, Access, UpdateSection, Help, About, FromComputer],
+            vec![RobotSection, Appearance, TextSection, HomeSection, Display, LockSection, StandBySection, BatterySection, Network, SoundSection, BluetoothSection, MusicSection, NameSection, UsbSection, CompanionSection, KeysSection, OnDeviceModel, Access, UpdateSection, Help, About, FromComputer],
         )
     }
 
@@ -3427,6 +3434,7 @@ impl SettingsApp {
             SoundSection => section("Sound", crate::sound::summary()),
             BluetoothSection => section("Bluetooth", crate::bluetooth::summary()),
             MusicSection => section("Music", crate::music::summary()),
+            CompanionSection => section("Computer companion", crate::companion::summary()),
             Mode => ("Mode".into(), (if g.tokens.tone == bezel::Tone::Light { "light" } else { "dark" }).into(), true),
             AccentColor => ("Accent".into(), g.accent.name().into(), true),
             HomeScreen => ("Home screen".into(), g.home.name().into(), true),
@@ -3753,6 +3761,7 @@ impl Screen for SettingsApp {
             Key::Enter | Key::Right if item == Item::SoundSection => return Nav::Push(Box::new(crate::sound::SoundScreen::new())),
             Key::Enter | Key::Right if item == Item::BluetoothSection => return Nav::Push(Box::new(crate::bluetooth::BluetoothScreen::new())),
             Key::Enter | Key::Right if item == Item::MusicSection => return Nav::Push(Box::new(crate::music::MusicSettings::new())),
+            Key::Enter | Key::Right if item == Item::CompanionSection => return Nav::Push(Box::new(crate::companion::CompanionScreen::new())),
             // Lower voltage, switched on: what it does, and a restart to try it.
             Key::Enter | Key::Right if item == Item::Undervolt && crate::power::undervolt().asks_to_try() => return Nav::Push(Box::new(crate::power::TryUndervolt::new())),
             Key::Enter | Key::Right if item == Item::KeyboardLesson => return Nav::Push(Box::new(crate::setup::Setup::lesson())),

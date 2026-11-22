@@ -61,6 +61,7 @@ mod clipboard;
 mod cjk_shots;
 mod clock;
 mod commands;
+mod companion;
 mod connect;
 mod control;
 mod deep;
@@ -703,6 +704,8 @@ fn main() {
     }
     // `catalyst-clip` and the Terminal's programs reach the clipboard here.
     clipboard::serve::serve();
+    // Catalyst Companion's service asks here for what only the shell does.
+    companion::serve();
     let mut platform: Box<dyn Platform> = open_platform(flag("--sim"));
     // The time zone chosen, in use for every clock this draws (on the handheld).
     device::apply_saved();
@@ -1753,6 +1756,9 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     }
     if std::env::var("CATALYST_SHOTS_ONLY").as_deref() == Ok("offline") {
         return offline_shots(dir);
+    }
+    if std::env::var("CATALYST_SHOTS_ONLY").as_deref() == Ok("companion") {
+        return companion::shots(dir);
     }
     // Or only Music's.
     if std::env::var("CATALYST_SHOTS_ONLY").as_deref() == Ok("music") {

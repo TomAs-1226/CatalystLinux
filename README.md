@@ -67,6 +67,73 @@ anyway*. From a terminal it takes the shell's own options: `--no-intro`,
 `--setup`, `--light`, `--speed device` (paced as the handheld, see below),
 `--robot 5805` (a real robot instead of the demo), `--arrive 5`.
 
+## Computer companion
+
+**catalyst-companion.exe**, in each release, reaches the handheld from a
+Windows computer: signing in, music, files, settings, updates and backups,
+with a real keyboard and mouse.
+
+1. On the handheld: Settings › Computer companion › Pair a computer. It
+   shows a six-digit code for five minutes.
+2. On the computer: open Catalyst Companion. It finds the handheld on the
+   same Wi-Fi network, or over the USB cable (Settings › USB set to
+   network, 192.168.7.1). Choose it and type the code. That is the only
+   time: from then on it connects by itself.
+
+Then, on its pages:
+
+- **Sign-ins.** *Sign in with Google* opens a small window on YouTube
+  Music's sign-in. Once you are signed in it closes by itself: the app reads
+  that window's cookies (WebView2's cookie manager, HTTP-only ones too) and
+  sends them to the handheld, which checks them as Set up from a computer
+  does and keeps them in `/data/music/cookies.txt` (0600). On the computer
+  they stay only in that window's own browser profile
+  (`%LOCALAPPDATA%\Catalyst Companion\YouTube Music`), which *Sign out*
+  deletes; they are never logged. For GitHub, *Use this computer's GitHub
+  sign-in* asks first, then takes `gh auth token` (GitHub CLI) or Git
+  Credential Manager's github.com sign-in, checks whose it is with GitHub,
+  and sets the handheld's GitHub key. *Paste a token* takes one by hand.
+- **Music.** Drop MP3, M4A, FLAC or Opus files on the window (or *Add
+  songs…*): they go to `/data/music/library/From computer`, and Music
+  indexes them by their tags like any other song. The library can be
+  browsed and any song downloaded.
+- **Files.** Match logs, photos, screenshots and notes, to
+  `Downloads\Catalyst` on the computer.
+- **Settings.** The team, a Wi-Fi network, the keys, the look and the
+  choices, by the same fields as Set up from a computer. Only what changed
+  is sent.
+- **System.** Check for, install and restart into a system update
+  (`catalyst-update`). *Back up* saves `/data` as a zip in
+  `Documents\Catalyst backups`, leaving out caches, downloaded updates, the
+  pairing and YouTube Music's sign-in (keep the zip private: it holds the
+  keys and Wi-Fi passwords). *Restore* puts a backup back and restarts the
+  handheld.
+
+**How it is kept safe.** The handheld's side is `catalyst-companiond` (the
+`catalyst-companion` service), off when switched off in Settings ›
+Computer companion; on, it sleeps until asked, at a low priority. It speaks
+only TLS 1.3, with a certificate of its own made the first time a computer
+pairs (and again once every computer is unpaired). The code never crosses
+the network: both ends run SPAKE2 with it and each proves it has the same
+key over the certificate it sees, so someone listening learns nothing to
+try codes against, and someone in the middle is found out. A code allows
+five tries. Pairing gives the computer a random 256-bit token, which every
+request carries; the handheld keeps only its SHA-256 (in
+`/data/companion/computers.json`), and the computer keeps it encrypted to
+its Windows account (DPAPI) with the certificate it pinned. Settings ›
+Computer companion lists the computers paired; Enter twice unpairs one.
+
+**Signing in to GitHub with a code** (the device flow) needs an OAuth
+app's client ID, which a release does not carry until one is registered:
+on github.com, Settings › Developer settings › OAuth Apps › New OAuth App
+(any homepage and callback URL, such as the repository's), tick *Enable
+Device Flow*, and copy its Client ID (not a secret). Build with
+`CATALYST_GITHUB_CLIENT_ID` set to it (`scripts/release.sh` passes it on),
+or put it in a file named `github-client-id` beside
+`catalyst-companion.exe` or in `%APPDATA%\Catalyst Companion`. The app then
+offers *Sign in with a code*: it opens github.com/login/device and shows the
+code to type there.
+
 ## Try the UI on this PC
 
 ```powershell

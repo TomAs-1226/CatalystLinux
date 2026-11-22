@@ -45,10 +45,11 @@ fi
 cd "$HERE/userland"
 # The shell, the system updater it starts, `ai` for the Terminal,
 # `catalyst-ui` (Catalyst Kit's screens for shell scripts), and Music's
-# player `catalyst-play`.
-cargo build --release --target "$TARGET" -p catalyst-shell -p catalyst-update -p catalyst-ai -p catalyst-kit -p catalyst-play
+# player `catalyst-play`, and `catalyst-companiond` (Catalyst Companion's
+# side, for the Windows app).
+cargo build --release --target "$TARGET" -p catalyst-shell -p catalyst-update -p catalyst-ai -p catalyst-kit -p catalyst-play -p catalyst-companiond
 mkdir -p "$BUILD/out"
-for bin in catalyst-shell catalyst-update ai catalyst-ui catalyst-play; do
+for bin in catalyst-shell catalyst-update ai catalyst-ui catalyst-play catalyst-companiond; do
 	cp "$CARGO_TARGET_DIR/$TARGET/release/$bin" "$BUILD/out/"
 	ls -l "$BUILD/out/$bin"
 	file "$BUILD/out/$bin"

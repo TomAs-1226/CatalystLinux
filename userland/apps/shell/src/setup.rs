@@ -368,6 +368,54 @@ pub struct Setup {
     joined: Option<f32>,
 }
 
+/// The team a computer sent, kept, and its robot connected to (the
+/// simulator's demo robot stays, standing in for the team's own).
+pub fn save_team(team: &str, robot: &mut Robot) {
+    let team = team.trim();
+    if team.is_empty() {
+        return;
+    }
+    crate::save_robot_address(team);
+    if !robot.is_demo() {
+        *robot = Robot::connect(&crate::screens::resolve_address(team));
+    }
+}
+
+/// What a computer sent that needs nothing of the screens: its Wi-Fi
+/// networks joined, its keys merged into `keys` and kept, an SSH key let
+/// in, YouTube Music signed in (written whole, readable by root alone), and
+/// SSH switched. Here and from Catalyst Companion (companion.rs) alike.
+/// Why the sign-in was not kept, if it was not.
+pub fn apply_now(a: &crate::remote::Answers, keys: &mut Keys) -> Option<String> {
+    crate::wifi::add_and_switch_on(&a.wifi);
+    // Keys typed on the handheld were kept as they were typed.
+    if a.keys != Keys::default() {
+        keys.merge(&a.keys);
+        keys.save().ok();
+    }
+    if let Some(key) = &a.ssh_key {
+        crate::add_ssh_key(key).ok();
+    }
+    if let Some(on) = a.ssh {
+        if on != crate::ssh_enabled() {
+            crate::set_ssh(on).ok();
+        }
+    }
+    a.cookies.as_ref().and_then(|jar| crate::music::sign_in(jar).err())
+}
+
+/// The look and the choices a computer sent, into `s` and saved.
+pub fn apply_look(a: &crate::remote::Answers, s: &mut crate::shell::Settings) {
+    s.accent = a.accent.unwrap_or(s.accent);
+    s.light = a.light.unwrap_or(s.light);
+    s.text = a.text.unwrap_or(s.text);
+    s.home = a.home.unwrap_or(s.home);
+    s.open_robot = a.open_robot.unwrap_or(s.open_robot);
+    s.match_report = a.match_report.unwrap_or(s.match_report);
+    s.calm = a.calm.unwrap_or(s.calm);
+    crate::save_settings(s);
+}
+
 /// What is left to do on the handheld once a computer has sent its answers
 /// on first start, in `FLOW`'s order. The page on the computer has nothing
 /// for the hardware check, the keyboard lesson, the name and time zone or
@@ -465,36 +513,14 @@ impl Setup {
 
     /// Put in place what a computer sent.
     fn apply(&mut self, a: crate::remote::Answers, cx: &mut Cx) {
-        if let Some(team) = a.team {
-            self.team = team;
+        if let Some(team) = &a.team {
+            self.team = team.clone();
             self.save_team(cx);
         }
-        crate::wifi::add_and_switch_on(&a.wifi);
-        self.keys.merge(&a.keys);
-        self.keys.save().ok();
-        if let Some(key) = a.ssh_key {
-            crate::add_ssh_key(&key).ok();
+        if let Some(why) = apply_now(&a, &mut self.keys) {
+            *cx.say = Some(why);
         }
-        // YouTube Music's sign-in, written whole and readable by root alone.
-        if let Some(jar) = &a.cookies {
-            if let Err(why) = crate::music::sign_in(jar) {
-                *cx.say = Some(why);
-            }
-        }
-        let s = &mut cx.settings;
-        s.accent = a.accent.unwrap_or(s.accent);
-        s.light = a.light.unwrap_or(s.light);
-        s.text = a.text.unwrap_or(s.text);
-        s.home = a.home.unwrap_or(s.home);
-        s.open_robot = a.open_robot.unwrap_or(s.open_robot);
-        s.match_report = a.match_report.unwrap_or(s.match_report);
-        s.calm = a.calm.unwrap_or(s.calm);
-        if let Some(on) = a.ssh {
-            if on != crate::ssh_enabled() {
-                crate::set_ssh(on).ok();
-            }
-        }
-        crate::save_settings(cx.settings);
+        apply_look(&a, cx.settings);
     }
 
     /// What a computer sent: shown arriving, put in place, and on first
@@ -665,15 +691,7 @@ impl Setup {
     }
 
     fn save_team(&mut self, cx: &mut Cx) {
-        let team = self.team.trim().to_owned();
-        if team.is_empty() {
-            return;
-        }
-        crate::save_robot_address(&team);
-        // In the simulator the demo robot stands in for the team's own: keep it.
-        if !cx.robot.is_demo() {
-            *cx.robot = Robot::connect(&crate::screens::resolve_address(&team));
-        }
+        save_team(&self.team, cx.robot);
     }
 
     /// How many rows the page has, not counting its Next button.

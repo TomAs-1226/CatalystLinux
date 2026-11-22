@@ -2078,6 +2078,10 @@ impl Shell {
         }
         self.gfx.tick_gpu();
         self.watch_link(dt);
+        // The look and the team Catalyst Companion sent, put in place.
+        if crate::companion::apply_pending(&mut self.robot, &mut self.settings) {
+            self.apply_settings();
+        }
         // Motion only moves forward in time if it was already moving; slower
         // under developer options' animation scale.
         let motion_dt = if self.moving { dt.min(0.05) / self.motion_scale() } else { 0.0 };

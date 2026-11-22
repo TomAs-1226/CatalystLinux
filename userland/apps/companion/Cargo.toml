@@ -1,0 +1,27 @@
+[package]
+name = "catalyst-companion"
+description = "Catalyst Companion for Windows: finds the handheld on the network or the USB cable, pairs once, then signs it in to YouTube Music and GitHub, moves music and files, and looks after its settings, updates and backups."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bezel = { workspace = true }
+catalyst-companion-proto = { workspace = true }
+serde_json = "1"
+detent = { workspace = true }
+getrandom = "0.4"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# Backups kept on the computer as a zip.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+png = "0.18"
+
+# The window, the sign-in browser and Windows' own pieces (drag and drop,
+# file dialogs, the clipboard, DPAPI for the token). Never on the handheld.
+[target.'cfg(not(target_arch = "aarch64"))'.dependencies]
+minifb = { version = "0.29", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+wry = { version = "0.57", default-features = false, features = ["os-webview"] }
+tao = { version = "0.37", default-features = false, features = ["rwh_06"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_UI_Controls_Dialogs", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_Security_Cryptography", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_System_Ole"] }
