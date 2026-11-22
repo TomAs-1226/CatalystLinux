@@ -866,7 +866,7 @@ impl EntryPage {
         }).collect()
     }
 
-    fn copy(&self, field: Field, cx: &mut Cx) {
+    fn copy_field(&self, field: Field, cx: &mut Cx) {
         let Some(e) = &self.entry else { return };
         let kind = e.kind;
         match field {
@@ -993,9 +993,9 @@ impl Screen for EntryPage {
                 *cx.say = Some("d again deletes it".into());
             }
             Key::Enter => match (kind, focused) {
-                (Kind::Note, _) => self.copy(Field::Notes, cx),
+                (Kind::Note, _) => self.copy_field(Field::Notes, cx),
                 (_, Some(Field::Notes)) => return Nav::Push(Box::new(TextPage::notes(self.id))),
-                (_, Some(f)) => self.copy(f, cx),
+                (_, Some(f)) => self.copy_field(f, cx),
                 (_, None) => {}
             },
             Key::Right if focused == Some(Field::Notes) => return Nav::Push(Box::new(TextPage::notes(self.id))),

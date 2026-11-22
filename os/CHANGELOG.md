@@ -10,6 +10,28 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.6.3
+
+### Home widgets
+- Choose what the glance page and Home's grid show: next match, battery, robot, music, weather, reminders, timers and more, each small, wide or large. Press E on Home to arrange them from the keyboard.
+- A new glance page to start with: next match, battery and robot, then music, reminders and timers.
+- The island's battery and clock now match the widgets exactly, and the clock turns with the minute.
+
+### Clipboard and quick capture
+- Ctrl+C and Ctrl+V copy and paste everywhere (Ctrl+Shift+C and Ctrl+Shift+V in the Terminal); scripts can use catalyst-clip.
+- Ctrl+Shift+H from anywhere shows your last 20 copies and your pins; Enter pastes one into what you're typing.
+- Ctrl+Shift+N from anywhere jots a note or a reminder ("swap battery in 10 min") without leaving what you're doing; Ctrl+P adds a photo, and holding Alt dictates.
+
+### Vault
+- Passwords, Wi-Fi keys, card PINs, notes and 2FA codes, sealed on the card and opened with your passcode. It locks as you leave, as the screen goes off, or after two idle minutes.
+- Bring passwords in from Bitwarden, 1Password, KeePass or an authenticator's otpauth list, and back up to a .cvault file under its own password.
+- Copied passwords paste anywhere for 30 seconds, never go in the clipboard's history, and clear when the handheld locks. No screenshots while the vault is open.
+
+### Assistant
+- Does what you ask, several steps at once and offline too: timers, reminders, notes, music, settings, downloads. Anything that could change something asks first.
+- "Brief me" (or Ctrl+B): the next match or the day, the robot, the battery, reminders and the last match's log, at a glance.
+- Remembers what you tell it, in /data/assistant/memory.md, which you can read and forget item by item. It leaves the handheld only with a question to OpenAI or Claude.
+
 ## 0.6.2
 
 ### Fixed
