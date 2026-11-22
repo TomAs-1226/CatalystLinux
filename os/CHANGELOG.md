@@ -10,6 +10,14 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.6.2
+
+### Fixed
+- 60 frames a second, held: the first frames of a scroll or a page turning, drawn while the processor speeds up, no longer drop everything after them to 45.
+- The Assistant answers with the on-device model again: with no room for the model you chose (the 350M needs more memory than is free while Music plays), the biggest one downloaded that fits answers, and says which. If none can, it says why instead of the offline help.
+- Questions the match logs can't answer go to the model, not only ones that look like chat.
+- The graphics chip has the 64 MB of memory 0.6.1 meant to give it.
+
 ## 0.6.1
 
 ### Smoother

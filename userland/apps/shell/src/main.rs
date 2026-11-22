@@ -783,7 +783,16 @@ struct Beat {
     since_late: u32,
     /// No faster than this (the battery saver), or zero.
     floor: Duration,
+    /// Frames of this motion still warming up: not held against the beat.
+    warming: u32,
 }
+
+/// A motion's first frames come while the processor's clock is still on its
+/// way up (sched.rs raises it as the motion starts) and caches fill: late,
+/// they would slow the beat for the whole motion, and the next, and the one
+/// after (measured on the handheld: 45 a second, never 60, every frame after
+/// them drawn in 8 ms).
+const WARM_FRAMES: u32 = 4;
 
 impl Beat {
     /// The handheld's beat: 25 ms, or `CATALYST_FRAME_MS`.
@@ -815,7 +824,7 @@ impl Beat {
     /// A beat whose fastest rate is a frame every `ms`.
     fn every(ms: f32) -> Beat {
         let base = Duration::from_secs_f32(ms.clamp(4.0, 100.0) / 1000.0);
-        Beat { steps: [base, base.mul_f32(4.0 / 3.0), base * 2, base * 4], level: 0, roomy: 0, since_late: u32::MAX, floor: Duration::ZERO }
+        Beat { steps: [base, base.mul_f32(4.0 / 3.0), base * 2, base * 4], level: 0, roomy: 0, since_late: u32::MAX, floor: Duration::ZERO, warming: WARM_FRAMES }
     }
 
     /// The battery saver: no faster than a frame every `ms` (none: as fast
@@ -849,6 +858,12 @@ impl Beat {
     /// room before the beat quickens; the panel's time does not, and is not.
     fn frame_and_panel_took(&mut self, work: Duration, panel: Duration) -> u32 {
         let needed = work.max(panel);
+        let warming = self.warming > 0;
+        self.warming = self.warming.saturating_sub(1);
+        if needed > self.interval() && warming {
+            // Late while the motion warms up: let go.
+            return (needed.as_secs_f32() / self.interval().as_secs_f32()).ceil().max(1.0) as u32;
+        }
         if needed > self.interval() {
             self.roomy = 0;
             if self.since_late < 8 && self.level + 1 < self.steps.len() {
@@ -872,6 +887,7 @@ impl Beat {
     /// Motion has stopped. Only now may the beat quicken, so that it never
     /// changes pace in the middle of an animation.
     fn rest(&mut self) {
+        self.warming = WARM_FRAMES;
         if self.roomy >= 40 && self.level > 0 && self.steps[self.level - 1] >= self.floor {
             self.level -= 1;
             self.roomy = 0;
@@ -4578,6 +4594,25 @@ mod tests {
         }
         beat.rest();
         assert_eq!(beat.level, 0);
+        // A motion's first frames, late while the clock comes up, do not
+        // slow it: 60 a second all through (the handheld held 45 so).
+        for motion in 0..3 {
+            for _ in 0..WARM_FRAMES {
+                beat.frame_and_panel_took(ms(24.0), ms(14.9));
+            }
+            for _ in 0..30 {
+                beat.frame_and_panel_took(ms(8.3), ms(14.9));
+            }
+            assert_eq!(beat.level, 0, "motion {motion}");
+            beat.rest();
+        }
+        // Late after the warm-up, as ever: slower.
+        for _ in 0..WARM_FRAMES {
+            beat.frame_and_panel_took(ms(8.3), ms(14.9));
+        }
+        beat.frame_and_panel_took(ms(24.0), ms(14.9));
+        beat.frame_and_panel_took(ms(24.0), ms(14.9));
+        assert_eq!(beat.level, 1);
     }
 
     #[test]
