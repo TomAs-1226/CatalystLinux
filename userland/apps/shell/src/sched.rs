@@ -48,7 +48,7 @@
 //! kernel sets it. Power saving (and the battery saver), conservative with
 //! `ignore_nice_load`: work at nice > 0 never climbs the clock there. The
 //! screen dark, powersave, at 600 MHz. Cores cannot be parked: the CM0's
-//! start its cores by spin table, which has no way to stop one
+//! cores are started by spin table, which has no way to stop one
 //! (`op_cpu_disable` in arch/arm64/kernel/smp.c returns EOPNOTSUPP), and an
 //! idle core already waits in WFI, there being no deeper idle state.
 
