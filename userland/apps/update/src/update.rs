@@ -278,6 +278,13 @@ fn gentle() {
 
 fn install_locked(dev: &Device) -> Result<(), String> {
     let m = saved_manifest(dev)?;
+    // A manifest kept from an earlier look (a check that could not reach the
+    // network leaves it) can name the very system that is running: writing
+    // it again would only restart into the same thing.
+    let (running, running_build) = dev.version();
+    if m.build <= running_build {
+        return Err(format!("this handheld runs {running} already: look for updates again"));
+    }
     let release = saved_release(dev)?;
     if !dev.test {
         if let Some((charge, charging)) = battery() {
@@ -610,6 +617,12 @@ mod tests {
         assert!(!Lock::held(&dev), "no such process");
         check(&dev).unwrap();
         assert_eq!(status::read(&dev).state, state::AVAILABLE, "found again");
+
+        // A kept manifest naming the build that runs is never written again.
+        std::fs::write(dev.etc.join("version"), "version=0.2.0\nbuild=200\n").unwrap();
+        assert!(install(&dev).unwrap_err().contains("runs 0.2.0 already"));
+        std::fs::write(dev.etc.join("version"), "version=0.1.0\nbuild=100\n").unwrap();
+        status::update(&dev, |s| s.state = state::AVAILABLE.into());
 
         // Installed into system B, its kernel into slot-b, config.txt set to try it.
         install(&dev).unwrap();
