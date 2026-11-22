@@ -123,13 +123,15 @@ link shutdown mount-ro
 # boot to work out the order, so the unused ones are pure delay. Among them
 # are the Dropbear and cron scripts that would start those at every boot
 # (SSH is only ever started by catalyst-ssh, when it is switched on).
+# What a runlevel above links is kept (so a service added there is never
+# taken out by mistake), with agetty, which agetty.ttyAMA0 is a link to.
 for script in "$TARGET_DIR"/etc/init.d/*; do
-	case "$(basename "$script")" in
-	catalyst-early | catalyst-shell | catalyst-late | catalyst-net | catalyst-wifi | catalyst-ssh | catalyst-update | catalyst-usb | catalyst-tailscale) ;;
-	catalyst-audio | catalyst-bluetooth) ;;
-	sysfs | devfs | agetty | agetty.ttyAMA0 | killprocs | mount-ro | functions.sh) ;;
-	*) rm -f "$script" ;;
+	name=$(basename "$script")
+	case "$name" in
+	agetty | functions.sh) continue ;;
 	esac
+	[ -n "$(find "$R" -name "$name" 2>/dev/null)" ] && continue
+	rm -f "$script"
 done
 
 # Libraries the toolchain and packages bring along that no program here
