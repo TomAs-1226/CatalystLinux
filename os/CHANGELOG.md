@@ -10,6 +10,12 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.6.4
+
+### Fixed
+- Set up from a computer shows what the handheld has now (the look, the choices, which keys are set) and changes only what you change: sent to add one key, it no longer turns SSH off or puts the look back to grid, dark and standard text.
+- Updates install much faster from the next one on: only the parts of the system that changed are written to the card, not all 1 GB.
+
 ## 0.6.3
 
 ### Home widgets
