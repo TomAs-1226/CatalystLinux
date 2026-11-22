@@ -108,8 +108,10 @@ You can search the web and read pages. Use them for anything current or outside 
 
 Actions are the team's saved shell commands on this handheld. Run one when it answers the question or the person asks for it. Some are critical because they could change something; the handheld asks the person before those run, and they may decline. Then say what it would have done and leave it. Do not run a critical Action that the person did not ask for and the question does not need.";
 
-/// For the on-device model: small, offline, with nothing to look at.
-const LOCAL_SYSTEM: &str = "You are a small assistant running offline on a pocket Linux handheld that an FRC robotics team uses. Answer in two or three short, plain sentences. You cannot see the robot, the web or any files: if the question needs them, say so in one sentence.";
+/// For the on-device model asked something not about the robot: small,
+/// offline, with nothing to look at (questions about the robot go through
+/// `crate::offline`, which gives it the facts).
+pub(crate) const LOCAL_SYSTEM: &str = "You are a small assistant running offline on a pocket Linux handheld that an FRC robotics team uses. Answer in two or three short, plain sentences. You cannot see the robot, the web or any files: if the question needs them, say so in one sentence.";
 
 /// For Browse: the page or the answer, in a form the handheld lays out.
 pub(crate) const BROWSE_SYSTEM: &str = "You are the web browser on Catalyst Linux, a pocket handheld with a 320 by 170 pixel screen and a keyboard, used by an FRC robotics team.
@@ -145,12 +147,14 @@ impl Service {
         }
     }
 
-    /// The model as people know it.
+    /// The model as people know it; on this handheld with no model
+    /// downloaded, the answers come from the logs alone.
     pub fn model_name(self) -> &'static str {
         match self {
             Service::OpenAi => "GPT-6.2 Sol",
             Service::Claude => "Claude Opus 5.5",
-            Service::Local => crate::local::model_name(),
+            Service::Local if crate::local::ready() => crate::local::model_name(),
+            Service::Local => "On device",
         }
     }
 
@@ -264,11 +268,12 @@ impl Prefs {
 }
 
 /// The service that answers, and its key: the one chosen if it can answer
-/// (its key set; the on-device model downloaded), else the first that can,
-/// the two services before the on-device model.
+/// (its key set), else the first that can, the two services before this
+/// handheld. This handheld always can: offline, from the match logs
+/// (`crate::offline`), its model wording the answers once one is downloaded.
 pub fn answering(prefs: &Prefs, keys: &Keys) -> Option<(Service, String)> {
     let can = |s: Service| match s {
-        Service::Local => crate::local::ready().then(|| (s, String::new())),
+        Service::Local => Some((s, String::new())),
         _ => keys.get(s.key()).map(|k| (s, k.to_owned())),
     };
     prefs.service.and_then(can).or_else(|| Service::ALL.into_iter().find_map(can))
@@ -276,7 +281,7 @@ pub fn answering(prefs: &Prefs, keys: &Keys) -> Option<(Service, String)> {
 
 /// The services that can answer now.
 pub fn available(keys: &Keys) -> Vec<Service> {
-    Service::ALL.into_iter().filter(|s| if *s == Service::Local { crate::local::ready() } else { keys.get(s.key()).is_some() }).collect()
+    Service::ALL.into_iter().filter(|s| *s == Service::Local || keys.get(s.key()).is_some()).collect()
 }
 
 thread_local! {
@@ -330,6 +335,11 @@ fn tool_specs() -> Vec<(&'static str, &'static str, Value)> {
             "match_logs",
             "The match logs pulled from the robot onto this handheld, each with its match and time and what stood out: faults and warnings, the lowest battery voltage, the worst loop time and overruns, brownouts, the hottest mechanism and the busiest CAN bus.",
             nothing(),
+        ),
+        (
+            "match_facts",
+            "One match's facts, worked out from its log on this handheld: each fault and measure with its numbers and its time into the match (brownouts and the battery, e-stops and lost comms, CAN, the loop, each motor's heat and current, stalls, mechanisms short of their setpoints, auto, the code it ran), worst first, and how the match went if the schedule knows. The match by its label as match_logs gives it (\"Q14\"), or \"latest\".",
+            json!({"type": "object", "properties": {"match": {"type": "string", "description": "A match's label, such as \"Q14\", or \"latest\"."}}, "required": ["match"], "additionalProperties": false}),
         ),
         (
             "event_schedule",
@@ -455,6 +465,28 @@ fn match_logs(robot: &Robot) -> Value {
         })
         .collect();
     json!({"status": robot.logs.status(), "logs": logs})
+}
+
+/// A match's sheet of facts (`crate::offline::facts`), for the services.
+fn match_facts(robot: &Robot, label: &str) -> Result<String, String> {
+    let lib = crate::offline::load(&crate::offline::Source::of(robot), &mut |_| {});
+    let label = label.trim();
+    let i = if label.is_empty() || label.eq_ignore_ascii_case("latest") { Some(0) } else { lib.index_of(label) };
+    let Some(m) = i.and_then(|i| lib.matches.get(i)) else {
+        return Err(format!("no log of {label} on this handheld; match_logs lists those there are"));
+    };
+    Ok(json!({
+        "match": m.label,
+        "file": m.log,
+        "seconds": m.seconds,
+        "enabledSeconds": m.enabled_seconds,
+        "code": m.code,
+        "autoRoutine": m.routine,
+        "outcome": lib.outcomes.get(&m.label),
+        "facts": m.facts.iter().map(|f| json!({"level": format!("{:?}", f.level).to_lowercase(), "fact": f.text})).collect::<Vec<_>>(),
+        "timesAre": "minutes:seconds into the match, from when the robot was first enabled",
+    })
+    .to_string())
 }
 
 fn list_actions(actions: &[Saved]) -> Value {
@@ -611,6 +643,7 @@ fn plan(call: &Call, robot: &Robot, actions: &[Saved]) -> Plan {
             None => Plan::Now(Err("no robot address yet: the team or robot is set in the Robot app".into())),
         },
         "match_logs" => Plan::Now(Ok(match_logs(robot).to_string())),
+        "match_facts" => Plan::Now(match_facts(robot, call.input["match"].as_str().unwrap_or_default())),
         "event_schedule" => Plan::Now(Ok(event_schedule(robot).to_string())),
         "graph_values" => Plan::Now(Ok(graph_values(robot).to_string())),
         "read_file" => Plan::Now(read_file(call.input["path"].as_str().unwrap_or_default())),
@@ -850,6 +883,11 @@ impl Chat {
 
     pub fn ask(&mut self, text: &str) {
         self.items.push(json!({"role": "user", "content": text}));
+    }
+
+    /// An answer made on this handheld, kept in the conversation as said.
+    fn said(&mut self, text: &str) {
+        self.items.push(json!({"role": "assistant", "content": text}));
     }
 
     pub fn len(&self) -> usize {
@@ -1224,13 +1262,19 @@ pub(crate) fn request(service: Service, key: &str, body: &Value) -> Result<Value
 /// The on-device model: its server started if it is not running, then asked
 /// OpenAI-style chat completions over plain HTTP, on this handheld only.
 fn request_local(body: &Value) -> Result<Value, String> {
+    request_local_within(body, LOCAL_SECONDS)
+}
+
+/// The same, given at most `seconds` to answer (offline answers have a
+/// deadline, past which the answer made from the facts is shown).
+pub(crate) fn request_local_within(body: &Value, seconds: u32) -> Result<Value, String> {
     let base = crate::local::start()?;
     if !(base.starts_with("http://127.0.0.1:") || base.starts_with("http://localhost:")) {
         return Err("the on-device model must be on this handheld".into());
     }
     crate::local::touch();
     let url = format!("{}/chat/completions", base.trim_end_matches('/'));
-    let max_time = LOCAL_SECONDS.to_string();
+    let max_time = seconds.to_string();
     let mut child = Command::new("curl")
         .args(["-sS", "--max-time", &max_time, "--proto", "=http", "-H", "Content-Type: application/json", "--data-binary", "@-", "-w", "\n%{http_code}", &url])
         .stdin(Stdio::piped())
@@ -1472,6 +1516,11 @@ enum Entry {
     Note(String),
     /// The pages the answer above rests on.
     Sources(Vec<Source>),
+    /// A match's report, made offline with no model: each fact a row.
+    Report { label: String, title: String, rows: Vec<(crate::wpilog::Level, String)> },
+    /// What an offline answer rests on ("from the log of Q14"), and whether
+    /// it is a model's wording that passed the check.
+    Basis { words: String, checked: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1498,6 +1547,21 @@ enum Busy {
     Tool { rx: Receiver<Result<String, String>>, id: String, row: usize, done: String },
     /// A critical Action shown, waiting for yes or no.
     Approving { id: String, saved: Saved, line: String, reason: String, row: usize },
+    /// Answering offline from the match logs, on a thread: the model wording
+    /// it (once it is), and the answer made from the facts (once there is
+    /// one), which Esc shows at once rather than waiting for the model.
+    Offline { rx: Receiver<crate::offline::Event>, wording: Option<String>, ready: Option<Box<crate::offline::Answer>>, _stop: StopWhenDropped },
+}
+
+/// A worker's stop flag, set once nobody waits for it (the answer came, or
+/// Esc, a new conversation, leaving): it reads no more logs and asks the
+/// model nothing more, and its memory is given back.
+struct StopWhenDropped(std::sync::Arc<AtomicBool>);
+
+impl Drop for StopWhenDropped {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
 }
 
 /// Set by the choices page for a fresh conversation when the assistant is
@@ -1532,6 +1596,9 @@ fn open_chat_waiting() -> bool {
 struct Laid {
     lines: Vec<String>,
     h: f32,
+    /// A report's lines: the level of the row each begins (`None` for a
+    /// row's second line).
+    levels: Vec<Option<crate::wpilog::Level>>,
 }
 
 pub struct Assistant {
@@ -1571,6 +1638,79 @@ pub struct Assistant {
     /// The line holds what was said aloud; and the question under way was.
     asked_aloud: bool,
     aloud: bool,
+    /// Offline: the question before, for a follow-up ("and Q12?").
+    offline: crate::offline::Context,
+    /// Offline, before anything is asked: the questions offered, and the one chosen.
+    suggestions: Vec<Suggestion>,
+    suggest: ListState,
+    /// What the questions offered were worked out from: the logs'
+    /// generation, and whether the robot was linked.
+    suggested: Option<(u64, bool)>,
+    /// The model that words offline answers, if one is downloaded.
+    offline_model: Option<String>,
+}
+
+/// A question offered offline, before anything is asked.
+#[derive(Clone, Debug, PartialEq)]
+struct Suggestion {
+    /// As the row shows it, and a mono value beside it (the match).
+    name: String,
+    value: String,
+    /// What it asks; `None` is the newest match's report.
+    question: Option<String>,
+}
+
+/// The questions offered offline, from the logs there are: the newest
+/// match's report, why it browned out (or what went wrong in it), what
+/// changed since the match before, a hot motor, the two compared.
+fn suggestions_for(robot: &Robot) -> Vec<Suggestion> {
+    let rows = robot.logs.list();
+    let read: Vec<&crate::logs::Row> = rows.iter().filter(|r| r.digest.is_some()).collect();
+    let label = |r: &crate::logs::Row| crate::offline::facts::label_from_name(&r.name).unwrap_or_else(|| r.title());
+    let mut out = Vec::new();
+    if let Some(newest) = read.first() {
+        let l = label(newest);
+        out.push(Suggestion { name: "Match report".into(), value: l.clone(), question: None });
+        let browned = newest.digest.as_ref().is_some_and(|d| d.brownouts.unwrap_or(0) > 0);
+        let q = if browned { format!("Why did we brown out in {l}?") } else { format!("What went wrong in {l}?") };
+        out.push(Suggestion { name: q.clone(), value: String::new(), question: Some(q) });
+        if let Some(before) = read.get(1) {
+            let q = format!("What changed since {}?", label(before));
+            out.push(Suggestion { name: q.clone(), value: String::new(), question: Some(q) });
+        }
+        out.push(Suggestion { name: "Any motor running hot?".into(), value: String::new(), question: Some("Any motor running hot?".into()) });
+        if let Some(before) = read.get(1) {
+            let q = format!("Compare {l} and {}", label(before));
+            out.push(Suggestion { name: q.clone(), value: String::new(), question: Some(q) });
+        }
+    }
+    if robot.linked() {
+        out.push(Suggestion { name: "How is the robot doing?".into(), value: String::new(), question: Some("How is the robot doing right now?".into()) });
+    }
+    out
+}
+
+/// What offline answers come from, longest first: the logs and the model
+/// that words them, or the logs alone.
+fn offline_from(logs: usize, model: Option<&str>) -> Vec<String> {
+    let count = match logs {
+        0 => return vec!["no match logs yet".into(), "no logs yet".into()],
+        1 => "1 match log".to_owned(),
+        n => format!("{n} match logs"),
+    };
+    let mut out = Vec::new();
+    if let Some(model) = model {
+        out.push(format!("{logs} logs · {}", model.to_lowercase()));
+        out.push(model.to_lowercase());
+    }
+    out.push(count);
+    out.push(format!("{logs} logs"));
+    out
+}
+
+/// Words a failed request ends in when there is no internet to ask over.
+fn no_internet(why: &str) -> bool {
+    ["no internet", "could not reach", "no answer in time", "secure connection failed"].iter().any(|w| why.contains(w))
 }
 
 const GAP: f32 = 6.0;
@@ -1621,7 +1761,90 @@ impl Assistant {
             countdown: None,
             asked_aloud: false,
             aloud: false,
+            offline: crate::offline::Context::default(),
+            suggestions: Vec::new(),
+            suggest: ListState::default(),
+            suggested: None,
+            offline_model: crate::offline::model::find().map(|m| m.name()),
         }
+    }
+
+    /// Answering on this handheld, from the match logs.
+    fn offline_mode(&self) -> bool {
+        self.service.as_ref().is_some_and(|(s, _)| *s == Service::Local)
+    }
+
+    /// A question answered offline, on a thread: the logs read (each new
+    /// one worked out once), the facts picked, the model (if there is one)
+    /// wording them, its wording checked. `report` asks for the newest
+    /// match's report instead, which needs no model.
+    fn ask_offline(&mut self, question: Option<String>, robot: &Robot) {
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let mut source = crate::offline::Source::of(robot);
+        source.stop = Some(stop.clone());
+        let mut ctx = self.offline.clone();
+        ctx.stop = Some(stop.clone());
+        let (tx, rx) = mpsc::channel();
+        let started = std::thread::Builder::new().name("offline".into()).stack_size(1024 * 1024).spawn(move || {
+            let mut send = |e: crate::offline::Event| {
+                tx.send(e).ok();
+            };
+            let lib = crate::offline::load(&source, &mut send);
+            let answer = match &question {
+                Some(q) => {
+                    let model = crate::offline::model::find();
+                    crate::offline::ask(q, &ctx, &lib, model.as_deref(), &mut send)
+                }
+                None => crate::offline::report(&lib, None),
+            };
+            send(crate::offline::Event::Done(Box::new(answer)));
+        });
+        if started.is_err() {
+            return self.failed("could not start answering".into());
+        }
+        self.busy = Busy::Offline { rx, wording: None, ready: None, _stop: StopWhenDropped(stop) };
+        self.waited = 0.0;
+        self.scroll.set(0.0);
+    }
+
+    /// The newest match's report, asked for with Ctrl R or from the questions offered.
+    fn report(&mut self, robot: &Robot) {
+        if !self.idle() {
+            return;
+        }
+        self.mark = self.chat.as_ref().map_or(0, Chat::len);
+        self.push(Entry::You("Match report".into()));
+        self.question = "Match report".into();
+        self.ask_offline(None, robot);
+    }
+
+    /// An offline answer, shown: a report as its card, an answer as said,
+    /// then what it rests on. The conversation keeps it, to carry on.
+    fn offline_done(&mut self, answer: crate::offline::Answer) {
+        self.busy = Busy::Idle;
+        match &answer.report {
+            Some(r) => self.push(Entry::Report { label: r.label.clone(), title: r.title.clone(), rows: r.rows.clone() }),
+            None => self.push(Entry::Said(answer.text.clone())),
+        }
+        let basis = match &answer.worded_by {
+            Some(model) if answer.lines.is_empty() => format!("{} · {}", answer.basis, model.to_lowercase()),
+            Some(model) => format!("{} · worded by {}, checked", answer.basis, model.to_lowercase()),
+            None => answer.basis.clone(),
+        };
+        self.push(Entry::Basis { words: basis, checked: answer.worded_by.is_some() && !answer.lines.is_empty() });
+        if answer.report.is_none() {
+            self.offline.prior = Some(answer.plan.clone());
+        }
+        if let Some(chat) = &mut self.chat {
+            if chat.service() == Service::Local {
+                let said = if answer.report.is_some() { format!("(the report of {})", answer.report.as_ref().map_or("", |r| r.label.as_str())) } else { answer.text.clone() };
+                if chat.len() == self.mark {
+                    chat.ask(&self.question);
+                }
+                chat.said(&said);
+            }
+        }
+        self.keep();
     }
 
     fn idle(&self) -> bool {
@@ -1653,6 +1876,10 @@ impl Assistant {
         self.busy = Busy::Idle;
         self.chat_id = None;
         self.countdown = None;
+        self.offline = crate::offline::Context::default();
+        self.suggest = ListState::default();
+        self.suggested = None;
+        self.offline_model = crate::offline::model::find().map(|m| m.name());
         self.revision += 1;
         self.scroll.jump(0.0);
     }
@@ -1662,8 +1889,8 @@ impl Assistant {
         let kept = load_chat(&self.chats, id).ok_or("that conversation is no longer kept")?;
         let keys = Keys::load();
         let key = match kept.service {
-            Service::Local if crate::local::ready() => String::new(),
-            Service::Local => return Err("it was with the on-device model, which is not downloaded".into()),
+            // Offline answers need no model: it carries on with or without one.
+            Service::Local => String::new(),
             s => keys.get(s.key()).ok_or_else(|| format!("it was with {}, whose key is gone", s.model_name()))?.to_owned(),
         };
         self.service = Some((kept.service, key));
@@ -1691,7 +1918,7 @@ impl Assistant {
         save_chat(&self.chats, &id, chat.service(), &title, chat.items(), &entries);
     }
 
-    fn send(&mut self) {
+    fn send(&mut self, robot: &Robot) {
         let text = self.input.trim().to_owned();
         if text.is_empty() || !self.idle() {
             return;
@@ -1706,7 +1933,10 @@ impl Assistant {
         self.rounds = 0;
         self.continuations = 0;
         self.actions = self.actions_given.clone().unwrap_or_else(crate::commands::all);
-        self.push(Entry::You(text));
+        self.push(Entry::You(text.clone()));
+        if self.offline_mode() {
+            return self.ask_offline(Some(text), robot);
+        }
         self.ask();
     }
 
@@ -1753,6 +1983,21 @@ impl Assistant {
         };
         let reply = match reply {
             Ok(reply) => reply,
+            // No internet, and a question the logs can answer: answered
+            // offline, on this handheld, saying so.
+            Err(why) if no_internet(&why) && self.rounds == 0 && {
+                let plan = crate::offline::route::rules(&self.question, &crate::offline::tools::Library::default(), None);
+                plan.sure && plan.intent != crate::offline::route::Intent::Chat
+            } => {
+                if let Some(chat) = &mut self.chat {
+                    chat.rewind(self.mark);
+                }
+                self.calls.clear();
+                self.outcomes.clear();
+                self.push(Entry::Note(format!("{why} · answered offline, from the match logs")));
+                let question = self.question.clone();
+                return self.ask_offline(Some(question), robot);
+            }
             Err(why) => return self.failed(why),
         };
         // What it did on the web, then what it said, then the pages it rests on.
@@ -1920,26 +2165,42 @@ impl Assistant {
                 Entry::You(text) => {
                     let lines = wrap_paragraphs(g, text, chat, W * 0.72 - 20.0);
                     let h = lines.len() as f32 * body_lh + 8.0;
-                    Laid { lines, h }
+                    Laid { lines, h, levels: Vec::new() }
                 }
                 Entry::Said(text) => {
-                    let lines = wrap_paragraphs(g, text, chat, W - 2.0 * PAD - 8.0);
+                    let lines = wrap_paragraphs(g, &units_together(text), chat, W - 2.0 * PAD - 8.0);
                     let h = lines.iter().map(|l| if l.is_empty() { body_lh * 0.5 } else { body_lh }).sum();
-                    Laid { lines, h }
+                    Laid { lines, h, levels: Vec::new() }
                 }
-                Entry::Step { .. } => Laid { lines: Vec::new(), h: cap_lh },
+                Entry::Step { .. } => Laid { lines: Vec::new(), h: cap_lh, levels: Vec::new() },
                 Entry::Asks { reason, .. } => {
                     let mut lines = crate::help::wrap(g, reason, ty.caption, W - 2.0 * PAD - 24.0);
                     lines.truncate(3);
                     let h = 9.0 + ty.body.size + 5.0 + lines.len() as f32 * cap_lh + cap_lh + 3.0 + cap_lh + 7.0;
-                    Laid { lines, h }
+                    Laid { lines, h, levels: Vec::new() }
                 }
                 Entry::Note(text) => {
                     let lines = crate::help::wrap(g, text, ty.caption, W - 2.0 * PAD - 22.0);
                     let h = lines.len() as f32 * cap_lh + 2.0;
-                    Laid { lines, h }
+                    Laid { lines, h, levels: Vec::new() }
                 }
-                Entry::Sources(_) => Laid { lines: Vec::new(), h: cap_lh + 2.0 },
+                Entry::Sources(_) => Laid { lines: Vec::new(), h: cap_lh + 2.0, levels: Vec::new() },
+                Entry::Report { rows, .. } => {
+                    let (mut lines, mut levels) = (Vec::new(), Vec::new());
+                    for (level, row) in rows {
+                        for (k, line) in crate::help::wrap(g, &units_together(row), chat, W - 2.0 * PAD - 30.0).into_iter().enumerate() {
+                            levels.push((k == 0).then_some(*level));
+                            lines.push(line);
+                        }
+                    }
+                    let h = 8.0 + ty.body.size + 6.0 + lines.len() as f32 * body_lh + 6.0;
+                    Laid { lines, h, levels }
+                }
+                Entry::Basis { words, .. } => {
+                    let lines = crate::help::wrap(g, words, ty.caption, W - 2.0 * PAD - 22.0);
+                    let h = lines.len() as f32 * cap_lh + 2.0;
+                    Laid { lines, h, levels: Vec::new() }
+                }
             });
         }
         self.laid = Some((self.revision, size, laid));
@@ -1955,6 +2216,48 @@ impl Assistant {
         let model = self.service.as_ref().map_or("", |(s, _)| s.label());
         let line = format!("{model} · {} · tab: choices", self.prefs.effort.name());
         g.text_at(W * 0.5, cy + ty.name.size * 0.5 + 8.0 + ty.caption.size * 1.5, Align::Center, &line, ty.caption, t.faint);
+    }
+
+    /// Offline, with nothing asked yet: the questions offered, to choose.
+    fn offering(&self) -> bool {
+        self.offline_mode() && self.entries.is_empty() && self.input.is_empty() && self.idle() && !self.suggestions.is_empty()
+    }
+
+    /// Offline, before anything is asked: that it is working offline and
+    /// from what, then the questions it answers best, Up and Down to choose
+    /// and Enter to ask (the first, the newest match's report, needs no model).
+    fn draw_offline_empty(&mut self, g: &mut Gfx, area: Rect, robot: &Robot) {
+        let t = g.tokens;
+        let ty = g.ty;
+        let head = area.y + 2.0 + ty.body.size * 0.5;
+        g.icon("cloud_off", false, PAD + 9.0, head, 15.0, t.ink);
+        let name = "Working offline";
+        let name_w = g.measure(name, ty.body);
+        g.text_at(PAD + 22.0, head, Align::Left, name, ty.body, t.ink);
+        // From what: the logs, worded by the model when there is one.
+        // The longest of these that fits whole beside the heading.
+        let logs = robot.logs.list().iter().filter(|r| r.digest.is_some()).count();
+        let choices = offline_from(logs, self.offline_model.as_deref());
+        let room = W - 2.0 * PAD - 22.0 - name_w - 12.0;
+        let from = choices.iter().find(|c| g.measure(c, ty.caption) <= room).or(choices.last()).cloned().unwrap_or_default();
+        g.text_at(W - PAD - 4.0, head, Align::Right, &from, ty.caption, t.dim);
+        let rows_top = head + ty.body.size * 0.5 + 5.0;
+        if self.suggestions.is_empty() {
+            let words = "No match logs are on this handheld yet. They come over from the robot after a match, and stay here unplugged.";
+            let cap_lh = ty.caption.size + 4.0;
+            for (k, line) in crate::help::wrap(g, words, ty.caption, W - 2.0 * PAD - 8.0).iter().enumerate() {
+                g.text_at(PAD + 4.0, rows_top + 6.0 + (k as f32 + 0.5) * cap_lh, Align::Left, line, ty.caption, t.dim);
+            }
+            return;
+        }
+        let row_h = g.row_h();
+        let n = self.suggestions.len();
+        for (i, y) in self.suggest.layout(g, n, rows_top, row_h, 2.0, area.bottom()) {
+            let s = &self.suggestions[i];
+            let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
+            g.row(r, &s.name, &s.value, t.dim, i == self.suggest.focus);
+        }
+        self.suggest.scrollbar(g, n, rows_top, area.bottom());
     }
 
     /// The line typed into, along the bottom.
@@ -1974,7 +2277,13 @@ impl Assistant {
         let cy = bar.cy();
         let send_w = 22.0;
         if self.input.is_empty() {
-            let words = if self.idle() || matches!(self.busy, Busy::Approving { .. }) { "type, or hold alt to talk" } else { "esc: stop" };
+            let words = match &self.busy {
+                Busy::Idle if self.offering() => "or type a question",
+                Busy::Idle if self.offline_mode() => "ask about a match",
+                Busy::Idle | Busy::Approving { .. } => "type, or hold alt to talk",
+                Busy::Offline { ready: Some(_), .. } => "esc: the answer from the facts now",
+                _ => "esc: stop",
+            };
             if focused {
                 g.surface(Rect::new(bar.x + 12.0, cy - chat.size * 0.5, 1.5, chat.size), 0.5, t.signal);
             }
@@ -2023,6 +2332,10 @@ fn step_words(call: &Call) -> StepWords {
         }
         "robot_agent" => StepWords { working: "asking the robot's agent".into(), done: "asked the robot's agent".into() },
         "match_logs" => same("looked at the match logs"),
+        "match_facts" => {
+            let label = call.input["match"].as_str().unwrap_or_default().trim();
+            same(&if label.is_empty() || label.eq_ignore_ascii_case("latest") { "read the newest match's log".to_owned() } else { format!("read {label}'s log") })
+        }
         "list_actions" => same("looked at the actions"),
         "event_schedule" => same("looked at the schedule"),
         "graph_values" => same("looked at the live graphs"),
@@ -2044,6 +2357,23 @@ pub(crate) fn chat_style(g: &Gfx) -> bezel::TextStyle {
 
 pub(crate) fn chat_line(g: &Gfx) -> f32 {
     g.ty.caption.size + 3.5
+}
+
+/// A number kept on the line with its unit ("6.3 V", "4 s", "72%"): the
+/// space between them one that does not break.
+fn units_together(text: &str) -> String {
+    let words: Vec<&str> = text.split(' ').collect();
+    let mut out = String::with_capacity(text.len());
+    for (i, word) in words.iter().enumerate() {
+        if i > 0 {
+            let unit = word.trim_end_matches([',', '.', ';', ')', ':']);
+            let number = words[i - 1].chars().last().is_some_and(|c| c.is_ascii_digit());
+            let held = number && matches!(unit, "V" | "A" | "s" | "ms" | "°C" | "m" | "%" | "rps" | "°" | "times" | "vs");
+            out.push(if held { '\u{a0}' } else { ' ' });
+        }
+        out.push_str(word);
+    }
+    out
 }
 
 /// Text wrapped paragraph by paragraph; a blank line between paragraphs.
@@ -2133,7 +2463,20 @@ impl Screen for Assistant {
         // does what it does (Enter sends it now, Esc clears it).
         self.countdown = None;
         let line = g_line_height();
+        // Offline, before anything is asked: the questions offered.
+        let offering = self.offline_mode() && self.entries.is_empty() && self.input.is_empty() && self.idle() && !self.suggestions.is_empty();
         match key {
+            Key::Up | Key::Down if offering => crate::screens::list_key(&mut self.suggest, key, self.suggestions.len()),
+            Key::Enter if offering => {
+                let chosen = self.suggestions.get(self.suggest.focus).cloned();
+                match chosen.and_then(|s| s.question) {
+                    Some(q) => {
+                        self.input = q;
+                        self.send(cx.robot);
+                    }
+                    None => self.report(cx.robot),
+                }
+            }
             Key::Up => self.scroll_by(line * 3.0),
             Key::Down => self.scroll_by(-line * 3.0),
             Key::PageUp => self.scroll_by(line * 8.0),
@@ -2143,6 +2486,21 @@ impl Screen for Assistant {
                 if self.idle() {
                     self.start_over();
                     *cx.say = Some("a new conversation".into());
+                }
+            }
+            // The newest match's report, from its log alone: any service, no model.
+            Key::Ctrl('r') => {
+                if self.idle() {
+                    self.report(cx.robot);
+                } else {
+                    *cx.say = Some("still answering · esc stops it".into());
+                }
+            }
+            // Offline, the model still wording it: the answer from the facts, now.
+            Key::Back if matches!(self.busy, Busy::Offline { ready: Some(_), .. }) => {
+                if let Busy::Offline { ready: Some(answer), .. } = std::mem::replace(&mut self.busy, Busy::Idle) {
+                    self.offline_done(*answer);
+                    *cx.say = Some("the answer from the facts, not waiting for the model".into());
                 }
             }
             Key::Leave => return Nav::Pop,
@@ -2168,7 +2526,7 @@ impl Screen for Assistant {
                     return Nav::Push(Box::new(SourcesPage::new(sources)));
                 }
             }
-            Key::Enter => self.send(),
+            Key::Enter => self.send(cx.robot),
             Key::Backspace => {
                 self.input.pop();
             }
@@ -2188,7 +2546,17 @@ impl Screen for Assistant {
         if let Some(question) = take_question() {
             self.input = question;
             if self.idle() && self.service.is_some() {
-                self.send();
+                self.send(cx.robot);
+            }
+        }
+        // Offline, the questions offered: from the logs there are, worked
+        // out again only when they change (or the robot comes or goes).
+        if self.offline_mode() && self.entries.is_empty() && self.idle() {
+            let now = (cx.robot.logs.generation(), cx.robot.linked());
+            if self.suggested != Some(now) {
+                self.suggested = Some(now);
+                self.suggestions = suggestions_for(cx.robot);
+                self.suggest.focus = self.suggest.focus.min(self.suggestions.len().saturating_sub(1));
             }
         }
         // A question heard, left alone long enough: it goes.
@@ -2231,6 +2599,34 @@ impl Screen for Assistant {
                 }
                 Err(TryRecvError::Empty) => {}
             },
+            Busy::Offline { .. } => loop {
+                let got = match &self.busy {
+                    Busy::Offline { rx, .. } => rx.try_recv(),
+                    _ => break,
+                };
+                match got {
+                    Ok(crate::offline::Event::Step(words)) => self.push(Entry::Step { words, state: StepState::Done }),
+                    Ok(crate::offline::Event::Wording(name)) => {
+                        if let Busy::Offline { wording, .. } = &mut self.busy {
+                            *wording = Some(name);
+                        }
+                    }
+                    Ok(crate::offline::Event::Ready(answer)) => {
+                        if let Busy::Offline { ready, .. } = &mut self.busy {
+                            *ready = Some(answer);
+                        }
+                    }
+                    Ok(crate::offline::Event::Done(answer)) => {
+                        self.offline_done(*answer);
+                        break;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        self.failed("the answer stopped".into());
+                        break;
+                    }
+                }
+            },
             Busy::Idle | Busy::Approving { .. } => {}
         }
         Nav::Stay
@@ -2251,7 +2647,7 @@ impl Screen for Assistant {
         moving || rising || counting || !self.idle()
     }
 
-    fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
+    fn draw(&mut self, g: &mut Gfx, robot: &Robot) {
         let t = g.tokens;
         let ty = g.ty;
         LINE.with(|l| l.set(chat_line(g)));
@@ -2270,8 +2666,14 @@ impl Screen for Assistant {
         let area = Rect::new(0.0, g.top(), W, bar.y - 4.0 - g.top());
         let approving = matches!(self.busy, Busy::Approving { .. });
         if self.entries.is_empty() {
-            self.draw_empty(g, area);
-            self.draw_input(g, bar, true);
+            if self.offline_mode() {
+                self.draw_offline_empty(g, area, robot);
+                let offering = self.offering();
+                self.draw_input(g, bar, !offering);
+            } else {
+                self.draw_empty(g, area);
+                self.draw_input(g, bar, true);
+            }
             return;
         }
         self.lay_out(g);
@@ -2297,8 +2699,11 @@ impl Screen for Assistant {
             }
             let words = match &self.busy {
                 Busy::Asking(_) => format!("thinking · {}", self.service.as_ref().map_or("", |(s, _)| s.label())),
+                Busy::Offline { wording: Some(model), .. } => format!("wording it · {}", model.to_lowercase()),
+                Busy::Offline { .. } => "working offline".into(),
                 _ => "working".into(),
             };
+            let words = g.text.fit(&words, &ty.caption, W - PAD - 34.0 - PAD);
             g.text_at(PAD + 34.0, cy, Align::Left, &words, ty.caption, t.dim);
         }
         let mut ring: Option<(Rect, f32)> = None;
@@ -2391,6 +2796,53 @@ impl Screen for Assistant {
                 Entry::Note(_) => {
                     let cap_lh = ty.caption.size + 4.0;
                     g.icon_alpha("warning", false, PAD + 8.0, top + cap_lh * 0.5, 13.0, t.dim, fade(top + cap_lh * 0.5));
+                    for (k, line) in l.lines.iter().enumerate() {
+                        let cy = top + (k as f32 + 0.5) * cap_lh;
+                        g.text_alpha(PAD + 20.0, cy, line, ty.caption, t.dim, fade(cy));
+                    }
+                }
+                Entry::Report { label, title, .. } => {
+                    // The report: a card of rows, each a fact with its level.
+                    let r = Rect::new(PAD, top, W - 2.0 * PAD, l.h);
+                    let radius = g.tile_radius().min(14.0);
+                    // A card taller than what shows stays, cut by the edges
+                    // rather than faded by its own (scrolled away) ends.
+                    let card = if r.y < area.y || r.bottom() > area.bottom() { a } else { fade(r.y + 10.0).min(fade(r.bottom() - 10.0)) };
+                    g.canvas.rrect(r.offset(g.ox, 0.0), radius, t.surface1, card);
+                    let ly = r.y + 8.0 + ty.body.size * 0.5;
+                    g.icon_alpha("insights", false, r.x + 16.0, ly, 14.0, t.ink, fade(ly));
+                    let head = format!("{label} report");
+                    let head_w = g.measure(&head, ty.body);
+                    g.text_alpha(r.x + 29.0, ly, &head, ty.body, t.ink, fade(ly));
+                    // When it was: the title's date and time ("nov 16 · 10:15").
+                    let parts: Vec<&str> = title.split(" · ").collect();
+                    let when = if parts.len() >= 2 { parts[parts.len() - 2..].join(" · ") } else { title.clone() };
+                    let when = g.text.fit(&when, &ty.caption, r.w - 29.0 - head_w - 20.0);
+                    let when_w = g.measure(&when, ty.caption);
+                    g.text_alpha(r.right() - 12.0 - when_w, ly, &when, ty.caption, t.faint, fade(ly));
+                    let mut ly = ly + ty.body.size * 0.5 + 6.0;
+                    let mut row_level = crate::wpilog::Level::Fine;
+                    for (line, level) in l.lines.iter().zip(&l.levels) {
+                        let cy = ly + lh * 0.5;
+                        if let Some(level) = level {
+                            row_level = *level;
+                            let color = match level {
+                                crate::wpilog::Level::Fault => g.fault(),
+                                crate::wpilog::Level::Warn => t.amber_ink,
+                                crate::wpilog::Level::Fine => t.dim,
+                            };
+                            g.canvas.circle(r.x + 15.0 + g.ox, cy, 2.5, color, fade(cy));
+                        }
+                        let ink = if row_level == crate::wpilog::Level::Fine { t.dim } else { t.ink };
+                        g.text_alpha(r.x + 24.0, cy, line, chat, ink, fade(cy));
+                        ly += lh;
+                    }
+                }
+                Entry::Basis { checked, .. } => {
+                    // What an offline answer rests on, under it.
+                    let cap_lh = ty.caption.size + 4.0;
+                    let icon = if *checked { "check_circle" } else { "description" };
+                    g.icon_alpha(icon, false, PAD + 8.0, top + cap_lh * 0.5, 13.0, t.dim, fade(top + cap_lh * 0.5));
                     for (k, line) in l.lines.iter().enumerate() {
                         let cy = top + (k as f32 + 0.5) * cap_lh;
                         g.text_alpha(PAD + 20.0, cy, line, ty.caption, t.dim, fade(cy));
@@ -2645,10 +3097,7 @@ impl Screen for Choices {
                 let can = available(&self.keys);
                 let current = answering(&self.prefs, &self.keys).map(|(s, _)| s);
                 match can.len() {
-                    0 => *cx.say = Some("add a key in keys, or download the on-device model in settings".into()),
-                    1 => {
-                        *cx.say = Some(if crate::local::ready() { "the other services need their keys".into() } else { "a key in keys, or the on-device model from settings, adds another".into() })
-                    }
+                    0 | 1 => *cx.say = Some("an openai or claude key in keys adds another".into()),
                     _ => {
                         let at = can.iter().position(|s| Some(*s) == current).unwrap_or(0);
                         self.prefs.service = Some(can[(at + 1) % can.len()]);
@@ -2711,9 +3160,19 @@ impl Screen for Choices {
             g.row(r, name, &value, color, i == self.list.focus);
         }
         self.list.scrollbar(g, CHOICE_ROWS, top, bottom);
+        // On this handheld: answers from the logs (a downloaded model
+        // words them); a key adds the services. Longest first, whole.
+        if self.list.focus == 0 && answering == Some(Service::Local) {
+            let more = available(&self.keys).len() > 1;
+            match (crate::local::ready(), more) {
+                (_, true) => g.hint_any(&["offline, from the logs · enter: the next one", "enter: the next one"]),
+                (true, false) => g.hint_any(&["offline, from the logs · a key adds gpt, claude", "offline, from the logs"]),
+                (false, false) => g.hint_any(&["offline, from the logs · a model words them", "offline, from the logs"]),
+            }
+            return;
+        }
         g.hint(match self.list.focus {
-            0 if crate::local::ready() => "enter: the next one · a new conversation",
-            0 => "on-device model: download it in settings",
+            0 => "enter: the next one · a new conversation",
             1 => "light answers sooner · medium thinks it through",
             2 => "enter: reopen one and carry on",
             3 => "enter: clear this one",
@@ -2906,6 +3365,16 @@ fn entry_json(entry: &Entry) -> Value {
         Entry::Asks { name, command, reason, state } => json!({"asks": name, "command": command, "reason": reason, "answer": match state { AskState::Yes => "yes", AskState::No => "no", AskState::Waiting => "no" }}),
         Entry::Note(text) => json!({"note": text}),
         Entry::Sources(list) => json!({"sources": list.iter().map(|s| json!({"title": s.title, "url": s.url})).collect::<Vec<_>>()}),
+        Entry::Report { label, title, rows } => json!({"report": label, "title": title, "rows": rows.iter().map(|(level, row)| json!([level_word(*level), row])).collect::<Vec<_>>()}),
+        Entry::Basis { words, checked } => json!({"basis": words, "checked": checked}),
+    }
+}
+
+fn level_word(level: crate::wpilog::Level) -> &'static str {
+    match level {
+        crate::wpilog::Level::Fault => "fault",
+        crate::wpilog::Level::Warn => "warn",
+        crate::wpilog::Level::Fine => "fine",
     }
 }
 
@@ -2926,6 +3395,25 @@ fn entry_from(v: &Value) -> Option<Entry> {
     }
     if let Some(t) = text("note") {
         return Some(Entry::Note(t));
+    }
+    if let Some(label) = text("report") {
+        let rows = v["rows"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| {
+                let level = match r[0].as_str()? {
+                    "fault" => crate::wpilog::Level::Fault,
+                    "warn" => crate::wpilog::Level::Warn,
+                    _ => crate::wpilog::Level::Fine,
+                };
+                Some((level, r[1].as_str()?.to_owned()))
+            })
+            .collect();
+        return Some(Entry::Report { label, title: text("title").unwrap_or_default(), rows });
+    }
+    if let Some(words) = text("basis") {
+        return Some(Entry::Basis { words, checked: v["checked"].as_bool().unwrap_or(false) });
     }
     let list = v["sources"].as_array()?;
     Some(Entry::Sources(list.iter().map(|s| Source { title: str_of(&s["title"]), url: str_of(&s["url"]) }).collect()))
@@ -3008,7 +3496,7 @@ mod tests {
         assert!(prefs.save());
         assert_eq!(Prefs::load(), prefs);
         let mut keys = Keys::default();
-        assert_eq!(answering(&prefs, &keys), None);
+        assert_eq!(answering(&prefs, &keys), Some((Service::Local, String::new())), "with no key, offline on this handheld");
         keys.set("openai", "sk-o");
         assert_eq!(answering(&prefs, &keys), Some((Service::OpenAi, "sk-o".into())), "the chosen one has no key: the one that does");
         keys.set("claude", "sk-ant-c");
@@ -3050,7 +3538,7 @@ mod tests {
         assert_eq!(server[1]["citations"], json!({"enabled": true}));
         assert!(!tools.iter().any(|t| t["name"] == "code_execution"));
         let names: Vec<&str> = tool_specs().iter().map(|(n, ..)| *n).collect();
-        assert_eq!(names, ["robot_status", "robot_values", "robot_agent", "match_logs", "event_schedule", "graph_values", "read_file", "handheld_status", "list_actions", "run_action"]);
+        assert_eq!(names, ["robot_status", "robot_values", "robot_agent", "match_logs", "match_facts", "event_schedule", "graph_values", "read_file", "handheld_status", "list_actions", "run_action"]);
         // The on-device model: OpenAI-style chat completions, its own short
         // prompt first, no tools.
         let mut chat = Chat::new(Service::Local);
@@ -3234,7 +3722,7 @@ mod tests {
         let (mut robot, _, _) = cx_parts();
         let mut page = page_for(Service::Claude);
         page.input = "search for something".into();
-        page.send();
+        page.send(&robot);
         page.busy = Busy::Idle;
         let before = page.chat.as_ref().unwrap().len();
         page.took(Ok(json!({"content": [{"type": "server_tool_use", "id": "s1", "name": "web_search", "input": {"query": "x"}}], "stop_reason": "pause_turn"})), &robot);
@@ -3360,16 +3848,111 @@ mod tests {
     }
 
     #[test]
-    fn the_on_device_model_answers_plainly_with_no_tools() {
+    fn on_this_handheld_it_answers_offline_from_the_logs_and_the_robot() {
         crate::shell::tests::sandbox();
         let (mut robot, mut settings, mut say) = cx_parts();
         let mut page = page_for(Service::Local);
+        // Before anything is asked: the questions offered, the report first.
+        {
+            let mut cx = Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true };
+            page.update(&mut cx);
+        }
+        assert_eq!(page.suggestions[0], Suggestion { name: "Match report".into(), value: "Q14".into(), question: None });
+        assert_eq!(page.suggestions[1].question.as_deref(), Some("Why did we brown out in Q14?"), "Q14 browned out");
+        // The robot just now, offline.
         type_and_send(&mut page, "how is the robot doing?", &mut robot, &mut settings, &mut say);
         run(&mut page, &mut robot, &mut settings, &mut say, 400);
         let entries: Vec<Entry> = page.entries.iter().map(|(e, _)| e.clone()).collect();
-        assert_eq!(entries.len(), 2, "a question and its answer, nothing looked at: {entries:?}");
-        assert!(matches!(&entries[1], Entry::Said(s) if s.contains("brownout")));
+        assert!(entries.contains(&Entry::Step { words: "looked at the robot".into(), state: StepState::Done }), "{entries:?}");
+        assert!(matches!(&entries[2], Entry::Said(s) if s.contains("The robot is linked: battery")), "{entries:?}");
+        assert_eq!(entries[3], Entry::Basis { words: "from the robot just now".into(), checked: false });
+        // A match, from its log, and a follow-up about another.
+        type_and_send(&mut page, "why did we brown out in Q14?", &mut robot, &mut settings, &mut say);
+        run(&mut page, &mut robot, &mut settings, &mut say, 400);
+        type_and_send(&mut page, "and Q12?", &mut robot, &mut settings, &mut say);
+        run(&mut page, &mut robot, &mut settings, &mut say, 400);
+        let said: Vec<String> = page.entries.iter().filter_map(|(e, _)| if let Entry::Said(s) = e { Some(s.clone()) } else { None }).collect();
+        assert!(said[1].starts_with("Q14: the robot browned out once: at 1:18 in teleop"), "{said:?}");
+        assert!(said[2].starts_with("Q12: the robot did not brown out"), "{said:?}");
+        assert!(page.entries.iter().any(|(e, _)| *e == Entry::Basis { words: "from the log of Q14".into(), checked: false }));
+        // Ctrl R: the newest match's report, no model.
+        {
+            let mut cx = Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true };
+            page.key(Key::Ctrl('r'), &mut cx);
+        }
+        run(&mut page, &mut robot, &mut settings, &mut say, 400);
+        let report = page.entries.iter().find_map(|(e, _)| if let Entry::Report { label, rows, .. } = e { Some((label.clone(), rows.clone())) } else { None }).expect("a report");
+        assert_eq!(report.0, "Q14");
+        assert_eq!(report.1[0].1, "The team won 101–95 on blue");
+        assert!(report.1.iter().any(|(level, row)| *level == crate::wpilog::Level::Fault && row.starts_with("The robot browned out")));
+        // Kept, and reopened whole, the report and what answers rest on too.
+        let kept = list_chats(&page.chats);
+        assert_eq!(kept.len(), 1);
+        let mut again = page_for(Service::Local);
+        again.chats = page.chats.clone();
+        again.reopen(&kept[0].id).unwrap();
+        assert_eq!(again.entries.iter().map(|(e, _)| e.clone()).collect::<Vec<_>>(), page.entries.iter().map(|(e, _)| e.clone()).collect::<Vec<_>>());
+        // Not about the robot, and no model downloaded: what offline answers are.
+        type_and_send(&mut page, "what is a brownout?", &mut robot, &mut settings, &mut say);
+        run(&mut page, &mut robot, &mut settings, &mut say, 400);
+        assert!(matches!(page.entries.iter().rev().nth(1), Some((Entry::Said(s), _)) if s.starts_with("Offline, I answer from the match logs")));
+        std::fs::remove_dir_all(&page.chats).ok();
+    }
+
+    #[test]
+    fn the_offline_page_fits_its_words_whole() {
+        let mut g = Gfx::new(bezel::Tokens::dark());
+        for theme in [crate::look::Theme::Catalyst, crate::look::Theme::Bezel] {
+            g.theme = theme;
+            for size in [crate::gfx::TextSize::Standard, crate::gfx::TextSize::Large] {
+                g.set_text_size(size);
+                let ty = g.ty;
+                let chat = chat_style(&g);
+                // The heading and what it answers from, side by side: the
+                // shortest way of saying it always fits; at the usual size,
+                // the logs and the model.
+                let room = W - 2.0 * PAD - 22.0 - g.measure("Working offline", ty.body) - 12.0;
+                let from = offline_from(16, Some("SmolLM2 360M"));
+                assert!(g.measure(from.last().unwrap(), ty.caption) <= room, "{theme:?} {size:?}");
+                if size == crate::gfx::TextSize::Standard {
+                    assert!(g.measure(&from[0], ty.caption) <= room, "{theme:?}: {}", from[0]);
+                }
+                // The questions offered, in their rows beside a match.
+                let row_w = W - 2.0 * PAD - 5.0;
+                for name in ["Why did we brown out in Q114?", "What changed since Q112?", "Compare Q114 and Q112", "How is the robot doing?"] {
+                    let (name, style) = if theme == crate::look::Theme::Bezel { (name.to_lowercase(), ty.label) } else { (name.to_owned(), ty.body) };
+                    assert!(g.measure(&name, style) <= row_w - 30.0, "{theme:?} {size:?}: {name}");
+                }
+                // The line typed into, while the model words an answer.
+                let bar_w = W - 2.0 * PAD;
+                assert!(g.measure("esc: the answer from the facts now", chat) <= bar_w - 24.0, "{size:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn with_no_internet_a_question_about_the_logs_is_answered_offline() {
+        crate::shell::tests::sandbox();
+        let robot = Robot::demo();
+        let (mut r, mut settings, mut say) = cx_parts();
+        let mut page = page_for(Service::OpenAi);
+        page.input = "what went wrong last match?".into();
+        page.send(&robot);
+        page.busy = Busy::Idle;
+        page.took(Err("no internet: the service's name did not resolve".into()), &robot);
+        assert!(matches!(page.busy, Busy::Offline { .. }), "answering offline");
+        run(&mut page, &mut r, &mut settings, &mut say, 400);
+        let entries: Vec<Entry> = page.entries.iter().map(|(e, _)| e.clone()).collect();
+        assert_eq!(entries[1], Entry::Note("no internet: the service's name did not resolve · answered offline, from the match logs".into()));
+        assert!(entries.iter().any(|e| matches!(e, Entry::Said(s) if s.starts_with("Q14: the robot browned out"))), "{entries:?}");
+        assert_eq!(page.chat.as_ref().unwrap().len(), 0, "the service's conversation as it was");
+        // A question the logs cannot answer fails as before.
+        page.input = "what's the weather?".into();
+        page.send(&robot);
+        page.busy = Busy::Idle;
+        page.took(Err("no internet: the service's name did not resolve".into()), &robot);
         assert!(page.idle());
+        assert_eq!(page.input, "what's the weather?", "back in the line to send again");
     }
 
     #[test]
@@ -3471,7 +4054,7 @@ mod tests {
         crate::shell::tests::sandbox();
         let mut page = page_for(Service::OpenAi);
         page.input = "why so slow?".into();
-        page.send();
+        page.send(&Robot::demo());
         let marked = page.mark;
         page.failed("no internet: the service's name did not resolve".into());
         assert_eq!(page.input, "why so slow?");
