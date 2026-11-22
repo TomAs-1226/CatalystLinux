@@ -35,6 +35,31 @@ fn curl() -> Command {
 }
 
 /// Fetch a URL's body.
+/// Wi-Fi switched on in Settings (it may still be asleep).
+const WIFI_ENABLED: &str = "/data/catalyst/wifi-enabled";
+
+/// A way to the internet: a default route, read from the kernel.
+fn online() -> bool {
+    std::fs::read_to_string("/proc/net/route").is_ok_and(|t| t.lines().skip(1).any(|l| l.split_whitespace().nth(1) == Some("00000000")))
+}
+
+/// The network, for an update about to use it. Ten minutes into standby the
+/// shell puts Wi-Fi to sleep, and an update checked for after that found no
+/// network at all ("could not resolve host"). With Wi-Fi switched on but no
+/// way out, it is woken and waited for, 20 seconds at most; the shell puts
+/// it back to sleep once the update no longer needs it. Not on a computer,
+/// and never Wi-Fi switched off.
+pub fn wake_network() {
+    if online() || !Path::new(WIFI_ENABLED).exists() {
+        return;
+    }
+    Command::new("/usr/sbin/catalyst-power").arg("wifi-wake").status().ok();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !online() && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
 pub fn get(url: &str) -> Result<Vec<u8>, String> {
     let out = curl().arg(url).output().map_err(|e| format!("could not run curl: {e}"))?;
     if !out.status.success() {
@@ -63,6 +88,8 @@ pub fn download(url: &str, to: &Path, size: u64, progress: &mut dyn FnMut(u64)) 
             return Ok(());
         }
         let before = have(to);
+        // Wi-Fi may have gone to sleep between tries.
+        wake_network();
         let status = run_once(url, to, &mut *progress)?;
         // 33: the file was already whole, so there was nothing to resume.
         if (status.success() || status.code() == Some(33)) && have(to) == size {

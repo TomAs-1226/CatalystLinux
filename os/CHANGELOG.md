@@ -15,6 +15,8 @@ the first section (this introduction) is not shown.
 ### Fixed
 - The Assistant answers with Claude again: 0.6.3's new tasks took it past the 20 tools Claude checks strictly in one question, and every question was refused.
 - An update cut off part way (the handheld switched off, the installer stopped) no longer keeps the handheld from ever checking for updates again.
+- Updates checked for in standby, after Wi-Fi has gone to sleep, wake Wi-Fi rather than failing to reach GitHub; it goes back to sleep once the update is done with it.
+- A download never carries on from a file another release left with the same name, which could make an update fail its check.
 
 ## 0.6.4
 

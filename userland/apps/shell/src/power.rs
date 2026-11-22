@@ -765,13 +765,19 @@ impl Care {
     }
 
     /// Ten minutes into the screen being off, Wi-Fi goes, unless something
-    /// needs it; it comes back with the screen.
+    /// needs it; it comes back with the screen. Woken meanwhile for an update
+    /// (which wakes it when it needs the network), it goes again once the
+    /// update is done with it.
     fn standby_wifi(&mut self, dt: f32, asleep: bool, choices: &Choices, busy_update: bool) {
         if asleep {
             self.asleep_for += dt;
-            if choices.wifi_sleeps && !self.wifi_slept && self.asleep_for >= WIFI_SLEEPS_AFTER && !busy_update && crate::wifi::switched_on() && !ssh_session() {
-                run_script(&["wifi-sleep"]);
-                self.wifi_slept = true;
+            if choices.wifi_sleeps && self.asleep_for >= WIFI_SLEEPS_AFTER && !busy_update && crate::wifi::switched_on() && !ssh_session() {
+                if !self.wifi_slept {
+                    run_script(&["wifi-sleep"]);
+                    self.wifi_slept = true;
+                } else if crate::wifi::woken() {
+                    run_script(&["wifi-sleep"]);
+                }
             }
         } else {
             self.asleep_for = 0.0;

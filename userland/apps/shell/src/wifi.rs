@@ -297,6 +297,12 @@ fn service_status() -> Option<String> {
     std::fs::read_to_string("/run/catalyst-wifi.status").ok().map(|s| s.trim().to_owned())
 }
 
+/// The Wi-Fi service up and running, as it says of itself: after standby put
+/// it to sleep, this means something woke it (an update needing the network).
+pub fn woken() -> bool {
+    service_status().as_deref() == Some("running")
+}
+
 // ------------------------------------------------------------- device ---
 
 fn cli(args: &[&str]) -> Option<String> {

@@ -63,11 +63,14 @@ pub fn check(dev: &Device) -> Result<(), String> {
     let (version, build) = dev.version();
     let channel = status::pref(dev, "channel").unwrap_or_else(|| "stable".into());
     status::update(dev, |s| s.state = state::CHECKING.into());
-    // The clock first: with it wrong (a clock chip that lost its time, a
-    // network that blocks the time servers), no certificate checks out and
-    // GitHub cannot be asked at all. Waits for a setting under way; quick
-    // when the clock was set in the last few hours.
+    // The network, woken if it is asleep in standby (the status says
+    // checking now, so the shell leaves it on); then the clock: with it
+    // wrong (a clock chip that lost its time, a network that blocks the
+    // time servers), no certificate checks out and GitHub cannot be asked
+    // at all. Waits for a setting under way; quick when the clock was set
+    // in the last few hours.
     if !dev.test {
+        net::wake_network();
         std::process::Command::new("/usr/sbin/catalyst-time").arg("sync").status().ok();
     }
     let found = (|| {
@@ -166,6 +169,25 @@ fn fits(m: &Manifest, spare: &Path) -> Result<(), String> {
 fn room_of(path: &Path) -> Option<u64> {
     use std::io::{Seek, SeekFrom};
     std::fs::File::open(path).ok()?.seek(SeekFrom::End(0)).ok()
+}
+
+/// Where a file downloads to: named by what it must hash to as well as its
+/// name, so a download only ever carries on from part of the same file.
+/// Named by its name alone, a part left by another release's file of that
+/// name was carried on from (0.6.3's system.img.gz, by 0.6.4's), and what
+/// came of it never checked out.
+fn download_path(dl: &Path, file: &manifest::File) -> PathBuf {
+    let tag: String = file.sha256.chars().take(16).collect();
+    dl.join(format!("{tag}-{}", file.name))
+}
+
+/// Everything in the download folder but `keep`: what other releases left.
+fn clear_others(dl: &Path, keep: &[PathBuf]) {
+    for entry in std::fs::read_dir(dl).into_iter().flatten().flatten() {
+        if !keep.contains(&entry.path()) {
+            std::fs::remove_file(entry.path()).ok();
+        }
+    }
 }
 
 /// One install at a time: a lock holding the installer's process id.
@@ -274,11 +296,15 @@ fn install_locked(dev: &Device) -> Result<(), String> {
     // A patch from this version, if there is one and this system is exactly
     // the one it was made from; otherwise the whole system.
     let mut patch = m.delta_from(&version).cloned();
+    // What another release left in the download folder goes first.
+    let mut keep = vec![download_path(&dl, &m.boot), download_path(&dl, &m.full)];
+    keep.extend(patch.as_ref().map(|d| download_path(&dl, &d.file)));
+    clear_others(&dl, &keep);
     let total = download_size(&m, &version);
     let mut fetched = 0u64;
     let mut fetch = |file: &manifest::File, dev: &Device| -> Result<PathBuf, String> {
         let url = net::file_url(&release, &file.name).ok_or(format!("the release has no {}", file.name))?;
-        let to = dl.join(&file.name);
+        let to = download_path(&dl, file);
         let mut report = reporter(dev, state::DOWNLOADING, &m.version);
         net::download(&url, &to, file.size, &mut |bytes| report((fetched + bytes) as f32 / total.max(1) as f32))?;
         fetched += file.size;
@@ -289,6 +315,9 @@ fn install_locked(dev: &Device) -> Result<(), String> {
         }
         Ok(to)
     };
+    // Said before anything is fetched: the shell leaves Wi-Fi on while it
+    // reads downloading (each download wakes it first if it is asleep).
+    status::update(dev, |s| s.state = state::DOWNLOADING.into());
     let boot_pack = fetch(&m.boot, dev)?;
     let payload = match patch.as_ref() {
         Some(d) => {
@@ -473,6 +502,26 @@ mod tests {
 
     fn curl_works() -> bool {
         std::process::Command::new("curl").arg("--version").output().is_ok_and(|o| o.status.success())
+    }
+
+    #[test]
+    fn a_download_never_carries_on_from_another_releases_file() {
+        let dl = std::env::temp_dir().join(format!("catalyst-update-dl-{}", std::process::id()));
+        std::fs::remove_dir_all(&dl).ok();
+        std::fs::create_dir_all(&dl).unwrap();
+        let file = |sha: &str| manifest::File { name: "system.img.gz".into(), size: 10, sha256: sha.into() };
+        let (old, new) = (file(&"a".repeat(64)), file(&"b".repeat(64)));
+        // The same name, two releases: two places, never the one file.
+        assert_ne!(download_path(&dl, &old), download_path(&dl, &new));
+        assert!(download_path(&dl, &new).to_string_lossy().ends_with("-system.img.gz"));
+        // What the older one left goes; a part of this release's own stays to carry on from.
+        std::fs::write(download_path(&dl, &old), b"0.6.3 whole").unwrap();
+        std::fs::write(dl.join("system.img.gz"), b"from before names had hashes").unwrap();
+        std::fs::write(download_path(&dl, &new), b"part").unwrap();
+        clear_others(&dl, &[download_path(&dl, &new)]);
+        let left: Vec<_> = std::fs::read_dir(&dl).unwrap().flatten().map(|e| e.path()).collect();
+        assert_eq!(left, vec![download_path(&dl, &new)]);
+        std::fs::remove_dir_all(&dl).ok();
     }
 
     #[test]
