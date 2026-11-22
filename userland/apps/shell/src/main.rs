@@ -677,6 +677,14 @@ fn main() {
             if perf {
                 eprintln!("{line}");
             }
+            // Asked for at run time (`touch /run/catalyst-perf`): the same
+            // line, timed, into /run/catalyst-perf.log, for a test to read.
+            if cfg!(target_os = "linux") && std::path::Path::new("/run/catalyst-perf").exists() {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/run/catalyst-perf.log") {
+                    writeln!(f, "{} {line}", chrono::Local::now().format("%H:%M:%S")).ok();
+                }
+            }
         }
         // What this frame needed: its own work, and the panel taking what
         // was sent. The beat slows to one the handheld can hold, so frames
@@ -3907,14 +3915,19 @@ impl Speed {
     }
 }
 
-/// Once a second: frames drawn, what a frame costs, and how busy the
-/// processor was. An idle screen should read 0 fps and about 0%.
+/// Once a second: frames drawn, what a frame costs, the longest wait
+/// between two frames of the same motion (a stutter is one long wait), and
+/// how busy the processor was. An idle screen should read 0 fps and about 0%.
 #[derive(Default)]
 struct Meter {
     since: Option<Instant>,
     frames: u32,
     busy: Duration,
     frame_cost: Duration,
+    /// The last frame sent, carried across seconds, and the longest gap
+    /// between two frames under half a second apart (longer is rest).
+    last_drawn: Option<Instant>,
+    worst_gap: Duration,
 }
 
 impl Meter {
@@ -3924,6 +3937,11 @@ impl Meter {
         if drew {
             self.frames += 1;
             self.frame_cost += cost;
+            let now = Instant::now();
+            if let Some(gap) = self.last_drawn.map(|t| now - t).filter(|g| *g < Duration::from_millis(500)) {
+                self.worst_gap = self.worst_gap.max(gap);
+            }
+            self.last_drawn = Some(now);
         }
         let elapsed = since.elapsed();
         if elapsed < Duration::from_secs(1) {
@@ -3931,11 +3949,13 @@ impl Meter {
         }
         let frame_ms = if self.frames > 0 { self.frame_cost.as_secs_f32() * 1e3 / self.frames as f32 } else { 0.0 };
         let line = format!(
-            "{:.0} fps · {frame_ms:.1} ms a frame · processor {:.0}% busy",
+            "{:.0} fps · {frame_ms:.1} ms a frame · worst gap {:.0} ms · processor {:.0}% busy",
             self.frames as f32 / elapsed.as_secs_f32(),
+            self.worst_gap.as_secs_f32() * 1e3,
             (self.busy.as_secs_f32() / elapsed.as_secs_f32() * 100.0).min(100.0)
         );
-        *self = Meter::default();
+        let last_drawn = self.last_drawn;
+        *self = Meter { last_drawn, ..Meter::default() };
         Some(line)
     }
 }
