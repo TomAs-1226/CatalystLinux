@@ -190,7 +190,7 @@ impl Screen for Share {
         if let Some((field, _)) = &self.typing {
             return field.draw(g, "enter: show it · esc: cancel");
         }
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         let items = self.items.clone();
         for (i, y) in self.list.layout(g, items.len(), top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);

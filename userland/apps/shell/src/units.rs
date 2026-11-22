@@ -6,7 +6,7 @@
 
 use bezel::{Align, Rect};
 
-use crate::gfx::{Gfx, ListState, H, PAD, W};
+use crate::gfx::{Gfx, ListState, PAD, W};
 use crate::platform::Key;
 use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
@@ -127,7 +127,7 @@ impl Screen for UnitsApp {
 
     fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
         let t = g.tokens;
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         for (i, y) in self.list.layout(g, KINDS.len(), top, row_h, 3.0, bottom) {
             let kind = &KINDS[i];
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
@@ -232,7 +232,7 @@ impl Screen for Converter {
         let t = g.tokens;
         let ty = g.ty;
         let units = KINDS[self.kind].units;
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         self.list.focus = self.from;
         let value = self.value();
         for (i, y) in self.list.layout(g, units.len(), top, row_h, 3.0, bottom) {

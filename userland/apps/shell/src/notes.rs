@@ -10,7 +10,7 @@ use std::time::SystemTime;
 
 use bezel::Rect;
 
-use crate::gfx::{Gfx, ListState, H, PAD, W};
+use crate::gfx::{Gfx, ListState, PAD, W};
 use crate::platform::Key;
 use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
@@ -232,7 +232,7 @@ impl Screen for Notes {
         }
         let shown = self.shown();
         let top = if self.search.is_some() { g.top() + Field::height(g) + 6.0 } else { g.top() };
-        let (row_h, bottom) = (g.row_h(), H - PAD - g.hint_h());
+        let (row_h, bottom) = (g.row_h(), g.above_hint());
         let now = chrono::Local::now();
         // While a search is typed, the ring is on the field, not a row.
         let searching = self.search.is_some();

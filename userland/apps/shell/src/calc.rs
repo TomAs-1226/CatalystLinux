@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use bezel::{Align, Rect};
 
-use crate::gfx::{Gfx, H, PAD, W};
+use crate::gfx::{Gfx, PAD, W};
 use crate::platform::Key;
 use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
@@ -711,7 +711,7 @@ impl Screen for Calculator {
         // Below: a whole number's other forms, or the latest answers.
         let below = display.bottom() + 6.0;
         let line = ty.caption.size + 4.0;
-        let bottom = H - PAD - g.hint_h();
+        let bottom = g.above_hint();
         let value = self.error.is_none().then(|| self.preview().or(self.answer.as_ref().map(|(_, v)| *v))).flatten();
         if let (Mode::Programmer { bits }, Some(Value::Int(n, _))) = (self.mode, value) {
             // Decimal, then every bit (32 to a line); unsigned and octal as

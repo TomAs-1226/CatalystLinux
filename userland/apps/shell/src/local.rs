@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 use bezel::{Align, Rect};
 use localmodel::{self as lm, Model, MODELS};
 
-use crate::gfx::{Gfx, ListState, H, PAD, W};
+use crate::gfx::{Gfx, ListState, PAD, W};
 use crate::platform::Key;
 use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
@@ -751,7 +751,7 @@ impl Screen for ModelPage {
         let t = g.tokens;
         let ty = g.ty;
         let model = self.focused();
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         let cap_lh = ty.caption.size + 4.0;
 
         // What the focused one is (two lines, so all three rows fit: its

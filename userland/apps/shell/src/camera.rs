@@ -1051,7 +1051,7 @@ impl Screen for TextPage {
             self.lines = Some((ty.body.size, lines));
         }
         let top = g.top();
-        let bottom = H - PAD - g.hint_h();
+        let bottom = g.above_hint();
         let lh = ty.body.size + 4.0;
         g.canvas.set_clip(Rect::new(0.0, top, W, bottom - top));
         if let Some((_, lines)) = &self.lines {

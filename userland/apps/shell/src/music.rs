@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use bezel::{Align, Rect};
 use serde_json::{json, Value};
 
-use crate::gfx::{Gfx, ListState, H, PAD, W};
+use crate::gfx::{Gfx, ListState, PAD, W};
 use crate::git::Job;
 use crate::photos::Picture;
 use crate::platform::{Key, Media};
@@ -1774,11 +1774,11 @@ impl MusicScreen {
     fn draw_start(&mut self, g: &mut Gfx) {
         let t = g.tokens;
         let rows = self.start_rows();
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         let width = W - 2.0 * PAD - 5.0;
         let n = now();
         let focus = self.list.focus;
-        for (i, y) in self.list.layout(g, rows.len(), top, row_h, 3.0, bottom + 2.0) {
+        for (i, y) in self.list.layout(g, rows.len(), top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, y, width, row_h);
             match rows[i] {
                 StartRow::NowPlaying => {
@@ -1829,14 +1829,14 @@ impl MusicScreen {
             g.surface(Rect::new(caret_x, field.cy() - ty.body.size * 0.45, 1.5, ty.body.size * 0.9), 0.5, t.signal);
             g.focus_ring(field, field.h * 0.5);
         }
-        let (list_top, row_h, bottom) = (field.bottom() + 5.0, g.row_h(), H - PAD - g.hint_h());
+        let (list_top, row_h, bottom) = (field.bottom() + 5.0, g.row_h(), g.above_hint());
         let width = W - 2.0 * PAD - 5.0;
         if self.search_job.is_some() {
             g.text_at(W * 0.5, (list_top + bottom) * 0.5, Align::Center, "looking…", ty.caption, t.dim);
         }
         let focus = if self.typing { usize::MAX } else { self.list.focus };
         let results = self.results.clone();
-        for (i, y) in self.list.layout(g, results.len(), list_top, row_h, 3.0, bottom + 2.0) {
+        for (i, y) in self.list.layout(g, results.len(), list_top, row_h, 3.0, bottom) {
             song_row(g, Rect::new(PAD, y, width, row_h), &results[i], i == focus);
         }
         self.list.scrollbar(g, results.len(), list_top, bottom);
@@ -1852,14 +1852,14 @@ impl MusicScreen {
     fn draw_queue(&mut self, g: &mut Gfx) {
         let t = g.tokens;
         let n = now();
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         let width = W - 2.0 * PAD - 5.0;
         if n.queue.is_empty() {
             g.empty("queue_music", "nothing in the queue");
             return;
         }
         let focus = self.list.focus;
-        for (i, y) in self.list.layout(g, n.queue.len(), top, row_h, 3.0, bottom + 2.0) {
+        for (i, y) in self.list.layout(g, n.queue.len(), top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, y, width, row_h);
             let track = &n.queue[i];
             if i == n.at {
@@ -1876,7 +1876,7 @@ impl MusicScreen {
     fn draw_account(&mut self, g: &mut Gfx) {
         let t = g.tokens;
         let ty = g.ty;
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         let width = W - 2.0 * PAD - 5.0;
         let signed = signed_in();
         let version = match (&self.updating, &self.version_seen) {
@@ -1889,7 +1889,7 @@ impl MusicScreen {
             rows.push(("Sign out", (if self.armed { "enter again" } else { "" }).into(), true));
         }
         let mut below = top;
-        for (i, y) in self.list.layout(g, rows.len(), top, row_h, 3.0, bottom + 2.0) {
+        for (i, y) in self.list.layout(g, rows.len(), top, row_h, 3.0, bottom) {
             let (name, value, lit) = &rows[i];
             let r = Rect::new(PAD, y, width, row_h);
             g.row(r, name, value, if *lit { t.ink } else { t.dim }, i == self.list.focus);

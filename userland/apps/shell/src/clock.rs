@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use bezel::{Align, Rect};
 use detent::{role, Animated};
 
-use crate::gfx::{Gfx, ListState, H, PAD, W};
+use crate::gfx::{Gfx, ListState, PAD, W};
 use crate::platform::Key;
 use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
@@ -579,7 +579,7 @@ impl Clock {
         let splits = sw.splits();
         let line = ty.caption.size + 5.0;
         let mut y = cy + big.size * 0.5 + 10.0 + ty.caption.size + line * 0.5;
-        let bottom = H - PAD - g.hint_h();
+        let bottom = g.above_hint();
         // The fastest lap in ice, the slowest in amber: only once they differ
         // (to the hundredth shown), so even laps are marked as neither.
         let laps: Vec<f64> = splits.iter().map(|s| (s.0 * 100.0).floor()).collect();
@@ -601,7 +601,7 @@ impl Clock {
 
     fn draw_timers(&mut self, g: &mut Gfx) {
         let t = g.tokens;
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h() - 6.0);
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         let timers = shared(|s| s.timers.clone());
         let len = timers.len() + 1;
         for (i, y) in self.timers.layout(g, len, top, row_h, 3.0, bottom) {
@@ -633,7 +633,7 @@ impl Clock {
 
     fn draw_world(&mut self, g: &mut Gfx) {
         let t = g.tokens;
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h() - 6.0);
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         let now = chrono::Utc::now();
         let local = chrono::Local::now();
         let here = local.offset().local_minus_utc() as i64;
@@ -676,6 +676,12 @@ impl Clock {
     }
 }
 
+/// A shell ticking on another thread announces a timer that runs out too
+/// (`Shell::tick`): a test that keeps shells ticking for long holds this,
+/// and so does the test that waits for its own timer's announcement.
+#[cfg(test)]
+pub(crate) static TIMERS_ANNOUNCED: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -717,6 +723,7 @@ mod tests {
 
     #[test]
     fn a_timer_that_runs_out_is_announced_once() {
+        let _alone = TIMERS_ANNOUNCED.lock().unwrap_or_else(|e| e.into_inner());
         let id = add_timer(0.05);
         std::thread::sleep(Duration::from_millis(80));
         let mut said = None;

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use bezel::{Align, Color, Rect, Tokens};
 use nt4::Value;
 
-use crate::gfx::{Gfx, H, PAD, W};
+use crate::gfx::{Gfx, PAD, W};
 use crate::platform::Key;
 use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
@@ -316,7 +316,7 @@ impl Screen for Graphs {
         };
         let start = end - WINDOW;
         let top = g.top();
-        let bottom = H - PAD - g.hint_h();
+        let bottom = g.above_hint();
         // A lane each, sharing the height: the fewer graphed, the taller.
         let n = keys.len();
         let lane_h = ((bottom - top) - LANE_GAP * (n - 1) as f32) / n as f32;

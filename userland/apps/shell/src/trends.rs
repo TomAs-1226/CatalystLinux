@@ -10,7 +10,7 @@
 
 use bezel::{Align, Rect};
 
-use crate::gfx::{Gfx, ListState, H, PAD, W};
+use crate::gfx::{Gfx, ListState, PAD, W};
 use crate::logs::{Digest, Row};
 use crate::platform::Key;
 use crate::robot::Robot;
@@ -197,8 +197,8 @@ impl Screen for Trends {
         let digests: Vec<&Digest> = read.iter().map(|r| r.digest.as_ref().expect("read")).collect();
         let worse = worsening(&rows);
         let (top, row_h) = (g.top(), g.row_h());
-        let bottom = H - PAD - g.hint_h();
-        for (i, y) in self.list.layout(g, Metric::ALL.len(), top, row_h, 3.0, bottom + 2.0) {
+        let bottom = g.above_hint();
+        for (i, y) in self.list.layout(g, Metric::ALL.len(), top, row_h, 3.0, bottom) {
             let metric = Metric::ALL[i];
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let focused = i == self.list.focus;

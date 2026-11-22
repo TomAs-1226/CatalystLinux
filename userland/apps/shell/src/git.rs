@@ -535,11 +535,11 @@ impl Screen for GitScreen {
         if let Some(field) = &self.typing {
             return field.draw(g, "enter: clone · esc: cancel");
         }
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         let rows = HEAD_ROWS + self.repos.len() + 1;
         let robots = robot_repo();
         let account = crate::github::account();
-        for (i, y) in self.list.layout(g, rows, top, row_h, 3.0, bottom + 2.0) {
+        for (i, y) in self.list.layout(g, rows, top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let focused = i == self.list.focus;
             match i {
@@ -662,9 +662,9 @@ impl Screen for AccountScreen {
     fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
         let t = g.tokens;
         let rows = self.rows();
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         let style = if g.theme == crate::look::Theme::Bezel { g.ty.body } else { g.ty.label };
-        for (i, y) in self.list.layout(g, rows.len(), top, row_h, 3.0, bottom + 2.0) {
+        for (i, y) in self.list.layout(g, rows.len(), top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let (name, value, what) = &rows[i];
             let room = r.w - g.measure(name, g.ty.body) - 34.0;
@@ -763,8 +763,8 @@ impl Screen for RemoteReposScreen {
             Some(Ok(repos)) if repos.is_empty() => return g.empty("folder", "no repositories on this account yet"),
             Some(Ok(repos)) => repos,
         };
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
-        for (i, y) in self.list.layout(g, repos.len(), top, row_h, 3.0, bottom + 2.0) {
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
+        for (i, y) in self.list.layout(g, repos.len(), top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let repo = &repos[i];
             let value = match &self.cloning {
@@ -988,13 +988,13 @@ impl Screen for RepoScreen {
         };
         g.text_fit(PAD + 2.0, top + ty.caption.size * 0.5, &head, ty.caption, t.dim, W - 2.0 * PAD);
         let list_top = top + ty.caption.size + 6.0;
-        let bottom = H - PAD - g.hint_h();
+        let bottom = g.above_hint();
         let row_h = g.row_h();
         let rows = self.rows();
         let mine = robot_repo().as_deref() == Some(self.repo.as_path());
         let s = status.as_ref().and_then(|s| s.as_ref().ok()).cloned().unwrap_or_default();
         let doing = self.working.as_ref().map(|(w, _)| *w);
-        for (i, y) in self.list.layout(g, rows.len(), list_top, row_h, 3.0, bottom + 2.0) {
+        for (i, y) in self.list.layout(g, rows.len(), list_top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let (name, value) = match rows[i] {
                 Row::Pull if doing == Some(Work::Pull) => ("Pull", "pulling…".to_owned()),
@@ -1116,7 +1116,7 @@ impl Screen for HistoryScreen {
             self.focus = Self::step(&rows, 0, 1).filter(|_| rows[0].commit.is_none()).unwrap_or(0);
         }
         let top = g.top();
-        let bottom = H - PAD - g.hint_h();
+        let bottom = g.above_hint();
         let row_h = ty.body.size + 9.0;
         let height = |r: &GraphRow| if r.commit.is_some() { row_h } else { row_h * JOIN };
         // Where each row starts, from the top of the history.
@@ -1296,8 +1296,8 @@ impl Screen for BranchesScreen {
             }
             Some(Ok(b)) => b,
         };
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
-        for (i, y) in self.list.layout(g, branches.len(), top, row_h, 3.0, bottom + 2.0) {
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
+        for (i, y) in self.list.layout(g, branches.len(), top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let b = &branches[i];
             let value = match (b.current, b.remote_only, &b.upstream) {

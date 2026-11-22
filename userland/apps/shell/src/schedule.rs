@@ -15,7 +15,7 @@ use std::time::Duration;
 use bezel::{Align, Color, Rect};
 use serde_json::Value;
 
-use crate::gfx::{Gfx, ListState, H, PAD, W};
+use crate::gfx::{Gfx, ListState, PAD, W};
 use crate::platform::Key;
 use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
@@ -521,7 +521,7 @@ impl Screen for ScheduleScreen {
         };
         g.text_fit(PAD + 2.0, top + ty.caption.size * 0.5, &head, ty.caption, t.dim, W - 2.0 * PAD);
         let list_top = top + ty.caption.size + 6.0;
-        let bottom = H - PAD - g.hint_h();
+        let bottom = g.above_hint();
         let row_h = g.row_h();
         // Start at the next match, the first time the list is shown.
         if !self.placed {
@@ -531,7 +531,7 @@ impl Screen for ScheduleScreen {
             }
         }
         let next_key = view.next(now).map(|m| m.key.clone());
-        for (i, y) in self.list.layout(g, view.matches.len(), list_top, row_h, 3.0, bottom + 2.0) {
+        for (i, y) in self.list.layout(g, view.matches.len(), list_top, row_h, 3.0, bottom) {
             let m = &view.matches[i];
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let focused = i == self.list.focus;
@@ -591,7 +591,7 @@ impl Screen for MatchScreen {
         let top = g.top();
         let w = (W - 2.0 * PAD - 8.0) * 0.5;
         for (i, (name, teams, color)) in [("red", &self.m.red, RED), ("blue", &self.m.blue, BLUE)].into_iter().enumerate() {
-            let r = Rect::new(PAD + i as f32 * (w + 8.0), top, w, H - top - PAD - g.hint_h() - 4.0);
+            let r = Rect::new(PAD + i as f32 * (w + 8.0), top, w, g.above_hint() - top);
             g.surface(r, 14.0, t.surface1);
             g.canvas.rrect(Rect::new(r.x, r.y, r.w, 3.0), 1.5, color, 1.0);
             let score = self.m.score.map(|(red, blue)| if i == 0 { red } else { blue }).filter(|s| *s >= 0);

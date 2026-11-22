@@ -23,7 +23,7 @@ use std::time::Instant;
 
 use bezel::{Align, Rect};
 
-use crate::gfx::{Gfx, ListState, H, PAD, W};
+use crate::gfx::{Gfx, ListState, PAD, W};
 use crate::git::Job;
 use crate::platform::Key;
 use crate::robot::Robot;
@@ -626,10 +626,10 @@ impl Screen for BluetoothScreen {
         let t = g.tokens;
         let ty = g.ty;
         let rows = self.rows();
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         let width = W - 2.0 * PAD - 5.0;
         let mut below = top;
-        for (i, y) in self.list.layout(g, rows.len(), top, row_h, 3.0, bottom + 2.0) {
+        for (i, y) in self.list.layout(g, rows.len(), top, row_h, 3.0, bottom) {
             let row = rows[i];
             let (name, value, lit) = self.describe(row);
             // A device's kind leads its row: headphones, a speaker.

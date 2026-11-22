@@ -1228,7 +1228,7 @@ impl Screen for BatteryPage {
         let shown = self.hero.value().clamp(0.0, 1.0);
         self.draw_hero(g, top, shown);
         let list_top = top + HERO_H * shown;
-        let (row_h, bottom) = (g.row_h(), H - PAD + 2.0);
+        let (row_h, bottom) = (g.row_h(), H);
         let choices = g.battery;
         for (i, y) in self.list.layout(g, ROWS.len(), list_top, row_h, 3.0, bottom) {
             let (name, value, on) = self.describe(ROWS[i], &choices);

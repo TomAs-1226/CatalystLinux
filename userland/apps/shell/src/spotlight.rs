@@ -111,11 +111,18 @@ const QUERY_MOST: usize = 60;
 /// The bar's measures at the text size in use: its line's height, a row's,
 /// and how many rows it holds at most.
 fn metrics(g: &Gfx) -> (f32, f32, usize) {
+    let (bar, row, rows) = room_in_rows(g);
+    (bar, row, rows.floor().max(1.0) as usize)
+}
+
+/// The rows the bar holds reaching down to its foot, the last perhaps in
+/// part: with more results than whole rows, it runs on there and the next
+/// one fades out under its foot, rather than stopping a part-row short.
+fn room_in_rows(g: &Gfx) -> (f32, f32, f32) {
     let bar = (g.ty.name.size + 15.0).round();
     let row = g.row_h();
     let room = H - TOP - FOOT - bar - LIST_ABOVE - LIST_BELOW;
-    let rows = ((room + ROW_GAP) / (row + ROW_GAP)).floor().max(1.0) as usize;
-    (bar, row, rows)
+    (bar, row, (room + ROW_GAP) / (row + ROW_GAP))
 }
 
 /// The bar at rest, `rows` rows of results tall.
@@ -181,6 +188,8 @@ pub struct Spotlight {
     /// Seconds until the robot's values shown are read again.
     values_age: f32,
     calm: bool,
+    /// The foot of the results, where a row part-way in fades out.
+    fade: crate::gfx::Fade,
 }
 
 impl Spotlight {
@@ -209,6 +218,7 @@ impl Spotlight {
             bar_at: Rect::new(SIDE, TOP, W - 2.0 * SIDE, 30.0),
             values_age: 0.0,
             calm: false,
+            fade: crate::gfx::Fade::default(),
         }
     }
 
@@ -529,7 +539,7 @@ impl Spotlight {
         self.rows_most = most;
         // As many rows as there are results, gliding there; a preview gets
         // all the room there is.
-        let want = if self.preview.is_some() { most } else { self.hits.len().min(most) } as f32;
+        let want = if self.preview.is_some() || self.hits.len() > most { room_in_rows(g).2 } else { self.hits.len() as f32 };
         if self.rows.target() != want && self.open {
             let growing = want > self.rows.target();
             if self.calm || self.grow.value() < 0.05 {
@@ -632,6 +642,9 @@ impl Spotlight {
             g.canvas.stroke_rrect(r.inset(-1.5), radius + 1.5, 1.5, g.ring_color(), alpha);
         }
         let from = scroll.floor().max(0.0) as usize;
+        // Under the whole rows, the next one fades out into the glass.
+        let whole_end = top + in_sight as f32 * step - ROW_GAP;
+        self.fade.take(g, whole_end + crate::gfx::RING_ROOM, list.bottom() - 1.0);
         for i in from..(from + in_sight + 1).min(self.hits.len()) {
             let y = top + (i as f32 - scroll) * step;
             if y > list.bottom() || y + row_h < list.y {
@@ -653,9 +666,11 @@ impl Spotlight {
             let title = g.text.fit(&hit.item.title, &ty.body, room - detail_w);
             g.text_alpha(r.x + 26.0, cy, &title, ty.body, t.ink, alpha);
         }
-        // More below or above: a thin bar along the right, inside the glass.
+        self.fade.apply(g);
+        // More below or above: a thin bar along the right, inside the glass,
+        // beside the whole rows.
         if self.hits.len() > most {
-            let track = Rect::new(list.right() - 3.5 + dx, top, 2.0, list.h - LIST_ABOVE - LIST_BELOW);
+            let track = Rect::new(list.right() - 3.5 + dx, top, 2.0, (whole_end - top).min(list.h - LIST_ABOVE - LIST_BELOW));
             let share = most as f32 / self.hits.len() as f32;
             let at = scroll / (self.hits.len() - most) as f32;
             let thumb = Rect::new(track.x, track.y + (track.h - track.h * share) * at.clamp(0.0, 1.0), 2.0, (track.h * share).max(8.0));

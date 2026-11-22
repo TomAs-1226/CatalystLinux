@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use bezel::{Align, Color, Rect};
 
-use crate::gfx::{Gfx, ListState, GAP, H, PAD, W};
+use crate::gfx::{Gfx, ListState, GAP, PAD, W};
 use crate::platform::Key;
 use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
@@ -350,7 +350,7 @@ impl Screen for Pit {
         let t = g.tokens;
         let ty = g.ty;
         let top = g.top();
-        let bottom = H - PAD - g.hint_h();
+        let bottom = g.above_hint();
         let w = (W - 2.0 * PAD - GAP) / 2.0;
         let radius = g.tile_radius();
         let cards = [Rect::new(PAD, top, w, bottom - top), Rect::new(PAD + w + GAP, top, w, bottom - top)];
@@ -499,12 +499,12 @@ impl Screen for Checklist {
         let count_w = g.text_at(W - PAD - 6.0, top + head_h * 0.5 - 1.0, Align::Right, &count, ty.caption, if done == self.items.len() && done > 0 { t.ice } else { t.dim });
         g.meter(Rect::new(PAD + 2.0, top + head_h * 0.5 - 3.5, W - 2.0 * PAD - count_w - 18.0, 5.0), if self.items.is_empty() { 0.0 } else { done as f32 / self.items.len() as f32 }, t.ice);
         let list_top = top + head_h + 3.0;
-        let bottom = H - PAD - g.hint_h();
+        let bottom = g.above_hint();
         if self.items.is_empty() {
             g.empty("checklist", "n: add the first item");
         }
         let row_h = g.row_h();
-        for (i, y) in self.list.layout(g, self.items.len(), list_top, row_h, 3.0, bottom + 2.0) {
+        for (i, y) in self.list.layout(g, self.items.len(), list_top, row_h, 3.0, bottom) {
             let item = &self.items[i];
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let (value, wrong) = vouch(&item.id, robot).unwrap_or_default();

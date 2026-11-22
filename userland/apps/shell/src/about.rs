@@ -300,7 +300,7 @@ impl Screen for About {
             self.draw_hero(g, top, shown);
         }
         let list_top = top + HERO_H * shown;
-        let (row_h, bottom) = (g.row_h(), H - PAD + 2.0);
+        let (row_h, bottom) = (g.row_h(), H);
         for (i, y) in self.list.layout(g, self.rows.len(), list_top, row_h, 3.0, bottom) {
             let row = &self.rows[i];
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);

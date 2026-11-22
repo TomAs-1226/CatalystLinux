@@ -647,7 +647,7 @@ impl Screen for ProcessView {
         let d = &self.now;
         // Six lines (the name, four readings, the command) above the hint at
         // any text size.
-        let line = (ty.body.size + 6.0).min((H - PAD - g.hint_h() - top) / 6.0);
+        let line = (ty.body.size + 6.0).min((g.above_hint() - top) / 6.0);
         let mut y = top + line * 0.5;
         // The name, and which process it is.
         let ids = format!("pid {} · parent {}", self.pid, d.ppid);

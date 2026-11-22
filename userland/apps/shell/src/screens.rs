@@ -763,7 +763,7 @@ impl Home {
     fn draw_carousel(&mut self, g: &mut Gfx, robot: &Robot) {
         let t = g.tokens;
         let ty = g.ty;
-        let (top, bottom) = (g.top(), H - 16.0);
+        let (top, bottom) = (g.top(), if g.pager.is_some() { H - 16.0 } else { H - PAD });
         let cy = (top + bottom) * 0.5;
         let (cw, ch) = (150.0, bottom - top - 6.0);
         // A neighbour's near edge sits just clear of the middle card.
@@ -823,7 +823,7 @@ impl Home {
         let widgets = g.glance.clone();
         self.cards.resize(widgets.len(), Rect::default());
         self.robot_card = widgets.iter().position(|w| *w == Widget::Robot);
-        let (top, bottom) = (g.top(), H - 16.0);
+        let (top, bottom) = (g.top(), if g.pager.is_some() { H - 16.0 } else { H - PAD });
         let w = (W - 2.0 * PAD - GAP) * 0.5;
         if widgets.is_empty() {
             g.empty("insights", "choose cards in Settings › Home");
@@ -1210,7 +1210,7 @@ impl Screen for RobotScreen {
         let t = g.tokens;
         let ty = g.ty;
         let top = g.top();
-        let bottom = H - PAD - g.hint_h();
+        let bottom = g.above_hint();
         (self.calm, self.linked) = (g.calm, robot.linked());
 
         // The robot on its stage: the team's own if one is installed, each
@@ -1348,9 +1348,9 @@ impl Screen for Health {
             return;
         }
         let len = firing.len() + history.len();
-        let list_bottom = H - PAD - g.hint_h();
+        let list_bottom = g.above_hint();
         let mut detail = String::new();
-        for (i, y) in self.list.layout(g, len, list_top, row_h, 3.0, list_bottom + 2.0) {
+        for (i, y) in self.list.layout(g, len, list_top, row_h, 3.0, list_bottom) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let focused = i == self.list.focus;
             if let Some((severity, subsystem, id, why)) = firing.get(i) {
@@ -1455,9 +1455,9 @@ impl Screen for LogsScreen {
         self.place(trends);
         let first = trends as usize;
         let top = g.top();
-        let bottom = H - PAD - g.hint_h();
+        let bottom = g.above_hint();
         let row_h = ty.body.size + ty.caption.size + 12.0;
-        for (i, y) in self.list.layout(g, rows.len() + first, top, row_h, 4.0, bottom + 2.0) {
+        for (i, y) in self.list.layout(g, rows.len() + first, top, row_h, 4.0, bottom) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let focused = i == self.list.focus;
             g.surface(r, 12.0, if focused { t.surface2 } else { t.surface1 });
@@ -1552,9 +1552,9 @@ impl Screen for LogDetail {
             g.text_fit(r.x + 9.0, r.bottom() - 5.0 - ty.label.size * 0.5, value, ty.label, t.ink, w - 14.0);
         }
         let list_top = top + chip_h + GAP;
-        let bottom = H - PAD - g.hint_h();
+        let bottom = g.above_hint();
         let row_h = g.row_h();
-        for (i, y) in self.list.layout(g, d.highlights.len(), list_top, row_h, 3.0, bottom + 2.0) {
+        for (i, y) in self.list.layout(g, d.highlights.len(), list_top, row_h, 3.0, bottom) {
             let (level, text) = &d.highlights[i];
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let color = level_color(g, *level);
@@ -1691,9 +1691,9 @@ impl Screen for Tables {
             return;
         }
         let (top, row_h) = (g.top(), g.row_h());
-        let bottom = H - PAD - g.hint_h();
+        let bottom = g.above_hint();
         let graphed = robot.graphs.keys().to_vec();
-        for (i, y) in self.list.layout(g, nodes.len(), top, row_h, 3.0, bottom + 2.0) {
+        for (i, y) in self.list.layout(g, nodes.len(), top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             match &nodes[i] {
                 Node::Table(name, count) => g.row(r, &format!("{name}/"), &format!("{count} ›"), t.dim, i == self.list.focus),
@@ -1804,7 +1804,7 @@ impl Screen for Motors {
         }
         let top = g.top();
         let row_h = ty.name.size + ty.caption.size + 12.0;
-        for (i, y) in self.list.layout(g, rows.len(), top, row_h, 4.0, H - PAD + 2.0) {
+        for (i, y) in self.list.layout(g, rows.len(), top, row_h, 4.0, H) {
             // serial|model|kind|bus|id|name|firmware|poweredSeconds|runningSeconds|…|peakStatorAmps|peakTempC|…
             let f: Vec<&str> = rows[i].split('|').collect();
             let field = |n: usize| f.get(n).copied().unwrap_or("");
@@ -1824,7 +1824,7 @@ impl Screen for Motors {
                 g.focus_ring(r, 12.0);
             }
         }
-        self.list.scrollbar(g, rows.len(), top, H - PAD);
+        self.list.scrollbar(g, rows.len(), top, H);
     }
 }
 
@@ -2918,8 +2918,10 @@ impl Screen for SettingsApp {
             }
         }
         let items = self.items.clone();
-        // Arrange apps says what its keys do along the bottom.
-        let bottom = if arranging { H - g.hint_h() - 3.0 } else { H - PAD + 2.0 };
+        // Arrange apps says what its keys do along the bottom, USB what the
+        // mode does, Name & time what the name is for; the rest run on to it.
+        let hinted = arranging || matches!(self.title, "USB" | "Name & time") || self.naming.is_some();
+        let bottom = if hinted { g.above_hint() } else { H };
         for (i, y) in self.list.layout(g, items.len(), top, row_h, 3.0, bottom) {
             let item = items[i];
             let (name, value, on) = self.describe(item, g, robot);
@@ -3156,9 +3158,9 @@ impl Screen for WifiScreen {
             return;
         }
         let state = self.wifi.state();
-        let bottom = H - PAD - g.hint_h();
+        let bottom = g.above_hint();
         let rows = state.networks.len() + 1;
-        for (i, y) in self.list.layout(g, rows, top, row_h, 3.0, bottom + 2.0) {
+        for (i, y) in self.list.layout(g, rows, top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let focused = i == self.list.focus;
             if i == 0 {

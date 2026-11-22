@@ -2257,6 +2257,8 @@ impl Assistant {
         }
         let row_h = g.row_h();
         let n = self.suggestions.len();
+        // The question line is drawn below the area: the list runs down to it.
+        g.take_foot(area.bottom());
         for (i, y) in self.suggest.layout(g, n, rows_top, row_h, 2.0, area.bottom()) {
             let s = &self.suggestions[i];
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
@@ -3034,8 +3036,9 @@ impl Screen for Confirm {
         }
         let t = g.tokens;
         let ty = g.ty;
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
-        let rows_top = bottom - 2.0 * row_h - 3.0;
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
+        // Its two rows rest on the hint, with room under them for the ring.
+        let rows_top = bottom - 2.0 * row_h - 3.0 - 4.0;
         let cap_lh = ty.caption.size + 4.0;
         // What it is, and why.
         let mut y = top + 1.0;
@@ -3071,6 +3074,8 @@ impl Screen for Confirm {
             let (name, value) = if i == 0 { ("Run it", if self.critical { "it could change something" } else { "" }) } else { ("Don't run it", "") };
             g.row(r, name, value, t.dim, i == self.list.focus);
         }
+        // Ends the list's clipping, which left the hint and the status unseen.
+        self.list.scrollbar(g, 2, rows_top, bottom);
         g.hint("enter: confirm · esc: don't run");
     }
 }
@@ -3164,7 +3169,7 @@ impl Screen for Choices {
 
     fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
         let t = g.tokens;
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         let answering = answering(&self.prefs, &self.keys).map(|(s, _)| s);
         let kept = list_chats(&chats_dir()).len();
         let keys = Service::ALL.iter().filter(|s| s.online() && self.keys.get(s.key()).is_some()).count();
@@ -3273,7 +3278,7 @@ impl Screen for Conversations {
             g.hint("each one is kept once it has an answer");
             return;
         }
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         let now = chrono::Utc::now().timestamp();
         let style = if g.theme == crate::look::Theme::Bezel { g.ty.body } else { g.ty.label };
         for (i, y) in self.list.layout(g, self.kept.len(), top, row_h, 3.0, bottom) {
@@ -3335,7 +3340,7 @@ impl Screen for SourcesPage {
 
     fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
         let t = g.tokens;
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         // The title has the row; where it is from is said below, for the
         // one chosen.
         for (i, y) in self.list.layout(g, self.sources.len(), top, row_h, 3.0, bottom) {

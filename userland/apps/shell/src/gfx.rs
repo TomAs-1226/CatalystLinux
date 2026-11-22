@@ -158,6 +158,13 @@ pub struct Gfx {
     pub columns: usize,
     /// Page dots a screen wants on the glass pager: (pages, current, x offset).
     pub pager: Option<(usize, usize, f32)>,
+    /// Where what the screen in front draws along the panel's foot begins
+    /// (a hint line, a row of buttons): the panel's bottom when nothing is
+    /// there. The handheld has no dock, so nothing else is kept free.
+    pub foot: f32,
+    /// The lists that screen drew: each one's top and where its viewport
+    /// ends, which is the foot (the tests hold every list to it).
+    pub viewports: Vec<(f32, f32)>,
     /// The width a screen title may take before it meets the island.
     pub title_room: f32,
     /// How much of the title shows: 1, or less while an island grown wide
@@ -341,6 +348,8 @@ impl Gfx {
             corner: 1.0,
             columns: 3,
             pager: None,
+            foot: H,
+            viewports: Vec::new(),
             title_room: 96.0,
             title_alpha: 1.0,
             focus: Focus::new(),
@@ -441,6 +450,18 @@ impl Gfx {
     /// The space a hint line takes at the bottom of a page.
     pub fn hint_h(&self) -> f32 {
         self.ty.caption.size + 4.0
+    }
+    /// Where a page or list ends above a hint line: clear of its letters.
+    /// With no hint, a list runs on to the panel's bottom (`H`) and a page
+    /// of tiles to its padding (`H - PAD`): Bezel keeps a dock's room free
+    /// at the foot of its wall panels, but the handheld has no dock.
+    pub fn above_hint(&self) -> f32 {
+        H - self.hint_h() - FOOT_AIR
+    }
+    /// Something is drawn along the panel's foot from `y` down (a row of
+    /// buttons, a status line): the screen's lists end above it.
+    pub fn take_foot(&mut self, y: f32) {
+        self.foot = self.foot.min(y);
     }
 
     // ---- drawing ----
@@ -753,6 +774,7 @@ impl Gfx {
     /// The line along the bottom: what the keys do, or how things stand.
     /// Always whole on the panel: a long one is cut short with an ellipsis.
     pub fn hint(&mut self, s: &str) {
+        self.take_foot(self.above_hint());
         let (style, color) = (self.ty.caption, self.tokens.dim);
         let fitted = self.text.fit(s, &style, W - 2.0 * PAD);
         self.text_at(W * 0.5, H - 2.0 - style.size * 0.5, Align::Center, &fitted, style, color);
@@ -774,7 +796,16 @@ impl Gfx {
         let cy = (self.top() + H) * 0.5;
         self.icon(icon, false, W * 0.5, cy - 12.0, 24.0, t.faint);
         let style = self.ty.caption;
-        self.text_at(W * 0.5, cy + 12.0, Align::Center, line, style, t.dim);
+        // Whole at every text size: a line too long for the panel goes on
+        // to a second, cut short there if even that is not enough.
+        let mut lines = crate::help::wrap(self, line, style, W - 2.0 * PAD);
+        if lines.len() > 2 {
+            let rest = lines.split_off(1).join(" ");
+            lines.push(self.text.fit(&rest, &style, W - 2.0 * PAD));
+        }
+        for (k, words) in lines.iter().enumerate() {
+            self.text_at(W * 0.5, cy + 12.0 + k as f32 * (style.size + 4.0), Align::Center, words, style, t.dim);
+        }
     }
 
     /// Run the glass pass over everything drawn so far: on the GPU when it
@@ -1097,6 +1128,56 @@ pub struct ListState {
     /// page reset) starts where it is, rather than gliding from wherever the
     /// list before it had scrolled to.
     placed: bool,
+    /// Where the whole rows end: below them, the rest of the viewport shows
+    /// the rows after fading out under its foot, as content goes under glass.
+    rows_end: f32,
+    fade: Fade,
+}
+
+/// Room kept under the last whole row of a list for the focus ring (2.5 px
+/// out, its stroke 1.5 wide): the ring is never in the fade.
+pub const RING_ROOM: f32 = 4.0;
+
+/// The air between a list's foot and what is drawn below it (a hint line,
+/// buttons). It is the list's too: the focus ring under the last whole row
+/// may reach into it, and the fade runs on through it.
+pub const FOOT_AIR: f32 = 3.0;
+
+/// A band along the foot of a scrolling area, where what runs on past its
+/// whole rows fades out, as content goes under glass, instead of stopping
+/// short of the foot or being cut there.
+#[derive(Default)]
+pub struct Fade {
+    /// The band's first pixel row and how many, and what was beneath it.
+    top: usize,
+    rows: usize,
+    under: Vec<u32>,
+}
+
+impl Fade {
+    /// Before the rows are drawn: keep what is beneath `from..to` now.
+    pub fn take(&mut self, g: &Gfx, from: f32, to: f32) {
+        let w = W as usize;
+        self.top = from.ceil().clamp(0.0, H) as usize;
+        self.rows = (to.floor().clamp(0.0, H) as usize).saturating_sub(self.top);
+        self.under.clear();
+        self.under.extend_from_slice(&g.canvas.px[self.top * w..(self.top + self.rows) * w]);
+    }
+    /// After: what was drawn in the band since fades into what was beneath
+    /// it, at once from its top (so a row part-way in reads as going under,
+    /// not cut off) and gone by its foot.
+    pub fn apply(&self, g: &mut Gfx) {
+        let w = W as usize;
+        if self.under.len() != self.rows * w {
+            return;
+        }
+        for k in 0..self.rows {
+            let t = (k as f32 + 1.0) / self.rows as f32;
+            let under = t * (2.0 - t);
+            let at = (self.top + k) * w;
+            bezel::simd::mix_into(&mut g.canvas.px[at..at + w], Some(&self.under[k * w..(k + 1) * w]), (under * 256.0) as u32);
+        }
+    }
 }
 
 impl ListState {
@@ -1118,13 +1199,21 @@ impl ListState {
         let step = self.visible.max(1) as isize * direction;
         self.focus = (self.focus as isize + step).clamp(0, len.saturating_sub(1) as isize) as usize;
     }
-    /// The rows to draw: (index, y). Keeps the focus on screen, and glides
-    /// there: while the list is moving, a row may be part-way in at the top
-    /// or bottom, so drawing is clipped to the list's area until
+    /// The rows to draw: (index, y). `bottom` is where the list's viewport
+    /// ends: the panel's bottom, or the top of what is drawn along it (a
+    /// hint line, buttons; [`FOOT_AIR`] above it). Whole rows rest above
+    /// it, with room for the focus ring, and keep the focus on screen,
+    /// gliding there; below them the rows after run on to the foot, fading
+    /// out under it. While the list is moving a row may be part-way in at
+    /// the top, so drawing is clipped to the viewport until
     /// [`ListState::scrollbar`] is called, which every list does last.
     pub fn layout(&mut self, g: &mut Gfx, len: usize, top: f32, row_h: f32, gap: f32, bottom: f32) -> Vec<(usize, f32)> {
+        let bottom = bottom.min(H);
+        g.viewports.push((top, bottom));
+        // Above something drawn below, the air over it is the list's too.
+        let edge = if bottom < H { (bottom + FOOT_AIR).min(H) } else { H };
         self.focus = self.focus.min(len.saturating_sub(1));
-        self.visible = (((bottom - top) + gap) / (row_h + gap)).floor().max(1.0) as usize;
+        self.visible = (((edge - RING_ROOM - top) + gap) / (row_h + gap)).floor().max(1.0) as usize;
         if self.focus < self.first {
             self.first = self.focus;
         } else if self.focus >= self.first + self.visible {
@@ -1139,22 +1228,31 @@ impl ListState {
         let scroll = g.list_scroll(self.first as f32, std::mem::take(&mut self.bump));
         self.shown = scroll;
         g.ring_shift = (scroll - self.first as f32) * pitch;
-        // A little beyond the rows themselves, so the focus ring is whole.
-        g.canvas.set_clip(Rect::new(0.0, top - 4.0, W, self.visible as f32 * pitch - gap + 8.0));
+        // A little above the rows, so the focus ring is whole; down to the
+        // viewport's foot.
+        g.canvas.set_clip(Rect::new(0.0, top - 4.0, W, (edge - top + 4.0).max(0.0)));
+        // What is beneath the band the rows fade out in, to fade them into.
+        self.rows_end = top + self.visible as f32 * pitch - gap;
+        self.fade.take(g, self.rows_end + RING_ROOM, edge);
+        // The rows in view, and those part-way under the fade.
+        let beyond = ((edge - self.rows_end) / pitch).ceil().max(0.0) as usize;
         let from = scroll.max(0.0).floor() as usize;
-        let to = (scroll.max(0.0).ceil() as usize + self.visible).min(len);
+        let to = (scroll.max(0.0).ceil() as usize + self.visible + beyond).min(len);
         // An arriving page's rows rise into place one after another.
         (from..to).map(|i| (i, top + (i as f32 - scroll) * pitch)).collect()
     }
     /// A thin position marker when the list is longer than the page. Ends
-    /// the clipping `layout` began.
+    /// the clipping `layout` began, and fades what was drawn under the
+    /// whole rows out into what was there before.
     pub fn scrollbar(&self, g: &mut Gfx, len: usize, top: f32, bottom: f32) {
         g.canvas.clear_clip();
         g.ring_shift = 0.0;
+        self.fade.apply(g);
         if len <= self.visible {
             return;
         }
-        let track = bottom - top;
+        // The track runs beside the whole rows, not into the fade.
+        let track = bottom.min(self.rows_end) - top;
         let thumb = (track * self.visible as f32 / len as f32).max(10.0);
         let y = top + (track - thumb) * (self.shown / (len - self.visible) as f32).clamp(0.0, 1.0);
         let faint = g.tokens.faint;

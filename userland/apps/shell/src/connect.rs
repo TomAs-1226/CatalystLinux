@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use bezel::{Align, Rect};
 
-use crate::gfx::{Gfx, ListState, H, PAD, W};
+use crate::gfx::{Gfx, ListState, PAD, W};
 use crate::platform::Key;
 use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
@@ -373,7 +373,7 @@ impl Screen for Connect {
             return field.draw(g, "enter: keep it · esc: cancel");
         }
         let rows = self.rows();
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         let has_key = key_path().with_extension("pub").exists();
         for (i, y) in self.list.layout(g, rows.len(), top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
@@ -433,7 +433,7 @@ impl Screen for KeyScreen {
         let top = g.top();
         let mut parts = self.public.split_whitespace();
         let (kind, body, comment) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""));
-        let panel = Rect::new(PAD, top, W - 2.0 * PAD, H - PAD - g.hint_h() - top);
+        let panel = Rect::new(PAD, top, W - 2.0 * PAD, g.above_hint() - top);
         g.surface(panel, g.tile_radius(), t.surface1);
         let style = ty.caption;
         g.text_at(panel.x + 9.0, panel.y + 6.0 + style.size * 0.5, Align::Left, &format!("{kind} · {comment}"), style, t.dim);

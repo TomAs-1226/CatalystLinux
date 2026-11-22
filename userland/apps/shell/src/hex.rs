@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use bezel::{Align, Rect};
 use detent::{role, Animated};
 
-use crate::gfx::{Gfx, H, PAD, W};
+use crate::gfx::{Gfx, PAD, W};
 use crate::platform::Key;
 use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
@@ -226,7 +226,7 @@ impl Screen for HexView {
         }
         let line = style.size + 4.0;
         let top = g.top();
-        let bottom = H - PAD - g.hint_h();
+        let bottom = g.above_hint();
         // The last row's own spacing may run under the hint's margin.
         let shown = (((bottom - top + 4.0) / line).floor() as u64).max(1);
         VISIBLE.with(|v| v.set(shown));
