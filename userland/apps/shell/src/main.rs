@@ -10,6 +10,7 @@
 //! catalyst-shell --passcode-bench   what making and checking the lock screen's
 //!                                passcode takes on this processor
 //! catalyst-shell --standby-shots <dir>   StandBy's faces and the lock screen, to PNG
+//! catalyst-shell --cjk-shots <dir>   Chinese, Japanese and Korean text on the screens, to PNG
 //!     --robot <team|ip|host>     robot to connect to (overrides the saved one)
 //!     --demo                     a scripted robot instead of a real one
 //!     --arrive <seconds>         the scripted robot, plugged in that long after start
@@ -45,6 +46,8 @@ mod camera;
 mod calc;
 mod catalogue;
 mod changelog;
+#[cfg(not(target_arch = "aarch64"))]
+mod cjk_shots;
 mod clock;
 mod commands;
 mod connect;
@@ -388,7 +391,7 @@ fn main() {
     };
     // The scripted tour brings its own files and apps to show.
     #[cfg(not(target_arch = "aarch64"))]
-    if flag("--shots") || flag("--voice-shots") {
+    if flag("--shots") || flag("--voice-shots") || flag("--cjk-shots") {
         tour_fixtures();
     }
     // The voice screens keep their state in a folder of their own: a tour
@@ -425,6 +428,10 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--standby-shots") {
         return standby_shots(std::path::Path::new(&dir));
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--cjk-shots") {
+        return cjk_shots::shots(std::path::Path::new(&dir));
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--looks") {
