@@ -12,6 +12,10 @@ the first section (this introduction) is not shown.
 
 ## 0.5.6
 
+### Fixed
+- 0.5.5 could leave the screen dark after it installed: its panel driver did not match its kernel. Fixed, and an update that leaves the panel dark now goes back to the system before it by itself.
+- This update also brings everything 0.5.5 had: apps from the Catalogue, Catalyst Kit, and compressed swap in memory.
+
 ### Sound
 - The speaker and headphones work. The speaker plays both channels, and its amplifier is on only while something plays.
 - Volume on Fn+S and Fn+D, mute on Fn+A, a volume bar in the control centre, and Settings › Sound.
