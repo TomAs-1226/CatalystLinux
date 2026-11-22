@@ -159,7 +159,7 @@ pub fn read_csv(text: &str, now: i64) -> Option<Found> {
                 },
                 Col::Field(f) => {
                     let limit = f.limit();
-                    let cut: String = value.chars().take(limit).collect();
+                    let cut: Zeroizing<String> = Zeroizing::new(value.chars().take(limit).collect());
                     let now = e.get(*f);
                     // A second column for the same field (KeePass's "URL"
                     // and "Web Site") fills it only if it is empty.

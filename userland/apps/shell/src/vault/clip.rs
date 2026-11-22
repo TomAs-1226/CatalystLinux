@@ -39,10 +39,20 @@ struct Held {
     at: Instant,
 }
 
-static HELD: Mutex<Option<Held>> = Mutex::new(None);
-
+#[cfg(not(test))]
 fn held_now() -> std::sync::MutexGuard<'static, Option<Held>> {
+    static HELD: Mutex<Option<Held>> = Mutex::new(None);
     HELD.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+// Each test thread copies to a clipboard of its own, so one test's copy is
+// never another's.
+#[cfg(test)]
+fn held_now() -> std::sync::MutexGuard<'static, Option<Held>> {
+    thread_local! {
+        static CELL: &'static Mutex<Option<Held>> = Box::leak(Box::new(Mutex::new(None)));
+    }
+    CELL.with(|c| *c).lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Put `text` on the clipboard as `sensitivity` says.

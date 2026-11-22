@@ -52,7 +52,7 @@ const DRIFT_PERIOD: (f32, f32) = (1260.0, 1740.0);
 
 // ------------------------------------------------------------- the time ---
 
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(any(test, not(target_arch = "aarch64")))]
 thread_local! {
     /// The galleries' own time, so a picture always reads 9:41.
     static PRETEND: std::cell::Cell<Option<NaiveDateTime>> = const { std::cell::Cell::new(None) };
@@ -60,7 +60,7 @@ thread_local! {
 
 /// The time on the wall, here (or as the gallery pretends).
 pub fn local_now() -> NaiveDateTime {
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     if let Some(at) = PRETEND.with(std::cell::Cell::get) {
         return at;
     }
@@ -68,7 +68,7 @@ pub fn local_now() -> NaiveDateTime {
 }
 
 /// For the galleries and the tests: the clock reads `at` from now on.
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(any(test, not(target_arch = "aarch64")))]
 pub fn pretend_time(at: Option<NaiveDateTime>) {
     PRETEND.with(|p| p.set(at));
 }

@@ -30,9 +30,13 @@
 //!   app is left (back to Home, or another app from the recent apps): what
 //!   was copied stays on the clipboard its 30 seconds, so nothing needs the
 //!   vault open behind you. It is not kept among the recent apps, whose
-//!   cards are pictures of what was on the screen.
+//!   cards are pictures of what was on the screen, and no screenshot is
+//!   taken while it is open.
 //! - **Spotlight** finds entries by their titles while it is open, and
 //!   nothing at all while it is locked; it is never given anything else.
+//! - **A file that will not open** (changed, cut short, not a vault) is
+//!   never written over: the vault says so, and can set it aside under
+//!   another name to make a new one, into which a backup restores.
 
 mod clip;
 mod crypto;
@@ -137,8 +141,10 @@ fn changed() {
     GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Lock it now: its key and entries wiped from memory.
+/// Lock it now: its key and entries wiped from memory, and a password made
+/// for an entry not yet taken up.
 pub fn lock() {
+    screen::forget();
     let gone = session().take();
     if gone.is_some() {
         OPEN.store(false, Ordering::Relaxed);
@@ -148,10 +154,12 @@ pub fn lock() {
 }
 
 /// Every frame, from the shell: lock it if `now` (the screen off, StandBy,
-/// the lock screen) or after two idle minutes; and let a copied secret go
-/// once its 30 seconds are up. Costs a load when it is locked.
+/// the lock screen) or after two idle minutes, and wipe a key held for a
+/// passcode change likewise; and let a copied secret go once its 30 seconds
+/// are up. Costs a load or two when it is locked.
 pub fn watch(now: bool) {
     clip::clear_after();
+    rewrap_watch(now);
     if !is_open() {
         return;
     }
@@ -257,6 +265,10 @@ pub enum Outcome {
     Opened(Unlocked),
     /// Not the passcode.
     Wrong,
+    /// The file will not open with any passcode: changed, cut short, or not
+    /// a vault at all. It is left as it is; [`set_aside_damaged`] makes room
+    /// for a new one without losing it.
+    Damaged(String),
     Failed(String),
 }
 
@@ -317,9 +329,10 @@ pub fn begin_unlock(passcode: Zeroizing<String>) -> Receiver<Outcome> {
         let (ring, plain) = match Keyring::open(&file, passcode.as_bytes(), Role::Vault) {
             Ok(opened) => opened,
             Err(crypto::Error::Wrong) => return Outcome::Wrong,
+            Err(e @ (crypto::Error::Damaged | crypto::Error::Tampered | crypto::Error::NotOurs)) => return Outcome::Damaged(e.words().to_owned()),
             Err(e) => return Outcome::Failed(e.words().to_owned()),
         };
-        let Some(entries) = entry::decode(plain.bytes()) else { return Outcome::Failed(crypto::Error::Damaged.words().to_owned()) };
+        let Some(entries) = entry::decode(plain.bytes()) else { return Outcome::Damaged(crypto::Error::Damaged.words().to_owned()) };
         drop(plain);
         let mut ring = ring;
         let mark = crypto::mark_of(phc.as_deref());
@@ -385,19 +398,69 @@ pub fn delete() -> std::io::Result<()> {
     }
 }
 
+/// A vault that will not open, set aside to make room for a new one: renamed
+/// beside it (`vault.damaged-20261121-214107`, still root's alone), never
+/// deleted, so nothing in it is lost should it be mended. The name it was
+/// given.
+pub fn set_aside_damaged() -> std::io::Result<PathBuf> {
+    lock();
+    flush();
+    let path = path();
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let mut to = path.with_file_name(format!("vault.damaged-{stamp}"));
+    let mut n = 2;
+    while to.exists() {
+        to = path.with_file_name(format!("vault.damaged-{stamp}-{n}"));
+        n += 1;
+    }
+    std::fs::rename(&path, &to)?;
+    #[cfg(unix)]
+    if let Some(dir) = path.parent().and_then(|d| std::fs::File::open(d).ok()) {
+        dir.sync_all().ok();
+    }
+    changed();
+    Ok(to)
+}
+
 // ------------------------------------------------ the passcode changing ---
 
 /// The vault's key, unwrapped with the passcode there is, while Settings
-/// asks for the new one twice; and the file it came from.
-static PENDING: Mutex<Option<(Keyring, Vec<u8>, PathBuf)>> = Mutex::new(None);
+/// asks for the new one twice: the key, the file it came from, and when.
+struct Held {
+    ring: Keyring,
+    file: Vec<u8>,
+    path: PathBuf,
+    since: Instant,
+}
 
-fn pending() -> MutexGuard<'static, Option<(Keyring, Vec<u8>, PathBuf)>> {
+/// A passcode change under way.
+struct Change {
+    held: Option<Held>,
+    /// The held key was wiped (the screen went off, or two minutes passed)
+    /// before the new passcode was made: the change must start again.
+    voided: bool,
+}
+
+#[cfg(not(test))]
+fn pending() -> MutexGuard<'static, Change> {
+    static PENDING: Mutex<Change> = Mutex::new(Change { held: None, voided: false });
     PENDING.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+// Each test thread changes a passcode of its own, out of reach of the other
+// tests' shells, whose screens go off as they please.
+#[cfg(test)]
+fn pending() -> MutexGuard<'static, Change> {
+    thread_local! {
+        static CELL: &'static Mutex<Change> = Box::leak(Box::new(Mutex::new(Change { held: None, voided: false })));
+    }
+    CELL.with(|c| *c).lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Settings › Lock screen › Change passcode: the passcode there is was
 /// right. If it opens the vault, its key is held (wiped when let go) until
-/// the new passcode is made, or the change is given up.
+/// the new passcode is made, the change is given up, the screen goes off or
+/// StandBy or the lock screen comes, or two minutes pass.
 pub fn rewrap_begin(passcode: &str) {
     rewrap_begin_at(path(), passcode);
 }
@@ -406,36 +469,54 @@ fn rewrap_begin_at(path: PathBuf, passcode: &str) {
     flush();
     let held = std::fs::read(&path).ok().and_then(|file| {
         let (ring, _) = Keyring::open(&file, passcode.as_bytes(), Role::Vault).ok()?;
-        Some((ring, file, path))
+        Some(Held { ring, file, path, since: Instant::now() })
     });
-    *pending() = held;
+    *pending() = Change { held, voided: false };
+}
+
+/// From `watch`: a key held for a change is wiped as the vault would lock.
+fn rewrap_watch(now: bool) {
+    let mut change = pending();
+    if change.held.as_ref().is_some_and(|h| now || h.since.elapsed() >= IDLE) {
+        *change = Change { held: None, voided: true };
+    }
+}
+
+/// The key held for a change was wiped before the change was made: Settings
+/// asks for the passcode there is again.
+pub fn rewrap_voided() -> bool {
+    pending().voided
 }
 
 /// The new passcode is made: the vault's key wrapped under it and written,
-/// then `keep` keeps the passcode's hash. Should keeping fail, the vault is
-/// put back as it was, so the two never part.
-pub fn rewrap_with<E>(new: &str, new_phc: &str, keep: impl FnOnce() -> Result<(), E>) -> Result<(), E> {
-    let Some((ring, old, path)) = pending().take() else { return keep() };
+/// then `keep` keeps the passcode's hash. The two never part: should the
+/// vault not move, the passcode is not changed; should keeping fail, the
+/// vault is put back as it was; and if the held key was wiped meanwhile,
+/// nothing is changed.
+pub fn rewrap_with(new: &str, new_phc: &str, keep: impl FnOnce() -> std::io::Result<()>) -> Result<(), String> {
+    let keep = || keep().map_err(|e| format!("could not keep it: {e}"));
+    let change = std::mem::replace(&mut *pending(), Change { held: None, voided: false });
+    let Some(Held { ring, file: old, path, .. }) = change.held else {
+        if change.voided {
+            return Err("locked meanwhile · change it again".into());
+        }
+        // No vault, or one under an earlier passcode: nothing to move.
+        return keep();
+    };
     // An open vault would hold the old header.
     lock();
     let moved = ring.unseal(&old).and_then(|plain| ring.rewrap(new.as_bytes(), ring.head().cost, crypto::mark_of(Some(new_phc)))?.seal(plain.bytes()));
     drop(ring);
-    let Ok(file) = moved else { return keep() };
-    if crate::sys::write_private(&path, &file).is_err() {
-        return keep();
-    }
-    match keep() {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            crate::sys::write_private(&path, &old).ok();
-            Err(e)
-        }
-    }
+    let file = moved.map_err(|e| format!("could not move the vault: {}", e.words()))?;
+    crate::sys::write_private(&path, &file).map_err(|e| format!("could not move the vault: {e}"))?;
+    keep().inspect_err(|_| {
+        crate::sys::write_private(&path, &old).ok();
+    })
 }
 
 /// The change was given up: the held key is wiped.
 pub fn rewrap_cancel() {
-    pending().take();
+    *pending() = Change { held: None, voided: false };
 }
 
 // ------------------------------------------------------- backup, restore ---

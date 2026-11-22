@@ -85,6 +85,20 @@ fn fit_value(g: &mut Gfx, value: &str, room: f32) -> String {
 /// Masked: as many dots as never tells a length.
 const MASK: &str = "••••••••••";
 
+/// A write of the vault that failed, said in the island by whichever of its
+/// pages is in front when it is known.
+fn say_write_error(cx: &mut Cx) {
+    if let Some(why) = super::take_write_error() {
+        *cx.say = Some(why);
+    }
+}
+
+/// As the vault locks: a password made for an entry, not yet taken up by
+/// it, is wiped.
+pub(super) fn forget() {
+    PICKED.lock().unwrap_or_else(|e| e.into_inner()).take();
+}
+
 // ------------------------------------------------------------- an input ---
 
 /// What a key did to an input.
@@ -193,8 +207,17 @@ enum State {
     /// A passcode, no vault yet.
     Create,
     Locked,
+    /// Its file would not open with any passcode: it may be set aside.
+    Damaged,
     Open,
 }
+
+/// What the page says of a file that will not open, fullest first.
+const DAMAGED: [&str; 3] = [
+    "The vault's file was changed or damaged, and will not open with any passcode. Set aside, it is kept whole under another name, and a new vault can be made here; a backup restores into\u{a0}it.",
+    "The vault's file was changed or damaged. Set aside, it is kept whole under another name, and a new vault can be\u{a0}made.",
+    "The file is damaged. Set it aside to start\u{a0}again.",
+];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Row {
@@ -205,11 +228,19 @@ enum Row {
     Lock,
 }
 
-/// What the list shows of an entry: never more than its id, name and summary.
+/// What the list shows of an entry: never more than its id, name and
+/// summary, wiped when let go as the entry is.
 struct Line {
     id: u64,
     name: String,
     summary: String,
+}
+
+impl Drop for Line {
+    fn drop(&mut self) {
+        self.name.zeroize();
+        self.summary.zeroize();
+    }
 }
 
 /// The app: the vault locked or open, and its list.
@@ -228,6 +259,8 @@ pub struct Vault {
     exists: bool,
     /// Wrapped under a passcode other than the one set now.
     earlier: bool,
+    /// The file would not open with any passcode, in words.
+    damaged: Option<String>,
     seen: (u64, u64),
     /// The seconds before it locks by itself, as last drawn (in its last minute).
     locks_drawn: Option<u64>,
@@ -254,6 +287,7 @@ impl Vault {
             passcode_set: false,
             exists: false,
             earlier: false,
+            damaged: None,
             seen: (u64::MAX, u64::MAX),
             locks_drawn: None,
         };
@@ -271,12 +305,17 @@ impl Vault {
         self.passcode_set = passcode::is_set();
         self.exists = super::exists();
         self.earlier = self.exists && self.passcode_set && !super::is_open() && !super::under_current_passcode();
+        if !self.exists {
+            self.damaged = None;
+        }
         true
     }
 
     fn state(&self) -> State {
         if super::is_open() {
             State::Open
+        } else if self.exists && self.damaged.is_some() {
+            State::Damaged
         } else if self.exists {
             State::Locked
         } else if self.passcode_set {
@@ -503,6 +542,26 @@ impl Vault {
         g.row(Rect::new(PAD, row_y, W - 2.0 * PAD, row_h), "Set a passcode", "›", t.ink, true);
         g.hint("enter: set a passcode · esc: back");
     }
+
+    fn draw_damaged(&mut self, g: &mut Gfx) {
+        let t = g.tokens;
+        let ty = g.ty;
+        let top = g.top();
+        let row_h = g.row_h();
+        let row_y = g.above_hint() - 4.0 - row_h;
+        let room = row_y - 6.0 - top;
+        let line_h = ty.caption.size + 4.0;
+        let lines = fit_lines(g, &DAMAGED, ty.caption, W - 2.0 * PAD - 8.0, ((room - 38.0) / line_h).floor().max(1.0) as usize);
+        let disc = 15.0;
+        let block = disc * 2.0 + 8.0 + lines.len() as f32 * line_h;
+        let y0 = top + ((room - block) * 0.5).max(0.0);
+        let fault = g.fault();
+        g.dot(W * 0.5, y0 + disc, disc, t.surface1);
+        g.icon("error", true, W * 0.5, y0 + disc, 18.0, fault);
+        caption_lines(g, &lines, y0 + disc * 2.0 + 8.0 + ty.caption.size * 0.5, Align::Center);
+        g.row(Rect::new(PAD, row_y, W - 2.0 * PAD, row_h), "Set it aside", "›", t.ink, true);
+        g.hint_any(&["enter: set it aside · esc: back", "enter: set aside · esc: back"]);
+    }
 }
 
 impl Drop for Vault {
@@ -521,7 +580,7 @@ impl Screen for Vault {
         match self.state() {
             State::Create | State::Locked => true,
             State::Open => self.search.is_some(),
-            State::NeedsPasscode => false,
+            State::NeedsPasscode | State::Damaged => false,
         }
     }
 
@@ -533,13 +592,16 @@ impl Screen for Vault {
         false
     }
 
+    // Its countdown and the lock that ends it need no more than the shell's
+    // idle looks, four a second.
     fn busy(&self) -> bool {
-        self.working.is_some() || self.field.moving() || super::is_open()
+        self.working.is_some() || self.field.moving()
     }
 
     fn set_aside(&mut self) {
         // The app was left: locked at once (what was copied stays its 30 s).
         super::lock();
+        self.field.clear();
         self.search = None;
         self.query.clear();
     }
@@ -555,6 +617,18 @@ impl Screen for Vault {
             State::NeedsPasscode => match key {
                 Key::Back => Nav::Pop,
                 Key::Enter | Key::Right => Nav::Push(Box::new(crate::lockpages::PasscodeFlow::new(crate::lockpages::Purpose::Set))),
+                _ => Nav::Stay,
+            },
+            State::Damaged => match key {
+                Key::Back => Nav::Pop,
+                Key::Enter | Key::Right => {
+                    *cx.say = Some(match super::set_aside_damaged() {
+                        Ok(_) => "damaged file set aside".into(),
+                        Err(e) => format!("could not set it aside: {e}"),
+                    });
+                    self.refresh();
+                    Nav::Stay
+                }
                 _ => Nav::Stay,
             },
             State::Create | State::Locked => {
@@ -579,9 +653,7 @@ impl Screen for Vault {
     }
 
     fn update(&mut self, cx: &mut Cx) -> Nav {
-        if let Some(why) = super::take_write_error() {
-            *cx.say = Some(why);
-        }
+        say_write_error(cx);
         let Some((rx, making)) = &self.working else { return Nav::Stay };
         let making = *making;
         let outcome = match rx.try_recv() {
@@ -615,6 +687,12 @@ impl Screen for Vault {
                 });
                 self.field.wrong(cx.settings.calm);
             }
+            // Not a wrong passcode, so no try is counted: the file itself.
+            Outcome::Damaged(why) => {
+                self.damaged = Some(why);
+                self.wrong = None;
+                self.field.clear();
+            }
             Outcome::Failed(why) => {
                 self.wrong = Some(why);
                 self.field.wrong(cx.settings.calm);
@@ -639,6 +717,7 @@ impl Screen for Vault {
             State::Open => self.draw_open(g),
             State::Locked | State::Create => self.draw_locked(g),
             State::NeedsPasscode => self.draw_needs_passcode(g),
+            State::Damaged => self.draw_damaged(g),
         }
     }
 }
@@ -761,6 +840,14 @@ impl EntryPage {
         page
     }
 
+    /// What it holds of the entry, wiped: the vault has locked.
+    fn forget(&mut self) {
+        self.entry = None;
+        self.totp = None;
+        self.code.0.zeroize();
+        self.code.1.zeroize();
+    }
+
     fn load(&mut self) {
         if self.seen == super::generation() {
             return;
@@ -843,6 +930,12 @@ impl EntryPage {
     }
 }
 
+impl Drop for EntryPage {
+    fn drop(&mut self) {
+        self.forget();
+    }
+}
+
 impl Screen for EntryPage {
     fn title(&self) -> &str {
         self.kind_title
@@ -854,10 +947,6 @@ impl Screen for EntryPage {
 
     fn keep_in_recents(&self) -> bool {
         false
-    }
-
-    fn busy(&self) -> bool {
-        true
     }
 
     fn set_aside(&mut self) {
@@ -915,8 +1004,10 @@ impl Screen for EntryPage {
         Nav::Stay
     }
 
-    fn update(&mut self, _cx: &mut Cx) -> Nav {
+    fn update(&mut self, cx: &mut Cx) -> Nav {
+        say_write_error(cx);
         if !super::is_open() {
+            self.forget();
             return Nav::Pop;
         }
         self.load();
@@ -1031,10 +1122,6 @@ impl Screen for TextPage {
 
     fn keep_in_recents(&self) -> bool {
         false
-    }
-
-    fn busy(&self) -> bool {
-        matches!(self.text, Text::Notes(_))
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -1187,10 +1274,6 @@ impl Screen for EditPage {
         false
     }
 
-    fn busy(&self) -> bool {
-        true
-    }
-
     fn resume(&mut self) {
         if let Some(picked) = PICKED.lock().unwrap_or_else(|e| e.into_inner()).take() {
             self.draft.set(Field::Password, &picked);
@@ -1270,7 +1353,8 @@ impl Screen for EditPage {
         Nav::Stay
     }
 
-    fn update(&mut self, _cx: &mut Cx) -> Nav {
+    fn update(&mut self, cx: &mut Cx) -> Nav {
+        say_write_error(cx);
         if super::is_open() {
             Nav::Stay
         } else {
@@ -1349,6 +1433,12 @@ enum GenRow {
 
 /// The recipe last used, for the next time the generator opens.
 static RECIPE: Mutex<(usize, bool, usize, bool)> = Mutex::new((20, true, 6, false));
+
+/// The gallery: each run starts from the generator's first recipe.
+#[cfg(not(target_arch = "aarch64"))]
+pub(super) fn first_recipe() {
+    *RECIPE.lock().unwrap_or_else(|e| e.into_inner()) = (20, true, 6, false);
+}
 
 /// New passwords: characters (a length, signs or not) or words; Enter makes
 /// another, and it is copied, or used in the entry being edited.
@@ -1469,10 +1559,6 @@ impl Screen for GeneratorPage {
         }
     }
 
-    fn busy(&self) -> bool {
-        true
-    }
-
     fn tick(&mut self, dt: f32) -> bool {
         self.arrive.tick(dt)
     }
@@ -1491,11 +1577,13 @@ impl Screen for GeneratorPage {
         for c in self.value.chars() {
             line.push(c);
             if g.measure(&line, style) > inner {
-                // A phrase breaks after a dash, between its words; random
+                // A phrase breaks after a dash, between its words (a dash
+                // that would not fit takes its word down with it); random
                 // characters wherever the line is full.
-                let cut = match line.rfind('-') {
-                    Some(at) if self.use_words && at + 1 < line.len() => at + 1,
-                    _ => line.len() - c.len_utf8(),
+                let before = line.len() - c.len_utf8();
+                let cut = match line[..before].rfind('-') {
+                    Some(at) if self.use_words => at + 1,
+                    _ => before,
                 };
                 let rest = line.split_off(cut);
                 lines.push(std::mem::take(&mut line));
@@ -1548,7 +1636,7 @@ impl Screen for GeneratorPage {
 
 // --------------------------------------------- importing and backing up ---
 
-const ABOUT_IMPORT: &str = "To bring passwords in, export them from Bitwarden, 1Password or KeePass as CSV (or your authenticator's codes as a text of otpauth:// lines), and copy the file to /data over SSH or USB. It shows here; Enter reads it into the vault.\n\nThe CSV holds every password in plain text, so once it is in, the vault offers to shred it: overwritten, then deleted. A memory card can keep old copies of its blocks as it wears, so shredding is the best the handheld can do: delete the export on your computer too, and empty its bin.\n\nA backup is the vault sealed under a password of its own (at least 10 characters), written to /data for you to copy off. It opens here, in this or another vault, with that password. Forget it and the backup is lost.";
+const ABOUT_IMPORT: &str = "To bring passwords in, export them from Bitwarden, 1Password or KeePass as CSV (or your authenticator's codes as a text of otpauth:// lines), and copy the file to /data over SSH or USB. It shows here; Enter reads it into the\u{a0}vault.\n\nThe CSV holds every password in plain text, so once it is in, the vault offers to shred it: overwritten, then deleted. A memory card can keep old copies of its blocks as it wears, so shredding is the best the handheld can do: delete the export on your computer too, and empty its bin.\n\nA backup is the vault sealed under a password of its own (at least 10 characters), written to /data for you to copy off. It opens here, in this or another vault, with that password. Forget it and the backup is lost.";
 
 #[derive(Clone, PartialEq, Debug)]
 enum ToolRow {
@@ -1608,7 +1696,7 @@ impl Screen for ToolsPage {
     }
 
     fn busy(&self) -> bool {
-        true
+        self.reading.is_some()
     }
 
     fn resume(&mut self) {
@@ -1655,6 +1743,7 @@ impl Screen for ToolsPage {
     }
 
     fn update(&mut self, cx: &mut Cx) -> Nav {
+        say_write_error(cx);
         if !super::is_open() {
             return Nav::Pop;
         }
@@ -1752,7 +1841,7 @@ impl ShredPage {
             (0, 0) => "Nothing in it was new.".to_owned(),
             (0, t) => format!("All {t}{from} were in the vault already."),
             (a, 0) => format!("{}{from} {} in the vault now.", items(a), if a == 1 { "is" } else { "are" }),
-            (a, t) => format!("{}{from} {} in the vault now; {t} {} there already.", items(a), if a == 1 { "is" } else { "are" }, if t == 1 { "was" } else { "were" }),
+            (a, t) => format!("{}{from} {} in the vault now; {t}\u{a0}{} there already.", items(a), if a == 1 { "is" } else { "are" }, if t == 1 { "was" } else { "were" }),
         };
         if bad > 0 {
             said.push_str(&format!(" {bad} 2FA secret{} could not be read.", if bad == 1 { "" } else { "s" }));
@@ -1798,6 +1887,17 @@ impl Screen for ShredPage {
                 crate::screens::list_key(&mut self.list, other, 2);
                 Nav::Stay
             }
+        }
+    }
+
+    // Locked meanwhile, it gives way with the rest: the export is listed
+    // again on the Import page, and offered for shredding again once read.
+    fn update(&mut self, cx: &mut Cx) -> Nav {
+        say_write_error(cx);
+        if super::is_open() {
+            Nav::Stay
+        } else {
+            Nav::Pop
         }
     }
 
@@ -1922,7 +2022,7 @@ impl Screen for PasswordPage {
     }
 
     fn busy(&self) -> bool {
-        true
+        self.job.is_some()
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
@@ -1940,6 +2040,7 @@ impl Screen for PasswordPage {
     }
 
     fn update(&mut self, cx: &mut Cx) -> Nav {
+        say_write_error(cx);
         if !super::is_open() {
             return Nav::Pop;
         }
@@ -2026,5 +2127,76 @@ mod tests {
         assert_eq!(grouped("482913"), "482 913");
         assert_eq!(grouped("48291307"), "4829 1307");
         assert_eq!(grouped("4829130"), "482 9130");
+    }
+
+    /// A page's keys and turns, as the shell gives them.
+    struct Run {
+        robot: Robot,
+        settings: crate::shell::Settings,
+        said: Option<String>,
+    }
+
+    impl Run {
+        fn new() -> Run {
+            Run { robot: Robot::demo(), settings: crate::shell::Settings::default(), said: None }
+        }
+
+        fn key(&mut self, page: &mut dyn Screen, key: Key) -> Nav {
+            page.key(key, &mut Cx { robot: &mut self.robot, settings: &mut self.settings, say: &mut self.said, at_rest: true })
+        }
+
+        fn update(&mut self, page: &mut dyn Screen) -> Nav {
+            page.update(&mut Cx { robot: &mut self.robot, settings: &mut self.settings, say: &mut self.said, at_rest: true })
+        }
+    }
+
+    #[test]
+    fn an_entry_and_a_password_made_for_one_are_let_go_as_the_vault_locks() {
+        let _ = super::super::tests::open_vault();
+        let id = super::super::with(|e| e[0].id).unwrap();
+        let mut page = EntryPage::new(id);
+        let mut g = Gfx::new(bezel::Tokens::dark());
+        let mut run = Run::new();
+        page.draw(&mut g, &run.robot);
+        assert!(page.entry.is_some() && page.totp.is_some() && !page.code.0.is_empty(), "its code shown");
+        *PICKED.lock().unwrap() = Some(Zeroizing::new("demo-picked-password".into()));
+        super::super::lock();
+        assert!(PICKED.lock().unwrap().is_none(), "the password made, not yet used, is wiped");
+        assert!(matches!(run.update(&mut page), Nav::Pop));
+        assert!(page.entry.is_none() && page.totp.is_none() && page.code.0.is_empty(), "nothing of the entry held as it goes");
+    }
+
+    #[test]
+    fn a_vault_that_will_not_open_is_offered_to_be_set_aside_and_a_new_one_made() {
+        let _ = super::super::tests::open_vault();
+        super::super::lock();
+        let mut bad = std::fs::read(super::super::path()).unwrap();
+        let at = bad.len() - 20;
+        bad[at] ^= 1;
+        std::fs::write(super::super::path(), &bad).unwrap();
+        let mut vault = Vault::new();
+        let mut run = Run::new();
+        assert_eq!(vault.state(), State::Locked);
+        for c in "2468".chars() {
+            run.key(&mut vault, Key::Char(c));
+        }
+        run.key(&mut vault, Key::Enter);
+        let began = std::time::Instant::now();
+        while vault.working.is_some() && began.elapsed().as_secs() < 30 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            run.update(&mut vault);
+        }
+        assert_eq!(vault.state(), State::Damaged);
+        assert!(!vault.wants_text() && vault.wrong.is_none(), "not said to be a wrong passcode");
+        // Letters do nothing here; Enter sets it aside.
+        run.key(&mut vault, Key::Char('x'));
+        assert_eq!(vault.state(), State::Damaged);
+        run.key(&mut vault, Key::Enter);
+        assert_eq!(run.said.as_deref(), Some("damaged file set aside"));
+        assert_eq!(vault.state(), State::Create);
+        let dir = super::super::path().parent().unwrap().to_path_buf();
+        let kept: Vec<_> = std::fs::read_dir(dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("vault.damaged-")).collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(std::fs::read(kept[0].path()).unwrap(), bad);
     }
 }

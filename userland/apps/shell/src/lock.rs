@@ -211,6 +211,13 @@ pub struct Field {
     placed: bool,
 }
 
+// What was typed and never taken is wiped as the field goes.
+impl Drop for Field {
+    fn drop(&mut self) {
+        passcode::wipe(&mut self.text);
+    }
+}
+
 impl Default for Field {
     fn default() -> Self {
         Self::new()
@@ -220,7 +227,9 @@ impl Default for Field {
 impl Field {
     pub fn new() -> Field {
         Field {
-            text: String::new(),
+            // Room for the longest at once, so typing never moves it and
+            // leaves a copy behind.
+            text: String::with_capacity(passcode::MAX_LEN * 4),
             count: Animated::new(0.0, role::tick()).with_rest(0.004),
             shake: Animated::new(0.0, shake_spring()).with_rest(0.05),
             fault: Animated::new(0.0, role::effect()).with_rest(0.004),
@@ -261,8 +270,11 @@ impl Field {
     }
 
     /// What was typed, taken out of the field (which is left empty).
+    /// What was typed, for the one who wipes it; the field's own copy is
+    /// wiped now.
     pub fn take(&mut self) -> String {
-        let text = std::mem::take(&mut self.text);
+        let text = self.text.clone();
+        passcode::wipe(&mut self.text);
         self.count.set(0.0);
         text
     }

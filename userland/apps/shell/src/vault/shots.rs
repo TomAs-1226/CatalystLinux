@@ -1,8 +1,9 @@
 //! `catalyst-shell --vault-shots <dir>`: the Vault app's pages, from demo
-//! data (never a real secret), in both looks at each text size: each page
-//! at twice the panel's size in `<dir>/<look>-<size>/`, and a sheet of all
-//! six side by side (compact, standard, large across; Catalyst over Bezel)
-//! as `<dir>/sheet-<page>.png`.
+//! data (never a real secret), in both looks, dark and light, at each text
+//! size: each page at twice the panel's size in
+//! `<dir>/<look>-<dark|light>-<size>/`, and a sheet of all twelve as
+//! `<dir>/sheet-<page>.png` (compact, standard, large across; down,
+//! Catalyst dark and light, then Bezel dark and light).
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -96,11 +97,11 @@ fn row_of(title: &str) -> usize {
 
 pub fn gallery(dir: &Path) {
     std::fs::create_dir_all(dir).expect("create the shots folder");
-    let looks = ["catalyst", "bezel"];
+    let looks = [("catalyst", false), ("catalyst", true), ("bezel", false), ("bezel", true)];
     let sizes = [TextSize::Compact, TextSize::Standard, TextSize::Large];
     // (page, look, size) → the panel's pixels.
     let mut shots: Vec<(String, usize, usize, Vec<u32>)> = Vec::new();
-    for (li, look) in looks.iter().enumerate() {
+    for (li, (look, light)) in looks.iter().enumerate() {
         for (si, size) in sizes.iter().enumerate() {
             let state = std::env::temp_dir().join(format!("catalyst-vault-shots-{}", std::process::id()));
             std::fs::remove_dir_all(&state).ok();
@@ -108,9 +109,13 @@ pub fn gallery(dir: &Path) {
             std::env::set_var("CATALYST_CONF", state.join("robot"));
             std::env::set_var("CATALYST_FILES", state.join("files"));
             super::lock();
+            super::screen::first_recipe();
             let mut shell = crate::fullheight::shell(look, *size);
             shell.settings.screen_off = 0;
-            let out = dir.join(format!("{look}-{}", size.name()));
+            shell.settings.light = *light;
+            shell.apply_settings();
+            settle(&mut shell, 60);
+            let out = dir.join(format!("{look}-{}-{}", if *light { "light" } else { "dark" }, size.name()));
             std::fs::create_dir_all(&out).expect("a look's folder");
             let mut save = |shell: &mut Shell, name: &str| {
                 shell.draw();
@@ -226,8 +231,24 @@ pub fn gallery(dir: &Path) {
             until(&mut shell, |s| s.top_title() == "Passcode");
             save(&mut shell, "22-a-short-passcode");
             press(&mut shell, &[Back, Back]);
+            // A file changed on the card: it will not open, and may be set aside.
             super::lock();
-            println!("22 pages in {}", out.display());
+            super::flush();
+            let mut file = std::fs::read(super::path()).expect("the vault's file");
+            let at = file.len() - 20;
+            file[at] ^= 1;
+            std::fs::write(super::path(), &file).expect("changed");
+            shell.show(Box::new(super::Vault::new()));
+            settle(&mut shell, 60);
+            typed(&mut shell, PASSCODE);
+            shell.key(Enter);
+            pause(&mut shell, 700);
+            save(&mut shell, "23-a-damaged-file");
+            press(&mut shell, &[Enter]);
+            save(&mut shell, "24-set-aside");
+            press(&mut shell, &[Back]);
+            super::lock();
+            println!("24 pages in {}", out.display());
         }
     }
     sheets(dir, &shots, looks.len(), sizes.len());

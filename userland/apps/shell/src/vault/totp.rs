@@ -145,28 +145,30 @@ impl Totp {
         Ok(Totp::new(&secret, Algorithm::Sha1, 6, 30))
     }
 
-    /// As an `otpauth://totp/` address: how the vault keeps it.
-    pub fn uri(&self) -> String {
+    /// As an `otpauth://totp/` address: how the vault keeps it. Built in one
+    /// buffer sized beforehand, wiped when let go, as it holds the secret.
+    pub fn uri(&self) -> Zeroizing<String> {
         let label = match (self.issuer.is_empty(), self.account.is_empty()) {
             (false, false) => format!("{}:{}", escape(&self.issuer), escape(&self.account)),
             (false, true) => escape(&self.issuer),
             (true, false) => escape(&self.account),
             (true, true) => "code".to_owned(),
         };
-        let mut secret = base32_encode(&self.secret);
-        let mut out = format!("otpauth://totp/{label}?secret={}", secret.as_str());
-        secret.zeroize();
-        if !self.issuer.is_empty() {
-            out.push_str(&format!("&issuer={}", escape(&self.issuer)));
-        }
+        let issuer = (!self.issuer.is_empty()).then(|| format!("&issuer={}", escape(&self.issuer))).unwrap_or_default();
+        let mut rest = issuer;
         if self.algorithm != Algorithm::Sha1 {
-            out.push_str(&format!("&algorithm={}", self.algorithm.name()));
+            rest.push_str(&format!("&algorithm={}", self.algorithm.name()));
         }
         if self.digits != 6 {
-            out.push_str(&format!("&digits={}", self.digits));
+            rest.push_str(&format!("&digits={}", self.digits));
         }
         if self.period != 30 {
-            out.push_str(&format!("&period={}", self.period));
+            rest.push_str(&format!("&period={}", self.period));
+        }
+        let secret = base32_encode(&self.secret);
+        let mut out = Zeroizing::new(String::with_capacity(32 + label.len() + secret.len() + rest.len()));
+        for part in ["otpauth://totp/", label.as_str(), "?secret=", secret.as_str(), rest.as_str()] {
+            out.push_str(part);
         }
         out
     }
@@ -193,7 +195,10 @@ fn parse_uri(text: &str) -> Result<Totp, &'static str> {
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
         let v = unescape(v);
         match k.to_ascii_lowercase().as_str() {
-            "secret" => secret = Some(base32(&v).ok_or("its secret is not base32")?),
+            "secret" => {
+                let v = Zeroizing::new(v);
+                secret = Some(base32(&v).ok_or("its secret is not base32")?);
+            }
             "issuer" if !v.trim().is_empty() => issuer = v.trim().to_owned(),
             "algorithm" => {
                 algorithm = match v.to_ascii_uppercase().replace('-', "").as_str() {
@@ -361,7 +366,7 @@ mod tests {
         assert_eq!(Totp::parse(&t.uri()).unwrap(), t);
         let bare = Totp::parse("jbsw y3dp ehpk 3pxp").unwrap();
         assert_eq!((bare.algorithm, bare.digits, bare.period), (Algorithm::Sha1, 6, 30));
-        assert_eq!(Totp::parse("otpauth://totp/x?secret=JBSWY3DPEHPK3PXP").unwrap().uri(), "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP");
+        assert_eq!(Totp::parse("otpauth://totp/x?secret=JBSWY3DPEHPK3PXP").unwrap().uri().as_str(), "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP");
         for bad in ["", "hello world!", "otpauth://hotp/x?secret=JBSWY3DPEHPK3PXP&counter=1", "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&digits=9", "otpauth://totp/x?issuer=y", "otpauth://totp/x?secret=AB", "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&algorithm=MD5"] {
             assert!(Totp::parse(bad).is_err(), "{bad:?}");
         }

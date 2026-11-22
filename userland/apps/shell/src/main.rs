@@ -4478,6 +4478,7 @@ mod tests {
     /// The gallery's Reminders pictures alone, into CATALYST_SHOTS (or the
     /// temporary folder): `cargo test --profile sim -p catalyst-shell
     /// reminders_gallery -- --ignored`.
+    #[cfg(not(target_arch = "aarch64"))]
     #[test]
     #[ignore]
     fn reminders_gallery() {

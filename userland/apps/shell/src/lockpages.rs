@@ -337,7 +337,7 @@ impl PasscodeFlow {
                     let made = passcode::make(&new);
                     // The vault moves to the new passcode as it is kept (and back, should keeping fail).
                     let result = match made {
-                        Some((phc, _, _)) => crate::vault::rewrap_with(&new, &phc, || passcode::keep(&phc)).map_err(|e| format!("could not keep it: {e}")),
+                        Some((phc, _, _)) => crate::vault::rewrap_with(&new, &phc, || passcode::keep(&phc)),
                         None => Err("could not make the passcode".into()),
                     };
                     passcode::wipe(&mut new);
@@ -397,6 +397,15 @@ impl Screen for PasscodeFlow {
     }
 
     fn update(&mut self, cx: &mut Cx) -> Nav {
+        // Changing it, the screen went off (or two minutes passed): the
+        // vault's key held for the change was wiped, so the passcode there is
+        // is asked for again.
+        if self.purpose == Purpose::Change && self.step != Step::Current && !self.working() && crate::vault::rewrap_voided() {
+            passcode::wipe(&mut self.first);
+            self.field.clear();
+            self.step = Step::Current;
+            self.wrong = Some("locked meanwhile · type it again".into());
+        }
         if let Some(rx) = &self.checking {
             match rx.try_recv() {
                 Ok(true) => {

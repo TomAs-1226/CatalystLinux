@@ -32,7 +32,7 @@ fn opened(outcome: Outcome) {
     match outcome {
         Outcome::Opened(u) => u.install(),
         Outcome::Wrong => panic!("wrong passcode"),
-        Outcome::Failed(why) => panic!("failed: {why}"),
+        Outcome::Damaged(why) | Outcome::Failed(why) => panic!("failed: {why}"),
     }
 }
 
@@ -48,7 +48,7 @@ fn demo_login() -> Entry {
 }
 
 /// A vault made under "2468" with one demo login, open.
-fn open_vault() -> String {
+pub(super) fn open_vault() -> String {
     let phc = with_passcode("2468");
     opened(wait(begin_create(Zeroizing::new("2468".into()))));
     change(|entries| entries.push(demo_login())).unwrap();
@@ -101,12 +101,43 @@ fn a_changed_byte_on_the_card_does_not_open() {
     bad[at] ^= 0x20;
     std::fs::write(path(), &bad).unwrap();
     match wait(begin_unlock(Zeroizing::new("2468".into()))) {
-        Outcome::Failed(why) => assert!(why.contains("changed or damaged"), "{why}"),
+        Outcome::Damaged(why) => assert!(why.contains("changed or damaged"), "{why}"),
         _ => panic!("a changed vault opened"),
     }
     assert!(!is_open());
+    assert_eq!(std::fs::read(path()).unwrap(), bad, "and it was left as it was");
     std::fs::write(path(), &good).unwrap();
     opened(wait(begin_unlock(Zeroizing::new("2468".into()))));
+}
+
+#[test]
+fn a_file_that_will_not_open_is_set_aside_whole_and_a_backup_restores_into_a_new_vault() {
+    let _ = open_vault();
+    let dir = crate::passcode::file().parent().unwrap().join("storage");
+    std::fs::create_dir_all(&dir).unwrap();
+    let backup = dir.join("vault-backup-2026-11-21.cvault");
+    wait(begin_backup(Zeroizing::new("a long backup phrase".into()), backup.clone()).unwrap()).unwrap();
+    lock();
+    // Cut short (a card pulled mid-copy), and then not a vault at all.
+    for bad in [std::fs::read(path()).unwrap()[..200].to_vec(), b"username,password\nx,y\n".to_vec()] {
+        std::fs::write(path(), &bad).unwrap();
+        assert!(matches!(wait(begin_unlock(Zeroizing::new("2468".into()))), Outcome::Damaged(_)));
+        let kept = set_aside_damaged().unwrap();
+        assert!(!exists(), "room for a new one");
+        assert_eq!(std::fs::read(&kept).unwrap(), bad, "kept whole beside it");
+        assert!(kept.file_name().unwrap().to_string_lossy().starts_with("vault.damaged-"));
+    }
+    // A wrong passcode is not damage: nothing is offered to set aside.
+    opened(wait(begin_create(Zeroizing::new("2468".into()))));
+    lock();
+    assert!(matches!(wait(begin_unlock(Zeroizing::new("1357".into()))), Outcome::Wrong));
+    // The new vault takes the backup.
+    opened(wait(begin_unlock(Zeroizing::new("2468".into()))));
+    let back = wait(begin_restore(Zeroizing::new("a long backup phrase".into()), backup)).unwrap();
+    let mut counts = (0, 0);
+    change(|entries| counts = import::merge(entries, back)).unwrap();
+    assert_eq!(counts, (1, 0));
+    assert_eq!(with(|e| e[0].password.clone()), Some(PASSWORD.to_owned()));
 }
 
 #[test]
@@ -117,8 +148,7 @@ fn changing_the_passcode_wraps_the_vault_again_and_a_failed_change_leaves_it_be(
     // Settings: the passcode there is was right; the new one is made.
     rewrap_begin_at(path(), "2468");
     let (new_phc, _, _) = crate::passcode::make("97531").unwrap();
-    let kept: Result<(), std::io::Error> = rewrap_with("97531", &new_phc, || crate::passcode::keep(&new_phc));
-    kept.unwrap();
+    rewrap_with("97531", &new_phc, || crate::passcode::keep(&new_phc)).unwrap();
     assert!(under_current_passcode());
     assert!(matches!(wait(begin_unlock(Zeroizing::new("2468".into()))), Outcome::Wrong), "the old passcode no longer opens it");
     opened(wait(begin_unlock(Zeroizing::new("97531".into()))));
@@ -130,8 +160,8 @@ fn changing_the_passcode_wraps_the_vault_again_and_a_failed_change_leaves_it_be(
     let as_it_was = std::fs::read(path()).unwrap();
     rewrap_begin_at(path(), "97531");
     let (other, _, _) = crate::passcode::make("86420").unwrap();
-    let failed: Result<(), &str> = rewrap_with("86420", &other, || Err("the card is full"));
-    assert_eq!(failed, Err("the card is full"));
+    let failed = rewrap_with("86420", &other, || Err(std::io::Error::other("the card is full")));
+    assert_eq!(failed, Err("could not keep it: the card is full".to_owned()));
     assert_eq!(std::fs::read(path()).unwrap(), as_it_was);
     opened(wait(begin_unlock(Zeroizing::new("97531".into()))));
 
@@ -139,10 +169,45 @@ fn changing_the_passcode_wraps_the_vault_again_and_a_failed_change_leaves_it_be(
     lock();
     rewrap_begin_at(path(), "97531");
     rewrap_cancel();
-    assert!(pending().is_none());
+    assert!(pending().held.is_none() && !rewrap_voided());
     // A wrong passcode there holds nothing.
     rewrap_begin_at(path(), "0000");
-    assert!(pending().is_none());
+    assert!(pending().held.is_none());
+}
+
+#[test]
+fn a_key_held_for_a_passcode_change_is_wiped_as_the_screen_goes_off_and_nothing_changes() {
+    let phc = open_vault();
+    lock();
+    let before = std::fs::read(path()).unwrap();
+    // Settings has the passcode there is; the screen goes off as the new
+    // one is typed.
+    rewrap_begin_at(path(), "2468");
+    assert!(pending().held.is_some());
+    watch(false);
+    assert!(pending().held.is_some(), "held while Settings is in use");
+    watch(true);
+    assert!(pending().held.is_none() && rewrap_voided(), "wiped with the screen off");
+    let (new_phc, _, _) = crate::passcode::make("97531").unwrap();
+    let mut kept = false;
+    let made = rewrap_with("97531", &new_phc, || {
+        kept = true;
+        Ok(())
+    });
+    assert_eq!(made, Err("locked meanwhile · change it again".to_owned()));
+    assert!(!kept, "the passcode is not changed without the vault");
+    assert_eq!(crate::passcode::stored().as_deref(), Some(phc.as_str()));
+    assert_eq!(std::fs::read(path()).unwrap(), before);
+    // Held two minutes, likewise.
+    rewrap_begin_at(path(), "2468");
+    pending().held.as_mut().unwrap().since = std::time::Instant::now().checked_sub(IDLE).expect("the clock goes back that far");
+    watch(false);
+    assert!(pending().held.is_none() && rewrap_voided());
+    // Begun again, it goes through.
+    rewrap_begin_at(path(), "2468");
+    assert!(!rewrap_voided());
+    rewrap_with("97531", &new_phc, || crate::passcode::keep(&new_phc)).unwrap();
+    opened(wait(begin_unlock(Zeroizing::new("97531".into()))));
 }
 
 #[test]
@@ -231,7 +296,7 @@ fn an_import_comes_in_and_a_backup_goes_out_sealed_and_comes_back() {
     flush();
     std::fs::copy(&dest, path()).unwrap();
     lock();
-    assert!(matches!(wait(begin_unlock(Zeroizing::new("2468".into()))), Outcome::Failed(_)));
+    assert!(matches!(wait(begin_unlock(Zeroizing::new("2468".into()))), Outcome::Damaged(_)));
 }
 
 /// Drive a vault page as the shell would: every message the island would

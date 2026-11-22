@@ -115,10 +115,11 @@ pub fn random(buf: &mut [u8]) -> Result<(), Error> {
     getrandom::fill(buf).map_err(|_| Error::Random)
 }
 
-/// A cost a file may name: within reason, so a damaged file cannot ask for
-/// gigabytes or minutes.
+/// A cost a file may name: within reason, so a damaged or hostile file
+/// cannot ask for more memory than a backup's own 64 MiB, nor for minutes
+/// (eight passes at that size are a few seconds on the A53).
 pub fn sane(cost: Cost) -> bool {
-    (8..=256 * 1024).contains(&cost.m_kib) && (1..=16).contains(&cost.t) && cost.p == 1
+    (8..=64 * 1024).contains(&cost.m_kib) && (1..=8).contains(&cost.t) && cost.p == 1
 }
 
 /// The key `secret` derives with `salt` at `cost`: Argon2id, its working
@@ -438,7 +439,11 @@ mod tests {
         let mut huge = file.clone();
         huge[AT_COST..AT_COST + 4].copy_from_slice(&(4u32 << 20).to_le_bytes());
         assert_eq!(Head::read(&huge).err(), Some(Error::Damaged), "no gigabytes asked for");
-        assert!(sane(crate::passcode::COST) && !sane(Cost { m_kib: 19456, t: 2, p: 4 }));
+        let mut slow = file.clone();
+        slow[AT_COST + 4..AT_COST + 8].copy_from_slice(&9u32.to_le_bytes());
+        assert_eq!(Head::read(&slow).err(), Some(Error::Damaged), "nor minutes");
+        assert!(sane(crate::passcode::COST) && sane(super::super::COST) && sane(super::super::BACKUP_COST));
+        assert!(!sane(Cost { m_kib: 19456, t: 2, p: 4 }) && !sane(Cost { m_kib: 64 * 1024 + 1, t: 3, p: 1 }));
         assert_ne!(mark_of(Some("$argon2id$a")), mark_of(Some("$argon2id$b")));
         assert_eq!(mark_of(None), [0; 8]);
     }

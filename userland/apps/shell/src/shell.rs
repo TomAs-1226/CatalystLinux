@@ -1491,7 +1491,11 @@ impl Shell {
                 Some(Outcome::Screenshot) => {
                     let picture = self.control_under.clone();
                     self.set_control(false);
-                    if let Some(picture) = picture {
+                    // Never of the vault open: the picture would keep on the
+                    // card, in plain sight, what the vault seals.
+                    if crate::vault::is_open() {
+                        self.say("no screenshots of the vault");
+                    } else if let Some(picture) = picture {
                         self.screenshot(picture);
                     }
                 }
@@ -3004,7 +3008,7 @@ impl Shell {
 
     /// The island set outright, push-to-talk's or a message (or neither),
     /// for the gallery to check each over each screen.
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub fn stage_island(&mut self, talk: Option<crate::voice::Island>, message: Option<&str>) {
         self.voice.staged = talk;
         self.message = message.map(|m| (m.to_owned(), f32::INFINITY));
@@ -3013,7 +3017,7 @@ impl Shell {
     }
 
     /// How much of the title shows just now, 0 to 1.
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub fn title_alpha(&self) -> f32 {
         self.title_shown.value()
     }
@@ -3505,7 +3509,7 @@ impl Shell {
     }
 
     /// The galleries' and tests' charger.
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub fn pretend_charger(&mut self, on: Option<bool>) {
         self.charger = on;
         // The lock screen reads the charge afresh.
@@ -3514,7 +3518,7 @@ impl Shell {
 
     /// The galleries' and tests' live activities, as if just read (and
     /// not read again).
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub fn pretend_activities(&mut self, list: Vec<crate::liveactivity::Activity>) {
         self.activities.set(list, self.settings.calm);
         self.dirty = true;
@@ -4100,7 +4104,7 @@ impl Shell {
 
     /// Deep standby as if it had lasted `seconds` drawing what `reading`
     /// says, for the gallery and the tests.
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub fn deep_for(&mut self, seconds: f32, reading: crate::power::Reading) {
         if !self.deep.on() {
             self.enter_deep();
@@ -4174,7 +4178,7 @@ impl Shell {
     }
 
     /// A screen opened straight away, for the gallery.
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub fn show(&mut self, screen: Box<dyn Screen>) {
         self.open(screen, Path::Slide);
     }
@@ -5449,6 +5453,28 @@ pub(crate) mod tests {
         }
         assert_eq!(shell.message.as_ref().map(|(m, _)| m.as_str()), Some("screenshot saved"));
         assert_eq!(count(), before + 2, "at the panel's size and twice it");
+    }
+
+    #[test]
+    fn no_screenshot_is_taken_of_the_vault_open() {
+        let mut shell = shell();
+        crate::passcode::test_store();
+        let (phc, _, _) = crate::passcode::make("2468").unwrap();
+        crate::passcode::keep(&phc).unwrap();
+        match crate::vault::begin_create(zeroize::Zeroizing::new("2468".into())).recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(crate::vault::Outcome::Opened(opened)) => opened.install(),
+            _ => panic!("the vault was not made"),
+        }
+        shell.open(Box::new(crate::vault::Vault::new()), Path::Slide);
+        frames(&mut shell, 40, FRAME);
+        assert!(crate::vault::is_open());
+        shell.key(Key::Ctrl(' '));
+        frames(&mut shell, 40, FRAME);
+        shell.key(Key::Char('s'));
+        assert!(shell.flash.is_none() && shell.saving.is_none(), "nothing taken");
+        assert!(!shell.control_open(), "the sheet goes all the same");
+        assert_eq!(shell.message.as_ref().map(|(m, _)| m.as_str()), Some("no screenshots of the vault"));
+        crate::vault::lock();
     }
 
     #[test]
