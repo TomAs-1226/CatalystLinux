@@ -210,20 +210,48 @@ pub trait Provider: Send + Sync {
 
 // --------------------------------------------------------------- matching ---
 
-/// Lower case, for matching.
+/// Lower case, for matching; full-width letters and digits (ＡＢＣ１２３, as
+/// Japanese and Chinese titles write them) as the plain ones.
 pub fn fold(s: &str) -> String {
-    s.to_lowercase()
+    if s.is_ascii() {
+        return s.to_lowercase();
+    }
+    s.chars().map(narrow).collect::<String>().to_lowercase()
+}
+
+/// A full-width letter, digit or sign as its plain one, and the ideographic
+/// space as a space.
+fn narrow(c: char) -> char {
+    match c {
+        '\u{ff01}'..='\u{ff5e}' => char::from_u32(c as u32 - 0xfee0).unwrap_or(c),
+        '\u{3000}' => ' ',
+        _ => c,
+    }
+}
+
+/// Written in Chinese, Japanese or Korean characters.
+fn cjk(c: char) -> bool {
+    bezel::lines::breaks_anywhere(c) || ('\u{ac00}'..='\u{d7a3}').contains(&c)
+}
+
+/// One Han character or Hangul syllable: a word's worth to search by, where
+/// one Latin letter is not.
+fn says_a_word(c: char) -> bool {
+    matches!(c as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0xAC00..=0xD7A3 | 0x20000..=0x3FFFF)
 }
 
 /// A name as words: lower case, split where it has anything but letters and
-/// digits and where a capital starts a word ("BatteryVolts" is "battery
-/// volts"), single spaces between.
+/// digits, where a capital starts a word ("BatteryVolts" is "battery
+/// volts") and where Latin meets CJK ("YOASOBI夜に駆ける" is "yoasobi
+/// 夜に駆ける"), single spaces between.
 pub fn split_words(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
     let mut prev: Option<char> = None;
-    for c in s.chars() {
+    for c in s.chars().map(narrow) {
         if c.is_alphanumeric() {
-            let boundary = prev.is_some_and(|p| (p.is_lowercase() && c.is_uppercase()) || (p.is_alphabetic() && c.is_ascii_digit()) || (p.is_ascii_digit() && c.is_alphabetic()));
+            let boundary = prev.is_some_and(|p| {
+                (p.is_lowercase() && c.is_uppercase()) || (p.is_alphabetic() && c.is_ascii_digit()) || (p.is_ascii_digit() && c.is_alphabetic()) || (p.is_alphanumeric() && cjk(p) != cjk(c))
+            });
             if boundary && !out.ends_with(' ') && !out.is_empty() {
                 out.push(' ');
             }
@@ -308,8 +336,9 @@ impl Query {
                 return Some((INITIALS, 0));
             }
         }
-        // One letter anywhere in a name says nothing: from two on.
-        if self.squashed.chars().count() < 2 {
+        // One letter anywhere in a name says nothing: from two on. One
+        // Chinese character or Hangul syllable says a word ("晴" in "晴天").
+        if self.squashed.chars().count() < 2 && !self.squashed.chars().all(says_a_word) {
             return None;
         }
         if let Some(at) = title.find(q) {
@@ -921,6 +950,33 @@ mod tests {
         assert_eq!(split_words("IMG_20261116_101500.jpg"), "img 20261116 101500 jpg");
         assert_eq!(split_words("  Net   tools "), "net tools");
         assert_eq!(split_words("q14"), "q 14");
+        // Where Latin meets CJK; full-width letters as plain ones.
+        assert_eq!(split_words("YOASOBI夜に駆ける"), "yoasobi 夜に駆ける");
+        assert_eq!(split_words("ＡＢＣ１２３の歌"), "abc 123 の歌");
+        assert_eq!(fold("ＹＯＡＳＯＢＩ\u{3000}夜"), "yoasobi 夜");
+    }
+
+    #[test]
+    fn chinese_japanese_and_korean_names_are_found_by_their_characters() {
+        let index = index_of(vec![
+            Item::new("a", "夜明けのシグナル", "music_note", weight::FILE),
+            Item::new("b", "晴天的回声 · 陈若晴", "music_note", weight::FILE),
+            Item::new("c", "東京の灯り (Tokyo Lights)", "music_note", weight::FILE),
+            Item::new("d", "서울의 밤", "music_note", weight::FILE),
+            Item::new("e", "Harbour Lights", "music_note", weight::FILE),
+        ]);
+        assert_eq!(titles(&index, "夜明け"), ["夜明けのシグナル"], "its start");
+        assert_eq!(titles(&index, "シグナル"), ["夜明けのシグナル"], "inside");
+        assert_eq!(titles(&index, "陈若晴"), ["晴天的回声 · 陈若晴"], "a word of it");
+        assert_eq!(titles(&index, "서울"), ["서울의 밤"]);
+        assert_eq!(titles(&index, "tokyo"), ["東京の灯り (Tokyo Lights)"], "its Latin words");
+        assert_eq!(titles(&index, "lights"), ["Harbour Lights", "東京の灯り (Tokyo Lights)"]);
+        // One Han character says a word, found anywhere; one kana does not.
+        assert_eq!(titles(&index, "晴"), ["晴天的回声 · 陈若晴"]);
+        assert_eq!(titles(&index, "灯"), ["東京の灯り (Tokyo Lights)"]);
+        assert!(titles(&index, "の").is_empty());
+        // Full-width letters typed find the plain ones.
+        assert_eq!(titles(&index, "ｈａｒｂｏｕｒ"), ["Harbour Lights"]);
     }
 
     #[test]
