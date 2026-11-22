@@ -24,14 +24,18 @@
 //!   your likes or everything played, one at a time and politely.
 //! - **Signed out by default:** nothing is sent but the searches and the
 //!   songs asked for. Signing in is a browser's cookies for
-//!   music.youtube.com, put at `/data/music/cookies.txt` (0600); the app
-//!   says plainly that a third-party client can break YouTube's terms.
-//!   The cookies only ever go to curl and yt-dlp in files, never on a
-//!   command line.
+//!   music.youtube.com, sent from Settings › Set up from a computer
+//!   (checked, and kept to the youtube.com ones) or put at
+//!   `/data/music/cookies.txt` (0600) by hand; the app says plainly that a
+//!   third-party client can break YouTube's terms. The cookies only ever go
+//!   to curl and yt-dlp in files, never on a command line, and never into a
+//!   log. Signed in, your library there (account.rs) shows in Music too:
+//!   your playlists, saved albums and artists.
 //!
 //! On a computer (the simulator) a made-up catalogue stands in, with covers
 //! drawn from each song's name, and songs "play" silently.
 
+mod account;
 mod covers;
 mod downloads;
 mod fetch;
@@ -46,7 +50,7 @@ mod store;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -66,6 +70,25 @@ pub fn forget_downloads_for_shots() {
         downloads::cancel(item.n);
     }
     std::fs::remove_dir_all(store::library_dir()).ok();
+}
+
+/// The assistant's shots (and the tests): signed in, with the simulator's
+/// made-up library there at once, or signed out with it forgotten.
+#[cfg(any(test, not(target_arch = "aarch64")))]
+pub fn signed_in_for_shots(on: bool) {
+    SIGNED_IN_FOR_SHOTS.store(on, Ordering::Relaxed);
+    if on {
+        account::seed_demo_for_shots();
+    } else {
+        account::forget();
+    }
+}
+
+/// The shots: signed in, your library not asked for yet (as on the first
+/// time Music opens after signing in).
+#[cfg(not(target_arch = "aarch64"))]
+pub fn forget_library_for_shots() {
+    account::forget();
 }
 
 /// The tour: nothing playing (to show what Music opens on then).
@@ -101,6 +124,8 @@ const ARTISTS_ONLY: &str = "EgWKAQIgAWoMEA4QChADEAQQCRAF";
 const PLAYLISTS_ONLY: &str = "EgWKAQIoAWoMEA4QChADEAQQCRAF";
 /// A long playlist, or all your likes: at most this many pages of it.
 const MAX_PAGES: usize = 30;
+/// Your likes: YouTube Music's library songs.
+const LIKES: &str = "FEmusic_liked_videos";
 
 /// The handheld (or its emulator): the real catalogue and player. Elsewhere
 /// the simulator's made-up ones.
@@ -198,6 +223,24 @@ fn is_count(text: &str) -> bool {
 pub fn parse_list(v: &Value) -> Vec<Track> {
     let mut items = Vec::new();
     find_all(v, "musicResponsiveListItemRenderer", &mut items);
+    tracks_of(items)
+}
+
+/// Your likes (YouTube Music's library songs, as ytmusicapi has them): a
+/// shelf of songs led, once there are two or more, by "Shuffle all", which
+/// is no song of its own (ytmusicapi leaves it out too). Songs in a list
+/// carry their place in it; that does not.
+pub fn parse_likes(v: &Value) -> Vec<Track> {
+    let mut items = Vec::new();
+    find_all(v, "musicResponsiveListItemRenderer", &mut items);
+    if items.len() >= 2 && items[0]["playlistItemData"].is_null() {
+        items.remove(0);
+    }
+    tracks_of(items)
+}
+
+/// List items as songs: those that play (have a video id), once each.
+fn tracks_of(items: Vec<&Value>) -> Vec<Track> {
     let mut tracks: Vec<Track> = items
         .into_iter()
         .filter_map(|r| {
@@ -268,13 +311,130 @@ pub fn parse_up_next(v: &Value) -> Vec<Track> {
 
 // --------------------------------------------------------------- account ---
 
+/// Where the cookies are kept: /data/music on the handheld; the tests' own
+/// folder in tests (an ARM test run is "on the handheld" too); the
+/// simulator's beside its settings.
+pub(crate) fn cookies_file() -> PathBuf {
+    if cfg!(test) {
+        store::root().join("cookies.txt")
+    } else if on_device() {
+        PathBuf::from(COOKIES)
+    } else {
+        crate::config_dir().join("music").join("cookies.txt")
+    }
+}
+
+/// The simulator signed in with its made-up library (cookies sent to its
+/// setup page, or the assistant's shots). The handheld goes by the file.
+pub static SIGNED_IN_FOR_SHOTS: AtomicBool = AtomicBool::new(false);
+
 /// Signed in: a browser's cookies for YouTube are on /data.
 pub fn signed_in() -> bool {
-    if on_device() {
-        Path::new(COOKIES).exists()
+    if on_device() && !cfg!(test) {
+        cookies_file().exists()
     } else {
-        false
+        SIGNED_IN_FOR_SHOTS.load(Ordering::Relaxed)
     }
+}
+
+/// A browser's cookies.txt for YouTube Music, checked, and kept to what
+/// signing in needs: its youtube.com cookies, in Netscape format. Shown in
+/// a log or a test's failure as a count, never the cookies themselves.
+#[derive(Clone, PartialEq)]
+pub struct Jar(String);
+
+impl std::fmt::Debug for Jar {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Jar({} cookies)", self.0.lines().filter(|l| !l.starts_with("# ")).count())
+    }
+}
+
+/// A cookies.txt is a few KB; more than this is not one for YouTube Music alone.
+pub const COOKIES_MOST: usize = 64 * 1024;
+/// The cookie YouTube's request signature is made from (`cookie_header`
+/// takes either), and those that say who is signed in.
+const SIGNING: [&str; 2] = ["SAPISID", "__Secure-3PAPISID"];
+const SESSION: [&str; 3] = ["SID", "__Secure-1PSID", "__Secure-3PSID"];
+
+/// A cookies.txt's text (pasted, or a file's) as a `Jar`, or why it is not
+/// one that signs in: not Netscape format, no YouTube sign-in in it, or
+/// expired by `now` (unix seconds; a clock not yet set is not trusted with
+/// that). The reasons never quote it.
+pub fn check_cookies(text: &str, now: i64) -> Result<Jar, String> {
+    const EXPORT: &str = "export music.youtube.com's cookies as cookies.txt (Netscape format)";
+    if text.len() > COOKIES_MOST {
+        return Err(format!("that is more than a cookies.txt for YouTube Music would be: {EXPORT} alone"));
+    }
+    let text = text.trim_start_matches('\u{feff}').trim();
+    if text.starts_with('[') || text.starts_with('{') {
+        return Err(format!("that is a JSON export: {EXPORT} instead"));
+    }
+    let mut kept = vec!["# Netscape HTTP Cookie File".to_owned()];
+    let (mut cookies, mut signing, mut session, mut expired) = (0, false, false, false);
+    for (n, line) in text.lines().enumerate() {
+        let line = line.trim();
+        // curl marks HTTP-only cookies with this prefix; other # lines are comments.
+        let (http_only, bare) = match line.strip_prefix("#HttpOnly_") {
+            Some(rest) => (true, rest),
+            None => (false, line),
+        };
+        if bare.is_empty() || (!http_only && bare.starts_with('#')) {
+            continue;
+        }
+        // Tabs, as the format has them; spaces where a copy made them spaces.
+        let mut f: Vec<&str> = if bare.contains('\t') { bare.split('\t').collect() } else { bare.split_whitespace().collect() };
+        if f.len() == 6 {
+            f.push(""); // a cookie with no value
+        }
+        let flag = |s: &str| s.eq_ignore_ascii_case("TRUE") || s.eq_ignore_ascii_case("FALSE");
+        let expiry = f.get(4).and_then(|e| e.split('.').next()).and_then(|e| e.trim().parse::<i64>().ok());
+        if f.len() != 7 || !flag(f[1]) || !flag(f[3]) || expiry.is_none() || f[5].trim().is_empty() {
+            return Err(format!("line {} is not a cookies.txt line: {EXPORT}", n + 1));
+        }
+        cookies += 1;
+        let domain = f[0].trim().trim_start_matches('.').to_ascii_lowercase();
+        if domain != "youtube.com" && !domain.ends_with(".youtube.com") {
+            continue;
+        }
+        let (name, value, expiry) = (f[5].trim(), f[6].trim(), expiry.unwrap_or(0));
+        if SIGNING.contains(&name) && !value.is_empty() {
+            signing = true;
+            expired |= expiry != 0 && now > 1_600_000_000 && expiry < now;
+        }
+        session |= SESSION.contains(&name) && !value.is_empty();
+        kept.push(format!("{}{}\t{}\t{}\t{}\t{}\t{name}\t{value}", if http_only { "#HttpOnly_" } else { "" }, f[0].trim(), f[1].to_ascii_uppercase(), f[2].trim(), f[3].to_ascii_uppercase(), expiry));
+    }
+    if cookies == 0 {
+        return Err(format!("there are no cookies in that: {EXPORT}"));
+    }
+    if kept.len() == 1 {
+        return Err("there are no YouTube cookies in that: export them from music.youtube.com".into());
+    }
+    if !signing || !session {
+        return Err("those cookies are not signed in: sign in on music.youtube.com, then export them again".into());
+    }
+    if expired {
+        return Err("those cookies have expired: export them again".into());
+    }
+    let jar = Jar(kept.join("\n") + "\n");
+    debug_assert!(cookie_header(&jar.0).is_some());
+    Ok(jar)
+}
+
+/// Signed in with `jar`: written whole (or not at all) where the cookies
+/// are kept, readable by root alone. The library of whoever was signed in
+/// before is forgotten.
+pub fn sign_in(jar: &Jar) -> Result<(), String> {
+    let file = cookies_file();
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("could not keep the sign-in: {e}"))?;
+    }
+    crate::sys::write_private(&file, jar.0.as_bytes()).map_err(|e| format!("could not keep the sign-in: {e}"))?;
+    account::forget();
+    if !on_device() && !cfg!(test) {
+        SIGNED_IN_FOR_SHOTS.store(true, Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 /// The cookies for youtube.com from a Netscape cookies.txt, and the one
@@ -310,10 +470,11 @@ fn sapisidhash(sapisid: &str, now: i64) -> String {
     format!("SAPISIDHASH {now}_{hex}")
 }
 
+/// The cookies forgotten, and with them your library's lists.
 fn sign_out() -> Result<(), String> {
-    if on_device() {
-        std::fs::remove_file(COOKIES).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(format!("could not sign out: {e}")) })?;
-    }
+    std::fs::remove_file(cookies_file()).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(format!("could not sign out: {e}")) })?;
+    SIGNED_IN_FOR_SHOTS.store(false, Ordering::Relaxed);
+    account::forget();
     Ok(())
 }
 
@@ -329,7 +490,7 @@ fn client_version() -> String {
 fn innertube(endpoint: &str, mut body: Value) -> Result<Value, String> {
     body["context"] = json!({"client": {"clientName": "WEB_REMIX", "clientVersion": client_version(), "hl": "en", "gl": "US"}});
     let mut headers = format!("Content-Type: application/json\nOrigin: {ORIGIN}\nX-Origin: {ORIGIN}\nReferer: {ORIGIN}/\nUser-Agent: Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36\n");
-    if let Some((cookie, sapisid)) = std::fs::read_to_string(COOKIES).ok().as_deref().and_then(cookie_header) {
+    if let Some((cookie, sapisid)) = std::fs::read_to_string(cookies_file()).ok().as_deref().and_then(cookie_header) {
         headers.push_str(&format!("Cookie: {cookie}\nAuthorization: {}\nX-Goog-AuthUser: 0\n", sapisidhash(&sapisid, chrono::Utc::now().timestamp())));
     }
     // Headers (the cookies with them) go to curl in a file only root
@@ -396,7 +557,7 @@ fn start_page() -> Result<(String, Vec<Track>), String> {
     }
     let browse = |id: &str| innertube("browse", json!({"browseId": id}));
     if signed_in() {
-        return Ok(("your likes".into(), parse_list(&browse("FEmusic_liked_videos")?)));
+        return Ok(("your likes".into(), parse_likes(&browse(LIKES)?)));
     }
     let home = browse("FEmusic_home")?;
     let picks = parse_list(&home);
@@ -533,9 +694,14 @@ fn continuation(v: &Value) -> Option<String> {
     found.iter().find_map(|c| c["continuation"].as_str()).map(|t| format!("n:{t}"))
 }
 
-/// A playlist's songs (or your likes), page after page.
+/// A playlist's songs, page after page.
 fn all_pages(first: Value) -> Result<Vec<Track>, String> {
-    let mut tracks = parse_list(&first);
+    all_pages_read(first, parse_list)
+}
+
+/// A list's songs page after page, the first page read by `read_first`.
+fn all_pages_read(first: Value, read_first: fn(&Value) -> Vec<Track>) -> Result<Vec<Track>, String> {
+    let mut tracks = read_first(&first);
     let mut next = continuation(&first);
     let mut pages = 1;
     while let Some(token) = next.take() {
@@ -562,7 +728,10 @@ fn all_pages(first: Value) -> Result<Vec<Track>, String> {
 
 /// Your likes, all of them (signed in).
 pub fn liked_all() -> Result<Vec<Track>, String> {
-    all_pages(innertube("browse", json!({"browseId": "FEmusic_liked_videos"}))?)
+    if !on_device() {
+        return Ok(demo_catalogue());
+    }
+    all_pages_read(innertube("browse", json!({"browseId": LIKES}))?, parse_likes)
 }
 
 pub fn open_collection(c: &Collection) -> Result<Opened, String> {
@@ -607,7 +776,7 @@ fn open_live(c: &Collection) -> Result<Opened, String> {
         Kind::Playlist | Kind::Liked => {
             let first = browse(&c.id)?;
             let (title, _, subtitle, _) = header(&first);
-            let tracks = all_pages(first)?;
+            let tracks = all_pages_read(first, if c.kind == Kind::Liked { parse_likes } else { parse_list })?;
             let name = if title.is_empty() { c.title.clone() } else { title };
             let byline = if subtitle.is_empty() { format!("{} songs", tracks.len()) } else { format!("{} · {} songs", subtitle.replace(" • ", " · "), tracks.len()) };
             Ok(Opened { byline, metas: vec![library::Meta::default(); tracks.len()], tracks, playlist: Some(name) })
@@ -953,7 +1122,7 @@ impl crate::spotlight::Provider for Spotlight {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn flex(text: &str) -> Value {
@@ -1054,6 +1223,94 @@ mod tests {
         let signed = sapisidhash("secret/xyz", 1_700_000_000);
         assert!(signed.starts_with("SAPISIDHASH 1700000000_") && signed.len() == "SAPISIDHASH 1700000000_".len() + 40);
         assert_eq!(cookie_header("# nothing\n"), None);
+    }
+
+    /// A made-up cookies.txt as a browser extension writes one: youtube.com's
+    /// sign-in, an HTTP-only cookie, and google.com's, which are not needed.
+    /// Held by tests that sign in or out: the sign-in and your library are
+    /// one for the whole run.
+    pub(crate) static SIGNING_IN: Mutex<()> = Mutex::new(());
+
+    pub(crate) const MADE_UP_JAR: &str = "# Netscape HTTP Cookie File\n# https://curl.haxx.se/rfc/cookie_spec.html\n\n.youtube.com\tTRUE\t/\tTRUE\t1893456000\tSID\tmade-up-sid\n.youtube.com\tTRUE\t/\tTRUE\t1893456000\tSAPISID\tmade-up/sapisid\n#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1893456000\t__Secure-3PSID\tmade-up-3psid\n.youtube.com\tTRUE\t/\tFALSE\t0\tPREF\t\n.google.com\tTRUE\t/\tTRUE\t1893456000\tNID\tmade-up-nid\n";
+    const NOW: i64 = 1_790_000_000;
+
+    #[test]
+    fn a_cookies_txt_is_checked_and_kept_to_youtubes_sign_in() {
+        let jar = check_cookies(MADE_UP_JAR, NOW).unwrap();
+        // youtube.com's alone, tabs as the format has them, the HTTP-only mark kept.
+        assert_eq!(jar.0, "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t1893456000\tSID\tmade-up-sid\n.youtube.com\tTRUE\t/\tTRUE\t1893456000\tSAPISID\tmade-up/sapisid\n#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1893456000\t__Secure-3PSID\tmade-up-3psid\n.youtube.com\tTRUE\t/\tFALSE\t0\tPREF\t\n");
+        assert!(!jar.0.contains("google"), "google.com's cookies are not kept");
+        // It signs requests as before.
+        assert_eq!(cookie_header(&jar.0).map(|(_, s)| s).as_deref(), Some("made-up/sapisid"));
+        // Shown, it is a count.
+        assert_eq!(format!("{jar:?}"), "Jar(4 cookies)");
+        assert!(!format!("{jar:?}").contains("made-up"));
+        // Pasted from a viewer that made the tabs spaces, with Windows' line
+        // ends and a byte-order mark: the same jar.
+        let spaced = format!("\u{feff}{}", MADE_UP_JAR.replace('\t', "  ").replace('\n', "\r\n"));
+        let again = check_cookies(&spaced, NOW).unwrap();
+        assert_eq!(again.0, jar.0);
+        // An expiry written as a decimal (some extensions do).
+        assert!(check_cookies(&MADE_UP_JAR.replace("1893456000", "1893456000.25"), NOW).is_ok());
+    }
+
+    #[test]
+    fn cookies_that_would_not_sign_in_are_refused_without_being_quoted() {
+        let refused = |text: &str| check_cookies(text, NOW).unwrap_err();
+        assert!(refused("[{\"domain\": \".youtube.com\", \"name\": \"SID\", \"value\": \"secret-json\"}]").contains("JSON"));
+        let why = refused("hello there, secret-word\n");
+        assert!(why.starts_with("line 1 is not a cookies.txt line") && !why.contains("secret-word"), "{why}");
+        assert!(refused("# Netscape HTTP Cookie File\n").contains("no cookies"));
+        assert!(refused(".google.com\tTRUE\t/\tTRUE\t0\tSID\tx\n").contains("no YouTube cookies"));
+        // Signed out on YouTube: its visitor cookies only.
+        assert!(refused(".youtube.com\tTRUE\t/\tTRUE\t0\tVISITOR_INFO1_LIVE\tv\n.youtube.com\tTRUE\t/\tFALSE\t0\tPREF\tf6=4\n").contains("not signed in"));
+        // A signature but no session, or the other way about.
+        assert!(refused(".youtube.com\tTRUE\t/\tTRUE\t0\tSAPISID\tx\n").contains("not signed in"));
+        assert!(refused(".youtube.com\tTRUE\t/\tTRUE\t0\tSID\tx\n").contains("not signed in"));
+        // A look-alike domain is not YouTube's.
+        assert!(refused(".notyoutube.com\tTRUE\t/\tTRUE\t0\tSID\tx\n.notyoutube.com\tTRUE\t/\tTRUE\t0\tSAPISID\ty\n").contains("no YouTube cookies"));
+        // Expired by now; though a clock not yet set does not say so.
+        let old = MADE_UP_JAR.replace("1893456000", "1700000000");
+        assert!(refused(&old).contains("expired"));
+        assert!(check_cookies(&old, 1000).is_ok());
+        // More than one would ever be.
+        assert!(refused(&"x".repeat(COOKIES_MOST + 1)).contains("more than"));
+    }
+
+    #[test]
+    fn signing_in_writes_the_cookies_whole_for_root_alone_and_forgets_the_last_library() {
+        let _one_at_a_time = SIGNING_IN.lock().unwrap_or_else(|e| e.into_inner());
+        let jar = check_cookies(MADE_UP_JAR, NOW).unwrap();
+        // Someone's library, kept from before.
+        let kept = store::root().join("your-library.json");
+        store::write_atomic(&kept, b"{\"playlists\": []}").unwrap();
+        sign_in(&jar).unwrap();
+        let file = cookies_file();
+        assert!(file.starts_with(store::root()), "the tests' own folder, never /data: {}", file.display());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), jar.0);
+        assert!(!kept.exists(), "the last library forgotten");
+        assert!(!file.with_file_name("cookies.txt.catalyst-saving").exists(), "nothing half-written left");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn your_likes_leave_out_the_shuffle_that_leads_them() {
+        let song = |id: &str, title: &str| json!({"musicResponsiveListItemRenderer": {"playlistItemData": {"videoId": id}, "flexColumns": [flex(title), flex("Mara Ellis")]}});
+        // "Shuffle all" plays the first song: it is not one more.
+        let shuffle = json!({"musicResponsiveListItemRenderer": {
+            "flexColumns": [flex("Shuffle all")],
+            "overlay": {"musicItemThumbnailOverlayRenderer": {"content": {"musicPlayButtonRenderer": {"playNavigationEndpoint": {"watchEndpoint": {"videoId": "a1", "playlistId": "RDAT"}}}}}}
+        }});
+        let v = json!({"contents": {"x": {"musicShelfRenderer": {"contents": [shuffle, song("a1", "Slow Signal"), song("b2", "Night Bus")]}}}});
+        let likes = parse_likes(&v);
+        assert_eq!(likes.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), ["Slow Signal", "Night Bus"]);
+        // One song alone has no shuffle before it.
+        let one = json!({"musicShelfRenderer": {"contents": [song("a1", "Slow Signal")]}});
+        assert_eq!(parse_likes(&one).len(), 1);
     }
 
     /// YouTube Music itself, signed out: a search, the home page and a radio

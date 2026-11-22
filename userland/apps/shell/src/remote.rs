@@ -1,13 +1,14 @@
 //! Setting the handheld up from a computer: for a few minutes it serves one
 //! page on the local network (over the Ethernet cable or Wi-Fi), and shows
 //! its address as text and a QR code with a one-time code beside it. The
-//! computer fills the page in (team, Wi-Fi, keys, an SSH key, the look and
-//! the choices) with a real keyboard, and sends it; the handheld takes it
-//! from there.
+//! computer fills the page in (team, Wi-Fi, keys, an SSH key, YouTube
+//! Music's sign-in, the look and the choices) with a real keyboard, and
+//! sends it; the handheld takes it from there.
 //!
 //! Nothing listens on the network except while this is showing, and then
 //! for ten minutes at most. The code must be given with the page; five
-//! wrong codes and it stops listening.
+//! wrong codes and it stops listening. What is sent is never written to a
+//! log, and the cookies for YouTube Music never come back on a page.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
@@ -34,6 +35,12 @@ const AT_ONCE: usize = 8;
 const IDLE_FOR: Duration = Duration::from_secs(300);
 /// And how long a request may take once it has started.
 const REQUEST_IN: Duration = Duration::from_secs(10);
+/// The most a form may send: the page's fields and a cookies.txt (64 KB at
+/// most, as a file and pasted both), with room for the form's own wrapping.
+const BODY_MOST: usize = 160 * 1024;
+/// More than that is read and passed over up to this much, so the browser
+/// is told why rather than finding the connection gone.
+const PASSED_OVER_MOST: usize = 2 * 1024 * 1024;
 
 /// What a computer sent. Anything left empty on the page is `None`: left as
 /// it is on the handheld.
@@ -43,6 +50,8 @@ pub struct Answers {
     pub wifi: Vec<(String, Option<String>)>,
     pub keys: Keys,
     pub ssh_key: Option<String>,
+    /// YouTube Music's sign-in: a browser's cookies.txt, checked.
+    pub cookies: Option<crate::music::Jar>,
     pub accent: Option<Accent>,
     pub light: Option<bool>,
     pub text: Option<TextSize>,
@@ -214,8 +223,14 @@ fn serve(listener: TcpListener, shared: Arc<Shared>, code: String) {
 
 /// One connection: its request, and the reply.
 fn answer(stream: TcpStream, shared: &Shared, code: &str) {
-    let Some((method, path, body)) = read_request(&stream, &shared.stop) else { return };
-    let reply = match (method.as_str(), path.as_str()) {
+    let Some(request) = read_request(&stream, &shared.stop) else { return };
+    respond(stream, reply(&request, shared, code));
+}
+
+/// What a request is answered with: the page, the page with what went
+/// wrong, or (the form taken) the page saying so.
+fn reply(request: &Request, shared: &Shared, code: &str) -> (&'static str, &'static str, String) {
+    match (request.method.as_str(), request.path.as_str()) {
         // Sent already: a second press of the button is told so, not refused.
         ("POST", "/") if shared.answers.lock().unwrap().is_some() => done_page(),
         _ if shared.stop.load(Ordering::Relaxed) && shared.answers.lock().unwrap().is_none() => {
@@ -225,14 +240,25 @@ fn answer(stream: TcpStream, shared: &Shared, code: &str) {
             set_status(shared, "a computer has the page open");
             page(None)
         }
+        ("POST", "/") if request.too_large => page(Some("That was more than the page takes. A cookies.txt is a few KB: export the cookies for music.youtube.com alone, and send it again.")),
         ("POST", "/") => {
-            let form = parse_form(&body);
+            let form = parse_body(&request.kind, &request.body);
             let given = form.iter().find(|(k, _)| k == "code").map(|(_, v)| v.trim().to_owned()).unwrap_or_default();
             if given == code {
-                *shared.answers.lock().unwrap() = Some(answers(&form));
-                set_status(shared, "received: putting it in place");
-                shared.stop.store(true, Ordering::Relaxed);
-                done_page()
+                // Cookies that would not sign in: said so, and nothing taken
+                // yet, so the page can be sent again with them put right.
+                match cookies_given(&form) {
+                    Err(why) => {
+                        set_status(shared, "the cookies sent would not sign in");
+                        page(Some(&format!("Nothing was changed: the YouTube Music cookies would not sign in ({why}).")))
+                    }
+                    Ok(_) => {
+                        *shared.answers.lock().unwrap() = Some(answers(&form));
+                        set_status(shared, "received: putting it in place");
+                        shared.stop.store(true, Ordering::Relaxed);
+                        done_page()
+                    }
+                }
             } else {
                 let wrong = shared.wrong.fetch_add(1, Ordering::Relaxed) + 1;
                 if wrong >= TRIES {
@@ -246,8 +272,18 @@ fn answer(stream: TcpStream, shared: &Shared, code: &str) {
             }
         }
         _ => ("404 Not Found", "text/plain", "not here".to_owned()),
-    };
-    respond(stream, reply);
+    }
+}
+
+/// A request as it arrived.
+struct Request {
+    method: String,
+    path: String,
+    /// Its Content-Type (a form's: urlencoded, or multipart with a file).
+    kind: String,
+    body: String,
+    /// More than `BODY_MOST` was sent (and passed over).
+    too_large: bool,
 }
 
 /// One request: method, path, and body, read with a size limit. A
@@ -255,7 +291,7 @@ fn answer(stream: TcpStream, shared: &Shared, code: &str) {
 /// browser's spare one), checking now and then that the page is still
 /// offered; once a request has started it must arrive whole in a few
 /// seconds, so a client sending a byte now and then cannot hold a thread.
-fn read_request(mut stream: &TcpStream, stop: &AtomicBool) -> Option<(String, String, String)> {
+fn read_request(mut stream: &TcpStream, stop: &AtomicBool) -> Option<Request> {
     stream.set_nonblocking(false).ok();
     let mut data = Vec::new();
     let mut buf = [0u8; 4096];
@@ -305,9 +341,22 @@ fn read_request(mut stream: &TcpStream, stop: &AtomicBool) -> Option<(String, St
     let head = String::from_utf8_lossy(&data[..head_end]).into_owned();
     let mut first = head.lines().next()?.split_whitespace();
     let (method, path) = (first.next()?.to_owned(), first.next()?.split('?').next()?.to_owned());
-    let length = head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().ok())).flatten().unwrap_or(0);
-    if length > 32 * 1024 {
+    let header = |name: &str| head.lines().find_map(|l| l.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case(name)).map(|(_, v)| v.trim().to_owned()));
+    let length = header("content-length").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+    let kind = header("content-type").unwrap_or_default();
+    if length > PASSED_OVER_MOST {
         return None;
+    }
+    // Too much: read to its end and let go, to say so.
+    if length > BODY_MOST {
+        let mut have = data.len() - head_end;
+        while have < length {
+            match read(&mut stream, &mut buf) {
+                Some(n) if n > 0 => have += n,
+                _ => break,
+            }
+        }
+        return Some(Request { method, path, kind, body: String::new(), too_large: true });
     }
     while data.len() < head_end + length {
         let n = read(&mut stream, &mut buf)?;
@@ -317,7 +366,7 @@ fn read_request(mut stream: &TcpStream, stop: &AtomicBool) -> Option<(String, St
         data.extend_from_slice(&buf[..n]);
     }
     let body = String::from_utf8_lossy(&data[head_end..(head_end + length).min(data.len())]).into_owned();
-    Some((method, path, body))
+    Some(Request { method, path, kind, body, too_large: false })
 }
 
 fn respond(mut stream: TcpStream, (status, kind, body): (&str, &str, String)) {
@@ -359,6 +408,55 @@ pub fn parse_form(body: &str) -> Vec<(String, String)> {
     }).collect()
 }
 
+/// A form's fields, as either kind of form sends them: urlencoded, or
+/// `multipart/form-data` (the page's, so a file can come with it).
+pub fn parse_body(kind: &str, body: &str) -> Vec<(String, String)> {
+    let boundary = kind
+        .split(';')
+        .map(str::trim)
+        .find_map(|p| p.strip_prefix("boundary="))
+        .map(|b| b.trim_matches('"'))
+        .filter(|_| kind.trim_start().to_ascii_lowercase().starts_with("multipart/form-data"));
+    match boundary {
+        Some(b) if !b.is_empty() => parse_multipart(b, body),
+        _ => parse_form(body),
+    }
+}
+
+/// `multipart/form-data` into name and value pairs: each part's name from
+/// its Content-Disposition, its value what follows its headers (a file's
+/// contents, for a file).
+pub fn parse_multipart(boundary: &str, body: &str) -> Vec<(String, String)> {
+    let delimiter = format!("--{boundary}");
+    let mut out = Vec::new();
+    for part in body.split(delimiter.as_str()).skip(1) {
+        // The last delimiter ends "--".
+        if part.starts_with("--") {
+            break;
+        }
+        let part = part.strip_prefix("\r\n").or_else(|| part.strip_prefix('\n')).unwrap_or(part);
+        let Some((headers, value)) = part.split_once("\r\n\r\n").or_else(|| part.split_once("\n\n")) else { continue };
+        let value = value.strip_suffix("\r\n").or_else(|| value.strip_suffix('\n')).unwrap_or(value);
+        let name = headers.lines().find(|l| l.to_ascii_lowercase().starts_with("content-disposition:")).and_then(|l| {
+            l.split(';').map(str::trim).find_map(|p| p.strip_prefix("name=")).map(|n| n.trim_matches('"').to_owned())
+        });
+        if let Some(name) = name {
+            out.push((name, value.to_owned()));
+        }
+    }
+    out
+}
+
+/// The cookies.txt sent, chosen as a file or pasted (the file if both):
+/// none, checked and taken, or why it would not sign in.
+pub fn cookies_given(form: &[(String, String)]) -> Result<Option<crate::music::Jar>, String> {
+    let given = ["cookies_file", "cookies"].iter().find_map(|name| form.iter().find(|(k, v)| k == name && !v.trim().is_empty()).map(|(_, v)| v.as_str()));
+    match given {
+        Some(text) => crate::music::check_cookies(text, chrono::Utc::now().timestamp()).map(Some),
+        None => Ok(None),
+    }
+}
+
 /// What the form says, field by field; blank fields change nothing.
 pub fn answers(form: &[(String, String)]) -> Answers {
     let field = |name: &str| form.iter().find(|(k, _)| k == name).map(|(_, v)| v.trim().to_owned()).filter(|v| !v.is_empty());
@@ -376,6 +474,8 @@ pub fn answers(form: &[(String, String)]) -> Answers {
         }
     }
     a.ssh_key = field("ssh_key").filter(|k| ["ssh-ed25519 ", "ssh-rsa ", "ecdsa-sha2-"].iter().any(|p| k.starts_with(p)) && !k.contains('\n'));
+    // Cookies that would not sign in are none (the page has said why).
+    a.cookies = cookies_given(form).ok().flatten();
     a.accent = field("accent").and_then(|v| Accent::from_name(&v));
     a.light = field("mode").map(|v| v == "light");
     a.text = field("text").and_then(|v| TextSize::from_name(&v));
@@ -408,6 +508,10 @@ pub fn received(a: &Answers) -> Vec<(String, String)> {
     if let Some(key) = &a.ssh_key {
         let kind = key.split_whitespace().next().unwrap_or("").trim_start_matches("ssh-");
         rows.push(("SSH key".to_owned(), kind.to_owned()));
+    }
+    // That it came, and no more.
+    if a.cookies.is_some() {
+        rows.push(("YouTube Music".to_owned(), "signed in".to_owned()));
     }
     let look: Vec<String> = [
         a.accent.map(|v| v.name().to_lowercase()),
@@ -451,6 +555,8 @@ pub struct Now {
     pub calm: bool,
     /// The services a key is set for already.
     pub keys: Vec<&'static str>,
+    /// Signed in to YouTube Music already.
+    pub music: bool,
 }
 
 impl Now {
@@ -469,12 +575,25 @@ impl Now {
             ssh: crate::ssh_enabled(),
             calm: s.calm,
             keys: SERVICES.iter().filter(|(name, _)| keys.get(name).is_some()).map(|(name, _)| *name).collect(),
+            music: crate::music::signed_in(),
         }
     }
 }
 
+/// Text made safe to put in the page.
+fn escaped(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+/// The page as a computer is given it, for the assistant's shots.
+#[cfg(not(target_arch = "aarch64"))]
+pub fn page_for_shots(now: &Now, error: Option<&str>) -> String {
+    let error = error.map_or(String::new(), |e| format!("<p class=\"error\">{}</p>", escaped(e)));
+    PAGE.replace("{{body}}", &form(now)).replace("{{error}}", &error)
+}
+
 fn page(error: Option<&str>) -> (&'static str, &'static str, String) {
-    let error = error.map_or(String::new(), |e| format!("<p class=\"error\">{e}</p>"));
+    let error = error.map_or(String::new(), |e| format!("<p class=\"error\">{}</p>", escaped(e)));
     let body = form(&Now::read());
     ("200 OK", "text/html", PAGE.replace("{{body}}", &body).replace("{{error}}", &error))
 }
@@ -501,13 +620,19 @@ fn form(now: &Now) -> String {
         let set = if now.keys.contains(&name) { " placeholder=\"set already: left empty, it is kept\"" } else { "" };
         form = form.replace(&format!("{{{{{name}}}}}"), set);
     }
-    form
+    // Signed in already: said so, and kept unless other cookies are sent.
+    let (state, placeholder) = if now.music {
+        ("<p class=\"state\">Signed in already. Left empty, the sign-in is kept.</p>", " placeholder=\"signed in already: left empty, it is kept\"")
+    } else {
+        ("", " placeholder=\"# Netscape HTTP Cookie File …\"")
+    };
+    form.replace("{{music_state}}", state).replace("{{cookies}}", placeholder)
 }
 
 const DONE: &str = r#"<section class="done"><h1>That's everything.</h1><p>The handheld is putting it in place. You can close this page.</p></section>"#;
 
 const FORM: &str = r#"
-<form method="post" action="/" autocomplete="off">
+<form method="post" action="/" enctype="multipart/form-data" autocomplete="off">
   <section>
     <h2>Code</h2>
     <label>The six digits on the handheld's screen
@@ -539,6 +664,14 @@ const FORM: &str = r#"
     <h2>Git</h2>
     <p class="hint">For Git on the handheld: your repositories, their history, pulling and pushing.</p>
     <label>GitHub <small>a token with repository access, from github.com, Settings, Developer settings</small><input name="github" spellcheck="false"{{github}}></label>
+  </section>
+  <section>
+    <h2>YouTube Music</h2>
+    <p class="hint">Sign in once, and your playlists, albums and artists are in Music on the handheld. On this computer, open music.youtube.com signed in and export its cookies as cookies.txt with a browser extension (Get cookies.txt LOCALLY in Chrome or Edge, cookies.txt in Firefox).</p>
+    {{music_state}}
+    <label>cookies.txt <small>the file</small><input type="file" name="cookies_file" accept=".txt,text/plain"></label>
+    <label>Or its text <small>pasted</small><textarea name="cookies" rows="3" spellcheck="false" autocomplete="off"{{cookies}}></textarea></label>
+    <p class="hint small">For a sign-in that lasts, export from a private window, then close it: a browser that stays on YouTube renews its cookies, and the copy stops working. Third-party players like this one can break YouTube's terms, which could put the account at risk.</p>
   </section>
   <section>
     <h2>SSH</h2>
@@ -588,7 +721,9 @@ input:focus,select:focus,textarea:focus{outline:2px solid var(--ink);outline-off
 .check{display:flex;align-items:center;gap:10px;font-weight:400}.check input{width:18px;height:18px;margin:0;accent-color:var(--crimson)}
 .pair{display:grid;grid-template-columns:1fr 1fr;gap:12px}.quad{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
 @media(max-width:520px){.pair,.quad{grid-template-columns:1fr 1fr}}
-.hint{color:var(--thin);margin:-4px 0 12px}
+.hint{color:var(--thin);margin:-4px 0 12px}.hint.small{font-size:13px;margin:0}
+.state{margin:-4px 0 12px;font-weight:500}.state::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#4cc38a;margin-right:8px;vertical-align:1px}
+input[type=file]{padding:8px 10px;color:var(--thin)}input[type=file]::file-selector-button{font:inherit;color:var(--ink);background:var(--line);border:0;border-radius:8px;padding:6px 12px;margin-right:12px;cursor:pointer}
 button{width:100%;margin-top:8px;padding:14px;border:0;border-radius:999px;background:var(--crimson);color:#fff;font:600 16px/1 inherit;font-family:inherit;cursor:pointer}
 button:focus-visible{outline:2px solid var(--ink);outline-offset:3px}
 .error{background:#3a1a22;border:1px solid #6e2a3a;color:#ffd7de;border-radius:12px;padding:12px 16px}
@@ -635,6 +770,7 @@ mod tests {
             ssh: true,
             calm: false,
             keys: vec!["claude"],
+            music: false,
         };
         let html = form(&now);
         // The look as it is, one choice each.
@@ -655,6 +791,127 @@ mod tests {
         assert_eq!((sent.accent, sent.light, sent.text, sent.home), (Some(now.accent), Some(now.light), Some(now.text), Some(now.home)));
         assert_eq!((sent.open_robot, sent.match_report, sent.ssh, sent.calm), (Some(now.open_robot), Some(now.match_report), Some(now.ssh), Some(now.calm)));
         assert_eq!((sent.keys.get("openai"), sent.keys.get("claude")), (Some("sk-new"), None), "the Claude key set already is kept");
+    }
+
+    use crate::music::tests::MADE_UP_JAR;
+
+    /// The page's form as a browser sends it, a file and all.
+    fn multipart(fields: &[(&str, Option<&str>, &str)]) -> (String, String) {
+        let boundary = "----CatalystFormBoundary7MA4YWxkTrZu0gW";
+        let mut body = String::new();
+        for (name, file, value) in fields {
+            body.push_str(&format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\""));
+            match file {
+                Some(f) => body.push_str(&format!("; filename=\"{f}\"\r\nContent-Type: text/plain\r\n\r\n{value}\r\n")),
+                None => body.push_str(&format!("\r\n\r\n{value}\r\n")),
+            }
+        }
+        body.push_str(&format!("--{boundary}--\r\n"));
+        (format!("multipart/form-data; boundary={boundary}"), body)
+    }
+
+    fn request(kind: &str, body: &str) -> Request {
+        Request { method: "POST".into(), path: "/".into(), kind: kind.into(), body: body.into(), too_large: false }
+    }
+
+    #[test]
+    fn a_form_with_a_file_reads_as_the_same_fields() {
+        let (kind, body) = multipart(&[("code", None, "123456"), ("team", None, "5805"), ("ssh_key", None, ""), ("cookies_file", Some("cookies.txt"), &MADE_UP_JAR.replace('\n', "\r\n")), ("cookies", None, ""), ("choices", None, "1"), ("ssh", None, "on")]);
+        let form = parse_body(&kind, &body);
+        let names: Vec<&str> = form.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(names, ["code", "team", "ssh_key", "cookies_file", "cookies", "choices", "ssh"]);
+        let a = answers(&form);
+        assert_eq!((a.team.as_deref(), a.ssh, a.open_robot), (Some("5805"), Some(true), Some(false)));
+        assert!(a.cookies.is_some(), "the file signs in");
+        // Not a file chosen: the text pasted. Neither: nothing changes.
+        let (kind, body) = multipart(&[("code", None, "1"), ("cookies_file", Some(""), ""), ("cookies", None, MADE_UP_JAR)]);
+        assert!(answers(&parse_body(&kind, &body)).cookies.is_some());
+        let (kind, body) = multipart(&[("code", None, "1"), ("cookies_file", Some(""), ""), ("cookies", None, "")]);
+        assert_eq!(cookies_given(&parse_body(&kind, &body)), Ok(None));
+        // Urlencoded, as before (and as the tests send it).
+        assert_eq!(parse_body("application/x-www-form-urlencoded", "team=254&code=1"), parse_form("team=254&code=1"));
+    }
+
+    #[test]
+    fn the_sign_in_arrives_as_signed_in_and_nothing_more() {
+        let a = answers(&[("cookies".into(), MADE_UP_JAR.into())]);
+        let rows = received(&a);
+        assert_eq!(rows, [("YouTube Music".to_owned(), "signed in".to_owned())]);
+        // Nowhere in what the handheld shows, nor in the answers shown for a test.
+        assert!(!format!("{rows:?}{a:?}").contains("made-up"), "{a:?}");
+        // Cookies that would not sign in are none.
+        assert_eq!(answers(&[("cookies".into(), "not cookies".into())]).cookies, None);
+    }
+
+    #[test]
+    fn cookies_that_would_not_sign_in_leave_the_page_open_and_nothing_taken() {
+        let shared = Shared::default();
+        let (kind, body) = multipart(&[("code", None, "424242"), ("team", None, "5805"), ("cookies_file", Some("cookies.json"), "[{\"name\": \"SID\", \"value\": \"secret-in-json\"}]")]);
+        let (status, _, page) = reply(&request(&kind, &body), &shared, "424242");
+        assert_eq!(status, "200 OK");
+        assert!(page.contains("Nothing was changed: the YouTube Music cookies would not sign in") && page.contains("JSON"), "said why");
+        assert!(!page.contains("secret-in-json"), "never echoed");
+        assert!(shared.answers.lock().unwrap().is_none() && !shared.stop.load(Ordering::Relaxed), "nothing taken, still offered");
+        assert_eq!(shared.wrong.load(Ordering::Relaxed), 0, "not a wrong code");
+        // Sent again put right: taken, the page done, and the cookies never on it.
+        let (kind, body) = multipart(&[("code", None, "424242"), ("team", None, "5805"), ("cookies", None, MADE_UP_JAR)]);
+        let (_, _, page) = reply(&request(&kind, &body), &shared, "424242");
+        assert!(page.contains("That's everything") && !page.contains("made-up"));
+        let taken = shared.answers.lock().unwrap().clone().unwrap();
+        assert!(taken.cookies.is_some() && taken.team.as_deref() == Some("5805"));
+        // Too much sent: said so.
+        let shared = Shared::default();
+        let (_, _, page) = reply(&Request { too_large: true, ..request("", "") }, &shared, "424242");
+        assert!(page.contains("more than the page takes"));
+        assert!(shared.answers.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_cookies_txt_fits_what_the_page_takes_and_more_is_told_so() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = AtomicBool::new(false);
+        let send = |body: Vec<u8>| {
+            std::thread::spawn(move || {
+                let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                let head = format!("POST / HTTP/1.1\r\nHost: x\r\nContent-Type: multipart/form-data; boundary=b\r\nContent-Length: {}\r\n\r\n", body.len());
+                s.write_all(head.as_bytes()).unwrap();
+                s.write_all(&body).ok();
+                s
+            })
+        };
+        // A large cookies.txt, as a file, is read whole.
+        let jar = MADE_UP_JAR.repeat(crate::music::COOKIES_MOST / MADE_UP_JAR.len());
+        let body = format!("--b\r\nContent-Disposition: form-data; name=\"cookies_file\"; filename=\"c.txt\"\r\n\r\n{jar}\r\n--b--\r\n");
+        assert!(body.len() > 32 * 1024, "more than the old limit");
+        let sender = send(body.into_bytes());
+        let (stream, _) = listener.accept().unwrap();
+        let got = read_request(&stream, &stop).unwrap();
+        assert!(!got.too_large);
+        assert_eq!(parse_body(&got.kind, &got.body)[0].1, jar);
+        drop(sender.join());
+        // Far more: passed over, and said so rather than cut off.
+        let sender = send(vec![b'x'; BODY_MOST + 1]);
+        let (stream, _) = listener.accept().unwrap();
+        let got = read_request(&stream, &stop).unwrap();
+        assert!(got.too_large && got.body.is_empty());
+        drop(sender.join());
+    }
+
+    #[test]
+    fn the_page_says_when_youtube_music_is_signed_in_already() {
+        let mut now = Now { accent: Accent::Rose, light: false, text: TextSize::Standard, home: HomeStyle::Grid, open_robot: false, match_report: false, ssh: false, calm: false, keys: vec![], music: true };
+        let html = form(&now);
+        assert!(html.contains("Signed in already. Left empty, the sign-in is kept."));
+        assert!(html.contains("name=\"cookies\" rows=\"3\" spellcheck=\"false\" autocomplete=\"off\" placeholder=\"signed in already: left empty, it is kept\""));
+        assert!(html.contains("enctype=\"multipart/form-data\"") && html.contains("type=\"file\" name=\"cookies_file\""));
+        now.music = false;
+        let html = form(&now);
+        assert!(!html.contains("signed in already") && !html.contains("Signed in already"));
+        assert!(!html.contains("{{"), "every blank filled");
+        // Sent as it came (nothing chosen, nothing pasted): the sign-in is left as it is.
+        let (kind, body) = multipart(&[("code", None, "1"), ("cookies_file", Some(""), ""), ("cookies", None, "")]);
+        assert_eq!(answers(&parse_body(&kind, &body)).cookies, None);
     }
 
     #[test]

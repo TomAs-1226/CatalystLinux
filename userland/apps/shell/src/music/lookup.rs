@@ -233,7 +233,7 @@ fn ytdlp(id: &str, client: Option<&str>, signed_in: bool, manner: Manner, second
         }
     }
     // Signed in, the cookies as a private copy (yt-dlp writes its jar back).
-    let jar = (signed_in && client.is_none()).then(|| std::fs::read(super::COOKIES).ok()).flatten().and_then(|cookies| {
+    let jar = (signed_in && client.is_none()).then(|| std::fs::read(super::cookies_file()).ok()).flatten().and_then(|cookies| {
         let path = super::private_file("cookies");
         crate::sys::write_private(&path, &cookies).ok().map(|_| path)
     });

@@ -475,6 +475,12 @@ impl Setup {
         if let Some(key) = a.ssh_key {
             crate::add_ssh_key(&key).ok();
         }
+        // YouTube Music's sign-in, written whole and readable by root alone.
+        if let Some(jar) = &a.cookies {
+            if let Err(why) = crate::music::sign_in(jar) {
+                *cx.say = Some(why);
+            }
+        }
         let s = &mut cx.settings;
         s.accent = a.accent.unwrap_or(s.accent);
         s.light = a.light.unwrap_or(s.light);
@@ -1675,10 +1681,35 @@ mod tests {
         assert_eq!(crate::remote::received(&crate::remote::Answers::default()), [("Nothing to change".to_owned(), String::new())]);
         // Every row fits beside its value.
         let mut g = Gfx::new(Tokens::dark());
-        let full = crate::remote::answers(&crate::remote::parse_form("team=99999&ssid1=A%20rather%20long%20network%20name&tba=x123456789&nexus=y123456789&openai=z123456789&claude=sk-ant-w123456789&ssh_key=ssh-ed25519%20AAA&accent=rose&mode=light&text=large&home=carousel&choices=1"));
+        let mut full = crate::remote::answers(&crate::remote::parse_form("team=99999&ssid1=A%20rather%20long%20network%20name&tba=x123456789&nexus=y123456789&openai=z123456789&claude=sk-ant-w123456789&ssh_key=ssh-ed25519%20AAA&accent=rose&mode=light&text=large&home=carousel&choices=1"));
+        full.cookies = crate::music::check_cookies(crate::music::tests::MADE_UP_JAR, 0).ok();
+        assert!(crate::remote::received(&full).iter().any(|(n, v)| n == "YouTube Music" && v == "signed in"));
         for (name, _) in crate::remote::received(&full) {
             assert!(g.measure(&name, TextStyle::sans(11.0, 600.0)) + 32.0 + 60.0 <= W - 2.0 * LEFT, "{name}");
         }
+    }
+
+    #[test]
+    fn youtube_musics_sign_in_from_a_computer_is_put_in_place_and_shown_only_as_signed_in() {
+        let _one_at_a_time = crate::music::tests::SIGNING_IN.lock().unwrap_or_else(|e| e.into_inner());
+        crate::shell::tests::sandbox();
+        let (mut settings, mut robot) = (crate::shell::Settings::default(), Robot::none());
+        let file = crate::music::cookies_file();
+        std::fs::remove_file(&file).ok();
+        let sent = crate::remote::answers(&[("cookies".into(), crate::music::tests::MADE_UP_JAR.into())]);
+        let mut setup = Setup { from_settings: true, ..Setup::new() };
+        setup.go(Page::Computer, true);
+        let mut say = None;
+        setup.take_answers(sent, &mut Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true });
+        assert_eq!(setup.received, [("YouTube Music".to_owned(), "signed in".to_owned())]);
+        assert_eq!(say, None, "put in place without a word");
+        let kept = std::fs::read_to_string(&file).unwrap();
+        assert!(kept.contains("\tSAPISID\t") && !kept.contains("google.com"), "the youtube.com cookies alone");
+        // Nothing sent for it: the sign-in is left as it is.
+        let mut again = Setup { from_settings: true, ..Setup::new() };
+        let mut say = None;
+        again.take_answers(crate::remote::answers(&crate::remote::parse_form("team=5805&cookies=")), &mut Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true });
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), kept);
     }
 
     #[test]

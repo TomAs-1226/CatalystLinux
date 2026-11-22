@@ -1,6 +1,7 @@
 //! The Music app's pages: the start, search (songs, albums, artists,
-//! playlists), what is playing and up next, the library on the card, an
-//! album or playlist with its download, the downloads, and the account.
+//! playlists), what is playing and up next, the library on the card, your
+//! library on YouTube Music (signed in), an album or playlist with its
+//! download, the downloads, and the account.
 //!
 //! The library is a page of Music rather than an app of its own: one app
 //! owns the one queue and the one player (and the media keys, the tile and
@@ -10,6 +11,7 @@
 
 use bezel::{Align, Rect};
 
+use super::account;
 use super::downloads::{self, State};
 use super::library::{self, Meta};
 use super::player::{self, Phase, Repeat};
@@ -74,6 +76,9 @@ enum Page {
     Albums(Option<String>),
     Songs(Box<SongList>),
     Downloads,
+    /// Your library on YouTube Music, and its albums or artists.
+    Yours,
+    YoursList(Kind),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -82,9 +87,36 @@ enum StartRow {
     Search,
     Library,
     Downloads,
-    Likes,
+    Yours,
     Song(usize),
     Account,
+}
+
+/// Your library on YouTube Music: your likes, the albums and artists, then
+/// each playlist (Liked music first).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum YoursRow {
+    Likes,
+    Albums,
+    Artists,
+    Playlist(usize),
+}
+
+fn yours_rows(lists: &account::Lists) -> Vec<YoursRow> {
+    let mut rows = vec![YoursRow::Likes, YoursRow::Albums, YoursRow::Artists];
+    rows.extend((0..lists.playlists.len()).map(YoursRow::Playlist));
+    rows
+}
+
+/// Your albums or artists that hold what is typed.
+fn yours_shown(lists: &account::Lists, kind: Kind, narrow: &str) -> Vec<Collection> {
+    let all = if kind == Kind::Album { &lists.albums } else { &lists.artists };
+    all.iter().filter(|c| narrowed(narrow, &format!("{} {}", c.title, c.byline))).cloned().collect()
+}
+
+/// Your likes, as a list to open.
+fn your_likes() -> Collection {
+    Collection { kind: Kind::Liked, id: super::LIKES.into(), title: "Your likes".into(), byline: "signed in".into(), art: String::new(), year: 0 }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -159,6 +191,7 @@ pub struct MusicScreen {
     covers_seen: u64,
     library_seen: u64,
     downloads_seen: u64,
+    yours_seen: u64,
     second_seen: u32,
     last_phase: Phase,
     changed: bool,
@@ -185,13 +218,26 @@ impl MusicScreen {
         } else {
             Page::Start
         };
-        let mut screen = MusicScreen {
+        let mut screen = Self::blank(offline);
+        screen.picks_job = (!offline).then(|| Job::start(super::start_page));
+        // Your library on YouTube Music, asked for again as Music opens
+        // (in the background; what was seen last shows meanwhile).
+        if super::signed_in() && !offline {
+            account::refresh(false);
+        }
+        screen.go(page);
+        screen
+    }
+
+    /// Music on its start page, with nothing asked for yet.
+    fn blank(offline: bool) -> Self {
+        MusicScreen {
             page: Page::Start,
             list: ListState::default(),
             back: Vec::new(),
             picks: Vec::new(),
             picks_are: "quick picks".into(),
-            picks_job: (!offline).then(|| Job::start(super::start_page)),
+            picks_job: None,
             picks_error: offline.then(|| "offline · your library and played songs are here".to_owned()),
             query: String::new(),
             typing: false,
@@ -212,12 +258,11 @@ impl MusicScreen {
             covers_seen: 0,
             library_seen: 0,
             downloads_seen: 0,
+            yours_seen: 0,
             second_seen: u32::MAX,
             last_phase: Phase::Empty,
             changed: true,
-        };
-        screen.go(page);
-        screen
+        }
     }
 
     fn go(&mut self, page: Page) {
@@ -277,8 +322,8 @@ impl MusicScreen {
         if !downloads::items().is_empty() {
             rows.push(StartRow::Downloads);
         }
-        if super::signed_in() && polite::online() {
-            rows.push(StartRow::Likes);
+        if super::signed_in() {
+            rows.push(StartRow::Yours);
         }
         rows.extend((0..self.picks.len()).map(StartRow::Song));
         rows.push(StartRow::Account);
@@ -358,10 +403,23 @@ impl MusicScreen {
         }));
     }
 
-    fn open(&mut self, c: Collection) {
+    /// An album, playlist or artist from YouTube Music opened: its songs
+    /// asked for. Offline, what of it is on the card instead; what to say
+    /// if there is none.
+    fn open(&mut self, c: Collection) -> Option<String> {
+        if !polite::online() {
+            return match card_copy(&c) {
+                Some(list) => {
+                    self.push(Page::Songs(Box::new(list)));
+                    None
+                }
+                None => Some("offline · none of it is on the card yet".into()),
+            };
+        }
         let title = c.title.clone();
         self.push(Page::Songs(Box::new(SongList { title, byline: c.byline.clone(), songs: Vec::new(), metas: Vec::new(), kind: ListKind::YouTube, playlist: None })));
         self.open_job = Some(Job::start(move || super::open_collection(&c)));
+        None
     }
 
     fn songs_page(title: &str, byline: String, songs: Vec<Track>, kind: ListKind) -> Page {
@@ -383,12 +441,37 @@ fn card_search(q: &str) -> Vec<Track> {
     found
 }
 
+/// What of a list from YouTube Music is on the card, for offline: the
+/// playlist it was downloaded into, the album, or the artist's songs.
+fn card_copy(c: &Collection) -> Option<SongList> {
+    let tracks = |songs: &[library::Song]| songs.iter().map(library::Song::track).collect::<Vec<_>>();
+    let playlist = |name: &str| library::playlists().into_iter().find(|(n, _)| *n == library::safe_name(name)).map(|(_, s)| tracks(&s));
+    let songs = match c.kind {
+        Kind::Playlist | Kind::Liked => playlist(&c.title),
+        Kind::Album => library::albums(None).into_iter().find(|a| a.name == c.title).map(|a| tracks(&a.songs)),
+        Kind::Artist => playlist(&format!("{} · top songs", c.title)).or_else(|| Some(library::albums(Some(&c.title)).iter().flat_map(|a| tracks(&a.songs)).collect())),
+    }
+    .filter(|s| !s.is_empty())?;
+    let byline = format!("on the card · {}", count_words(songs.len(), "song"));
+    Some(SongList { title: c.title.clone(), byline, metas: vec![Meta::default(); songs.len()], songs, kind: ListKind::Card, playlist: None })
+}
+
 /// Songs played and kept, as a list to play (the latest first).
 fn played_list() -> SongList {
     let played = store::played();
     let bytes: u64 = played.iter().map(|p| p.bytes).sum();
     let songs: Vec<Track> = played.into_iter().map(|p| p.track).collect();
     SongList { title: "Played".into(), byline: format!("{} · {}", count_words(songs.len(), "song"), store::size_words(bytes)), metas: vec![Meta::default(); songs.len()], songs, kind: ListKind::Played, playlist: None }
+}
+
+/// "just now", "5 min ago", "3 h ago", "2 days ago".
+fn ago(seconds: i64) -> String {
+    match seconds.max(0) {
+        s if s < 90 => "just now".into(),
+        s if s < 90 * 60 => format!("{} min ago", (s + 30) / 60),
+        s if s < 36 * 3600 => format!("{} h ago", (s + 1800) / 3600),
+        s => count_words(((s + 43_200) / 86_400) as usize, "day") + " ago",
+    }
 }
 
 fn count_words(n: usize, what: &str) -> String {
@@ -413,6 +496,9 @@ impl Screen for MusicScreen {
             Page::Albums(Some(a)) => a,
             Page::Songs(l) => &l.title,
             Page::Downloads => "Downloads",
+            Page::Yours => "Your library",
+            Page::YoursList(Kind::Album) => "Albums",
+            Page::YoursList(_) => "Artists",
         }
     }
 
@@ -420,7 +506,7 @@ impl Screen for MusicScreen {
     /// there searches or narrows (the shell would otherwise make f, x, z
     /// and c arrows).
     fn wants_text(&self) -> bool {
-        self.typing || matches!(self.page, Page::Start | Page::Search | Page::Artists | Page::Albums(_) | Page::Songs(_))
+        self.typing || matches!(self.page, Page::Start | Page::Search | Page::Artists | Page::Albums(_) | Page::Songs(_) | Page::YoursList(_))
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -492,7 +578,10 @@ impl Screen for MusicScreen {
                         }
                         StartRow::Library => self.push(Page::Library),
                         StartRow::Downloads => self.push(Page::Downloads),
-                        StartRow::Likes => self.open(Collection { kind: Kind::Liked, id: "FEmusic_liked_videos".into(), title: "Your likes".into(), byline: "signed in".into(), art: String::new(), year: 0 }),
+                        StartRow::Yours => {
+                            account::refresh(false);
+                            self.push(Page::Yours);
+                        }
                         StartRow::Song(i) => {
                             // Quick picks are a mix already: played as a list; likes too.
                             player::play(self.picks.clone(), i, false);
@@ -545,8 +634,8 @@ impl Screen for MusicScreen {
                         }
                     }
                     Key::Enter | Key::Right => {
-                        if let Some(c) = self.collections.get(self.list.focus).cloned() {
-                            self.open(c);
+                        if let Some(why) = self.collections.get(self.list.focus).cloned().and_then(|c| self.open(c)) {
+                            *cx.say = Some(why);
                         }
                     }
                     Key::Ctrl('n') => {
@@ -734,6 +823,62 @@ impl Screen for MusicScreen {
                     other => crate::screens::list_key(&mut self.list, other, rows.len()),
                 }
             }
+            Page::Yours => {
+                let lists = account::lists();
+                let rows = yours_rows(&lists);
+                let opened = match key {
+                    Key::Back => {
+                        self.pop(Page::Start);
+                        None
+                    }
+                    Key::Enter | Key::Right => match rows.get(self.list.focus).copied() {
+                        Some(YoursRow::Likes) => self.open(your_likes()),
+                        Some(YoursRow::Albums) => {
+                            self.push(Page::YoursList(Kind::Album));
+                            None
+                        }
+                        Some(YoursRow::Artists) => {
+                            self.push(Page::YoursList(Kind::Artist));
+                            None
+                        }
+                        Some(YoursRow::Playlist(i)) => lists.playlists.get(i).cloned().and_then(|c| self.open(c)),
+                        None => None,
+                    },
+                    Key::Char('/') => {
+                        self.push(Page::Search);
+                        self.typing = true;
+                        None
+                    }
+                    other => {
+                        crate::screens::list_key(&mut self.list, other, rows.len());
+                        None
+                    }
+                };
+                if let Some(why) = opened {
+                    *cx.say = Some(why);
+                }
+            }
+            Page::YoursList(kind) => {
+                let shown = yours_shown(&account::lists(), kind, &self.narrow);
+                match key {
+                    Key::Back if !self.narrow.is_empty() => self.narrow.clear(),
+                    Key::Back => self.pop(Page::Yours),
+                    Key::Enter | Key::Right => {
+                        if let Some(why) = shown.get(self.list.focus).cloned().and_then(|c| self.open(c)) {
+                            *cx.say = Some(why);
+                        }
+                    }
+                    Key::Backspace => {
+                        self.narrow.pop();
+                        self.list = ListState::default();
+                    }
+                    Key::Char(c) if !c.is_control() => {
+                        self.narrow.push(c);
+                        self.list = ListState::default();
+                    }
+                    other => crate::screens::list_key(&mut self.list, other, shown.len()),
+                }
+            }
             Page::Downloads => {
                 let rows = self.dl_rows();
                 let items = downloads::items();
@@ -886,7 +1031,8 @@ impl Screen for MusicScreen {
             self.second_seen = second;
             changed = true;
         }
-        for (seen, now) in [(&mut self.covers_seen, covers::ARRIVED.load(std::sync::atomic::Ordering::Relaxed)), (&mut self.library_seen, library::stamp() + store::played_stamp()), (&mut self.downloads_seen, downloads::stamp())] {
+        let yours = account::stamp();
+        for (seen, now) in [(&mut self.covers_seen, covers::ARRIVED.load(std::sync::atomic::Ordering::Relaxed)), (&mut self.library_seen, library::stamp() + store::played_stamp()), (&mut self.downloads_seen, downloads::stamp()), (&mut self.yours_seen, yours)] {
             if *seen != now {
                 *seen = now;
                 changed = true;
@@ -917,6 +1063,8 @@ impl Screen for MusicScreen {
             Page::Albums(a) => self.draw_albums(g, a.as_deref()),
             Page::Songs(l) => self.draw_songs(g, &l),
             Page::Downloads => self.draw_downloads(g),
+            Page::Yours => self.draw_yours(g),
+            Page::YoursList(kind) => self.draw_yours_list(g, kind),
         }
     }
 }
@@ -1056,7 +1204,7 @@ impl MusicScreen {
                     let active = dl.done < dl.total;
                     crate::bluetooth::icon_row(g, r, if active { "downloading" } else { "download_done" }, active, "Downloads", &format!("{} of {} ›", dl.done, dl.total), t.dim, i == focus)
                 }
-                StartRow::Likes => crate::bluetooth::icon_row(g, r, "favorite", false, "Your likes", "›", t.dim, i == focus),
+                StartRow::Yours => crate::bluetooth::icon_row(g, r, "queue_music", false, "Your library", "›", t.dim, i == focus),
                 StartRow::Song(s) => {
                     let track = &self.picks[s];
                     song_row(g, r, track, i == focus);
@@ -1072,6 +1220,7 @@ impl MusicScreen {
             Some(StartRow::NowPlaying) => &["enter: now playing · tab, anywhere here", "enter: now playing"],
             Some(StartRow::Library) => &["on the card · plays without the internet", "on the card"],
             Some(StartRow::Downloads) => &["saving to the library, one at a time", "saving to the library"],
+            Some(StartRow::Yours) => &["your playlists, albums and artists on youtube music", "playlists, albums, artists", "on youtube music"],
             Some(StartRow::Account) if super::signed_in() => &["signed in with your browser's cookies", "signed in"],
             Some(StartRow::Account) => &["signed out unless you sign in", "signed out"],
             _ => &["type to search youtube music", "type to search"],
@@ -1403,7 +1552,12 @@ impl MusicScreen {
         let sentences: &[&str] = if signed {
             &["Third-party players like this one can break YouTube's terms, which could put this account at risk.", "Sign out to keep it out of reach."]
         } else {
-            &["Third-party players like this one can break YouTube's terms.", "Signed out, nothing is at risk.", "To sign in, put cookies.txt from your browser in /data/music."]
+            &[
+                "Third-party players like this one can break YouTube's terms.",
+                "Signed out, nothing is at risk.",
+                "To sign in, use Settings › Set up from a computer.",
+                "Or put cookies.txt from your browser in /data/music.",
+            ]
         };
         // Whole sentences, the warning first: as many as there is room for.
         let mut y = below + 9.0 + ty.caption.size * 0.5;
@@ -1426,9 +1580,83 @@ impl MusicScreen {
             2 if self.armed => &["enter again: sign out · esc: stay", "enter again: sign out"],
             2 => &["forgets the cookies on this handheld", "enter: sign out"],
             _ if signed => &["signed in with your browser's cookies", "signed in"],
-            _ => &["signed out unless you sign in", "signed out"],
+            _ => &["sign in: settings › set up from a computer", "settings › set up from a computer", "sign in from a computer", "signed out"],
         };
         g.hint_any(hint);
+    }
+
+    fn draw_yours(&mut self, g: &mut Gfx) {
+        let t = g.tokens;
+        let lists = account::lists();
+        let rows = yours_rows(&lists);
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
+        let width = W - 2.0 * PAD - 5.0;
+        // Asked for the first time: no counts to give yet.
+        let first = lists.is_empty() && account::refreshing();
+        let count = |n: usize| if first { "…".to_owned() } else { format!("{n} ›") };
+        for (i, y) in self.list.layout(g, rows.len(), top, row_h, 3.0, bottom) {
+            let r = Rect::new(PAD, y, width, row_h);
+            let f = i == self.list.focus;
+            match rows[i] {
+                YoursRow::Likes => crate::bluetooth::icon_row(g, r, "favorite", false, "Your likes", "›", t.dim, f),
+                YoursRow::Albums => crate::bluetooth::icon_row(g, r, "album", false, "Albums", &count(lists.albums.len()), t.dim, f),
+                YoursRow::Artists => crate::bluetooth::icon_row(g, r, "artist", false, "Artists", &count(lists.artists.len()), t.dim, f),
+                YoursRow::Playlist(p) => {
+                    let c = &lists.playlists[p];
+                    // Who made it after its name; how many songs at the right, as the card's lists have it.
+                    let (by, songs) = playlist_line(&c.byline);
+                    let art_of = Track { id: c.id.clone(), art: c.art.clone(), title: c.title.clone(), ..Track::default() };
+                    art_row(g, r, &art_of, &c.title, &by.to_lowercase(), &songs, f);
+                    // Liked music with no cover of its own: a heart where it would be.
+                    if c.art.is_empty() && c.id == account::LIKED_MUSIC && super::on_device() {
+                        let side = r.h - 8.0;
+                        g.icon("favorite", true, r.x + 5.0 + side * 0.5, r.cy(), side * 0.55, t.dim);
+                    }
+                }
+            }
+        }
+        self.list.scrollbar(g, rows.len(), top, bottom);
+        let status = if first {
+            Some("asking youtube music…".to_owned())
+        } else if let Some(why) = account::problem() {
+            Some(why)
+        } else if !polite::online() {
+            Some(match lists.saved {
+                0 => "offline · as youtube music last listed it".to_owned(),
+                at => format!("offline · as listed {}", ago(store::now_unix() - at)),
+            })
+        } else if account::refreshing() {
+            Some("updating from youtube music…".to_owned())
+        } else {
+            None
+        };
+        let hint: Vec<String> = match (rows.get(self.list.focus).copied(), status) {
+            (Some(YoursRow::Likes) | None, Some(s)) => vec![s, "your library".into()],
+            (Some(YoursRow::Likes) | None, None) => vec!["your likes on youtube music · enter: open".into(), "your likes".into()],
+            (Some(YoursRow::Albums), _) => vec!["albums you saved on youtube music".into(), "saved albums".into()],
+            (Some(YoursRow::Artists), _) => vec!["artists of your songs, and those you follow".into(), "your artists".into()],
+            (Some(YoursRow::Playlist(_)), _) => vec!["enter: open · play, shuffle or download it".into(), "enter: open".into()],
+        };
+        let choices: Vec<&str> = hint.iter().map(String::as_str).collect();
+        g.hint_any(&choices);
+    }
+
+    fn draw_yours_list(&mut self, g: &mut Gfx, kind: Kind) {
+        let lists = account::lists();
+        let shown = yours_shown(&lists, kind, &self.narrow);
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
+        let width = W - 2.0 * PAD - 5.0;
+        if shown.is_empty() {
+            let (icon, none) = if kind == Kind::Album { ("album", "no saved albums on youtube music yet") } else { ("artist", "no artists in your library yet") };
+            g.empty(icon, if self.narrow.is_empty() { none } else { "none has that in its name" });
+            self.narrow_hint(g);
+            return;
+        }
+        for (i, y) in self.list.layout(g, shown.len(), top, row_h, 3.0, bottom) {
+            collection_row(g, Rect::new(PAD, y, width, row_h), &shown[i], i == self.list.focus);
+        }
+        self.list.scrollbar(g, shown.len(), top, bottom);
+        self.narrow_hint(g);
     }
 }
 
@@ -1457,6 +1685,21 @@ fn art_row(g: &mut Gfx, r: Rect, art_of: &Track, name: &str, byline: &str, value
     if title_w + 30.0 < room && !byline.is_empty() {
         g.text_fit(x + title_w + 6.0, r.cy(), byline, ty.caption, t.dim, room - title_w - 6.0);
     }
+}
+
+/// A playlist's line as who made it and how many songs it has:
+/// "Thomas · 25 songs" → ("Thomas", "25"); "Auto playlist" as it is.
+fn playlist_line(byline: &str) -> (String, String) {
+    let mut parts: Vec<&str> = byline.split(" · ").collect();
+    let count = parts.last().and_then(|last| {
+        let (n, what) = last.split_once(' ')?;
+        let counted = n.chars().next().is_some_and(|c| c.is_ascii_digit()) && n.chars().all(|c| c.is_ascii_digit() || c == ',' || c == '.');
+        (counted && matches!(what, "song" | "songs" | "track" | "tracks" | "episode" | "episodes" | "video" | "videos")).then(|| n.to_owned())
+    });
+    if count.is_some() {
+        parts.pop();
+    }
+    (parts.join(" · "), count.unwrap_or_default())
 }
 
 /// An album, artist or playlist found.
@@ -1502,6 +1745,12 @@ mod tests {
             "waiting",
             "in the library",
             "offline",
+            "on youtube music",
+            "your library",
+            "your likes",
+            "saved albums",
+            "your artists",
+            "sign in from a computer",
         ];
         for size in [crate::gfx::TextSize::Standard, crate::gfx::TextSize::Large] {
             g.set_text_size(size);
@@ -1510,6 +1759,61 @@ mod tests {
                 assert!(g.measure(s, caption) <= W - 2.0 * PAD, "{s:?} at {size:?}");
             }
         }
+    }
+
+    #[test]
+    fn your_library_shows_signed_in_only_and_its_lists_open_and_narrow() {
+        let _one_at_a_time = super::super::tests::SIGNING_IN.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut settings, mut robot) = (crate::shell::Settings::default(), Robot::none());
+        let mut say = None;
+        let mut screen = MusicScreen::blank(false);
+        let mut press = |screen: &mut MusicScreen, key: Key| screen.key(key, &mut Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true });
+        // Signed out: nothing of it, and no lists.
+        super::super::signed_in_for_shots(false);
+        assert!(!screen.start_rows().contains(&StartRow::Yours));
+        assert!(account::lists().is_empty());
+        // Signed in: a row of its own, and the lists as last seen, at once.
+        super::super::signed_in_for_shots(true);
+        assert!(screen.start_rows().contains(&StartRow::Yours));
+        let lists = account::lists();
+        assert_eq!(yours_rows(&lists)[..4], [YoursRow::Likes, YoursRow::Albums, YoursRow::Artists, YoursRow::Playlist(0)]);
+        assert_eq!(lists.playlists[0].title, "Liked music");
+        // Its albums, narrowed by typing; Esc gives all of them back, then goes back.
+        screen.push(Page::Yours);
+        assert_eq!(screen.title(), "Your library");
+        assert!(!screen.wants_text(), "the arrows move");
+        press(&mut screen, Key::Down);
+        press(&mut screen, Key::Enter);
+        assert!(matches!(screen.page, Page::YoursList(Kind::Album)) && screen.wants_text());
+        for c in "low".chars() {
+            press(&mut screen, Key::Char(c));
+        }
+        let shown = yours_shown(&account::lists(), Kind::Album, &screen.narrow);
+        assert_eq!(shown.iter().map(|c| c.title.as_str()).collect::<Vec<_>>(), ["Low Water"]);
+        press(&mut screen, Key::Back);
+        assert!(screen.narrow.is_empty() && matches!(screen.page, Page::YoursList(_)));
+        press(&mut screen, Key::Back);
+        assert!(matches!(screen.page, Page::Yours) && screen.list.focus == 1, "back where it was");
+        // Offline, a list none of which is on the card says so (and asks nothing).
+        assert!(card_copy(&lists.playlists[1]).is_none());
+        // Signed out again: gone, and forgotten.
+        super::super::signed_in_for_shots(false);
+        assert!(account::lists().is_empty() && !screen.start_rows().contains(&StartRow::Yours));
+        assert!(!store::root().join("your-library.json").exists());
+    }
+
+    #[test]
+    fn a_playlists_count_goes_to_the_right_of_its_row() {
+        assert_eq!(playlist_line("Thomas · 25 songs"), ("Thomas".into(), "25".into()));
+        assert_eq!(playlist_line("Catalyst · 1,204 songs"), ("Catalyst".into(), "1,204".into()));
+        assert_eq!(playlist_line("12 episodes"), (String::new(), "12".into()));
+        assert_eq!(playlist_line("Auto playlist"), ("Auto playlist".into(), String::new()));
+        assert_eq!(playlist_line("Thomas · 2024 Remixes"), ("Thomas · 2024 Remixes".into(), String::new()));
+    }
+
+    #[test]
+    fn how_long_ago_your_library_was_listed_reads_plainly() {
+        assert_eq!((ago(20), ago(300), ago(3 * 3600), ago(86_400), ago(3 * 86_400)), ("just now".into(), "5 min ago".into(), "3 h ago".into(), "24 h ago".into(), "3 days ago".into()));
     }
 
     #[test]

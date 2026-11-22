@@ -183,6 +183,16 @@ pub fn cache_pair(id: &str) -> (PathBuf, PathBuf) {
     (store::cache_dir().join(format!("{id}.jpg")), store::cache_dir().join(format!("{id}-small.jpg")))
 }
 
+/// A list's small cover (a playlist, album or artist in your library on
+/// YouTube Music), kept in the cache so lists show it offline too.
+pub fn keep_small(track: &Track) -> bool {
+    let (_, small) = cache_pair(&track.id);
+    if small.exists() {
+        return true;
+    }
+    load(track).filter(|p| !p.is_empty()).is_some_and(|p| write_jpeg(&p, &small))
+}
+
 /// An album folder's covers.
 pub fn folder_pair(dir: &Path) -> (PathBuf, PathBuf) {
     (dir.join("cover.jpg"), dir.join("cover-small.jpg"))

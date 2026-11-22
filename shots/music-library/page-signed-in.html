@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Set up Catalyst Linux</title>
+<style>
+:root{--ground:#0d0e12;--card:#16171c;--line:#2b2d35;--ink:#f4f4f6;--thin:#8d919a;--crimson:#e94560}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(120% 80% at 20% 0%,#1b1c22 0%,var(--ground) 60%);color:var(--ink);font:15px/1.45 "Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,sans-serif;min-height:100vh}
+main{max-width:640px;margin:0 auto;padding:40px 20px 64px}
+header{display:flex;align-items:center;gap:14px;margin-bottom:28px}
+header svg{width:44px;height:44px;flex:none}
+.word{font-size:26px;letter-spacing:-.02em}.word b{font-weight:700}.word span{font-weight:300;color:var(--thin)}
+.rule{height:1px;background:linear-gradient(90deg,var(--crimson),transparent);margin:-14px 0 28px}
+section{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px 20px;margin:0 0 14px}
+h2{font-size:13px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--thin);margin:0 0 12px}
+label{display:block;margin:0 0 12px;font-weight:500}
+label small{font-weight:400;color:var(--thin);margin-left:6px}
+input,select,textarea{display:block;width:100%;margin-top:6px;background:#0f1014;border:1px solid var(--line);border-radius:10px;color:var(--ink);font:inherit;padding:10px 12px}
+textarea{font-family:ui-monospace,"Cascadia Code",monospace;font-size:13px;resize:vertical}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--ink);outline-offset:1px;border-color:transparent}
+.check{display:flex;align-items:center;gap:10px;font-weight:400}.check input{width:18px;height:18px;margin:0;accent-color:var(--crimson)}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:12px}.quad{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+@media(max-width:520px){.pair,.quad{grid-template-columns:1fr 1fr}}
+.hint{color:var(--thin);margin:-4px 0 12px}.hint.small{font-size:13px;margin:0}
+.state{margin:-4px 0 12px;font-weight:500}.state::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#4cc38a;margin-right:8px;vertical-align:1px}
+input[type=file]{padding:8px 10px;color:var(--thin)}input[type=file]::file-selector-button{font:inherit;color:var(--ink);background:var(--line);border:0;border-radius:8px;padding:6px 12px;margin-right:12px;cursor:pointer}
+button{width:100%;margin-top:8px;padding:14px;border:0;border-radius:999px;background:var(--crimson);color:#fff;font:600 16px/1 inherit;font-family:inherit;cursor:pointer}
+button:focus-visible{outline:2px solid var(--ink);outline-offset:3px}
+.error{background:#3a1a22;border:1px solid #6e2a3a;color:#ffd7de;border-radius:12px;padding:12px 16px}
+.done{text-align:center;padding:40px 20px}.done h1{font-size:28px;margin:0 0 8px}
+</style></head><body><main>
+<header><svg viewBox="0 0 512 512" aria-hidden="true"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#191a20"/><stop offset=".55" stop-color="#101116"/><stop offset="1" stop-color="#08090b"/></linearGradient><radialGradient id="l"><stop offset="0" stop-color="#e94560" stop-opacity=".3"/><stop offset="1" stop-color="#e94560" stop-opacity="0"/></radialGradient></defs><rect width="512" height="512" rx="114" fill="url(#g)"/><circle cx="256" cy="256" r="196" fill="url(#l)"/><path transform="translate(88 88) scale(14)" d="M13.5 2 5 13h5l-1.5 9L19 10h-5.5z" fill="#e94560"/></svg>
+<div class="word"><b>Catalyst</b> <span>Linux</span></div></header>
+<div class="rule"></div>
+
+
+<form method="post" action="/" enctype="multipart/form-data" autocomplete="off">
+  <section>
+    <h2>Code</h2>
+    <label>The six digits on the handheld's screen
+      <input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autofocus></label>
+  </section>
+  <section>
+    <h2>Robot</h2>
+    <label>Team number <small>the robot is then at 10.TE.AM.2</small>
+      <input name="team" inputmode="numeric" pattern="[0-9]{1,5}" maxlength="5"></label>
+  </section>
+  <section>
+    <h2>Wi-Fi</h2>
+    <p class="hint">For updates and the event schedule. The robot only needs its cable.</p>
+    <div class="pair"><label>Network<input name="ssid1"></label><label>Password<input name="psk1" type="password"></label></div>
+    <div class="pair"><label>Another network<input name="ssid2"></label><label>Password<input name="psk2" type="password"></label></div>
+  </section>
+  <section>
+    <h2>Keys for online services</h2>
+    <label>The Blue Alliance <small>read API key</small><input name="tba" spellcheck="false"></label>
+    <label>FRC Nexus <small>for live queueing</small><input name="nexus" spellcheck="false"></label>
+  </section>
+  <section>
+    <h2>Assistant</h2>
+    <p class="hint">The assistant answers questions about the robot with either service; one key is enough. Each is paid for by use on the account it comes from.</p>
+    <label>OpenAI <small>GPT-6.2 Sol · a key from platform.openai.com, API keys</small><input name="openai" spellcheck="false"></label>
+    <label>Claude <small>Claude Opus 5.5 · a key from platform.claude.com, API keys</small><input name="claude" spellcheck="false"></label>
+  </section>
+  <section>
+    <h2>Git</h2>
+    <p class="hint">For Git on the handheld: your repositories, their history, pulling and pushing.</p>
+    <label>GitHub <small>a token with repository access, from github.com, Settings, Developer settings</small><input name="github" spellcheck="false"></label>
+  </section>
+  <section>
+    <h2>YouTube Music</h2>
+    <p class="hint">Sign in once, and your playlists, albums and artists are in Music on the handheld. On this computer, open music.youtube.com signed in and export its cookies as cookies.txt with a browser extension (Get cookies.txt LOCALLY in Chrome or Edge, cookies.txt in Firefox).</p>
+    <p class="state">Signed in already. Left empty, the sign-in is kept.</p>
+    <label>cookies.txt <small>the file</small><input type="file" name="cookies_file" accept=".txt,text/plain"></label>
+    <label>Or its text <small>pasted</small><textarea name="cookies" rows="3" spellcheck="false" autocomplete="off" placeholder="signed in already: left empty, it is kept"></textarea></label>
+    <p class="hint small">For a sign-in that lasts, export from a private window, then close it: a browser that stays on YouTube renews its cookies, and the copy stops working. Third-party players like this one can break YouTube's terms, which could put the account at risk.</p>
+  </section>
+  <section>
+    <h2>SSH</h2>
+    <label>Your public key <small>ssh-ed25519 …</small><textarea name="ssh_key" rows="2" spellcheck="false"></textarea></label>
+  </section>
+  <section>
+    <h2>Choices</h2>
+    <p class="hint">As the handheld has them now.</p>
+    <input type="hidden" name="choices" value="1">
+    <label class="check"><input type="checkbox" name="open_robot" checked> Open Robot when one is plugged in</label>
+    <label class="check"><input type="checkbox" name="match_report" checked> Show how the last match went</label>
+    <label class="check"><input type="checkbox" name="ssh"> SSH access</label>
+    <label class="check"><input type="checkbox" name="calm"> Calm version: less motion, no transparency</label>
+  </section>
+  <section>
+    <h2>Look</h2>
+    <p class="hint">As the handheld has it now.</p>
+    <div class="quad">
+      <label>Accent<select name="accent"><option value="orange">orange</option><option value="blue">blue</option><option value="green">green</option><option value="violet">violet</option><option value="rose" selected>rose</option></select></label>
+      <label>Mode<select name="mode"><option value="dark" selected>dark</option><option value="light">light</option></select></label>
+      <label>Text<select name="text"><option value="standard" selected>standard</option><option value="compact">compact</option><option value="large">large</option></select></label>
+      <label>Home<select name="home"><option value="grid" selected>grid</option><option value="carousel">carousel</option><option value="flow">flow</option></select></label>
+    </div>
+  </section>
+  <button type="submit">Send to the handheld</button>
+</form>
+</main></body></html>

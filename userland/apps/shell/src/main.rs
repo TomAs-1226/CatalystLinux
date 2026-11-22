@@ -1752,6 +1752,10 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
         };
         return music_shots(&mut shell, &press, &save, &settle);
     }
+    // Or only your library on YouTube Music, and signing in from a computer.
+    if std::env::var("CATALYST_SHOTS_ONLY").as_deref() == Ok("music-library") {
+        return music_library_shots(dir);
+    }
     // From Files to Settings, however many apps lie between.
     let files_to_settings: Vec<Key> =
         [Ctrl('q'), Back].into_iter().chain(std::iter::repeat_n(Right, steps_to("Settings") - steps_to("Files"))).chain([Enter]).collect();
@@ -3473,6 +3477,169 @@ fn music_shots(shell: &mut Shell, press: &dyn Fn(&mut Shell, &[Key], usize), sav
             std::process::exit(1);
         }
     }
+}
+
+/// Your library on YouTube Music (the simulator's made-up one, signed in),
+/// and signing in from a computer: each page in both looks, dark and light,
+/// at each text size; the page the computer is given as HTML beside them.
+/// `CATALYST_SHOTS_ONLY=music-library catalyst-shell --shots <dir>`.
+#[cfg(not(target_arch = "aarch64"))]
+fn music_library_shots(dir: &std::path::Path) {
+    use Key::*;
+    let settle = |shell: &mut Shell, frames: usize| {
+        for _ in 0..frames {
+            if shell.tick(1.0 / 60.0) {
+                shell.draw();
+            }
+        }
+    };
+    let save = |shell: &mut Shell, name: &str| {
+        shell.draw();
+        platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}.png")), 3);
+        println!("{name}");
+    };
+    let press = |shell: &mut Shell, keys: &[Key], frames: usize| {
+        for key in keys {
+            shell.key(*key);
+            settle(shell, frames);
+        }
+    };
+    let real_time = |shell: &mut Shell, seconds: f32| {
+        let until = Instant::now() + Duration::from_secs_f32(seconds);
+        while Instant::now() < until {
+            settle(shell, 6);
+            std::thread::sleep(Duration::from_millis(40));
+        }
+    };
+    tour_fixtures();
+    music::stop_for_shots();
+    music::forget_downloads_for_shots();
+    let fresh = |theme: look::Theme, light: bool, text: gfx::TextSize| {
+        let mut shell = Shell::new(Robot::demo());
+        (shell.settings.theme, shell.settings.light, shell.settings.text) = (theme, light, text);
+        shell.apply_settings();
+        settle(&mut shell, 100);
+        shell
+    };
+    // Music, signed in, from its start page (nothing playing, nothing downloading).
+    let music_open = |shell: &mut Shell| {
+        shell.show(Box::new(music::MusicScreen::new()));
+        real_time(shell, 0.8);
+        settle(shell, 40);
+    };
+    // A made-up cookies.txt, as a browser extension writes one.
+    let jar = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t1893456000\tSID\tmade-up-sid\n.youtube.com\tTRUE\t/\tTRUE\t1893456000\tSAPISID\tmade-up/sapisid\n#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1893456000\t__Secure-3PSID\tmade-up-3psid\n.google.com\tTRUE\t/\tTRUE\t1893456000\tNID\tmade-up-nid\n";
+    let variants = [
+        ("catalyst-dark-standard", look::Theme::Catalyst, false, gfx::TextSize::Standard),
+        ("catalyst-light-compact", look::Theme::Catalyst, true, gfx::TextSize::Compact),
+        ("catalyst-dark-large", look::Theme::Catalyst, false, gfx::TextSize::Large),
+        ("bezel-light-standard", look::Theme::Bezel, true, gfx::TextSize::Standard),
+        ("bezel-dark-compact", look::Theme::Bezel, false, gfx::TextSize::Compact),
+        ("bezel-light-large", look::Theme::Bezel, true, gfx::TextSize::Large),
+    ];
+    let mut missing = std::collections::BTreeSet::new();
+    for (name, theme, light, text) in variants {
+        music::signed_in_for_shots(true);
+        let mut shell = fresh(theme, light, text);
+        music_open(&mut shell);
+        // Search, Library, then Your library.
+        press(&mut shell, &[Down, Down], 20);
+        save(&mut shell, &format!("1-start-{name}"));
+        press(&mut shell, &[Enter], 40);
+        save(&mut shell, &format!("2-your-library-{name}"));
+        press(&mut shell, &[Down, Down, Down], 20);
+        save(&mut shell, &format!("3-liked-music-{name}"));
+        press(&mut shell, &[End], 30);
+        save(&mut shell, &format!("4-playlists-{name}"));
+        press(&mut shell, &[Home, Down, Enter], 40);
+        save(&mut shell, &format!("5-albums-{name}"));
+        press(&mut shell, &[Back, Down, Enter], 40);
+        save(&mut shell, &format!("6-artists-{name}"));
+        // A playlist opened: play, shuffle, download it all.
+        press(&mut shell, &[Back, Down, Down, Enter], 30);
+        real_time(&mut shell, 0.7);
+        settle(&mut shell, 30);
+        save(&mut shell, &format!("7-playlist-{name}"));
+        press(&mut shell, &[Down, Down, Enter], 20);
+        save(&mut shell, &format!("8-download-confirm-{name}"));
+        // Signed out, the account page says how to sign in.
+        music::signed_in_for_shots(false);
+        let mut out = fresh(theme, light, text);
+        music_open(&mut out);
+        press(&mut out, &[End, Enter], 40);
+        real_time(&mut out, 0.4);
+        settle(&mut out, 30);
+        save(&mut out, &format!("9-account-signed-out-{name}"));
+        // What a computer sent, the sign-in among it, arrived.
+        let sent = remote::answers(&remote::parse_form(&format!("team=5805&ssid1=Workshop&psk1=hunter22&tba=abcdefgh12345678wxyz&cookies={}&accent=rose&mode={}&choices=1&open_robot=on", urlencoded(jar), if light { "light" } else { "dark" })));
+        assert!(sent.cookies.is_some(), "the made-up cookies sign in");
+        let mut received = fresh(theme, light, text);
+        received.show(Box::new(setup::Setup::showing_received(&sent)));
+        settle(&mut received, 260);
+        save(&mut received, &format!("10-setup-received-{name}"));
+        for g in [&shell.gfx, &out.gfx, &received.gfx] {
+            missing.extend(g.missing_icons().iter().cloned());
+        }
+    }
+    // Once: the first time, asking; downloading a playlist; offline.
+    music::signed_in_for_shots(true);
+    music::forget_library_for_shots();
+    let mut shell = fresh(look::Theme::Catalyst, false, gfx::TextSize::Standard);
+    shell.show(Box::new(music::MusicScreen::new()));
+    settle(&mut shell, 20);
+    press(&mut shell, &[Down, Down], 8);
+    press(&mut shell, &[Enter], 36);
+    save(&mut shell, "11-your-library-asking");
+    real_time(&mut shell, 1.2);
+    settle(&mut shell, 30);
+    save(&mut shell, "12-your-library-arrived");
+    press(&mut shell, &[Down, Down, Down, Down, Enter], 30);
+    real_time(&mut shell, 0.7);
+    settle(&mut shell, 30);
+    press(&mut shell, &[Down, Down, Enter, Enter], 30);
+    real_time(&mut shell, 0.5);
+    settle(&mut shell, 20);
+    save(&mut shell, "13-playlist-downloading");
+    // Saved, and the island's word on it come and gone.
+    real_time(&mut shell, 19.0);
+    settle(&mut shell, 30);
+    save(&mut shell, "14-playlist-downloaded");
+    missing.extend(shell.gfx.missing_icons().iter().cloned());
+    music::polite::OFFLINE_FOR_TESTS.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut offline = fresh(look::Theme::Catalyst, false, gfx::TextSize::Standard);
+    music::stop_for_shots();
+    offline.show(Box::new(music::MusicScreen::new()));
+    settle(&mut offline, 40);
+    // Offline Music opens on the card's library: back to the start, then
+    // Your library (after Search, Library and Downloads).
+    press(&mut offline, &[Back, Down, Down, Down, Enter], 30);
+    save(&mut offline, "15-your-library-offline");
+    // The playlist downloaded opens from the card.
+    press(&mut offline, &[Down, Down, Down, Down, Enter], 30);
+    save(&mut offline, "16-playlist-offline-from-the-card");
+    music::polite::OFFLINE_FOR_TESTS.store(false, std::sync::atomic::Ordering::Relaxed);
+    missing.extend(offline.gfx.missing_icons().iter().cloned());
+    music::signed_in_for_shots(false);
+    music::forget_downloads_for_shots();
+    // The page a computer is given, signed out and signed in, and with a
+    // refusal, to look at in a browser.
+    let mut now = remote::Now::read();
+    now.music = false;
+    std::fs::write(dir.join("page-signed-out.html"), remote::page_for_shots(&now, None)).ok();
+    now.music = true;
+    std::fs::write(dir.join("page-signed-in.html"), remote::page_for_shots(&now, None)).ok();
+    let why = remote::cookies_given(&[("cookies".into(), "{\"domain\": \".youtube.com\"}".into())]).err().unwrap_or_default();
+    std::fs::write(dir.join("page-refused.html"), remote::page_for_shots(&now, Some(&format!("Nothing was changed: the YouTube Music cookies would not sign in ({why}).")))).ok();
+    if !missing.is_empty() {
+        eprintln!("icons asked for that are not built in: {}", missing.into_iter().collect::<Vec<_>>().join(", "));
+        std::process::exit(1);
+    }
+}
+
+/// Text as a form sends it.
+#[cfg(not(target_arch = "aarch64"))]
+fn urlencoded(s: &str) -> String {
+    s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
 }
 
 /// The robot's top-level tables, as Tables lists them.

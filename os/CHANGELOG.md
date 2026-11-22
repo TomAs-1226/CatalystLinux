@@ -10,6 +10,13 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.6.8
+
+### Music
+- Sign in to YouTube Music from a computer: Settings › Set up from a computer takes the cookies.txt a browser extension exports from music.youtube.com, chosen as a file or pasted. It checks the cookies sign in, keeps only YouTube's, and never shows them again; left empty, the sign-in stays as it is.
+- Signed in, Your library in Music has your playlists (Liked music first), the albums you saved and your artists, as YouTube Music lists them. Each opens to play, shuffle or download all for offline.
+- Your library shows at once, offline too: it is kept on the card and brought up to date in the background whenever Music opens online. Offline, a playlist you downloaded opens from the card.
+
 ## 0.6.7
 
 ### Fixed
