@@ -20,7 +20,10 @@ export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$BUILD/output/host/bin/aa
 export CC_aarch64_unknown_linux_musl="$BUILD/output/host/bin/aarch64-linux-gcc"
 export AR_aarch64_unknown_linux_musl="$BUILD/output/host/bin/aarch64-linux-ar"
 export CFLAGS_aarch64_unknown_linux_musl="-mcpu=cortex-a53"
-export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-cpu=cortex-a53 -C target-feature=-crt-static"
+# Without the A53's optional AES and SHA instructions, as build-shell.sh
+# builds it: the CM0 lacks them, and code tested with them assumed is not
+# the code the handheld runs.
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-cpu=cortex-a53 -C target-feature=-crt-static,-aes,-sha2"
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUNNER="$HERE/scripts/arm-run.sh"
 
 cd "$HERE/userland"

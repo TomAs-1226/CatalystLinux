@@ -504,7 +504,7 @@ pub struct Talk {
     pub calm: bool,
     /// What the island shows, set by the gallery to check each state over
     /// each screen without talking.
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub staged: Option<Island>,
 }
 
@@ -520,7 +520,7 @@ impl Talk {
             clock: 0.0,
             note: None,
             calm: false,
-            #[cfg(not(target_arch = "aarch64"))]
+            #[cfg(any(test, not(target_arch = "aarch64")))]
             staged: None,
         }
     }
@@ -685,7 +685,7 @@ impl Talk {
 
     /// What the island shows, while there is something to.
     pub fn island(&self) -> Option<Island> {
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(any(test, not(target_arch = "aarch64")))]
         if let Some(staged) = &self.staged {
             return Some(staged.clone());
         }

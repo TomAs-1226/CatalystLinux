@@ -139,6 +139,7 @@ mod tools;
 mod trends;
 mod units;
 mod upnext;
+mod vault;
 mod voice;
 mod weather;
 mod wifi;
@@ -416,6 +417,16 @@ fn main() {
     if flag("--passcode-bench") {
         println!("{}", passcode::bench());
         return;
+    }
+    // And what opening the vault takes.
+    if flag("--vault-bench") {
+        println!("{}", vault::bench());
+        return;
+    }
+    // The Vault app's pages, from demo data, in both looks at each text size.
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--vault-shots") {
+        return vault::shots::gallery(std::path::Path::new(&dir));
     }
     // The clock, the battery and the card, measured for sched.rs's choices.
     if let Some(at) = args.iter().position(|a| a == "--sched-bench") {
@@ -4502,6 +4513,7 @@ mod tests {
     /// The gallery's Reminders pictures alone, into CATALYST_SHOTS (or the
     /// temporary folder): `cargo test --profile sim -p catalyst-shell
     /// reminders_gallery -- --ignored`.
+    #[cfg(not(target_arch = "aarch64"))]
     #[test]
     #[ignore]
     fn reminders_gallery() {

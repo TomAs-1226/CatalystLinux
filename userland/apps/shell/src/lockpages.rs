@@ -18,7 +18,7 @@ use crate::shell::{Cx, Nav, Screen};
 
 /// What Settings says of the passcode: what it does, what it does not
 /// cover, and how one forgotten comes off. Numbers keep to their units.
-pub const LOCK_NOTE: &str = "With a passcode, the handheld asks for it once the screen has been off. It keeps out someone at the keys. It does not cover SSH, the setup page a computer opens, or the card itself: anyone can take the card out and read it. Forgotten, it comes off over SSH (rm /data/catalyst/passcode) or from the card on a Linux computer.";
+pub const LOCK_NOTE: &str = "With a passcode, the handheld asks for it once the screen has been off. It keeps out someone at the keys. It does not cover SSH, the setup page a computer opens, or the card itself: anyone can take the card out and read it. Forgotten, it comes off over SSH (rm /data/catalyst/passcode) or from the card on a Linux computer; the Vault it opens is lost with it.";
 const NO_PASSCODE: &str = "No passcode: a key wakes it straight to where it was.";
 
 fn standby_note(h24: bool) -> String {
@@ -177,6 +177,11 @@ impl Screen for LockPage {
         match (row, key) {
             (LockRow::Set, Key::Enter | Key::Right) => Nav::Push(Box::new(PasscodeFlow::new(Purpose::Set))),
             (LockRow::Change, Key::Enter | Key::Right) => Nav::Push(Box::new(PasscodeFlow::new(Purpose::Change))),
+            // The vault opens with the passcode alone: it stays on while there is one.
+            (LockRow::TurnOff, Key::Enter | Key::Right) if crate::vault::needs_passcode() => {
+                *cx.say = Some("the vault needs a passcode".into());
+                Nav::Stay
+            }
             (LockRow::TurnOff, Key::Enter | Key::Right) => Nav::Push(Box::new(PasscodeFlow::new(Purpose::Remove))),
             (LockRow::Customise, Key::Enter | Key::Right) => Nav::Push(Box::new(Editor::new())),
             (LockRow::Previews, Key::Enter | Key::Left | Key::Right) => {
@@ -288,9 +293,14 @@ impl PasscodeFlow {
                     return;
                 }
                 let mut typed = self.field.take();
+                let changing = self.purpose == Purpose::Change;
                 let (tx, rx) = std::sync::mpsc::channel();
                 let spawned = std::thread::Builder::new().name("passcode".into()).stack_size(256 * 1024).spawn(move || {
                     let right = passcode::check(&typed, &phc);
+                    // Changing it: the vault's key is held, to wrap again under the new one.
+                    if right && changing {
+                        crate::vault::rewrap_begin(&typed);
+                    }
                     passcode::wipe(&mut typed);
                     tx.send(right).ok();
                 });
@@ -325,11 +335,12 @@ impl PasscodeFlow {
                 let (tx, rx) = std::sync::mpsc::channel();
                 let spawned = std::thread::Builder::new().name("passcode".into()).stack_size(256 * 1024).spawn(move || {
                     let made = passcode::make(&new);
-                    passcode::wipe(&mut new);
+                    // The vault moves to the new passcode as it is kept (and back, should keeping fail).
                     let result = match made {
-                        Some((phc, _, _)) => passcode::keep(&phc).map_err(|e| format!("could not keep it: {e}")),
+                        Some((phc, _, _)) => crate::vault::rewrap_with(&new, &phc, || passcode::keep(&phc)),
                         None => Err("could not make the passcode".into()),
                     };
+                    passcode::wipe(&mut new);
                     tx.send(result).ok();
                 });
                 if spawned.is_ok() {
@@ -343,6 +354,10 @@ impl PasscodeFlow {
 impl Drop for PasscodeFlow {
     fn drop(&mut self) {
         passcode::wipe(&mut self.first);
+        // A change given up: the vault's key held for it is wiped.
+        if self.purpose == Purpose::Change && self.making.is_none() {
+            crate::vault::rewrap_cancel();
+        }
     }
 }
 
@@ -382,6 +397,15 @@ impl Screen for PasscodeFlow {
     }
 
     fn update(&mut self, cx: &mut Cx) -> Nav {
+        // Changing it, the screen went off (or two minutes passed): the
+        // vault's key held for the change was wiped, so the passcode there is
+        // is asked for again.
+        if self.purpose == Purpose::Change && self.step != Step::Current && !self.working() && crate::vault::rewrap_voided() {
+            passcode::wipe(&mut self.first);
+            self.field.clear();
+            self.step = Step::Current;
+            self.wrong = Some("locked meanwhile · type it again".into());
+        }
         if let Some(rx) = &self.checking {
             match rx.try_recv() {
                 Ok(true) => {

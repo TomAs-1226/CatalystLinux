@@ -125,12 +125,19 @@ fn salt() -> [u8; 16] {
 /// The cost to make a new hash at, given that `COST` took `took` here: the
 /// largest of the same shape within the budget, never under the floor.
 pub fn fitted(took: Duration) -> Cost {
+    fitted_to(COST, BUDGET_MS, took)
+}
+
+/// As [`fitted`], for another cost and budget (the vault's): given that
+/// `base` took `took` here, the largest of its shape within `budget_ms`,
+/// never under the floor's memory.
+pub fn fitted_to(base: Cost, budget_ms: f32, took: Duration) -> Cost {
     let ms = took.as_secs_f32() * 1000.0;
-    if ms <= BUDGET_MS {
-        return COST;
+    if ms <= budget_ms {
+        return base;
     }
-    let m = (COST.work() * BUDGET_MS / ms / COST.t as f32) as u32;
-    Cost { m_kib: (m / 1024 * 1024).clamp(FLOOR.m_kib, COST.m_kib), ..COST }
+    let m = (base.work() * budget_ms / ms / base.t as f32) as u32;
+    Cost { m_kib: (m / 1024 * 1024).clamp(FLOOR.m_kib, base.m_kib), ..base }
 }
 
 /// A new passcode's hash, sized for this handheld: (the PHC string, the
@@ -180,13 +187,15 @@ pub fn test_store() -> PathBuf {
     dir
 }
 
+/// The tests' quick cost, on a thread that asked for one (the vault's
+/// hashes take it too).
 #[cfg(test)]
-fn test_cost() -> Option<Cost> {
+pub(crate) fn test_cost() -> Option<Cost> {
     TEST_COST.with(std::cell::Cell::get)
 }
 
 #[cfg(not(test))]
-fn test_cost() -> Option<Cost> {
+pub(crate) fn test_cost() -> Option<Cost> {
     None
 }
 
