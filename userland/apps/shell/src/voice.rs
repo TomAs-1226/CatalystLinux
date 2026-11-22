@@ -1342,6 +1342,8 @@ mod tests {
         assert_eq!(talk.tick(0.02, false, true, None), None, "and nothing to say about it");
     }
 
+    // The galleries' own helpers: not in the handheld's build.
+    #[cfg(not(target_arch = "aarch64"))]
     #[test]
     fn alt_wakes_it_from_deep_standby_and_that_press_is_spent() {
         let mut shell = home();
@@ -1361,6 +1363,8 @@ mod tests {
         run(&mut shell, 0.1);
     }
 
+    // The galleries' own helpers: not in the handheld's build.
+    #[cfg(not(target_arch = "aarch64"))]
     #[test]
     fn a_title_gives_way_to_an_island_grown_over_it_and_comes_back_whole() {
         let mut shell = home();

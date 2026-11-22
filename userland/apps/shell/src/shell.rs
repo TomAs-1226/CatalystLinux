@@ -259,6 +259,15 @@ pub struct Cx<'a> {
     pub at_rest: bool,
 }
 
+/// Set by a screen that changed `Cx::settings` in its `update` (a key's
+/// changes are drawn anyway): the shell draws them at once.
+static SETTINGS_CHANGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The settings were changed outside a key: apply them.
+pub fn settings_changed() {
+    SETTINGS_CHANGED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub enum Nav {
     Stay,
     /// A page deeper in the same app: slides in from the right.
@@ -1198,6 +1207,13 @@ impl Shell {
     /// pacing measurement.
     pub fn top_title(&self) -> &str {
         self.stack.last().map_or("", |(screen, _)| screen.title())
+    }
+
+    /// The screen in front is at work (a question being answered): the
+    /// Assistant's gallery waits for it to finish.
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn top_busy(&self) -> bool {
+        self.stack.last().is_some_and(|(screen, _)| screen.busy())
     }
 
     /// First start: setup, over Home, for the start animation to give way to.
@@ -2178,6 +2194,11 @@ impl Shell {
             }
             if !matches!(nav, Nav::Stay) {
                 self.follow(nav);
+                self.apply_settings();
+                moving = true;
+            } else if SETTINGS_CHANGED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                // A screen changed the settings with no key pressed (the
+                // assistant, when a tool comes back): drawn as they are now.
                 self.apply_settings();
                 moving = true;
             }
@@ -3706,8 +3727,14 @@ impl Shell {
         // at all while it is off.
         let unix = chrono::Utc::now().timestamp();
         let sources = crate::liveactivity::Sources { robot: &self.robot, update: &self.update, unix };
-        // Music in front shows the song itself: no card over it.
-        self.activities.quiet = self.stack.last().filter(|(s, _)| s.title() == "Music").map(|_| crate::liveactivity::Kind::Music);
+        // Music in front shows the song itself: no card over it; nor over
+        // the Assistant, whose steps show in the conversation (the island
+        // keeps its compact line).
+        self.activities.quiet = self.stack.last().and_then(|(s, _)| match s.title() {
+            "Music" => Some(crate::liveactivity::Kind::Music),
+            "Assistant" => Some(crate::liveactivity::Kind::Assistant),
+            _ => None,
+        });
         let (acts_moving, acts_changed) = self.activities.tick(dt, motion_dt, lit, calm, &sources);
         // Tab held towards a lock: the cue fills as it is held, and draws
         // back if it is let go first.

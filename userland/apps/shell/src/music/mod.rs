@@ -58,6 +58,16 @@ use crate::shell::{Cx, Screen};
 
 pub use player::{media_key, playing, tile};
 
+/// The assistant's shots: no downloads asked for and none saved, so each
+/// set starts as the first did.
+#[cfg(not(target_arch = "aarch64"))]
+pub fn forget_downloads_for_shots() {
+    for item in downloads::items() {
+        downloads::cancel(item.n);
+    }
+    std::fs::remove_dir_all(store::library_dir()).ok();
+}
+
 /// The tour: nothing playing (to show what Music opens on then).
 #[cfg(not(target_arch = "aarch64"))]
 pub fn stop_for_shots() {
@@ -798,6 +808,92 @@ fn know(tracks: &[Track]) {
     let over = known.len().saturating_sub(KNOWN_KEPT);
     known.drain(..over);
     KNOWN_CHANGED.fetch_add(1, Ordering::Relaxed);
+}
+
+// ------------------------------------------------------- for the assistant ---
+
+/// Songs found for a search (the assistant plays them; this waits for the network).
+pub fn find_songs(query: &str) -> Result<Vec<Track>, String> {
+    search(query)
+}
+
+/// Play `list` from its first song.
+pub fn play_list(list: Vec<Track>) {
+    player::play(list, 0, false);
+}
+
+/// An album, playlist or artist opened, its songs put in the download
+/// queue: how many were added (those saved already are left out).
+pub fn save_opened(o: &Opened, from: &str) -> usize {
+    downloads::add(o.tracks.iter().cloned().zip(o.metas.iter().cloned()).collect(), from, o.playlist.as_deref())
+}
+
+/// What songs will take on the card, about.
+pub fn estimate(tracks: &[Track]) -> u64 {
+    downloads::estimate(tracks)
+}
+
+/// Of these songs, how many are on the card already, and how many wait in
+/// the download queue.
+pub fn saved_or_waiting(tracks: &[Track]) -> (usize, usize) {
+    let items = downloads::items();
+    let on_card = tracks.iter().filter(|t| t.local.is_some() || library::by_youtube(&t.id).is_some() || items.iter().any(|i| i.track.id == t.id && matches!(i.state, downloads::State::Done(_)))).count();
+    let waiting = tracks.iter().filter(|t| items.iter().any(|i| i.track.id == t.id && matches!(i.state, downloads::State::Waiting | downloads::State::Active))).count();
+    (on_card, waiting)
+}
+
+/// The downloads waiting, and those that failed.
+pub fn downloads_pending() -> (usize, usize) {
+    let items = downloads::items();
+    let waiting = items.iter().filter(|i| matches!(i.state, downloads::State::Waiting | downloads::State::Active)).count();
+    (waiting, items.iter().filter(|i| matches!(i.state, downloads::State::Failed(_))).count())
+}
+
+/// The failed downloads tried again, and the queue woken: how many failed.
+pub fn retry_downloads() -> usize {
+    let failed = downloads_pending().1;
+    downloads::retry_failed();
+    fetch::wake();
+    failed
+}
+
+/// Why downloads are held back now, if they are ("waiting for Wi-Fi").
+pub fn download_wait() -> Option<&'static str> {
+    fetch::waits(true)
+}
+
+/// What playing comes to after the assistant's pause, carry on, next or
+/// back: what was done ("paused"), and the song it is on.
+pub fn control(action: &str) -> Result<(String, String), String> {
+    use player::Phase;
+    let now = player::now();
+    let Some(track) = now.track().cloned() else { return Err("nothing is playing".into()) };
+    let song = format!("{} · {}", track.title, track.artist);
+    let playing = matches!(now.phase, Phase::Playing | Phase::Loading);
+    match action {
+        "pause" if !playing => Ok(("paused already".into(), song)),
+        "resume" if playing => Ok(("playing already".into(), song)),
+        "pause" | "resume" => {
+            player::toggle();
+            Ok((if playing { "paused".into() } else { "playing again".into() }, song))
+        }
+        "next" => match now.queue.get(now.at + 1) {
+            Some(next) => {
+                player::next();
+                Ok(("next song".into(), format!("{} · {}", next.title, next.artist)))
+            }
+            None => Err("this is the last song in the queue".into()),
+        },
+        "previous" => {
+            player::previous();
+            let back = (now.position <= player::RESTART_AFTER && now.at > 0).then(|| &now.queue[now.at - 1]);
+            Ok(match back {
+                Some(t) => ("back a song".into(), format!("{} · {}", t.title, t.artist)),
+                None => ("from the start".into(), song),
+            })
+        }
+        other => Err(format!("music cannot {other}")),
+    }
 }
 
 /// Music in Spotlight: the songs it knows, played from there, and, for

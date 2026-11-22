@@ -134,6 +134,8 @@ pub enum Link {
     Note(String),
     /// The pit checklist.
     Checklist,
+    /// A briefing, in the Assistant (`crate::ai::briefing`).
+    Briefing,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -657,6 +659,7 @@ fn to_json(r: &Reminder) -> Value {
         Link::None => Value::Null,
         Link::Note(file) => json!({ "note": file }),
         Link::Checklist => json!("checklist"),
+        Link::Briefing => json!("briefing"),
     };
     json!({
         "id": r.id, "text": r.text, "list": r.list.name(), "when": when, "repeat": repeat, "link": link,
@@ -698,6 +701,7 @@ fn from_json(v: &Value) -> Option<Reminder> {
     };
     let link = match &v["link"] {
         Value::String(s) if s == "checklist" => Link::Checklist,
+        Value::String(s) if s == "briefing" => Link::Briefing,
         o => o["note"].as_str().map_or(Link::None, |f| Link::Note(f.to_owned())),
     };
     Some(Reminder {
@@ -977,7 +981,7 @@ pub fn tile() -> (String, Option<&'static str>) {
     })
 }
 
-/// What a reminder opens: its note in the editor, or the pit checklist.
+/// What a reminder opens: its note in the editor, the pit checklist, or a briefing.
 pub fn opens(link: &Link) -> Result<Box<dyn crate::shell::Screen>, &'static str> {
     match link {
         Link::Note(file) => match crate::files::Editor::open(&crate::notes::dir().join(file)) {
@@ -985,6 +989,7 @@ pub fn opens(link: &Link) -> Result<Box<dyn crate::shell::Screen>, &'static str>
             Err(_) => Err("that note is gone"),
         },
         Link::Checklist => Ok(Box::new(crate::pit::Checklist::new())),
+        Link::Briefing => Ok(Box::new(crate::ai::Assistant::briefing())),
         Link::None => Err("nothing to open"),
     }
 }

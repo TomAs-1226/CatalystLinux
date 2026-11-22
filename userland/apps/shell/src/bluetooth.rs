@@ -263,6 +263,13 @@ fn act(work: Work, address: String) -> Result<String, String> {
     }
 }
 
+/// Bluetooth switched on or off, waited for (the assistant, on a thread of
+/// its own, once the person said yes): what the script said ("restart"
+/// the first time it is switched on).
+pub fn switch(on: bool) -> Result<String, String> {
+    act(if on { Work::On } else { Work::Off }, String::new())
+}
+
 // ------------------------------------------------------------------ demo ---
 
 struct Demo {

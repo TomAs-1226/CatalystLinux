@@ -433,6 +433,7 @@ impl Screen for Reminders {
                 let open = match row.link {
                     Link::Note(_) => Some("o: open note"),
                     Link::Checklist => Some("o: checklist"),
+                    Link::Briefing => Some("o: briefing"),
                     Link::None => None,
                 };
                 match open {
@@ -487,6 +488,7 @@ impl Reminders {
             let marks: Vec<&str> = [row.repeats.then_some("sync"), match row.link {
                 Link::Note(_) => Some("sticky_note_2"),
                 Link::Checklist => Some("checklist"),
+                Link::Briefing => Some("auto_awesome"),
                 Link::None => None,
             }]
             .into_iter()
@@ -765,6 +767,7 @@ impl Screen for Compose {
                     match (&p.link, mode) {
                         (_, Mode::Note { .. }) => "opens the note".to_owned(),
                         (Link::Checklist, _) => format!("{} list · opens the checklist", list.name()),
+                        (Link::Briefing, _) => format!("{} list · opens a briefing", list.name()),
                         _ => format!("{} list", list.name()),
                     }
                 };
