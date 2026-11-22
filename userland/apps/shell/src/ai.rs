@@ -1847,6 +1847,8 @@ impl Assistant {
             None => self.push(Entry::Said(answer.text.clone())),
         }
         let basis = match &answer.worded_by {
+            // "lfm2.5 230m's own knowledge, not the logs" names it already.
+            Some(model) if answer.lines.is_empty() && answer.basis.contains(&model.to_lowercase()) => answer.basis.clone(),
             Some(model) if answer.lines.is_empty() => format!("{} · {}", answer.basis, model.to_lowercase()),
             Some(model) => format!("{} · worded by {}, checked", answer.basis, model.to_lowercase()),
             None => answer.basis.clone(),
@@ -2314,6 +2316,9 @@ impl Assistant {
         if self.input.is_empty() {
             let words = match &self.busy {
                 Busy::Idle if self.offering() => "or type a question",
+                // With a model downloaded it answers anything, the match
+                // logs from their facts and the rest from what it knows.
+                Busy::Idle if self.offline_mode() && crate::local::ready() => "ask anything, or about a match",
                 Busy::Idle if self.offline_mode() => "ask about a match",
                 Busy::Idle | Busy::Approving { .. } => "type, or hold alt to talk",
                 Busy::Offline { ready: Some(_), .. } => "esc: the answer from the facts now",

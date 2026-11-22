@@ -354,12 +354,15 @@ fn word(m: &dyn Model, tier: model::Tier, question: &str, lib: &Library, answer:
     answer.draft = Some(draft);
 }
 
-/// Not a question about the robot: the model's own answer, said to be
-/// that; or with no model, what offline answers are.
+/// Not a question the match logs answer (a chat, or one the rules could not
+/// place and no model sorted): the model's own answer, said to be that; with
+/// no model, what offline answers are; and when the model could not answer,
+/// why (not enough memory free, say), never the same few words as if there
+/// were no model at all.
 fn chat(question: &str, plan: Plan, model: Option<&dyn Model>, on: &mut dyn FnMut(Event)) -> Answer {
     let help = "Offline, I answer from the match logs on this handheld: ask what went wrong in a match, why it browned out, whether a motor ran hot, what CAN did, or to compare two matches. Ctrl R gives the newest match's report.";
     let blank = |text: String, basis: &str| Answer { text, report: None, basis: basis.to_owned(), worded_by: None, lines: Vec::new(), plan: plan.clone(), draft: None, routed_by_model: false };
-    let Some(m) = model.filter(|_| plan.intent == Intent::Chat) else { return blank(help.into(), "offline") };
+    let Some(m) = model else { return blank(help.into(), "offline") };
     on(Event::Wording(m.name()));
     let body = model::body(crate::ai::LOCAL_SYSTEM, &[("user", question)], 160, None);
     match m.chat(&body, 90).and_then(|v| model::reply(&v)) {
@@ -368,7 +371,8 @@ fn chat(question: &str, plan: Plan, model: Option<&dyn Model>, on: &mut dyn FnMu
             a.worded_by = Some(m.name());
             a
         }
-        _ => blank(help.into(), "offline"),
+        Ok(_) => blank(format!("{} gave no answer to that. Ask again, or ask about a match.", m.name()), "offline"),
+        Err(why) => blank(format!("The on-device model could not answer: {why}."), "offline"),
     }
 }
 

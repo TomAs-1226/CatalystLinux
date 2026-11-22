@@ -392,6 +392,21 @@ pub fn room_for(model: &Model, available: Option<u64>) -> Result<(), String> {
     }
 }
 
+/// The model to answer with: the chosen one if there is room for it now,
+/// else the biggest smaller one downloaded that has room (the handheld at
+/// rest has about 370 MB free: the 350M needs 380 with its headroom, the
+/// 230M 310). When none has room, why the chosen one cannot answer.
+pub fn fitting(dir: &Path, chosen: &'static Model, available: Option<u64>) -> Result<&'static Model, String> {
+    match room_for(chosen, available) {
+        Ok(()) => Ok(chosen),
+        Err(why) => MODELS
+            .iter()
+            .filter(|m| m.peak_mb < chosen.peak_mb && present(dir, m) && room_for(m, available).is_ok())
+            .max_by_key(|m| m.peak_mb)
+            .ok_or(why),
+    }
+}
+
 /// Whether memory is short enough that a model waiting (loaded, not
 /// answering) should give its memory back now.
 pub fn memory_short(available: Option<u64>) -> bool {
@@ -735,6 +750,35 @@ mod tests {
         let why = room_for(small, Some(100)).unwrap_err();
         assert!(!why.contains("smaller model"), "nothing smaller to choose: {why}");
         assert!(room_for(big, None).is_ok(), "unknown memory: it may try");
+    }
+
+    #[test]
+    fn without_room_for_the_chosen_model_the_biggest_that_has_room_answers() {
+        let dir = std::env::temp_dir().join(format!("catalyst-fitting-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Downloaded and checked, as sparse files of the right size.
+        let have = |m: &Model| {
+            std::fs::File::create(path(&dir, m)).unwrap().set_len(m.size).unwrap();
+            std::fs::write(checked_mark(&dir, m), format!("{}\n", m.sha256)).unwrap();
+        };
+        let (fastest, balanced, smartest) = (&MODELS[0], &MODELS[1], &MODELS[2]);
+        have(fastest);
+        have(balanced);
+        have(smartest);
+        // The handheld at rest, measured: 366 MB free. The 350M needs 380.
+        assert_eq!(fitting(&dir, smartest, Some(366)).unwrap().id, balanced.id);
+        assert_eq!(fitting(&dir, smartest, Some(400)).unwrap().id, smartest.id, "room: the one chosen");
+        assert_eq!(fitting(&dir, smartest, None).unwrap().id, smartest.id, "unknown memory: the one chosen");
+        // Music playing too: down to the smallest.
+        assert_eq!(fitting(&dir, smartest, Some(290)).unwrap().id, fastest.id);
+        // Only downloaded ones stand in.
+        remove(&dir, balanced);
+        assert_eq!(fitting(&dir, smartest, Some(366)).unwrap().id, fastest.id);
+        // Never a bigger one than chosen, and with room for none, why.
+        assert_eq!(fitting(&dir, fastest, Some(400)).unwrap().id, fastest.id);
+        let why = fitting(&dir, smartest, Some(100)).unwrap_err();
+        assert!(why.contains(smartest.name) && why.contains("100 MB"), "{why}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

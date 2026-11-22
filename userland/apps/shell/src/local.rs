@@ -81,6 +81,9 @@ static TRYING: AtomicU32 = AtomicU32::new(0);
 static AWAY: AtomicBool = AtomicBool::new(false);
 /// Asked to stop while a model was loading: the load, once done, gives up.
 static STOP_ASKED: AtomicBool = AtomicBool::new(false);
+/// The model the running server has, by its place in `MODELS`: the chosen
+/// one, or a smaller one standing in while there is no room for it.
+static ANSWERING_WITH: AtomicU32 = AtomicU32::new(u32::MAX);
 
 fn server() -> std::sync::MutexGuard<'static, Option<Running>> {
     SERVER.lock().unwrap_or_else(|e| e.into_inner())
@@ -90,16 +93,29 @@ fn server() -> std::sync::MutexGuard<'static, Option<Running>> {
 
 /// Whether the chosen model is downloaded and checked. (The assistant's
 /// "On this handheld" asks; until that lands, nothing here does.)
+/// Looked at again at most every two seconds: pages ask while they draw.
 #[allow(dead_code)]
 pub fn ready() -> bool {
-    let dir = lm::dir();
-    lm::present(&dir, lm::chosen(&dir))
+    thread_local! {
+        static SEEN: std::cell::Cell<Option<(Instant, bool)>> = const { std::cell::Cell::new(None) };
+    }
+    SEEN.with(|seen| match seen.get() {
+        Some((at, ready)) if at.elapsed() < Duration::from_secs(2) && !cfg!(test) => ready,
+        _ => {
+            let dir = lm::dir();
+            let ready = lm::present(&dir, lm::chosen(&dir));
+            seen.set(Some((Instant::now(), ready)));
+            ready
+        }
+    })
 }
 
-/// The chosen model's name, "LFM2.5 230M".
+/// The name of the model answering, "LFM2.5 230M": the one loaded while
+/// one is, else the chosen one.
 #[allow(dead_code)]
 pub fn model_name() -> &'static str {
-    lm::chosen(&lm::dir()).name
+    let loaded = MODELS.get(ANSWERING_WITH.load(Ordering::Relaxed) as usize).filter(|_| PID.load(Ordering::Relaxed) != 0);
+    loaded.unwrap_or_else(|| lm::chosen(&lm::dir())).name
 }
 
 /// The chosen model, for what else to know of it (whether llama-server
@@ -114,10 +130,10 @@ pub fn model() -> &'static Model {
 /// its own, only when a question needs it: loading takes seconds.
 pub fn start() -> Result<String, String> {
     let dir = lm::dir();
-    let model = lm::chosen(&dir);
+    let chosen = lm::chosen(&dir);
     // Before anything that answers on the port is taken for it.
-    if !lm::present(&dir, model) {
-        return Err(format!("{} is not downloaded: Settings › On-device model", model.name));
+    if !lm::present(&dir, chosen) {
+        return Err(format!("{} is not downloaded: Settings › On-device model", chosen.name));
     }
     // Someone is asking: someone is looking.
     AWAY.store(false, Ordering::SeqCst);
@@ -140,6 +156,10 @@ pub fn start() -> Result<String, String> {
     if lm::healthy() {
         return Ok(lm::base_url());
     }
+    // The chosen model, or, with no room for it now (the 350M needs more
+    // than the handheld has free with Music on), the biggest one downloaded
+    // that has room: an answer from a smaller model rather than none.
+    let model = lm::fitting(&dir, chosen, lm::available_mb())?;
     // A live activity while it loads (seconds, from the card).
     let _loading = crate::liveactivity::task(crate::liveactivity::Kind::Assistant, format!("Loading {}", model.name), "on-device model");
     let mut child = lm::spawn_server(&dir, model)?;
@@ -151,6 +171,7 @@ pub fn start() -> Result<String, String> {
     }
     let (pid, cpu) = (child.id(), cpu_time(child.id()));
     *running = Some(Running { child, last: Instant::now(), cpu });
+    ANSWERING_WITH.store(MODELS.iter().position(|m| m.id == model.id).map_or(u32::MAX, |i| i as u32), Ordering::SeqCst);
     PID.store(pid, Ordering::SeqCst);
     drop(running);
     reap_when_done();
