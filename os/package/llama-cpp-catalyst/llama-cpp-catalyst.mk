@@ -16,6 +16,11 @@
 # choice would not show there). One CPU build, no runtime-loaded backends, no
 # OpenMP runtime to carry, no model downloads of its own (the shell fetches
 # and checks models itself).
+#
+# The version is Buildroot's (b8117), which runs every model Settings offers
+# (SmolLM2's llama, Liquid's LFM2.5 as lfm2, with its tool-call parser) and
+# was measured with them on the handheld. How llama-server is run (threads,
+# priority, batches, cache) is in userland/crates/localmodel.
 ifeq ($(BR2_PACKAGE_LLAMA_CPP),y)
 LLAMA_CPP_CONF_OPTS += \
 	-DGGML_NATIVE=OFF \

@@ -1282,11 +1282,14 @@ pub(crate) fn request_local_within(body: &Value, seconds: u32) -> Result<Value, 
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|_| "curl could not start".to_owned())?;
+    // Under way: `local::cancel` cuts it (and the answer) short.
+    crate::local::answering(Some(child.id()));
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(body.to_string().as_bytes()).map_err(|_| "the question could not be sent".to_owned())?;
     }
-    let output = child.wait_with_output().map_err(|_| "the on-device model stopped".to_owned())?;
-    crate::local::touch();
+    let output = child.wait_with_output().map_err(|_| "the on-device model stopped".to_owned());
+    crate::local::answering(None);
+    let output = output?;
     if !output.status.success() {
         return Err(match output.status.code() {
             Some(7) => "the on-device model is not running".into(),
@@ -2132,7 +2135,9 @@ impl Assistant {
     }
 
     /// Stop what is under way: the answer, a tool, or a question waiting.
+    /// The on-device model stops writing at once.
     fn stop(&mut self) {
+        crate::local::cancel();
         let running = matches!(self.busy, Busy::Tool { .. });
         self.busy = Busy::Idle;
         if let Some(chat) = &mut self.chat {
@@ -2389,6 +2394,15 @@ fn wrap_paragraphs(g: &mut Gfx, text: &str, style: bezel::TextStyle, width: f32)
     lines
 }
 
+impl Drop for Assistant {
+    /// Closed for good while the on-device model answers: it stops writing.
+    fn drop(&mut self) {
+        if !self.idle() && matches!(self.service, Some((Service::Local, _))) {
+            crate::local::cancel();
+        }
+    }
+}
+
 impl Screen for Assistant {
     fn title(&self) -> &str {
         "Assistant"
@@ -2404,6 +2418,14 @@ impl Screen for Assistant {
 
     fn busy(&self) -> bool {
         !self.idle()
+    }
+
+    /// Left while the on-device model answers: it stops, rather than writing
+    /// on where nobody reads it (a service on the internet carries on).
+    fn set_aside(&mut self) {
+        if !self.idle() && matches!(self.service, Some((Service::Local, _))) {
+            self.stop();
+        }
     }
 
     /// Push-to-talk here asks it: what was said is the question.
@@ -2562,7 +2584,7 @@ impl Screen for Assistant {
         // A question heard, left alone long enough: it goes.
         if self.countdown.is_some_and(|left| left <= 0.0) {
             self.countdown = None;
-            self.send();
+            self.send(cx.robot);
         }
         // Back from the confirm page with an answer.
         if matches!(self.busy, Busy::Approving { .. }) {

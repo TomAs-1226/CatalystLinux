@@ -1144,6 +1144,73 @@ fn motion(dir: &std::path::Path) {
     println!("motion in {}", dir.display());
 }
 
+/// Settings › On-device model: its row, the page with nothing downloaded,
+/// a download part way, the default in use with an answer it gave, and the
+/// fastest and smartest focused (stand-in files of the models' sizes,
+/// accepted as checked). At the text size given, else the one set.
+#[cfg(not(target_arch = "aarch64"))]
+fn model_shots(dir: &std::path::Path, text: Option<gfx::TextSize>) {
+    use Key::*;
+    let settle = |shell: &mut Shell, frames: usize| {
+        for _ in 0..frames {
+            if shell.tick(1.0 / 60.0) {
+                shell.draw();
+            }
+        }
+    };
+    let save = |shell: &mut Shell, name: &str| {
+        shell.draw();
+        platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}.png")), 3);
+    };
+    let press = |shell: &mut Shell, keys: &[Key], frames: usize| {
+        for key in keys {
+            shell.key(*key);
+            settle(shell, frames);
+        }
+    };
+    let models = config_dir().join("models");
+    std::fs::remove_dir_all(&models).ok();
+    std::env::set_var("CATALYST_MODELS", &models);
+    let mut shell = Shell::new(Robot::demo());
+    if let Some(size) = text {
+        shell.settings.text = size;
+    }
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    press(&mut shell, &vec![Right; steps_to("Settings")], 20);
+    press(&mut shell, &[Enter], 90);
+    press(&mut shell, &vec![Down; screens::settings_row("On-device model")], 20);
+    save(&mut shell, "112-settings-on-device-model");
+    press(&mut shell, &[Enter], 90);
+    save(&mut shell, "112b-on-device-model");
+    shell.show(Box::new(local::ModelPage::showing_download(localmodel::DEFAULT, 0.37)));
+    settle(&mut shell, 90);
+    save(&mut shell, "112c-on-device-model-downloading");
+    // The default and the fastest here, the default in use.
+    std::fs::create_dir_all(&models).ok();
+    for model in [&localmodel::MODELS[localmodel::DEFAULT], &localmodel::MODELS[0]] {
+        if let Ok(stand_in) = std::fs::File::create(localmodel::partial(&models, model)) {
+            stand_in.set_len(model.size).ok();
+        }
+        localmodel::accept(&models, model, model.sha256).ok();
+    }
+    localmodel::set_chosen(&models, &localmodel::MODELS[localmodel::DEFAULT]).ok();
+    shell.show(Box::new(local::ModelPage::showing_answer("A brownout is when the battery sags so low that the robot's controller cuts power to the motors to keep itself running.")));
+    settle(&mut shell, 90);
+    save(&mut shell, "112d-on-device-model-answer");
+    shell.show(Box::new(local::ModelPage::new().showing_loaded(191)));
+    settle(&mut shell, 90);
+    save(&mut shell, "112g-on-device-model-loaded");
+    shell.show(Box::new(local::ModelPage::new().focused_on(0)));
+    settle(&mut shell, 90);
+    save(&mut shell, "112e-on-device-model-fastest");
+    shell.show(Box::new(local::ModelPage::new().focused_on(localmodel::MODELS.len() - 1)));
+    settle(&mut shell, 90);
+    save(&mut shell, "112f-on-device-model-smartest");
+    std::fs::remove_dir_all(&models).ok();
+    std::env::remove_var("CATALYST_MODELS");
+}
+
 /// The assistant offline: with no key it answers on this handheld, from the
 /// demo robot's match logs. The questions it offers, an answer and what it
 /// rests on, a follow-up, a match's report (no model), two matches compared,
@@ -2538,35 +2605,7 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     // The assistant again with no key: offline, from the match logs.
     offline_shots(dir);
 
-    // Settings › On-device model: its row, the page with nothing downloaded,
-    // a download part way, and the model here with an answer it gave (a
-    // stand-in file of the model's size, accepted as checked).
-    let models = config_dir().join("models");
-    std::fs::remove_dir_all(&models).ok();
-    std::env::set_var("CATALYST_MODELS", &models);
-    let mut shell = Shell::new(Robot::demo());
-    shell.apply_settings();
-    settle(&mut shell, 100);
-    press(&mut shell, &vec![Right; steps_to("Settings")], 20);
-    press(&mut shell, &[Enter], 90);
-    press(&mut shell, &vec![Down; screens::settings_row("On-device model")], 20);
-    save(&mut shell, "112-settings-on-device-model");
-    press(&mut shell, &[Enter], 90);
-    save(&mut shell, "112b-on-device-model");
-    shell.show(Box::new(local::ModelPage::showing_download(0.37)));
-    settle(&mut shell, 90);
-    save(&mut shell, "112c-on-device-model-downloading");
-    let model = &localmodel::MODELS[0];
-    std::fs::create_dir_all(&models).ok();
-    if let Ok(stand_in) = std::fs::File::create(localmodel::partial(&models, model)) {
-        stand_in.set_len(model.size).ok();
-    }
-    localmodel::accept(&models, model, model.sha256).ok();
-    shell.show(Box::new(local::ModelPage::showing_answer("A brownout is when the battery sags so low that the robot's controller cuts power to the motors to keep itself running.")));
-    settle(&mut shell, 90);
-    save(&mut shell, "112d-on-device-model-answer");
-    std::fs::remove_dir_all(&models).ok();
-    std::env::remove_var("CATALYST_MODELS");
+    model_shots(dir, None);
     // The tools: Calculator (an answer, then programmer mode), Units (torque),
     // Notes (the list, a search), Clock (timers running, the stopwatch with
     // laps, the world), HTTP (a request to the demo robot's agent, its

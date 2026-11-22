@@ -1975,11 +1975,13 @@ sign-in token, which Anthropic allows only in its own apps.
 
 The on-device model is asked the same way, over plain HTTP to its server on
 the handheld itself (`127.0.0.1` only; curl is held to `http` there), in
-OpenAI's chat-completions shape (`POST /chat/completions`). Asked about the
-robot, it words facts it is given (below); asked anything else, it answers
-from what it knows, with no tools and no web. Its server is started when it
-is first asked and stopped when the service is changed away from it (and,
-by Settings' on-device model, after a while unasked).
+OpenAI's chat-completions shape (`POST /chat/completions`, at most 400
+tokens back). Asked about the robot, it words facts it is given (below); asked
+anything else, it answers from what it knows, with no tools and no web, and
+its server is started when it is first asked and stopped when the service
+is changed away from it, two minutes after its last answer, or when the
+screen goes off (see On-device model). Esc, or leaving the Assistant while
+it writes, stops the answer at once.
 
 - OpenAI: the Responses API, `store: false`, so nothing is kept on OpenAI's
   side between turns; every turn sends the conversation back, reasoning
@@ -2154,35 +2156,125 @@ The on-device model has no web, so Browse needs an OpenAI or Claude key.
 
 A small language model that runs on the handheld itself, with no network
 and no key: for the Assistant app when it is chosen there, and for `ai` in
-the Terminal. Settings › On-device model chooses one, downloads it, tries it
-with one question, and removes it.
+the Terminal. Settings › On-device model lists three, named for what each
+is for. Enter downloads one, uses one already downloaded, and asks the one
+in use a question; d twice removes one (or stops its download, which
+carries on from where it was next time). Above the list is what the focused
+one is, as measured: its pace, its size and what it is like. The one in use
+says whether it is loaded and the memory it holds, and u unloads it now.
 
-| Model | File | In use while answering | Like |
-|---|---|---|---|
-| SmolLM2 135M (default) | 145 MB | about 190 MB | light; simple answers |
-| SmolLM2 360M | 271 MB | about 305 MB | better; slower |
+| | Model | File | Writes | Reads | First word, 300-token log | Memory | Checks |
+|---|---|---|---|---|---|---|---|
+| Fastest | SmolLM2 135M, 4-bit | 92 MB | 11.0 tokens/s | 19.8 tokens/s | 15 s | 165 MB | 9 of 25 |
+| Balanced (default) | LFM2.5 230M, 4-bit | 149 MB | 8.1 tokens/s | 16.2 tokens/s | 19 s | 210 MB | 17 of 25 |
+| Smartest | LFM2.5 350M, 4-bit | 219 MB | 5.9 tokens/s | 9.5 tokens/s | 32 s | 280 MB | 15 of 25 |
 
-Both are Hugging Face's SmolLM2 Instruct (Apache-2.0) as GGUF files
-quantised by bartowski (135M at 8 bits, 360M at 4), each pinned in
-`userland/crates/localmodel` by its size and SHA-256. Neither is in the image:
-one is downloaded when asked for, over HTTPS with curl, to `/data/models`,
-carrying on after a dropped connection, and kept only if its sum checks out.
-Be honest about them: they are quick and offline, fine for short answers and
-wording, often wrong on facts, and they have none of the assistant's tools
-(they cannot see the robot or run Actions). So for the robot they only word
-facts worked out for them, and every word is checked (*Offline answers*).
+Measured on the handheld (llama.cpp b8117, three threads, as it is run
+here); "Memory" is llama-server's resident memory at its largest while
+answering; "Checks" is a fixed check of 25 about a robot's match log
+(below). They are GGUF files pinned in `userland/crates/localmodel` by
+size and SHA-256: SmolLM2 (Hugging Face, Apache-2.0, quantised by
+bartowski) and LFM2.5 (Liquid AI, LFM Open License v1.0, free for anyone
+under US$10 million a year in revenue, which a team is; quantised by
+Liquid). None is in the image: one is downloaded when asked for, over HTTPS
+with curl, to `/data/models`, carrying on after a dropped connection, and
+kept only if its sum checks out. Be honest about them: they are quick and
+offline, fine for short answers, wording and pulling facts out of text they
+are given, often wrong about anything they are not given, and they have
+none of the assistant's tools (they cannot see the robot or run Actions).
+0.5.4's two (SmolLM2 135M at 8 bits, which is no better than at 4, and
+SmolLM2 360M) are taken off the card when the page opens; a handheld that
+had chosen the 135M still has it chosen.
+So for the robot they only word facts worked out for them, and every word
+is checked (*Offline answers*).
 
-It runs as llama.cpp's `llama-server` (Buildroot's `llama-cpp`, b8117), only
-while something asks: on 127.0.0.1:8088, one conversation, three threads
-(the fourth core stays the shell's), at a lower priority than the shell, and
-stopped after three minutes unasked, so it costs nothing at rest. Memory is
-what limits it on 512 MB, so it runs with an 8-bit attention cache (flash
-attention), batches of 128 and the model mapped from the card; measured
-under emulation, llama's own buffers come to 185 MB for the 135M (model 136,
-cache 24, working space 25) and 302 MB for the 360M, and a model is not
-started unless the kernel says that much and 40 MB more is free (the 360M
-then asks for other apps to be closed). Every other llama.cpp tool is taken
-out of the image (41 MB).
+**How they were chosen.** From a survey of small instruct models (late
+2026, each checked on Hugging Face), nine were run on the handheld at
+several quantisations: SmolLM2 135M and 360M, LFM2.5 230M and 350M, Granite
+4.0 H 350M, MNN-Pocket 0.3B, Gemma 3 270M, and the bigger Qwen3 0.6B and
+LFM2 700M. For each: reading and writing speed at two, three and four
+threads, memory, heat, the shell's frame times beside it, and the checks:
+ten questions about a match log (the score, the lowest voltage and when,
+which motor overheated and its CAN ID…), ten harder ones (by how much they
+lost, how long the climb took, the seconds between two faults…), a JSON
+summary asked for in words and held to a schema, and two tool calls through
+llama-server's own `tools`, all at temperature 0, scored the same way. Also
+timed: the offline log analysis's shape, the log kept and about 100 fresh
+tokens of facts and a question each time, up to 120 written (LFM2.5 230M
+14 s a question, SmolLM2 18 s, LFM2.5 350M 20 s, Gemma 17 s).
+
+- LFM2.5 230M is the default: the best on the checks, both tool calls
+  right, the quickest at the log analysis's questions, in 210 MB.
+- SmolLM2 135M is the fastest writer, and at 4 bits as right as at 8 (and
+  48 MB lighter); it makes things up most.
+- LFM2.5 350M is the largest that fits with room to spare, the best of
+  these on Liquid's own instruction-following test (77 against 72), level
+  with the 230M on these checks and slower.
+- Not offered: Gemma 3 270M (its answers keep closest to the facts given,
+  but it holds 363 MB while answering, more than fits with room to spare,
+  writes slowly through its 262,000-word vocabulary, and scored 11 of 25 at
+  8 bits); Granite 4.0 H 350M (359 MB, 7 of 15); MNN-Pocket 0.3B (slower
+  than LFM2.5 230M and behind it); SmolLM2 360M; Qwen3 0.6B and LFM2 700M,
+  whose 382 and 446 MB files leave no room: with zram on they load, but
+  write 0.3 tokens a second while the shell is swapped out.
+
+What the A53 can do sets the rules. Without a dot-product instruction,
+reading is bound by arithmetic (2 to 3 billion multiply-adds a second on
+three cores) and writing by memory, so the pace follows the model's size,
+and a model of 500 MB or more (Qwen3.5 0.8B, Gemma 3 1B, Llama 3.2 1B,
+LFM2.5 1.2B) would read a 300-token question for over a minute where it
+fits at all. 4-bit files read as fast as 8-bit ones here and write faster
+(less to move), in half the memory.
+
+**How it runs.** llama.cpp's `llama-server` (Buildroot's `llama-cpp`,
+b8117), on 127.0.0.1:8088, one conversation at a time, by these rules:
+
+- Nothing runs until a question needs it: never at boot, never because a
+  page is open.
+- Two minutes after its last question or answer it is stopped, and all its
+  memory comes back (measured: 372 MB free before, 186 MB held loaded, 371
+  MB free after). Two minutes because a follow-up in that time is answered
+  at once, while starting again costs about 10 s (9.6 s for LFM2.5 230M off
+  the card, 13 s for the 350M), little beside the 20 to 35 s a question
+  with a log in it takes to read.
+- When nobody is looking (the screen off, StandBy's faces, locked) it is
+  stopped within a second, or straight after the answer it is writing.
+- An answer given up on (Esc, or leaving the Assistant while it writes)
+  stops at once: the Assistant's request is cut, and llama-server stops
+  writing when its asker goes (measured: from three cores' work to none
+  within half a second).
+- Loaded and waiting it uses no processor time (measured: 0.05% over
+  20 s, after an answer as before one).
+- It never needs swap. Only models that fit in RAM with the shell's 30 MB
+  and 100 MB to spare are offered; one is started only with its memory and
+  100 MB more free now (MemAvailable, which counts no swap), else it says
+  what to close; one waiting gives its memory back at once when less than
+  60 MB is free; and the kernel kills it first should memory run out
+  (`oom_score_adj` 800, set before it maps a byte).
+- Every thread of it runs at nice 10 from its first instruction, on three
+  of the four cores: with all three working, a 60 Hz task at the shell's
+  priority missed no frames (p99 under 11 ms). Four threads read 21%
+  faster but reached 80 °C, where the firmware lowers the clock of
+  everything, within 50 s, and wrote no faster; two stay at 71 °C but are
+  a third slower.
+- Hot, it waits: at 78 °C it is held still until the processor is back to
+  72 °C (seconds), so the firmware never has to slow the shell. Three
+  threads writing without a pause reach 78 °C after about two minutes;
+  answers are held to 512 tokens (the Assistant asks for at most 400).
+- Memory: an 8-bit attention cache with flash attention (16-bit was slower
+  and larger), batches of 64 (as fast as 512, 25 MB less working space),
+  the model mapped from the card, and none of llama-server's copies of
+  earlier conversations (`--cache-ram 0`; it would otherwise keep up to
+  8 GB).
+
+For JSON, ask with a schema (`localmodel::chat_body_json`): llama-server's
+grammar holds the answer to it, so it always parses (the values are still
+the model's). LFM2.5's tool calls come back as OpenAI-style `tool_calls`.
+LFM2.5 is a hybrid model, and llama-server can only take it back to a point
+it saved, which batches of 64 put 64 tokens before each question's end: a
+second question about the same log is answered in 5 s rather than 18
+(measured, LFM2.5 230M). Every other llama.cpp tool is taken out of the
+image (41 MB).
 
 **Built for this processor.** ggml chooses its kernels when it is compiled,
 so `os/package/llama-cpp-catalyst` pins it: no native guessing,
