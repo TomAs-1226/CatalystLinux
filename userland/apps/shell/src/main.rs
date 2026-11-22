@@ -307,6 +307,14 @@ fn load_settings(settings: &mut shell::Settings) {
     }
 }
 
+/// The settings as saved, read afresh: for the page a computer sets the
+/// handheld up from, which shows what the handheld has now.
+pub fn saved_settings() -> shell::Settings {
+    let mut settings = shell::Settings::default();
+    load_settings(&mut settings);
+    settings
+}
+
 /// Read settings from their file's text; anything not understood is left as it was.
 fn parse_settings(text: &str, settings: &mut shell::Settings) {
     // The glance page's cards from before widgets, kept as widgets unless

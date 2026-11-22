@@ -435,11 +435,73 @@ fn done_page() -> (&'static str, &'static str, String) {
     ("200 OK", "text/html", PAGE.replace("{{body}}", DONE).replace("{{error}}", ""))
 }
 
+/// What the handheld has now, as the page shows it, so that the page sent
+/// back as it came changes nothing. (It showed its own defaults instead:
+/// sent to add one key, it turned SSH off and put the look back to grid,
+/// dark and standard text.)
+#[derive(Clone, Debug, PartialEq)]
+pub struct Now {
+    pub accent: Accent,
+    pub light: bool,
+    pub text: TextSize,
+    pub home: HomeStyle,
+    pub open_robot: bool,
+    pub match_report: bool,
+    pub ssh: bool,
+    pub calm: bool,
+    /// The services a key is set for already.
+    pub keys: Vec<&'static str>,
+}
+
+impl Now {
+    /// Read afresh each time the page is asked for: from the saved settings,
+    /// SSH as it is, and the keys file.
+    pub fn read() -> Now {
+        let s = crate::saved_settings();
+        let keys = Keys::load();
+        Now {
+            accent: s.accent,
+            light: s.light,
+            text: s.text,
+            home: s.home,
+            open_robot: s.open_robot,
+            match_report: s.match_report,
+            ssh: crate::ssh_enabled(),
+            calm: s.calm,
+            keys: SERVICES.iter().filter(|(name, _)| keys.get(name).is_some()).map(|(name, _)| *name).collect(),
+        }
+    }
+}
+
 fn page(error: Option<&str>) -> (&'static str, &'static str, String) {
     let error = error.map_or(String::new(), |e| format!("<p class=\"error\">{e}</p>"));
-    let accents: String = Accent::ALL.iter().map(|a| format!("<option value=\"{0}\">{0}</option>", a.name().to_lowercase())).collect();
-    let body = FORM.replace("{{accents}}", &accents);
+    let body = form(&Now::read());
     ("200 OK", "text/html", PAGE.replace("{{body}}", &body).replace("{{error}}", &error))
+}
+
+/// The form, showing what the handheld has now: the look's choices chosen,
+/// the boxes ticked as they are, and a key already set said to be.
+fn form(now: &Now) -> String {
+    let option = |value: &str, current: bool| format!("<option value=\"{value}\"{}>{value}</option>", if current { " selected" } else { "" });
+    let accents: String = Accent::ALL.iter().map(|a| option(&a.name().to_lowercase(), *a == now.accent)).collect();
+    let modes = option("dark", !now.light) + &option("light", now.light);
+    let texts: String = [TextSize::Standard, TextSize::Compact, TextSize::Large].iter().map(|t| option(t.name(), *t == now.text)).collect();
+    let homes: String = HomeStyle::ALL.iter().map(|h| option(h.name(), *h == now.home)).collect();
+    let checked = |on: bool| if on { " checked" } else { "" };
+    let mut form = FORM
+        .replace("{{accents}}", &accents)
+        .replace("{{modes}}", &modes)
+        .replace("{{texts}}", &texts)
+        .replace("{{homes}}", &homes)
+        .replace("{{open_robot}}", checked(now.open_robot))
+        .replace("{{match_report}}", checked(now.match_report))
+        .replace("{{ssh}}", checked(now.ssh))
+        .replace("{{calm}}", checked(now.calm));
+    for (name, _) in SERVICES {
+        let set = if now.keys.contains(&name) { " placeholder=\"set already: left empty, it is kept\"" } else { "" };
+        form = form.replace(&format!("{{{{{name}}}}}"), set);
+    }
+    form
 }
 
 const DONE: &str = r#"<section class="done"><h1>That's everything.</h1><p>The handheld is putting it in place. You can close this page.</p></section>"#;
@@ -464,19 +526,19 @@ const FORM: &str = r#"
   </section>
   <section>
     <h2>Keys for online services</h2>
-    <label>The Blue Alliance <small>read API key</small><input name="tba" spellcheck="false"></label>
-    <label>FRC Nexus <small>for live queueing</small><input name="nexus" spellcheck="false"></label>
+    <label>The Blue Alliance <small>read API key</small><input name="tba" spellcheck="false"{{tba}}></label>
+    <label>FRC Nexus <small>for live queueing</small><input name="nexus" spellcheck="false"{{nexus}}></label>
   </section>
   <section>
     <h2>Assistant</h2>
     <p class="hint">The assistant answers questions about the robot with either service; one key is enough. Each is paid for by use on the account it comes from.</p>
-    <label>OpenAI <small>GPT-6.2 Sol · a key from platform.openai.com, API keys</small><input name="openai" spellcheck="false"></label>
-    <label>Claude <small>Claude Opus 5.5 · a key from platform.claude.com, API keys</small><input name="claude" spellcheck="false"></label>
+    <label>OpenAI <small>GPT-6.2 Sol · a key from platform.openai.com, API keys</small><input name="openai" spellcheck="false"{{openai}}></label>
+    <label>Claude <small>Claude Opus 5.5 · a key from platform.claude.com, API keys</small><input name="claude" spellcheck="false"{{claude}}></label>
   </section>
   <section>
     <h2>Git</h2>
     <p class="hint">For Git on the handheld: your repositories, their history, pulling and pushing.</p>
-    <label>GitHub <small>a token with repository access, from github.com, Settings, Developer settings</small><input name="github" spellcheck="false"></label>
+    <label>GitHub <small>a token with repository access, from github.com, Settings, Developer settings</small><input name="github" spellcheck="false"{{github}}></label>
   </section>
   <section>
     <h2>SSH</h2>
@@ -484,19 +546,21 @@ const FORM: &str = r#"
   </section>
   <section>
     <h2>Choices</h2>
+    <p class="hint">As the handheld has them now.</p>
     <input type="hidden" name="choices" value="1">
-    <label class="check"><input type="checkbox" name="open_robot" checked> Open Robot when one is plugged in</label>
-    <label class="check"><input type="checkbox" name="match_report" checked> Show how the last match went</label>
-    <label class="check"><input type="checkbox" name="ssh"> SSH access</label>
-    <label class="check"><input type="checkbox" name="calm"> Calm version: less motion, no transparency</label>
+    <label class="check"><input type="checkbox" name="open_robot"{{open_robot}}> Open Robot when one is plugged in</label>
+    <label class="check"><input type="checkbox" name="match_report"{{match_report}}> Show how the last match went</label>
+    <label class="check"><input type="checkbox" name="ssh"{{ssh}}> SSH access</label>
+    <label class="check"><input type="checkbox" name="calm"{{calm}}> Calm version: less motion, no transparency</label>
   </section>
   <section>
     <h2>Look</h2>
+    <p class="hint">As the handheld has it now.</p>
     <div class="quad">
       <label>Accent<select name="accent">{{accents}}</select></label>
-      <label>Mode<select name="mode"><option value="dark">dark</option><option value="light">light</option></select></label>
-      <label>Text<select name="text"><option value="standard">standard</option><option value="compact">compact</option><option value="large">large</option></select></label>
-      <label>Home<select name="home"><option value="grid">grid</option><option value="carousel">carousel</option><option value="flow">flow</option></select></label>
+      <label>Mode<select name="mode">{{modes}}</select></label>
+      <label>Text<select name="text">{{texts}}</select></label>
+      <label>Home<select name="home">{{homes}}</select></label>
     </div>
   </section>
   <button type="submit">Send to the handheld</button>
@@ -557,6 +621,40 @@ mod tests {
         let a = answers(&parse_form("ssh_key=rm+-rf+%2F&team=abc"));
         assert_eq!((a.ssh_key, a.team), (None, None));
         assert_eq!(a.open_robot, None, "no choices section sent: choices left alone");
+    }
+
+    #[test]
+    fn the_page_shows_what_the_handheld_has_so_sent_as_it_came_it_changes_nothing() {
+        let now = Now {
+            accent: Accent::Blue,
+            light: true,
+            text: TextSize::Large,
+            home: HomeStyle::Flow,
+            open_robot: false,
+            match_report: true,
+            ssh: true,
+            calm: false,
+            keys: vec!["claude"],
+        };
+        let html = form(&now);
+        // The look as it is, one choice each.
+        for chosen in ["value=\"blue\" selected", "value=\"light\" selected", "value=\"large\" selected", "value=\"flow\" selected"] {
+            assert!(html.contains(chosen), "{chosen}");
+        }
+        assert_eq!(html.matches(" selected>").count(), 4);
+        // The boxes ticked as they are: SSH stays on.
+        assert!(html.contains("name=\"ssh\" checked") && html.contains("name=\"match_report\" checked"));
+        assert!(!html.contains("name=\"open_robot\" checked") && !html.contains("name=\"calm\" checked"));
+        // A key set already is said to be; the others are not.
+        assert!(html.contains("name=\"claude\" spellcheck=\"false\" placeholder=\"set already"));
+        assert!(html.contains("name=\"openai\" spellcheck=\"false\">"));
+        assert!(!html.contains("{{"), "every blank filled");
+        // What a browser sends for the page as it came, a key pasted in:
+        // the look and choices as they were, the other keys left alone.
+        let sent = answers(&parse_form("code=123456&tba=&nexus=&openai=sk-new&claude=&github=&choices=1&match_report=on&ssh=on&accent=blue&mode=light&text=large&home=flow"));
+        assert_eq!((sent.accent, sent.light, sent.text, sent.home), (Some(now.accent), Some(now.light), Some(now.text), Some(now.home)));
+        assert_eq!((sent.open_robot, sent.match_report, sent.ssh, sent.calm), (Some(now.open_robot), Some(now.match_report), Some(now.ssh), Some(now.calm)));
+        assert_eq!((sent.keys.get("openai"), sent.keys.get("claude")), (Some("sk-new"), None), "the Claude key set already is kept");
     }
 
     #[test]
