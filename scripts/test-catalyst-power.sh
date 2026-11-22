@@ -33,6 +33,7 @@ sed -e "s|^MNT=.*|MNT=$T/boot|" \
 	-e "s|^SYS=.*|SYS=$T/sys|" \
 	-e "s|^RUN=.*|RUN=$T/run|" \
 	-e 's|mount -t vfat -o rw "$BOOT_DEV" "$MNT" \|\| return 1|:|' \
+	-e 's|mount -t vfat -o ro "$BOOT_DEV" "$MNT" \|\| return 1|:|' \
 	-e 's|^\tumount "$MNT"|\t:|' \
 	-e 's|busybox reboot -f|echo REBOOT|' \
 	-e 's|^\t\treboot$|\t\techo REBOOT|' \
@@ -45,6 +46,11 @@ cat >"$T/boot/config.txt" <<'EOF'
 kernel=Image
 dtoverlay=cardputerzero-v5-overlay
 dtoverlay=bq27220_v5
+
+# catalyst-power: the core clock held, so the panel's link holds 62.5 MHz
+core_freq=250
+core_freq_min=250
+# catalyst-power: end
 
 # Which system starts: written by catalyst-update. [all] is the system in
 # use; [tryboot] the one an update is tried in, once, after reboot "0 tryboot".
@@ -134,11 +140,29 @@ rm -f "$T/tryboot"
 echo "== both trials at once"
 $P panel on
 $P undervolt on
-check "both blocks in" "$(grep -c '^# catalyst-power: end$' "$T/boot/config.txt")" "2"
+check "both blocks in, with the clock's" "$(grep -c '^# catalyst-power: end$' "$T/boot/config.txt")" "3"
 $P panel off
 check "the panel's out, the voltage's stays" "$(grep -c '^over_voltage=-1$' "$T/boot/config.txt"):$(grep -c '^dtoverlay=cardputerzero-portrait$' "$T/boot/config.txt")" "1:0"
 $P undervolt off
 check "both out: config.txt as it was" "$(cmp -s "$T/boot/config.txt" "$T/original.txt" && echo same)" "same"
+
+echo "== the panel's clock block, on a handheld updated from before it"
+awk '
+	skip == 1 { if ($0 == "# catalyst-power: end") skip = 2; next }
+	skip == 2 { skip = 0; if ($0 == "") next }
+	index($0, "# catalyst-power: the core clock held") == 1 { skip = 1; next }
+	{ print }
+' "$T/original.txt" >"$T/boot/config.txt"
+check "without it to begin with" "$(grep -c '^core_freq' "$T/boot/config.txt")" "0"
+check "a start puts it in, and nothing else happens" "$($P boot)" ""
+check "the core held at 250, once" "$(grep -c '^core_freq=250$' "$T/boot/config.txt"):$(grep -c '^core_freq_min=250$' "$T/boot/config.txt")" "1:1"
+clock=$(line_of core_freq=250)
+slots=$(grep -n '^# Which system starts:' "$T/boot/config.txt" | cut -d: -f1)
+check "above the system block" "$([ "$clock" -lt "$slots" ] && echo yes)" "yes"
+$P boot >/dev/null
+check "the next start leaves it be" "$(grep -c '^core_freq=250$' "$T/boot/config.txt")" "1"
+check "the system block untouched" "$(sed -n '/^\[all\]$/,$p' "$T/boot/config.txt" | tr '\n' ' ')" "[all] os_prefix=slot-a/ [tryboot] os_prefix=slot-b/ "
+cp "$T/original.txt" "$T/boot/config.txt"
 
 # Deep standby, against a sysfs laid out as the handheld's: Wi-Fi running,
 # a radio unblocked, the USB controller as the host, the Grove output on,

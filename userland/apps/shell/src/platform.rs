@@ -385,6 +385,41 @@ pub trait Platform {
     /// Standby with the screen dark: the panel itself sleeps (`true`), or
     /// wakes and shows the last frame again (`false`). Nothing on a computer.
     fn panel_sleep(&mut self, _asleep: bool) {}
+    /// How long the panel takes over a whole frame, where that is known (the
+    /// frames are paced by it). None on a computer.
+    fn panel_frame(&self) -> Option<Duration> {
+        None
+    }
+}
+
+/// The kernel's own time over a flush before the first pixel leaves: about a
+/// millisecond (measured on the handheld, the panel's framebuffer in cached
+/// memory).
+pub const PANEL_FLUSH_START: Duration = Duration::from_millis(1);
+
+/// How long the panel takes over a whole frame of `frame_bytes`, from its
+/// link's speed: the bytes on the wire and the kernel's start. None when the
+/// speed is not known (`link_hz` 0 or missing: the link's clock moves with
+/// the core's, on a system from before the core was held).
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+pub fn panel_frame_time(link_hz: Option<u64>, frame_bytes: usize) -> Option<Duration> {
+    let hz = link_hz.filter(|hz| *hz > 0)?;
+    Some(Duration::from_secs_f64(frame_bytes as f64 * 8.0 / hz as f64) + PANEL_FLUSH_START)
+}
+
+/// Never exactly one row: the kernel takes a write of one whole row of the
+/// framebuffer for a write of nothing (its sum ends the row at column 0),
+/// so a change that small never reached the panel. The row beside it goes
+/// too (it is what the panel shows already).
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+pub fn never_one_row((first, end): (usize, usize), height: usize) -> (usize, usize) {
+    if end != first + 1 || height < 2 {
+        (first, end)
+    } else if end < height {
+        (first, end + 1)
+    } else {
+        (first - 1, end)
+    }
 }
 
 /// The rows that differ from the frame last shown, as first..end, and note
@@ -654,6 +689,9 @@ pub mod device {
         column: Vec<u32>,
         /// The kernel's text console, held in graphics mode while the shell runs.
         _console: Option<File>,
+        /// How long the panel takes over a whole frame, from its driver's
+        /// `link_hz`, where that is known.
+        panel_frame: Option<Duration>,
     }
 
     /// Tell the kernel's text console to stand aside. The boot line puts it
@@ -770,6 +808,11 @@ pub mod device {
             let (width, height, bpp) = (var[0] as usize, var[1] as usize, var[6] as usize);
             // line_length sits after id[16], smem_start (8), smem_len, type, type_aux, visual, 3 × u16 + pad.
             let stride = u32::from_ne_bytes(fix[48..52].try_into().unwrap()) as usize;
+            // The link's speed, from the panel's driver (next to its
+            // tearing_effect): known when the core clock is held.
+            let name = std::path::Path::new(&fb_path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let link_hz = std::fs::read_to_string(format!("/sys/class/graphics/{name}/device/link_hz")).ok().and_then(|t| t.trim().parse::<u64>().ok());
+            let panel_frame = super::panel_frame_time(link_hz, stride * height);
             let mut device = Device {
                 fb,
                 fb_path,
@@ -791,6 +834,7 @@ pub mod device {
                 turn: (height > width).then(Turn::chosen),
                 column: Vec::new(),
                 _console: quiet_console(),
+                panel_frame,
             };
             device.find_inputs();
             // A shell restarted while the screen was off finds the panel asleep.
@@ -986,6 +1030,7 @@ pub mod device {
                 if first >= end || self.width < canvas.h as usize {
                     return 0.0;
                 }
+                let (first, end) = super::never_one_row((first, end), self.height);
                 turned_rows(canvas, turn, (first, end), self.bytes_per_pixel, self.stride, &mut self.rows, &mut self.column);
                 self.fb.write_all_at(&self.rows, (first * self.stride) as u64).ok();
                 return (end - first) as f32 / self.height.max(1) as f32;
@@ -995,6 +1040,7 @@ pub mod device {
             if first >= end {
                 return 0.0;
             }
+            let (first, end) = super::never_one_row((first, end), self.height.min(canvas.h as usize));
             self.rows.resize((end - first) * self.stride, 0);
             for y in first..end {
                 let src = &canvas.px[y * canvas.w as usize..][..w];
@@ -1017,6 +1063,10 @@ pub mod device {
 
         fn invalidate(&mut self) {
             self.shown.clear();
+        }
+
+        fn panel_frame(&self) -> Option<Duration> {
+            self.panel_frame
         }
 
         fn framebuffer(&self) -> Option<String> {
@@ -1348,6 +1398,28 @@ mod tests {
         assert_eq!(panel_in(&root).as_deref(), Some("/dev/fb0"));
         std::fs::remove_dir_all(&root).ok();
         assert_eq!(panel_in(&root), None, "no framebuffers at all");
+    }
+
+    #[test]
+    fn a_change_of_one_row_is_sent_with_a_row_beside_it() {
+        // The kernel takes a write of exactly one whole row for none.
+        assert_eq!(never_one_row((40, 41), 170), (40, 42));
+        assert_eq!(never_one_row((169, 170), 170), (168, 170), "the last row: the one above");
+        assert_eq!(never_one_row((0, 1), 170), (0, 2));
+        // Two rows or more go as they are.
+        assert_eq!(never_one_row((40, 42), 170), (40, 42));
+        assert_eq!(never_one_row((0, 170), 170), (0, 170));
+    }
+
+    #[test]
+    fn the_panel_takes_a_whole_frame_in_the_time_its_link_allows() {
+        let full = 320 * 170 * 2;
+        // At 62.5 MHz: 13.9 ms on the wire, a millisecond before it.
+        let fast = panel_frame_time(Some(62_500_000), full).unwrap();
+        assert!((14.8..15.0).contains(&(fast.as_secs_f32() * 1000.0)), "{fast:?}");
+        // Not known: none (the link's clock moves with the core's).
+        assert_eq!(panel_frame_time(Some(0), full), None);
+        assert_eq!(panel_frame_time(None, full), None);
     }
 
     #[test]

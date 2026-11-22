@@ -601,7 +601,9 @@ fn main() {
         Beat::new()
     };
     #[cfg(target_arch = "aarch64")]
-    let mut beat = Beat::new();
+    let mut beat = Beat::for_panel(platform.panel_frame());
+    // How long the panel takes over a whole frame, where that is known.
+    let panel_frame = platform.panel_frame().unwrap_or(Duration::ZERO);
     let mut meter = Meter::default();
     let perf = flag("--perf");
     let mut last = Instant::now();
@@ -695,7 +697,7 @@ fn main() {
         // What this frame needed: its own work, and the panel taking what
         // was sent. The beat slows to one the handheld can hold, so frames
         // stay evenly spaced rather than alternating fast and slow.
-        let beats = if part > 0.0 { beat.frame_took(cost + speed.panel.mul_f32(part)) } else { 1 };
+        let beats = if part > 0.0 { beat.frame_and_panel_took(cost + speed.panel.mul_f32(part), panel_frame.mul_f32(part)) } else { 1 };
         next_frame += beat.interval() * beats;
         if !shell.animating() {
             beat.rest();
@@ -710,13 +712,18 @@ fn main() {
 ///
 /// Frames evenly spaced look smooth; frames that alternate fast and slow do
 /// not, however good their average. So the beat is the fastest of a few
-/// steady rates that the handheld is actually holding: 40 frames a second
-/// (25 ms, or `CATALYST_FRAME_MS`), then 30, 20 and 10; the simulator at full
-/// speed starts from the computer's screen rate instead. One late frame is
+/// steady rates that the handheld is actually holding: from 60 frames a
+/// second where the panel takes a whole frame in time (its link at 62.5
+/// MHz), else 40 (25 ms, or `CATALYST_FRAME_MS`), then three slower; the
+/// simulator at full speed starts from the computer's screen rate instead. One late frame is
 /// let go: it takes an extra beat and the rhythm carries on. A second soon
 /// after means the beat is too fast, and it steps down. It steps back up only
 /// after a long run of frames with room to spare, so it settles rather than
 /// hunts.
+/// The room a whole frame on the panel must leave in a beat: the kernel's
+/// own time before it sends a frame varies by a millisecond or two.
+const PANEL_ROOM_MS: f32 = 1.5;
+
 struct Beat {
     steps: [Duration; 4],
     level: usize,
@@ -730,9 +737,29 @@ struct Beat {
 
 impl Beat {
     /// The handheld's beat: 25 ms, or `CATALYST_FRAME_MS`.
+    #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     fn new() -> Beat {
-        let ms = std::env::var("CATALYST_FRAME_MS").ok().and_then(|v| v.parse::<f32>().ok()).filter(|ms| (5.0..=100.0).contains(ms)).unwrap_or(25.0);
-        Beat::every(ms)
+        Beat::every(Beat::asked().unwrap_or(25.0))
+    }
+
+    /// `CATALYST_FRAME_MS`, when it is set to something sensible.
+    fn asked() -> Option<f32> {
+        std::env::var("CATALYST_FRAME_MS").ok().and_then(|v| v.parse::<f32>().ok()).filter(|ms| (5.0..=100.0).contains(ms))
+    }
+
+    /// The handheld's beat for its panel: the fastest of 60, 50 and 40
+    /// frames a second that the panel takes a whole frame within, with a
+    /// little room (a frame is sent while the next is drawn, so the panel
+    /// must be done by then). At 62.5 MHz a whole frame takes 15 ms: 60. Not
+    /// known (a system from before the core clock was held, the link's
+    /// speed moving with it): 40, as ever. `CATALYST_FRAME_MS` over all.
+    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+    fn for_panel(panel: Option<Duration>) -> Beat {
+        if let Some(ms) = Beat::asked() {
+            return Beat::every(ms);
+        }
+        let fits = |ms: f32| panel.is_some_and(|p| p.as_secs_f32() * 1000.0 + PANEL_ROOM_MS <= ms);
+        Beat::every([1000.0 / 60.0, 20.0].into_iter().find(|ms| fits(*ms)).unwrap_or(25.0))
     }
 
     /// A beat whose fastest rate is a frame every `ms`.
@@ -763,6 +790,15 @@ impl Beat {
     /// Note what a frame needed. Returns how many beats it takes up: one,
     /// unless it ran late.
     fn frame_took(&mut self, needed: Duration) -> u32 {
+        self.frame_and_panel_took(needed, Duration::ZERO)
+    }
+
+    /// As [`Beat::frame_took`], with the panel's time apart from the work:
+    /// the panel takes a frame while the next is drawn, so a frame needs the
+    /// longer of the two. Drawing wanders from frame to frame and is given
+    /// room before the beat quickens; the panel's time does not, and is not.
+    fn frame_and_panel_took(&mut self, work: Duration, panel: Duration) -> u32 {
+        let needed = work.max(panel);
         if needed > self.interval() {
             self.roomy = 0;
             if self.since_late < 8 && self.level + 1 < self.steps.len() {
@@ -774,7 +810,7 @@ impl Beat {
             }
         } else {
             self.since_late = self.since_late.saturating_add(1);
-            if self.level > 0 && needed.mul_f32(1.15) < self.steps[self.level - 1] {
+            if self.level > 0 && work.mul_f32(1.15) < self.steps[self.level - 1] && panel < self.steps[self.level - 1] {
                 self.roomy += 1;
             } else {
                 self.roomy = 0;
@@ -4406,6 +4442,35 @@ mod tests {
         assert_eq!(beat.level, 3);
         beat.rest();
         assert_eq!(beat.level, 2);
+    }
+
+    #[test]
+    fn the_beat_is_as_fast_as_the_panel_takes_whole_frames() {
+        // The link at 62.5 MHz: a whole frame in 15 ms, so 60 a second.
+        let fast = platform::panel_frame_time(Some(62_500_000), 320 * 170 * 2);
+        assert!((Beat::for_panel(fast).interval().as_secs_f32() * 1000.0 - 16.7).abs() < 0.1);
+        // At 50 MHz (18.4 ms): 50 a second. Not known: 40, as before.
+        let slower = platform::panel_frame_time(Some(50_000_000), 320 * 170 * 2);
+        assert_eq!(Beat::for_panel(slower).interval(), ms(20.0));
+        assert_eq!(Beat::for_panel(None).interval(), ms(25.0));
+        // A frame needs the longer of its drawing and the panel's sending
+        // (the panel sends one while the next is drawn), not the two added.
+        let mut beat = Beat::for_panel(fast);
+        for _ in 0..50 {
+            assert_eq!(beat.frame_and_panel_took(ms(12.0), ms(14.9)), 1);
+        }
+        assert_eq!(beat.level, 0, "both fit: 60 a second held");
+        // Slowed by drawing, the panel's steady 15 ms does not keep the beat
+        // from quickening again; drawing needs its room.
+        for _ in 0..3 {
+            beat.frame_and_panel_took(ms(20.0), ms(14.9));
+        }
+        assert_eq!(beat.level, 1);
+        for _ in 0..40 {
+            beat.frame_and_panel_took(ms(12.0), ms(14.9));
+        }
+        beat.rest();
+        assert_eq!(beat.level, 0);
     }
 
     #[test]
