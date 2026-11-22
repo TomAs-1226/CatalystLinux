@@ -902,11 +902,18 @@ struct Beat {
 }
 
 /// A motion's first frames come while the processor's clock is still on its
-/// way up (sched.rs raises it as the motion starts) and caches fill: late,
-/// they would slow the beat for the whole motion, and the next, and the one
-/// after (measured on the handheld: 45 a second, never 60, every frame after
-/// them drawn in 8 ms).
-const WARM_FRAMES: u32 = 4;
+/// way up (sched.rs raises it as the motion starts), caches fill and, when a
+/// page opens or closes, two pages are drawn at once: late, they would slow
+/// the beat for the whole motion and the ones after (measured on the
+/// handheld: 45 a second, never 60, every frame after them drawn in 8 ms;
+/// then Music at 30 a second from its opening, its frames 6 ms). About a
+/// page's opening, at 60 a second.
+const WARM_FRAMES: u32 = 24;
+
+/// Frames in a row with room to spare before the beat quickens a step (at
+/// rest): long enough not to hunt, short enough that one heavy moment does
+/// not hold a page at a slower beat long after it.
+const ROOMY_RUN: u32 = 24;
 
 impl Beat {
     /// The handheld's beat: 25 ms, or `CATALYST_FRAME_MS`.
@@ -1002,7 +1009,7 @@ impl Beat {
     /// changes pace in the middle of an animation.
     fn rest(&mut self) {
         self.warming = WARM_FRAMES;
-        if self.roomy >= 40 && self.level > 0 && self.steps[self.level - 1] >= self.floor {
+        if self.roomy >= ROOMY_RUN && self.level > 0 && self.steps[self.level - 1] >= self.floor {
             self.level -= 1;
             self.roomy = 0;
         }
@@ -4989,7 +4996,7 @@ mod tests {
         }
         assert_eq!(beat.level, 3);
         // Only a long run with real room to spare brings it back up, a step at a time.
-        for _ in 0..39 {
+        for _ in 0..ROOMY_RUN - 1 {
             beat.frame_took(ms(20.0));
         }
         beat.rest();
@@ -5040,6 +5047,17 @@ mod tests {
             assert_eq!(beat.level, 0, "motion {motion}");
             beat.rest();
         }
+        // A page opening, two pages drawn at once for a moment (Music's
+        // opening on the handheld: 23 ms a frame), then the page at 6 ms a
+        // frame: 60 a second after it, not 30 for as long as it shows.
+        for _ in 0..20 {
+            beat.frame_and_panel_took(ms(22.8), ms(14.9));
+        }
+        for _ in 0..30 {
+            beat.frame_and_panel_took(ms(6.0), ms(14.9));
+        }
+        assert_eq!(beat.level, 0, "60 a second after a heavy opening");
+        beat.rest();
         // Late after the warm-up, as ever: slower.
         for _ in 0..WARM_FRAMES {
             beat.frame_and_panel_took(ms(8.3), ms(14.9));

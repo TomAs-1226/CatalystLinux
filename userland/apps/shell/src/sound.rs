@@ -1310,11 +1310,30 @@ impl Screen for UsbAudioPage {
         "USB"
     }
 
-    fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
+    fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         match key {
             Key::Back => Nav::Pop,
             Key::Char('r') => {
                 self.read_now();
+                Nav::Stay
+            }
+            // The next step, asked for: a computer's mode has the port, so
+            // charging only (the controller hosts from the next start); set,
+            // a restart. Nothing changes unless Enter is pressed here.
+            Key::Enter => {
+                match self.status.as_ref().map(|s| s.setup) {
+                    Some(Setup::DeviceMode) => {
+                        *cx.say = Some(match crate::usb::set(0) {
+                            Ok(()) => "usb on charging only · restart with the switch on the hub's side".into(),
+                            Err(why) => why,
+                        });
+                        self.read_now();
+                    }
+                    Some(Setup::Restart) if on_device() => {
+                        std::process::Command::new("reboot").spawn().ok();
+                    }
+                    _ => {}
+                }
                 Nav::Stay
             }
             _ => Nav::Stay,
@@ -1367,7 +1386,11 @@ impl Screen for UsbAudioPage {
         let r = Rect::new(PAD, crate::gfx::H - PAD - g.hint_h() - row_h, W - 2.0 * PAD, row_h);
         let lit = setup.there();
         crate::bluetooth::icon_row(g, r, "headphones", lit, "USB headphones", setup.value(), if lit { t.ink } else { t.dim }, true);
-        g.hint("esc back");
+        match setup {
+            Setup::DeviceMode => g.hint_any(&["enter: usb on charging only · esc back", "enter: charging only", "enter: set up"]),
+            Setup::Restart => g.hint_any(&["enter: restart now · esc back", "enter: restart now"]),
+            _ => g.hint("esc back"),
+        }
     }
 }
 
@@ -1607,5 +1630,33 @@ mod tests {
         assert_eq!(level_of(1.0), 1.0);
         assert!((level_of(0.031_6) - 0.5).abs() < 0.01, "-30 dBFS is half way");
         assert_eq!(level_of(0.0), 0.0);
+    }
+
+    #[test]
+    fn enter_on_the_usb_page_takes_the_next_step_toward_headphones() {
+        crate::shell::tests::sandbox();
+        let _turn = crate::usb::MODE_FILE.lock().unwrap_or_else(|e| e.into_inner());
+        // A computer's mode has the port (serial, as the handheld had it).
+        crate::usb::set(1).unwrap();
+        let mut page = UsbAudioPage::new();
+        page.status = Some(Status { setup: Setup::DeviceMode, ..Status::default() });
+        let (mut robot, mut settings, mut say) = (crate::robot::Robot::demo(), crate::shell::Settings::default(), None);
+        let mut cx = Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true };
+        page.key(Key::Enter, &mut cx);
+        assert_eq!(crate::usb::mode(), 0, "charging only, asked for here");
+        assert!(say.as_deref().is_some_and(|s| s.contains("charging only") && s.contains("restart")), "{say:?}");
+        // Set and waiting for a start: Enter restarts, on the handheld alone
+        // (here it changes nothing).
+        page.status = Some(Status { setup: Setup::Restart, ..Status::default() });
+        let mut say = None;
+        let mut cx = Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true };
+        page.key(Key::Enter, &mut cx);
+        assert_eq!(crate::usb::mode(), 0);
+        // Ready or playing: Enter changes nothing.
+        crate::usb::set(1).unwrap();
+        page.status = Some(Status { setup: Setup::Ready, ..Status::default() });
+        page.key(Key::Enter, &mut cx);
+        assert_eq!(crate::usb::mode(), 1, "left as it was");
+        crate::usb::set(0).unwrap();
     }
 }

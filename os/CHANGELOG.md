@@ -10,6 +10,12 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.6.9
+
+### Fixed
+- Music, and any page after a heavy opening, runs at 60 frames a second again: the moment a page opens no longer holds everything after it at 30.
+- Settings › Sound › USB headphones takes the next step on Enter: USB on charging only while a computer's mode has the port, then a restart.
+
 ## 0.6.8
 
 ### Music

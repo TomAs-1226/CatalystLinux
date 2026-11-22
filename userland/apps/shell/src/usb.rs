@@ -75,6 +75,11 @@ pub fn connected() -> Option<bool> {
     Some(state.trim() == "configured")
 }
 
+/// The tests that set the mode take turns: the file it is kept in is one
+/// for the whole test run.
+#[cfg(test)]
+pub(crate) static MODE_FILE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,6 +87,7 @@ mod tests {
     #[test]
     fn a_mode_is_kept_and_read_back() {
         crate::shell::tests::sandbox();
+        let _turn = MODE_FILE.lock().unwrap_or_else(|e| e.into_inner());
         set(2).unwrap();
         assert_eq!(MODES[mode()].0, "network");
         set(0).unwrap();
