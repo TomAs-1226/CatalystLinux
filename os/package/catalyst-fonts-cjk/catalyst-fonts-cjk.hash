@@ -1,0 +1,5 @@
+# Locally computed: the files at the noto-cjk commit tagged Sans2.004, and
+# fontTools' wheel as PyPI lists it.
+sha256  ab2728702f90d2ae900309f299dc3c2b075010888a1a8a67fbd5b4c6aff713a0  NotoSansCJKjp-VF.otf
+sha256  6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2  LICENSE
+sha256  496d26e4d14dcccdd6ada2e937e4d174d3138e3d73f5c9b6ec6eb2fd1dab4f66  fonttools-4.60.0-py3-none-any.whl

@@ -1,0 +1,10 @@
+config BR2_PACKAGE_CATALYST_FONTS_CJK
+	bool "catalyst-fonts-cjk"
+	help
+	  Noto Sans CJK, cut down to the Chinese, Japanese and Korean
+	  characters in everyday use (13,483 of them), for the shell to
+	  draw song titles, file names and notes its Latin fonts lack.
+	  Installed as /usr/share/fonts/catalyst/NotoSansCJK-Catalyst.otf
+	  (5.5 MB), with its licence (SIL Open Font License 1.1).
+
+	  https://github.com/notofonts/noto-cjk

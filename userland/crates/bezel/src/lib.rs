@@ -14,6 +14,7 @@ pub mod color;
 pub mod glass;
 pub mod hues;
 pub mod icons;
+pub mod lines;
 pub mod simd;
 pub mod text;
 

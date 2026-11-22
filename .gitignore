@@ -5,3 +5,5 @@
 /scripts/__pycache__/
 /.claude/worktrees/
 /catalyst-apps/dist/
+# The CJK font, made from pinned inputs by scripts/cjk-font.py.
+/userland/assets/fonts/cjk/
