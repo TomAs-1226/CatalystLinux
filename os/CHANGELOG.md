@@ -21,6 +21,10 @@ the first section (this introduction) is not shown.
 - Back up the handheld to a zip on the computer, and restore it. Caches, downloaded updates and YouTube Music's sign-in are left out.
 - Safe on a shared network: TLS to the handheld's own certificate, pinned when pairing; the code never crosses the network, and five wrong tries end it; each computer's token is kept on the handheld only as a hash. Unpair a computer in Settings › Computer companion, or switch it off there and nothing listens.
 
+### Fixed
+- After a heavy moment, such as Music opening, pages come back to 60 frames a second on the next key, not after several presses at 30.
+- An update looked for while the handheld was offline no longer installs the system it already runs and restarts into it.
+
 ## 0.6.9
 
 ### Fixed
