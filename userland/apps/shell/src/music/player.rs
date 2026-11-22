@@ -173,7 +173,7 @@ fn player() -> &'static Player {
     PLAYER.get_or_init(|| {
         let (tx, rx) = channel::<Cmd>();
         let state = Arc::new(Mutex::new(Shared { queue: Vec::new(), at: 0, phase: Phase::Empty, offset: 0.0, anchor: None, length: None, loading: None, buffering: false, shuffle: false, repeat: Repeat::Off, unshuffled: None }));
-        let worker = Worker { tx: tx.clone(), state: state.clone(), sound: None, gen: 0, errors: Arc::new(Mutex::new(String::new())), retry_at: None, busy_tries: 0, ffmpeg_for: None, fetch_failed: None, sim_due: None, played_on: None, control: None, fading: false };
+        let worker = Worker { tx: tx.clone(), state: state.clone(), sound: None, gen: 0, errors: Arc::new(Mutex::new(String::new())), retry_at: None, busy_tries: 0, ffmpeg_for: None, fetch_failed: None, sim_due: None, played_on: None, control: None, fading: false, paused_since: None, retired: false };
         std::thread::Builder::new().name("music".into()).stack_size(256 * 1024).spawn(move || worker.run(rx)).ok();
         fetch::on_event(|e| {
             if let Some(p) = PLAYER.get() {
@@ -363,7 +363,16 @@ struct Worker {
     control: Option<std::process::ChildStdin>,
     /// The sound playing has been asked to fade out.
     fading: bool,
+    /// Paused since then.
+    paused_since: Option<Instant>,
+    /// Paused so long it has let go: off the island, nothing fetched ahead,
+    /// no network wanted. The queue and the place in the song are kept, and
+    /// play carries on from there.
+    retired: bool,
 }
+
+/// Paused this long, the music lets go (see `Worker::retired`).
+const RETIRE_AFTER: Duration = Duration::from_secs(10 * 60);
 
 impl Worker {
     fn run(mut self, rx: Receiver<Cmd>) {
@@ -372,7 +381,8 @@ impl Worker {
                 Some(Sound::Silent { until }) => Some(*until),
                 _ => None,
             };
-            let deadline = [self.retry_at, self.sim_due, silent, self.sleep_look()].into_iter().flatten().min();
+            let retire = self.paused_since.filter(|_| !self.retired).map(|at| at + RETIRE_AFTER);
+            let deadline = [self.retry_at, self.sim_due, silent, self.sleep_look(), retire].into_iter().flatten().min();
             let cmd = match deadline {
                 Some(d) => rx.recv_timeout(d.saturating_duration_since(Instant::now())),
                 None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
@@ -409,7 +419,13 @@ impl Worker {
             if s.repeat == Repeat::All && ahead.len() < AHEAD {
                 ahead.extend(s.queue.iter().take(AHEAD - ahead.len()).cloned());
             }
-            let active = matches!(s.phase, Phase::Playing | Phase::Loading | Phase::Paused);
+            if s.phase == Phase::Paused {
+                self.paused_since.get_or_insert_with(Instant::now);
+            } else {
+                self.paused_since = None;
+                self.retired = false;
+            }
+            let active = matches!(s.phase, Phase::Playing | Phase::Loading) || (s.phase == Phase::Paused && !self.retired);
             (current.filter(|_| active), ahead)
         };
         if super::on_device() {
@@ -1044,6 +1060,11 @@ impl Worker {
     }
 
     fn deadline(&mut self) {
+        if !self.retired && self.paused_since.is_some_and(|at| at.elapsed() >= RETIRE_AFTER) {
+            self.retired = true;
+            self.publish();
+            return;
+        }
         if self.sim_due.is_some_and(|at| Instant::now() >= at) {
             self.sim_due = None;
             let at = self.state.lock().unwrap().offset;
@@ -1111,7 +1132,7 @@ impl Worker {
             crate::nowplaying::set(None);
             return;
         };
-        if matches!(s.phase, Phase::Empty | Phase::Failed(_)) {
+        if matches!(s.phase, Phase::Empty | Phase::Failed(_)) || (s.phase == Phase::Paused && self.retired) {
             drop(s);
             crate::nowplaying::set(None);
             return;

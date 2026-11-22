@@ -102,6 +102,12 @@ pub const DARK_LOOK: std::time::Duration = std::time::Duration::from_secs(2);
 /// Woken by a lift, how long it stays on with no key: a look at it.
 const GLANCE: u32 = 10;
 
+/// StandBy shows this long past where the screen would have gone off, then
+/// it goes dark as it would off the charger; a key or a lift brings it back.
+/// My own tuning: long enough to glance at from the bed, short enough that
+/// a handheld left on a computer's USB all day does not stay lit.
+const FACES_FOR: f32 = 300.0;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
     Awake,
@@ -185,7 +191,8 @@ impl Standby {
         }
         self.state = State::Faces;
         self.glance = false;
-        self.idle = self.idle.max(self.off_at);
+        // Set down on the charger: StandBy's while starts now.
+        self.idle = self.off_at;
         self.apply_power(Power::Saving.governors());
         self.level.set_with(level, role::smooth());
         self.light();
@@ -197,6 +204,13 @@ impl Standby {
     /// when the last key was pressed (hours ago, on the charger overnight).
     fn leave_faces(&mut self) {
         if self.state == State::Faces {
+            self.idle = self.idle.min(self.off_at);
+        }
+    }
+
+    /// Off the charger: deep standby's wait starts now, as on leaving StandBy.
+    pub fn unplugged(&mut self) {
+        if matches!(self.state, State::Faces | State::Off) {
             self.idle = self.idle.min(self.off_at);
         }
     }
@@ -355,6 +369,10 @@ impl Standby {
             // starts now.
             State::Faces if self.faces.is_none() => {
                 self.leave_faces();
+                self.state = State::Off;
+                self.level.set_with(0.0, role::smooth());
+            }
+            State::Faces if self.idle >= off_at + FACES_FOR => {
                 self.state = State::Off;
                 self.level.set_with(0.0, role::smooth());
             }
@@ -517,9 +535,9 @@ mod tests {
         assert_eq!(s.state(), State::Dim, "it dims first, as ever");
         run(&mut s, 8.0, 60, false);
         assert_eq!(s.state(), State::Faces, "and then StandBy, not dark");
-        assert!(!s.asleep(), "never dark: deep standby cannot begin");
-        run(&mut s, 8.0 * 3600.0, 60, false);
-        assert_eq!(s.state(), State::Faces, "all night");
+        assert!(!s.asleep(), "lit, not dark");
+        run(&mut s, 60.0, 60, false);
+        assert_eq!(s.state(), State::Faces, "for a while");
         assert!(s.shade() < 0.01, "lit");
         // Night: the light glides down, slowly.
         s.set_faces(Some(0.3));
@@ -527,6 +545,11 @@ mod tests {
         assert!(s.shade() > 0.02 && s.shade() < 0.6, "on its way: {}", s.shade());
         run(&mut s, 6.0, 60, false);
         assert!((s.shade() - 0.7).abs() < 0.02, "night: {}", s.shade());
+        // Then dark, as off the charger.
+        run(&mut s, FACES_FOR, 60, false);
+        assert_eq!(s.state(), State::Off);
+        run(&mut s, 2.0, 60, false);
+        assert!(s.asleep(), "dark");
         // A key wakes it, and is spent doing so.
         assert!(s.key());
         assert_eq!(s.state(), State::Awake);
@@ -539,10 +562,9 @@ mod tests {
         let mut s = Standby::new();
         s.backlight = false;
         s.set_faces(Some(1.0));
-        run(&mut s, 3.0 * 3600.0, 60, false);
+        run(&mut s, 180.0, 60, false);
         assert_eq!(s.state(), State::Faces);
-        // (Hours of twentieths of a second, added up in f32.)
-        assert!(s.idle() > 3.0 * 3600.0 - 120.0, "{}", s.idle());
+        assert!(s.idle() > 175.0, "{}", s.idle());
         // Unplugged: it goes off as it would have, and its idle time is as
         // if the screen had only now gone off.
         s.set_faces(None);
@@ -554,7 +576,7 @@ mod tests {
         let mut s = Standby::new();
         s.backlight = false;
         s.set_faces(Some(1.0));
-        run(&mut s, 600.0, 60, false);
+        run(&mut s, 200.0, 60, false);
         s.put_down();
         run(&mut s, 2.0, 60, false);
         assert_eq!(s.state(), State::Off);

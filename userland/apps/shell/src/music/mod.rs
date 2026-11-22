@@ -774,6 +774,13 @@ fn all_pages_read(first: Value, read_first: fn(&Value) -> Vec<Track>) -> Result<
     Ok(tracks)
 }
 
+/// Songs are downloading (deep standby and music standby wait for them).
+pub fn downloads_running() -> bool {
+    // The unit tests' queues fill beside tests of deep standby, which must
+    // not see them (as with `player::playing`).
+    !cfg!(test) && downloads::running()
+}
+
 /// Your likes, all of them (signed in).
 pub fn liked_all() -> Result<Vec<Track>, String> {
     if !on_device() {

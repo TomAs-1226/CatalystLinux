@@ -3650,6 +3650,10 @@ impl Shell {
     fn watch_charger(&mut self) -> bool {
         let on = self.on_charger();
         let plugged = on && !self.charger_was;
+        if self.charger_was && !on {
+            // Unplugged: deep standby's wait starts now, not from hours ago.
+            self.standby.unplugged();
+        }
         self.charger_was = on;
         if plugged && self.faces_wanted().is_some() && self.standby.to_faces() {
             self.dirty = true;
@@ -4024,6 +4028,8 @@ impl Shell {
             timer: timer_running(),
             saving: self.saving.is_some(),
             music: music_playing(),
+            downloads: crate::music::downloads_running(),
+            charger: self.on_charger(),
         })
     }
 
@@ -4045,6 +4051,9 @@ impl Shell {
             timer: timer_running(),
             saving: self.saving.is_some(),
             music: false,
+            // Music standby takes Wi-Fi away unless the music needs it.
+            downloads: crate::music::downloads_running(),
+            charger: false,
         })
     }
 
@@ -5746,8 +5755,10 @@ pub(crate) mod tests {
         shell.settings.screen_off = 30;
         shell.settings.battery.deep_after = 10;
         shell.pretend_charger(Some(true));
-        // All night on the charger: StandBy, never dark, never deep.
-        assert_eq!(until_deep(&mut shell, 8 * 3600), None, "deep standby never begins on the charger");
+        // On the charger: StandBy where the screen would have gone off.
+        for _ in 0..60 {
+            shell.tick(1.0);
+        }
         assert_eq!(shell.standby_state(), State::Faces);
         assert!(shell.faces_showing() && !shell.panel_off());
         assert!(!shell.locked(), "no passcode: no lock");
@@ -5767,6 +5778,14 @@ pub(crate) mod tests {
         assert_eq!(shell.standby_state(), State::Awake);
         assert!(!shell.faces_showing());
         assert_eq!(shell.stack.len(), 1, "the Enter that left StandBy opened nothing");
+        // All night on the charger: StandBy for a while, then dark (a
+        // handheld left on a computer's USB does not stay lit), never deep.
+        assert_eq!(until_deep(&mut shell, 8 * 3600), None, "deep standby never begins on the charger");
+        assert_eq!(shell.standby_state(), State::Off);
+        assert!(!shell.faces_showing());
+        shell.key(Key::Enter);
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(shell.standby_state(), State::Awake);
         // StandBy switched off: the screen goes off on the charger as ever.
         shell.settings.lock.standby = false;
         assert!(until_off(&mut shell, 60).is_some());
@@ -5780,7 +5799,7 @@ pub(crate) mod tests {
         shell.settings.screen_off = 30;
         shell.settings.battery.deep_after = 10;
         shell.pretend_charger(Some(true));
-        for _ in 0..3 * 3600 {
+        for _ in 0..120 {
             shell.tick(1.0);
         }
         assert_eq!(shell.standby_state(), State::Faces);

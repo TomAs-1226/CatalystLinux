@@ -158,6 +158,12 @@ pub fn items() -> Vec<Item> {
     with(|q| q.items.clone())
 }
 
+/// Songs downloading, or waiting to with Wi-Fi there to fetch them: deep
+/// standby waits for them.
+pub fn running() -> bool {
+    with(|q| q.items.iter().any(|i| i.state == State::Active || (i.state == State::Waiting && super::polite::on_wifi())))
+}
+
 pub fn has_waiting() -> bool {
     with(|q| q.items.iter().any(|i| i.state == State::Waiting))
 }
