@@ -1,11 +1,11 @@
 """Turn bake.py's renders into what the shell carries: `objects.pack`.
 
-    py -3 tools/bake3d/pack.py BAKED OUT.pack                 the shipped sizes of
-                                                              the objects in shipped.txt
-    py -3 tools/bake3d/pack.py BAKED OUT.pack --preview 96    the whole turn of
-                                                              every object (app
-                                                              icons at 0.6 of it),
-                                                              for the previews only
+    py -3 tools/bake3d/pack.py BAKED OUT.pack [names]         the shipped sizes and
+                                                              poses of the objects
+                                                              named (shipped.txt's
+                                                              by default)
+    py -3 tools/bake3d/pack.py BAKED OUT.pack --preview 96    the whole turn at
+                                                              rest, 15° apart
     py -3 tools/bake3d/pack.py BAKED --peek OUT.png [names]   a quick look
 
 Each view is brought down from the render's size to the size it is shown
@@ -25,14 +25,30 @@ An object with parts (a robot's drivetrain, intake, arm...; a battery's
 cells) has a fifth plane: which part each pixel is, by the commonest part
 under it. The shell colours each part on its own, from what it stands for.
 
-The pack is little-endian: "C3DP", a version (2), then each object (its
-name, tints, where it stands, its parts with the turn that faces each to the
-camera, its sizes; each size its views and, per view, where its frame lies:
-a PNG whose red, green, blue and alpha are the four planes, and for an
-object with parts a greyscale PNG of part numbers right after it).
+An object with mechanisms (Numbers' intake and hood) was rendered in every
+pose, each a step of each mechanism. Its rest pose is kept whole; every
+other pose only where it differs from the rest, as a patch: the 8-pixel
+tiles of the view it changes, eight to a row in one PNG, each byte as its
+difference from what it is laid over (wrapping; part numbers exclusive-
+or'd), so what a tile kept is zeros and deflates to almost nothing. A pose
+of one mechanism moved is one patch, laid over the rest pose; two moved are
+their two patches added together, then a patch of the tiles where the pose
+itself differs from that (where they meet, or one shades the other). So
+the intake's two steps and the hood's three cost a fraction of six whole
+turns.
+
+The pack is little-endian: "C3DP", a version (3), then each object (its
+name, tints and its own colour, where it stands, its parts with the turn
+that faces each to the camera, its mechanisms with their steps, its sizes;
+each size its views and, per view, where its frame lies: a PNG whose red,
+green, blue and alpha are the four planes, and for an object with parts a
+greyscale PNG of part numbers right after it; then its tile size and its
+patches, each the view and pose it is for, its tiles (numbered across the
+view, row by row) and where its PNGs lie).
 """
 
 import io
+import itertools
 import json
 import os
 import struct
@@ -41,8 +57,13 @@ import sys
 import numpy as np
 from PIL import Image
 
-VERSION = 2
-ROLES = {"signal": 0, "ice": 1, "amber": 2, "fault": 3, "ink": 4}
+VERSION = 3
+ROLES = {"signal": 0, "ice": 1, "amber": 2, "fault": 3, "ink": 4, "own": 5}
+# What counts as a difference from the rest pose (render noise is less;
+# a step this small at a tile's edge does not show), and a patch's tiles.
+SHADE_STEP, COVER_STEP, SHADOW_STEP = 8, 4, 10
+TILE = 8
+ACROSS = 8
 # The neutral lightness each kind of surface was rendered at (kit.MATERIALS):
 # a palette colour is anchored there, so a surface facing the light shows
 # the palette's colour itself.
@@ -72,11 +93,11 @@ def resize(plane, px):
     return np.asarray(im)
 
 
-def planes(folder, yaw, pitch, px, prefix=""):
+def planes(folder, yaw, pitch, px, prefix="", pose=""):
     """The four planes of one view at `px` across (`prefix` "turn_" for the
-    previews' whole turn)."""
-    lit = load(os.path.join(folder, f"{prefix}lit_{yaw:+04d}_{pitch:+03d}.png"))
-    data = load(os.path.join(folder, f"{prefix}data_{yaw:+04d}_{pitch:+03d}.png"))
+    previews' whole turn; `pose` "@12" for a pose other than the rest)."""
+    lit = load(os.path.join(folder, f"{prefix}lit_{yaw:+04d}_{pitch:+03d}{pose}.png"))
+    data = load(os.path.join(folder, f"{prefix}data_{yaw:+04d}_{pitch:+03d}{pose}.png"))
     alpha = lit[..., 3]
     cover = data[..., 3]
     shade = srgb_to_linear(lit[..., :3].mean(axis=2))
@@ -104,10 +125,10 @@ def planes(folder, yaw, pitch, px, prefix=""):
     return out
 
 
-def part_plane(folder, yaw, pitch, px, prefix, parts, cover):
+def part_plane(folder, yaw, pitch, px, prefix, parts, cover, pose=""):
     """Which part each pixel is, at `px` across: the commonest part number
     under it (0 where the object is not)."""
-    raw = load(os.path.join(folder, f"{prefix}part_{yaw:+04d}_{pitch:+03d}.png"))
+    raw = load(os.path.join(folder, f"{prefix}part_{yaw:+04d}_{pitch:+03d}{pose}.png"))
     ids = np.round(srgb_to_linear(raw[..., 0]) * 16).astype(np.int32) * (raw[..., 3] > 0.5)
     best = np.zeros((px, px), np.float32)
     out = np.zeros((px, px), np.uint8)
@@ -124,6 +145,62 @@ def l8_bytes(plane):
     out = io.BytesIO()
     Image.fromarray(np.ascontiguousarray(plane), "L").save(out, "PNG", optimize=True)
     return out.getvalue()
+
+
+def changed(a, la, b, lb):
+    """The tiles where view b differs from view a (planes and part
+    numbers), numbered across the view row by row."""
+    d = np.abs(a.astype(np.int16) - b.astype(np.int16))
+    ta, tb = a[1].astype(np.int16), b[1].astype(np.int16)
+    tint = (np.abs((ta >> 4) - (tb >> 4)) > 1) | (np.abs((ta & 15) - (tb & 15)) > 1)
+    mask = (d[0] > SHADE_STEP) | tint | (d[2] > COVER_STEP) | (d[3] > SHADOW_STEP)
+    if la is not None:
+        mask |= la != lb
+    px = a.shape[1]
+    n = -(-px // TILE)
+    grid = np.zeros((n * TILE, n * TILE), bool)
+    grid[:px, :px] = mask
+    return [int(i) for i in np.flatnonzero(grid.reshape(n, TILE, n, TILE).any(axis=(1, 3)))]
+
+
+def tile_box(t, px):
+    n = -(-px // TILE)
+    y0, x0 = divmod(t, n)
+    y0, x0 = y0 * TILE, x0 * TILE
+    return y0, x0, min(TILE, px - y0), min(TILE, px - x0)
+
+
+def add(q, lq, base, lbase, tiles, onto, lonto):
+    """View q's difference from view base, in its tiles, added to a copy of
+    view onto: as the shell lays a patch down (bytes wrapping, part numbers
+    exclusive-or'd)."""
+    out, lout = onto.copy(), (lonto.copy() if lonto is not None else None)
+    px = q.shape[1]
+    for t in tiles:
+        y0, x0, h, w = tile_box(t, px)
+        d = q[:, y0:y0 + h, x0:x0 + w].astype(np.int16) - base[:, y0:y0 + h, x0:x0 + w]
+        out[:, y0:y0 + h, x0:x0 + w] = (out[:, y0:y0 + h, x0:x0 + w] + d) & 255
+        if lout is not None:
+            lout[y0:y0 + h, x0:x0 + w] ^= lq[y0:y0 + h, x0:x0 + w] ^ lbase[y0:y0 + h, x0:x0 + w]
+    return out, lout
+
+
+def strip(q, lq, onto, lonto, tiles):
+    """View q's tiles, eight to a row, as their difference from view onto:
+    its planes, and its part numbers."""
+    px = q.shape[1]
+    across = min(ACROSS, len(tiles))
+    rows = -(-len(tiles) // ACROSS)
+    planes_ = np.zeros((4, rows * TILE, across * TILE), np.uint8)
+    parts_ = np.zeros((rows * TILE, across * TILE), np.uint8)
+    for k, t in enumerate(tiles):
+        y0, x0, h, w = tile_box(t, px)
+        r, c = divmod(k, ACROSS)
+        d = q[:, y0:y0 + h, x0:x0 + w].astype(np.int16) - onto[:, y0:y0 + h, x0:x0 + w]
+        planes_[:, r * TILE:r * TILE + h, c * TILE:c * TILE + w] = d & 255
+        if lq is not None:
+            parts_[r * TILE:r * TILE + h, c * TILE:c * TILE + w] = lq[y0:y0 + h, x0:x0 + w] ^ lonto[y0:y0 + h, x0:x0 + w]
+    return planes_, parts_
 
 
 def png_bytes(p):
@@ -157,8 +234,7 @@ def write_pack(baked, out, preview=None, only=None):
         sizes = meta["sizes"]
         prefix = ""
         if preview:
-            # App icons at about their size on the carousel, the rest at a hero's.
-            px = round(preview * 0.6) if meta["name"].startswith("app-") else preview
+            px = preview
             sizes = [["preview", px, meta["turn"], [0]]]
             prefix = "turn_"
         entry = bytearray()
@@ -166,6 +242,8 @@ def write_pack(baked, out, preview=None, only=None):
         entry += struct.pack("<B", len(name)) + name
         tints = meta["tints"]
         entry += struct.pack("<BB", ROLES[tints[0]], ROLES[tints[1]])
+        own = meta.get("own") or "#000000"
+        entry += bytes(int(own[i:i + 2], 16) for i in (1, 3, 5))
         fx, fy = meta["foot"]
         entry += struct.pack("<HH", int(round(fx * 65535)), int(round(fy * 65535)))
         parts = meta.get("parts", [])
@@ -173,6 +251,26 @@ def write_pack(baked, out, preview=None, only=None):
         for part, facing in zip(parts, meta.get("facing", [0] * len(parts))):
             b = part.encode()
             entry += struct.pack("<B", len(b)) + b + struct.pack("<h", facing)
+        # Its mechanisms and their steps (in tenths), and its poses: every
+        # step of each, the rest first, numbered as the shell numbers them
+        # (the first mechanism's step, plus the second's times the first's
+        # count, and so on).
+        mechs = [] if preview else meta.get("mechanisms", [])
+        entry += struct.pack("<B", len(mechs))
+        for m in mechs:
+            b = m["name"].encode()
+            entry += struct.pack("<B", len(b)) + b + struct.pack("<B", len(m["steps"]))
+            entry += struct.pack(f"<{len(m['steps'])}h", *[int(round(v * 10)) for v in m["steps"]])
+        counts = [len(m["steps"]) for m in mechs]
+        poses = list(itertools.product(*[range(n) for n in counts]))[1:]
+
+        def code(pose):
+            c, k = 0, 1
+            for i, n in zip(pose, counts):
+                c += i * k
+                k *= n
+            return c
+
         entry += struct.pack("<B", len(sizes))
         for label, px, yaws, pitches in sizes:
             label = label.encode()
@@ -180,14 +278,56 @@ def write_pack(baked, out, preview=None, only=None):
             entry += struct.pack("<HBB", px, len(yaws), len(pitches))
             entry += struct.pack(f"<{len(yaws)}h", *yaws)
             entry += struct.pack(f"<{len(pitches)}b", *pitches)
+            patches = []
+            whole, patched = len(blobs), 0
             for pitch in pitches:
                 for yaw in yaws:
                     p = planes(folder, yaw, pitch, px, prefix)
                     raw += p.size
                     blob = png_bytes(p)
-                    extra = l8_bytes(part_plane(folder, yaw, pitch, px, prefix, parts, p[2])) if parts else b""
+                    lp = part_plane(folder, yaw, pitch, px, prefix, parts, p[2]) if parts else None
+                    extra = l8_bytes(lp) if parts else b""
                     entry += struct.pack("<III", len(blobs), len(blob), len(extra))
                     blobs += blob + extra
+                    if not poses:
+                        continue
+                    # Each other pose: what it changes, as a patch.
+                    view = pitches.index(pitch) * len(yaws) + yaws.index(yaw)
+                    got = {}
+                    for pose in poses:
+                        tag = "@" + "".join(str(i) for i in pose)
+                        q = planes(folder, yaw, pitch, px, prefix, tag)
+                        lq = part_plane(folder, yaw, pitch, px, prefix, parts, q[2], tag) if parts else None
+                        got[pose] = (q, lq)
+                    singles = {}
+                    for pose in poses:
+                        q, lq = got[pose]
+                        moved = [i for i, step in enumerate(pose) if step]
+                        onto, lonto = p, lp
+                        if len(moved) == 1:
+                            # One mechanism moved: what it changes from the rest.
+                            tiles = changed(p, lp, q, lq)
+                            singles[pose] = tiles
+                        else:
+                            # Two: their patches added together, then where
+                            # the pose itself differs from that.
+                            for i in moved:
+                                one = tuple(step if j == i else 0 for j, step in enumerate(pose))
+                                onto, lonto = add(got[one][0], got[one][1], p, lp, singles[one], onto, lonto)
+                            tiles = changed(onto, lonto, q, lq)
+                        if not tiles:
+                            continue
+                        sp, sl = strip(q, lq, onto, lonto, tiles)
+                        pb = png_bytes(sp)
+                        pe = l8_bytes(sl) if parts else b""
+                        patches.append(struct.pack("<HHH", view, code(pose), len(tiles)) + struct.pack(f"<{len(tiles)}H", *tiles) + struct.pack("<III", len(blobs), len(pb), len(pe)))
+                        blobs += pb + pe
+                        patched += len(pb) + len(pe)
+            entry += struct.pack("<BBI", TILE, ACROSS, len(patches))
+            for patch in patches:
+                entry += patch
+            if poses:
+                print(f"  {meta['name']} {label}: rest pose {(len(blobs) - whole - patched) / 1024:.0f} KB; {len(patches)} patches for {len(poses)} poses, {patched / 1024:.0f} KB")
         entries.append(entry)
         print(f"  {meta['name']}: {', '.join(f'{s[0]} {s[1]} px × {len(s[2]) * len(s[3])}' for s in sizes)}")
     body = header
@@ -251,7 +391,7 @@ def peek(baked, out, only, yaw=0):
         small = min(s[1] for s in meta["sizes"])
         parts = []
         for tone, px, k in (("dark", 120, 1), ("light", 120, 1), ("dark", small, max(1, 120 // small))):
-            pal = PALETTES[tone]
+            pal = dict(PALETTES[tone], own=meta.get("own") or "#808080")
             p = planes(folder, yaw, 0, px)
             pm, keep = colour(p, pal, meta["tints"])
             img = pm + np.ones((px, px, 3), np.float32) * hexc(pal["surface"]) * keep

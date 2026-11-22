@@ -1340,15 +1340,8 @@ impl Screen for Health {
         if firing.is_empty() && history.is_empty() {
             let (icon, line) = if robot.linked() { ("check_circle", "nothing firing") } else { ("link_off", "no robot") };
             let cy = (list_top + H) * 0.5;
-            let object = if g.objects.has(crate::robot3d::TEAM) { crate::robot3d::TEAM } else { crate::robot3d::GENERIC };
-            let parts: Vec<String> = g.objects.parts(object).into_iter().map(|(name, _)| name).collect();
-            let looks = crate::robot3d::read(robot, &parts).looks(g);
-            if g.object_looking(object, "m", W * 0.5, cy - 10.0, crate::object3d::View::REST, 1.0, 1.0, &looks) {
-                g.text_at(W * 0.5, cy + 24.0, Align::Center, line, ty.caption, t.dim);
-            } else {
-                g.icon(icon, false, W * 0.5, cy - 12.0, 24.0, t.faint);
-                g.text_at(W * 0.5, cy + 12.0, Align::Center, line, ty.caption, t.dim);
-            }
+            g.icon(icon, false, W * 0.5, cy - 12.0, 24.0, t.faint);
+            g.text_at(W * 0.5, cy + 12.0, Align::Center, line, ty.caption, t.dim);
             return;
         }
         let len = firing.len() + history.len();
@@ -1452,7 +1445,7 @@ impl Screen for LogsScreen {
         let rows = robot.logs.list();
         let status = robot.logs.status();
         if rows.is_empty() {
-            g.empty(if status.is_empty() { "link_off" } else { "description" }, if status.is_empty() { "no robot set" } else { &status });
+            g.empty("description", if status.is_empty() { "no robot set" } else { &status });
             return;
         }
         let trends = crate::trends::available(&rows);
@@ -1691,7 +1684,7 @@ impl Screen for Tables {
         let ty = g.ty;
         let nodes = self.nodes(robot);
         if nodes.is_empty() {
-            g.empty(if robot.linked() { "account_tree" } else { "link_off" }, if robot.linked() { "nothing published here" } else { "no robot" });
+            g.empty("link_off", if robot.linked() { "nothing published here" } else { "no robot" });
             return;
         }
         let (top, row_h) = (g.top(), g.row_h());
@@ -1803,7 +1796,7 @@ impl Screen for Motors {
         let ty = g.ty;
         let rows = robot.strings("MotorHistory/Rows");
         if rows.is_empty() {
-            g.empty(if robot.linked() { "precision_manufacturing" } else { "link_off" }, if robot.linked() { "no motor history published" } else { "no robot" });
+            g.empty("precision_manufacturing", if robot.linked() { "no motor history published" } else { "no robot" });
             return;
         }
         let top = g.top();

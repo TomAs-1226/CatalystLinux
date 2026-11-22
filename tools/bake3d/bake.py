@@ -14,6 +14,7 @@ gives the ambient occlusion. A shadow catcher under the object keeps its
 contact shadow, which the light throws down and to the right.
 """
 
+import itertools
 import json
 import math
 import os
@@ -103,10 +104,10 @@ def bake(name, spec, out):
     shipped = sorted({(y, p) for _, _, yaws, pitches in spec["sizes"] for p in pitches for y in yaws})
     turn = [(y, 0) for y in models.TURN]
     if QUICK:
-        shipped = [v for v in shipped if v in ((0, 0), (-48, 0), (48, 0), (0, -12), (0, 12))]
+        shipped = [v for v in shipped if v in ((0, 0), (-48, 0), (48, 0), (0, -12), (0, 12), (44, 0), (88, 0), (180, 0), (272, 0))]
         turn = [(0, 0), (90, 0), (180, 0)]
 
-    def pose(yaw, pitch):
+    def pose_view(yaw, pitch):
         pivot.rotation_euler = (0, 0, math.radians(rest + yaw))
         camera_pose(cam, target, elevation + pitch, distance)
         light_pose(light, target, elevation + pitch, 6.0)
@@ -118,10 +119,12 @@ def bake(name, spec, out):
     def bounds(views):
         xs, ys = [], []
         for yaw, pitch in views[:: max(1, len(views) // 24)] + [views[-1]]:
-            pose(yaw, pitch)
+            pose_view(yaw, pitch)
             pts = kit.evaluated_points(objs)
             d = (light.location - target).normalized()
-            shadow = [p - d * (p.z / d.z) for p in pts[::3]] if d.z > 0.05 else []
+            # Its shadow too, unless it may run off the frame (it fades out
+            # before the edge: object3d.rs), so a turning robot fills more of it.
+            shadow = [p - d * (p.z / d.z) for p in pts[::3]] if d.z > 0.05 and spec.get("frame_shadow", True) else []
             for p in pts + shadow:
                 v = world_to_camera_view(scene, cam, p)
                 xs.append(v.x)
@@ -140,8 +143,41 @@ def bake(name, spec, out):
             cam_data.shift_y += (y0 + y1) / 2 - 0.5
         return cam_data.lens, cam_data.shift_x, cam_data.shift_y
 
+    # Its mechanisms (Numbers' intake and hood): each pose is a step of
+    # each, the first all at their first (the rest pose, which the turn and
+    # the parts' facing use). Every pose is rendered at every shipped view;
+    # pack.py keeps, for each pose, only what differs from the rest pose.
+    mechanisms = spec.get("mechanisms", [])
+    poses = list(itertools.product(*[range(len(m["steps"])) for m in mechanisms]))
+
+    def strike(pose):
+        for m, i in zip(mechanisms, pose):
+            m["set"](m["steps"][i])
+        bpy.context.view_layer.update()
+
+    def tag_of(pose):
+        return "" if not any(pose) else "@" + "".join(str(i) for i in pose)
+
+    # Framed with every mechanism at its farthest, so no pose leaves the frame.
+    if mechanisms:
+        strike(tuple(len(m["steps"]) - 1 for m in mechanisms))
     framing = {"": frame(shipped), "turn_": frame(turn)}
+    if mechanisms:
+        strike(poses[0])
     sets = {"": shipped, "turn_": turn}
+
+    def each(kind, samples, denoise):
+        """Render every view of every pose (the turn at rest only)."""
+        for prefix, views in sets.items():
+            use(prefix)
+            for pose in poses if prefix == "" else poses[:1]:
+                if mechanisms:
+                    strike(pose)
+                for yaw, pitch in views:
+                    pose_view(yaw, pitch)
+                    render(scene, os.path.join(folder, f"{prefix}{kind}_{yaw:+04d}_{pitch:+03d}{tag_of(pose)}.png"), samples, denoise)
+        if mechanisms:
+            strike(poses[0])
 
     def use(prefix):
         cam_data.lens, cam_data.shift_x, cam_data.shift_y = framing[prefix]
@@ -150,18 +186,14 @@ def bake(name, spec, out):
     # as a fraction of the frame from the top left: the shell sets objects
     # down on a surface by it.
     use("")
-    pose(0, 0)
+    pose_view(0, 0)
     foot = world_to_camera_view(scene, cam, Vector((0, 0, 0)))
     middle = world_to_camera_view(scene, cam, target)
 
     folder = os.path.join(out, name)
     os.makedirs(folder, exist_ok=True)
     started = time.time()
-    for prefix, views in sets.items():
-        use(prefix)
-        for yaw, pitch in views:
-            pose(yaw, pitch)
-            render(scene, os.path.join(folder, f"{prefix}lit_{yaw:+04d}_{pitch:+03d}.png"), SAMPLES, True)
+    each("lit", SAMPLES, True)
 
     # The data pass: flat tint and coverage, no shadow, no light needed.
     ground.hide_render = True
@@ -176,11 +208,7 @@ def bake(name, spec, out):
             for i, m in enumerate(mats):
                 if m and "data" in m:
                     mats[i] = bpy.data.materials[m["data"]]
-    for prefix, views in sets.items():
-        use(prefix)
-        for yaw, pitch in views:
-            pose(yaw, pitch)
-            render(scene, os.path.join(folder, f"{prefix}data_{yaw:+04d}_{pitch:+03d}.png"), DATA_SAMPLES, False)
+    each("data", DATA_SAMPLES, False)
 
     # The parts pass, for an object whose parts the shell colours one by one
     # (a robot's drivetrain, intake, arm...): each part's number as flat
@@ -190,7 +218,7 @@ def bake(name, spec, out):
     parts = spec.get("parts", [])
     facing = []
     if parts:
-        pose(0, 0)
+        pose_view(0, 0)
         owner = {o.name: kit.part_of(o) for o in objs}
         centroids = {}
         for o in objs:
@@ -221,11 +249,7 @@ def bake(name, spec, out):
             for slot in o.material_slots:
                 slot.material = m
         scene.cycles.filter_width = 0.01
-        for prefix, views in sets.items():
-            use(prefix)
-            for yaw, pitch in views:
-                pose(yaw, pitch)
-                render(scene, os.path.join(folder, f"{prefix}part_{yaw:+04d}_{pitch:+03d}.png"), 1, False)
+        each("part", 1, False)
 
     meta = {
         "name": name,
@@ -239,10 +263,12 @@ def bake(name, spec, out):
         "about": spec.get("about", ""),
         "parts": parts,
         "facing": facing,
+        "own": spec.get("own"),
+        "mechanisms": [dict(name=m["name"], steps=m["steps"]) for m in mechanisms],
     }
     with open(os.path.join(folder, "meta.json"), "w") as f:
         json.dump(meta, f, indent=1)
-    print(f"bake3d: {name}: {len(shipped) + len(turn)} views in {time.time() - started:.1f} s", flush=True)
+    print(f"bake3d: {name}: {len(shipped) * len(poses) + len(turn)} views ({len(poses)} poses) in {time.time() - started:.1f} s", flush=True)
 
 
 QUICK = False
@@ -264,7 +290,7 @@ def main():
         return
     names = argv[1:] or list(models.ASSETS)
     for name in names:
-        bake(name, models.ASSETS[name], out)
+        bake(name, models.ASSETS[name](), out)
 
 
 main()

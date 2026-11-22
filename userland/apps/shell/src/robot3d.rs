@@ -1,33 +1,39 @@
-//! The robot in three dimensions, as the Robot app shows it: each part
-//! coloured by what the robot says of it.
+//! The robot in three dimensions, as the Robot app shows it: Numbers, FRC
+//! 5805's (or a team's own, from `/data/catalyst/robot3d.pack`), posed and
+//! coloured by what the robot says.
 //!
+//! - Its intake slides out and in with the carriage (`Deploy/LengthInches`)
+//!   and its hood rises and falls (`Hood/AngleDegrees`), each shown at the
+//!   nearest of the steps it was rendered at and moved between them on a
+//!   spring; its flywheel shines as it spins (`Shooter/VelocityRPS`).
 //! - A part running hot or warned about glows amber, one in fault red,
-//!   one at work (a shooter at speed, an intake running, an elevator on its
-//!   way) a faint ice; the bumpers take the alliance's red or blue.
+//!   one at work (the shooter at speed, the intake running) a faint ice;
+//!   the bumpers take the alliance's red or blue.
 //! - Disabled, the robot is dimmed; with no link, it is grey and faded.
 //! - Its mode (disabled, auto, teleop, test, stopped) and link, its battery
 //!   and what needs attention are written around it.
 //! - At rest it turns slowly on its stand; when a part turns warm or
-//!   faults, it turns to show that part, holds there a while, and turns on.
-//!   Calm, it stands still (and is put facing a part at once).
+//!   faults, or a mechanism moves, it turns to show that part, holds there
+//!   a while, and turns on. Calm, it stands still (and is put facing a part
+//!   at once), and nothing moves but the picture changing.
 //!
 //! Which part is which comes from the robot's own words: a health check, a
 //! temperature or a current published under a subsystem's name is the
-//! part whose name (or one like it) is in that name: "Elevator" is the
-//! elevator, "FrontLeftDrive" the drivetrain. A team's own robot, baked
-//! from its CAD (`tools/bake3d/robot.sh`), may name parts of its own
-//! ("climber"): telemetry under that name colours it.
+//! part whose name (or one like it) is in that name: "Hood" is the hood,
+//! "Conveyor" the hopper, "FrontLeftDrive" the drivetrain. A team's own
+//! robot, baked from its CAD (`tools/bake3d/robot.sh`), may name parts of
+//! its own ("climber"): telemetry under that name colours it.
 
 use bezel::{Align, Color, Rect};
 use detent::{role, Animated};
 use nt4::Value;
 
 use crate::gfx::Gfx;
-use crate::object3d::{Looks, PartLook, View};
+use crate::object3d::{Looks, PartLook, Sheen, View, MECHANISMS};
 use crate::robot::Robot;
 
-/// The shell's own robot, and the one a team may put on the data partition.
-pub const GENERIC: &str = "robot-generic";
+/// The shell's own robot (Numbers), and the one a team may put on the data partition.
+pub const BUILT_IN: &str = "robot";
 pub const TEAM: &str = "robot-team";
 
 /// The file a team's robot is read from: `/data/catalyst/robot3d.pack`.
@@ -82,15 +88,23 @@ pub struct State {
     pub browned_out: bool,
     /// Each part: how it is, and a few words why (for the worst).
     pub parts: Vec<(String, Condition, String)>,
+    /// The intake's carriage (Deploy's inches), the hood's angle (degrees)
+    /// and the flywheel's speed (turns a second), as the robot reports them.
+    pub intake: Option<f64>,
+    pub hood: Option<f64>,
+    pub flywheel: Option<f64>,
 }
 
 /// Other names a part goes by in telemetry.
 fn kin(part: &str) -> &'static [&'static str] {
     match part {
         "drivetrain" => &["swerve", "drive", "steer", "module", "chassis", "wheel", "odometry"],
-        "intake" => &["intake", "roller", "indexer", "feeder", "hopper", "serializer"],
+        "intake" => &["intake", "roller", "deploy", "serializer"],
+        "hopper" => &["hopper", "conveyor", "indexer", "spindexer", "floor"],
         "elevator" => &["elevator", "arm", "lift", "wrist", "pivot", "climb", "extension"],
-        "shooter" => &["shooter", "flywheel", "launcher", "turret", "hood", "scorer", "outtake"],
+        "shooter" => &["shooter", "flywheel", "launcher", "turret", "hood", "scorer", "outtake", "feeder", "kicker"],
+        "flywheel" => &["flywheel"],
+        "hood" => &["hood"],
         "bumpers" => &["bumper"],
         "frame" => &["systemcore", "can", "power", "pdh", "pdp", "battery", "radio", "electrical"],
         _ => &[],
@@ -99,10 +113,12 @@ fn kin(part: &str) -> &'static [&'static str] {
 
 /// The part a subsystem's name belongs to, if any: the one with the
 /// longest of its names in it ("Flywheel" is the shooter's flywheel, not
-/// the drivetrain's wheel), the first part listed on a tie.
+/// the drivetrain's wheel), a part's own name before another's word for it
+/// ("Hood" is the hood where there is one, else the shooter's), the first
+/// part listed on a tie.
 fn part_for<'a>(name: &str, parts: &'a [String]) -> Option<&'a String> {
     let name = name.to_lowercase();
-    let best = |p: &String| std::iter::once(p.as_str()).chain(kin(p).iter().copied()).filter(|k| name.contains(k)).map(str::len).max();
+    let best = |p: &String| std::iter::once((p.as_str(), 1)).chain(kin(p).iter().map(|k| (*k, 0))).filter(|(k, _)| name.contains(k)).map(|(k, own)| k.len() * 2 + own).max();
     let mut found: Option<(&String, usize)> = None;
     for p in parts {
         if let Some(len) = best(p) {
@@ -165,7 +181,8 @@ pub fn read(robot: &Robot, parts: &[String]) -> State {
             let Some((owner, field)) = key.rsplit_once('/') else { continue };
             let part = part_for(owner, parts);
             match (field, &value) {
-                ("TemperatureC", v) => {
+                // A mechanism's own, or its leading motor's (PrimaryTemperatureC).
+                (f, v) if f.ends_with("TemperatureC") => {
                     if let Some(t) = v.as_f64() {
                         let c = if t >= 85.0 { Condition::Fault } else if t >= 70.0 { Condition::Warm } else { Condition::Normal };
                         worse(part, c, format!("{} {t:.0} °c", owner.to_lowercase()));
@@ -193,9 +210,13 @@ pub fn read(robot: &Robot, parts: &[String]) -> State {
         linked: robot.linked(),
         mode: robot.linked().then(|| mode(robot)).flatten(),
         alliance: robot.fms("IsRedAlliance").and_then(|v| v.as_bool()).map(|red| if red { Alliance::Red } else { Alliance::Blue }),
-        volts: robot.f64("Systemcore/BatteryVolts").filter(|_| robot.linked()),
+        volts: robot.f64("Systemcore/BatteryVolts").or_else(|| robot.f64("Status/BatteryVolts")).filter(|_| robot.linked()),
         browned_out,
         parts: conditions,
+        intake: robot.f64("Deploy/LengthInches").filter(|_| robot.linked()),
+        // Until it is homed its angle means nothing.
+        hood: robot.f64("Hood/AngleDegrees").filter(|_| robot.linked() && robot.string("Hood/State").as_deref() != Some("UNHOMED")),
+        flywheel: robot.f64("Shooter/VelocityRPS").filter(|_| robot.linked()),
     }
 }
 
@@ -215,7 +236,10 @@ impl State {
     pub fn looks(&self, g: &Gfx) -> Looks {
         let t = g.tokens;
         let mut looks = Looks { dim: if !self.linked { 0.85 } else if matches!(self.mode, Some(Mode::Disabled) | Some(Mode::Stopped)) { 0.6 } else { 0.0 }, ..Looks::plain() };
+        // The flywheel is the shooter's: what is said of the shooter shows on it too.
+        let shooter = self.parts.iter().find(|(p, ..)| p == "shooter").map_or(Condition::Normal, |(_, c, _)| *c);
         for (part, c, _) in &self.parts {
+            let c = if part == "flywheel" && shooter > *c { &shooter } else { c };
             let glow = match c {
                 Condition::Normal => None,
                 Condition::Working => Some((t.ice, 0.22)),
@@ -243,21 +267,55 @@ pub fn alliance_colour(a: Alliance) -> Color {
 /// part it turned to show. (Our own tuning.)
 const TURNING: f32 = 9.0;
 const HOLD: f32 = 6.0;
+/// How far past facing the camera it turns to show a mechanism moving, in
+/// degrees: a slide seen head-on hardly moves. (Our own tuning.)
+const MECHANISM_ANGLE: f32 = 40.0;
 
-/// The robot on its stand: which way it faces, and what it last turned to show.
+/// The flywheel's bands, crossings a second for its speed in turns a
+/// second: slow enough to follow (the real wheel turns 20 to 40 times a
+/// second at a shot), quicker as it spins up. (Our own tuning.)
+fn sheen_speed(rps: f64) -> f32 {
+    (0.6 + rps as f32 / 14.0).min(3.4)
+}
+
+/// The step nearest a value: what a mechanism is shown at.
+fn nearest(steps: &[f32], value: f32) -> usize {
+    steps.iter().enumerate().min_by(|a, b| (a.1 - value).abs().total_cmp(&(b.1 - value).abs())).map_or(0, |(i, _)| i)
+}
+
+/// The robot on its stand: which way it faces, what it last turned to
+/// show, how its mechanisms are posed, and how far its flywheel's bands
+/// have run.
 pub struct Hero {
     yaw: Animated,
     /// Turning freely, or holding a part until then (seconds).
     held: Option<f32>,
     clock: f32,
     shown: Option<(String, Condition)>,
+    /// Each mechanism's place among its steps, moving to the one shown; set
+    /// at once the first time it is drawn.
+    pose: [Animated; MECHANISMS],
+    posed: bool,
+    /// The flywheel: its speed (turns a second) and its bands' place (0 to 1).
+    spin: f32,
+    phase: f32,
     /// The team's file, when it was last read (a newer one is read again).
     loaded: Option<std::time::SystemTime>,
 }
 
 impl Default for Hero {
     fn default() -> Self {
-        Hero { yaw: Animated::new(0.0, role::detent()).with_rest(0.05), held: None, clock: 0.0, shown: None, loaded: None }
+        Hero {
+            yaw: Animated::new(0.0, role::detent()).with_rest(0.05),
+            held: None,
+            clock: 0.0,
+            shown: None,
+            pose: std::array::from_fn(|_| Animated::new(0.0, crate::gfx::spatial::default()).with_rest(0.005)),
+            posed: false,
+            spin: 0.0,
+            phase: 0.0,
+            loaded: None,
+        }
     }
 }
 
@@ -276,22 +334,31 @@ impl Hero {
         if g.objects.has(TEAM) {
             TEAM
         } else {
-            GENERIC
+            BUILT_IN
         }
     }
 
-    /// Advance: turning on, or holding. True while it moves.
+    /// Advance: turning on, or holding; the mechanisms on their springs;
+    /// the flywheel's bands. True while anything moves.
     pub fn tick(&mut self, dt: f32, calm: bool, turning: bool) -> bool {
         self.clock += dt;
         if self.held.is_some_and(|until| self.clock >= until) && self.yaw.is_settled() {
             self.held = None;
+        }
+        let mut moving = false;
+        for p in &mut self.pose {
+            moving |= p.tick(dt);
+        }
+        if self.spin > 0.0 && !calm {
+            self.phase = (self.phase + sheen_speed(self.spin as f64) * dt).rem_euclid(1.0);
+            moving = true;
         }
         if self.held.is_none() && turning && !calm {
             let next = self.yaw.value() + TURNING * dt;
             self.yaw.jump(next);
             return true;
         }
-        self.yaw.tick(dt)
+        self.yaw.tick(dt) | moving
     }
 
     /// Something about a part changed for the worse: turn to show it.
@@ -311,18 +378,54 @@ impl Hero {
     /// a part newly in need of a look.
     pub fn draw(&mut self, g: &mut Gfx, object: &str, size: &str, cx: f32, cy: f32, state: &State, alpha: f32) {
         let attention = state.attention().map(|(p, c, _)| (p.to_owned(), c));
+        let facing_of = |g: &Gfx, part: &str| g.objects.parts(object).into_iter().find(|(n, _)| n == part).map(|(_, f)| f as f32);
         if attention != self.shown {
             if let Some((part, _)) = &attention {
-                if let Some((_, facing)) = g.objects.parts(object).into_iter().find(|(n, _)| n == part) {
-                    self.attend(facing as f32, g.calm);
+                if let Some(facing) = facing_of(g, part) {
+                    self.attend(facing, g.calm);
                     g.started_moving();
                 }
             }
             self.shown = attention;
         }
-        let looks = state.looks(g);
+        // Each mechanism at the step nearest what the robot reports (at
+        // rest where it says nothing), moving there on its spring; a move
+        // (not the first placing) turns the robot to show it, unless it is
+        // already showing a part in trouble.
+        let mut pose = [0.0; MECHANISMS];
+        for (m, (name, steps)) in g.objects.mechanisms(object).iter().enumerate().take(MECHANISMS) {
+            let value = match name.as_str() {
+                "intake" => state.intake,
+                "hood" => state.hood,
+                _ => None,
+            };
+            let to = value.map_or(0, |v| nearest(steps, v as f32)) as f32;
+            if (self.pose[m].target() - to).abs() > 1e-3 {
+                if !self.posed || g.calm {
+                    self.pose[m].jump(to);
+                } else {
+                    self.pose[m].set(to);
+                    g.started_moving();
+                    if self.shown.is_none() {
+                        if let Some(facing) = facing_of(g, name) {
+                            // Three quarters on, so the move is seen across, not toward the eye.
+                            self.attend(facing + MECHANISM_ANGLE, g.calm);
+                        }
+                    }
+                }
+            }
+            pose[m] = self.pose[m].value();
+        }
+        self.posed = true;
+        let mut looks = state.looks(g);
+        // The flywheel shining as it spins (above idle): still in the calm version.
+        self.spin = state.flywheel.filter(|rps| *rps > 2.0).unwrap_or(0.0) as f32;
+        if self.spin > 0.0 {
+            let amount = (0.2 + self.spin / 100.0).min(0.45);
+            looks.sheen = Some(("flywheel".into(), Sheen { colour: g.tokens.ice, phase: self.phase, amount }));
+        }
         let fade = if state.linked { 1.0 } else { 0.75 };
-        g.object_looking(object, size, cx, cy, View::yaw(self.yaw.value()), 1.0, alpha * fade, &looks);
+        g.object_looking(object, size, cx, cy, View::yaw(self.yaw.value()).posed(pose), 1.0, alpha * fade, &looks);
     }
 }
 
@@ -482,6 +585,58 @@ mod tests {
     }
 
     #[test]
+    fn numbers_parts_are_found_by_its_subsystems_names() {
+        let p: Vec<String> = ["drivetrain", "intake", "hopper", "shooter", "flywheel", "hood", "bumpers", "frame"].map(String::from).to_vec();
+        let of = |name: &str| part_for(name, &p).map(String::as_str);
+        assert_eq!(of("Hood"), Some("hood"), "its own part, not the shooter's word for it");
+        assert_eq!(of("HoodMotor"), Some("hood"));
+        assert_eq!(of("Deploy"), Some("intake"));
+        assert_eq!(of("Intake"), Some("intake"));
+        assert_eq!(of("Conveyor"), Some("hopper"));
+        assert_eq!(of("Feeder"), Some("shooter"));
+        assert_eq!(of("ShooterPrimary"), Some("shooter"));
+        assert_eq!(of("Flywheel"), Some("flywheel"));
+        assert_eq!(of("FrontLeft"), None);
+        assert_eq!(of("Swerve"), Some("drivetrain"));
+    }
+
+    #[test]
+    fn its_mechanisms_follow_the_robot_and_move_between_steps() {
+        let mut g = Gfx::new(bezel::Tokens::dark());
+        let mut hero = Hero::default();
+        let mut robot = Robot::demo();
+        robot.refresh(0.1);
+        robot.demo_say("Deploy/LengthInches", Value::Double(5.0));
+        robot.demo_say("Hood/AngleDegrees", Value::Double(13.0));
+        robot.demo_say("Hood/State", Value::String("IDLE".into()));
+        let object = hero.object(&mut g);
+        let names: Vec<String> = g.objects.parts(object).into_iter().map(|(n, _)| n).collect();
+        hero.draw(&mut g, object, "hero", 80.0, 90.0, &read(&robot, &names), 1.0);
+        assert_eq!((hero.pose[0].value(), hero.pose[1].value()), (0.0, 0.0), "stowed, the hood idle at its first step");
+        // The intake deploys and the hood aims: each to its nearest step, on a spring.
+        robot.demo_say("Deploy/LengthInches", Value::Double(11.8));
+        robot.demo_say("Hood/AngleDegrees", Value::Double(30.0));
+        let state = read(&robot, &names);
+        assert_eq!((state.intake, state.hood), (Some(11.8), Some(30.0)));
+        hero.draw(&mut g, object, "hero", 80.0, 90.0, &state, 1.0);
+        assert_eq!((hero.pose[0].target(), hero.pose[1].target()), (1.0, 1.0), "out; 30° shows at 25°");
+        assert!(hero.pose[0].value() < 0.1, "not there at once");
+        for _ in 0..40 {
+            hero.tick(0.025, false, true);
+        }
+        assert!((hero.pose[0].value() - 1.0).abs() < 0.05 && (hero.pose[1].value() - 1.0).abs() < 0.05, "there within a second");
+        // Not homed, the hood's angle means nothing: shown at rest.
+        robot.demo_say("Hood/State", Value::String("UNHOMED".into()));
+        assert_eq!(read(&robot, &names).hood, None);
+        // The flywheel spinning: its bands run on.
+        robot.demo_say("Shooter/VelocityRPS", Value::Double(30.0));
+        hero.draw(&mut g, object, "hero", 80.0, 90.0, &read(&robot, &names), 1.0);
+        let before = hero.phase;
+        assert!(hero.tick(0.1, false, false));
+        assert!(hero.phase != before);
+    }
+
+    #[test]
     fn a_part_is_found_by_any_of_its_names() {
         let p = parts();
         assert_eq!(part_for("FrontLeftDrive", &p).map(String::as_str), Some("drivetrain"));
@@ -504,7 +659,7 @@ mod tests {
         let mut robot = Robot::demo();
         robot.refresh(0.1);
         let object = hero.object(&mut g);
-        assert_eq!(object, GENERIC);
+        assert_eq!(object, BUILT_IN);
         let names: Vec<String> = g.objects.parts(object).into_iter().map(|(n, _)| n).collect();
         let state = read(&robot, &names);
         hero.draw(&mut g, object, "hero", 80.0, 90.0, &state, 1.0);

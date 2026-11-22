@@ -32,8 +32,8 @@ windows that grow out of tiles whenever it is there.
 | `shots/flasher/` | Catalyst Flasher's screens (`catalyst-flasher --shot`). |
 | `shots/motion/` | Each kind of motion as a strip of frames 50 ms apart and an animated PNG, and the Home settings (`--motion`). |
 | `shots/vm/` | The same shell as the ARM build on the image's own kernel, in the emulator. |
-| `tools/bake3d/` | The 3D objects: their models, the Blender bake and the packer (see *Objects in three dimensions*). |
-| `shots/3d-preview/` | The 3D objects to look at before they ship: `index.html`. |
+| `tools/bake3d/` | The Robot app's robot in 3D: Numbers' bake, the packer, and a team's own from its CAD (see *The robot in three dimensions*). |
+| `shots/3d-preview/` | The robot in 3D to look at before it ships: `index.html`. |
 
 ## Decisions
 
@@ -166,19 +166,10 @@ accelerates, since it is thrown rather than placed. Any key skips it.
 The first start continues into **setup**, which owns the whole panel the way
 a computer's own setup does: no island, no status, the brand's ground, each
 page's title, words and rows rising in one after another from the side the
-page came from. Setup is a way through a space: each page has its object in
-three dimensions standing on a pool of light to the right of its words (the
-handheld to welcome, the network, the team's robot, a globe, a key, a
-switch, the battery), and moving on carries the camera along to the next
-one, the last page's object passing nearer and off to the left as the next
-turns in from further off (`object3d`, below). The objects answer what is
-done: Wi-Fi's arcs stay dark until there is a network, then light, the
-Wi-Fi turns once round and setup carries on by itself, a key kept turns the key, a digit of the team number turns the robot
-a little, a time zone chosen turns the globe by its offset. Pages of choices
-already made (keys, choices, power, the look, the hardware found) start on
-Next, so Enter goes straight on and Up goes into them. The calm version
-keeps the objects still and the pages where they are. "Hi." offers three
-ways on (the handheld turns over into a laptop for the second):
+page came from. Pages of choices already made (keys, choices, power, the
+look, the hardware found) start on Next, so Enter goes straight on and Up
+goes into them; once Wi-Fi joins, its page says so a moment and setup
+carries on by itself. "Hi." offers three ways on:
 
 - **Set up here**: Wi-Fi first (its radio is switched on as the page
   arrives, so the networks are listed by the time they are asked for, and
@@ -956,73 +947,86 @@ The panel is found by its size, so the second graphics device this brings does
 not confuse it. `scripts/test-arm.sh` runs the GPU test through Mesa's
 software renderer under emulation, which stands in for the VideoCore there.
 
-## Objects in three dimensions
+## The robot in three dimensions
 
-Inside the apps, where a picture can say something a flat icon cannot,
-there are objects in three dimensions, rendered beforehand. Home's icons,
-lists, rows and the control centre stay flat. The handheld renders nothing
-in 3D: it lays down pictures, chosen by springs and coloured by what they
-stand for (`apps/shell/src/object3d.rs`).
+Only the Robot app's robot is in three dimensions; every other icon, page
+and empty page is flat. The handheld renders nothing in 3D: it lays down
+pictures rendered beforehand, posed and coloured by what the robot says
+(`apps/shell/src/object3d.rs`, `robot3d.rs`).
 
-- **The robot, in the Robot app.** The robot stands on its stage at the
-  left of the Robot page, turning slowly, and each of its parts shows what
-  the robot says of it (`robot3d.rs`): a part running hot or warned about
-  glows amber, one in fault red, one at work (a shooter at speed, an intake
-  running, an elevator on its way) a faint ice, and the bumpers take the
-  alliance's red or blue. Disabled, the robot is dimmed; with no link, grey
-  and faded. Its mode (disabled, auto, teleop, test, e-stopped) is on a chip
-  at the top, its link's round trip beside it, the battery large at the
-  bottom (amber under 11.8 V, red under 11 V or browned out) and what needs
-  attention beside the battery. When a part turns warm or faults, the robot
-  turns to show it, holds there six seconds and turns on. Which part is
-  which comes from the robot's own words: a health check, a temperature or a
-  current published under a subsystem's name colours the part whose name (or
-  one like it) is in it ("Elevator" the elevator, "FrontLeftDrive" the
-  drivetrain, "Flywheel" the shooter). The mode is read from the Driver
-  Station's control bits (`/FMSInfo/FMSControlData`) and the alliance from
-  `/FMSInfo/IsRedAlliance`, else from Catalyst's own opmode. Health, with
-  nothing firing, shows the same robot; an app with no robot to show (Tables,
-  Motors, Logs) shows it greyed.
-- **The battery** at the top of Settings › Battery: five cells, lit from the
-  bottom one for each fifth of charge begun (red at 15% and under), the bolt
-  over them lit while it charges; the exact figure beside it.
-- **The weather** on Weather's card: sun, clear night, partly cloudy by day
-  and by night, cloud, rain, snow, sleet, storm or fog.
-- **Setup's objects** (see *Starting up*), Wi-Fi's arcs dark until there is a
-  network; **About's header**, the handheld itself; and **empty pages**, each
-  the app's own object (an empty folder, no photos yet, no matches), a key
-  where a key is missing, the instrument greyed where there is no sensor.
+The robot is **Numbers**, FRC 5805's, from the team website's own model
+(`TomAs-1226/smblyrequired`, `public/models/robot.glb` and its manifest
+`robot.json`); its name on the page is the robot's own
+(`Robot/Identity/Name`). It stands on its stage at the left of the Robot
+page:
 
-**How they are made.** In Blender (5.2, Cycles), headless, by `tools/bake3d`:
-`blender -b --factory-startup -P tools/bake3d/bake.py -- OUT [names]`.
-Each object is rendered from every angle it is shown at under Bezel's one
-light, resting above and to the left (an area light fixed to the camera),
-with soft shadows and ambient occlusion, in neutral greys that say what a
-surface is rather than its colour. Each view is kept as planes: lightness,
-which parts take a tint, cover, shadow, and for an object with parts which
-part each pixel is. Colour is put on at run time from the palette (dark,
-light, any accent, your own colour), and each part painted or lit as it
-reports. Most objects are built in code (`tools/bake3d/models.py`); setup's
-toy robot, the globe, the laptop and the trophy were generated with
-Higgsfield (Tripo, text to 3D) and are kept reduced in `tools/bake3d/glb/`.
+- **Its mechanisms move as the robot's do.** The intake's carriage slides
+  out and in (`/Catalyst/Deploy/LengthInches`, stowed at 5.0, out at 11.8)
+  and the hood rises and falls (`/Catalyst/Hood/AngleDegrees`; until it is
+  homed, at rest). Each is shown at the nearest step it was rendered at (the
+  intake stowed or out, the hood at 11°, 25° and 40°) and moved between
+  them on a spring, the two steps blended as it goes. The
+  flywheel shines as it spins (`/Catalyst/Shooter/VelocityRPS`): bands of
+  light run across it, quicker as it spins up. The swerve modules are not
+  steered in the picture: at 112 pixels a module is a few pixels across, and
+  each angle would be another set of views.
+- **Each part shows what the robot says of it** (drivetrain, intake,
+  hopper, shooter, flywheel, hood, bumpers, frame): running hot or warned
+  about, it glows amber; in fault, red; at work, a faint ice. The bumpers
+  take the alliance's red or blue (the accent until it is known). Disabled,
+  the robot is dimmed; with no link, grey and faded. Which part is which
+  comes from the subsystem's name a health check, a temperature or a
+  current is published under: "Hood" the hood, "Deploy" and "Intake" the
+  intake, "Conveyor" the hopper, "Feeder" and "Shooter" the shooter.
+- **Around it**: its mode (disabled, auto, teleop, test, e-stopped) on a
+  chip at the top, read from the Driver Station's control bits
+  (`/FMSInfo/FMSControlData`, else Catalyst's own opmode), its link's round
+  trip beside it, the battery large at the bottom (amber under 11.8 V, red
+  under 11 V or browned out) and what needs attention beside the battery.
+- **It turns slowly at rest**; when a part turns warm or faults it turns to
+  show it, and when a mechanism moves it turns to show it three quarters on
+  (a slide seen head-on hardly moves); it holds there six seconds and turns
+  on. The calm version keeps it still: the picture changes, nothing moves.
+
+**How it is made.** `tools/bake3d/numbers.sh` fetches the model and its
+manifest from the website at a pinned commit, checked by their SHA-256
+(5 MB, kept out of this repository), into `tools/bake3d/numbers/`. Then
+`blender -b --factory-startup -P tools/bake3d/bake.py -- OUT robot`
+(Blender 5.2, Cycles) renders it every 4° all the way round, under Bezel's
+one light resting above and to the left (an area light fixed to the
+camera), with soft shadows and ambient occlusion, in neutral greys that say
+what a surface is rather than its colour, in each of its six poses (the
+intake's two steps by the hood's three, posed as the website's own code
+poses them). The CAD has no bumpers, so they are added at the size the
+manifest gives; its polycarbonate is left out, as clear. Each view is kept
+as planes: lightness, which parts take a tint, cover, shadow, and which
+part each pixel is; colour is put on at run time, Numbers' anodised blue as
+its own (`#0057b8`), the rest from the palette (dark, light, any accent,
+your own colour). `pack.py` keeps the rest pose whole and every other pose
+only where it differs from it: a patch of the 8-pixel tiles it changes, each
+byte kept as its difference from what it is laid over, so what a tile kept
+deflates to almost nothing. Two mechanisms moved are their two patches
+together, then a patch of the tiles where they meet.
 `tools/bake3d/previews.sh BAKED` packs a bake and runs `catalyst-shell
 --objects shots/3d-preview` for the previews (`shots/3d-preview/index.html`).
 
-**What it costs.** The pack is 2.8 MB in the program file, read in place:
-35 objects, a third of it the Robot app's robot, whose 90 views (4 degrees
-apart) keep its slow turn free of double edges where two views are blended.
+**What it costs.** The pack is 2.5 MB in the program file, read in place:
+Numbers alone, 1.1 MB of it the rest pose's 90 views and 1.4 MB the
+patches for its other five poses (six whole turns would be about 6.6 MB).
 Frames are decoded and coloured only when first wanted, into a cache of at
 most 384 kB, the least recently used let go first: the Robot page turning
-holds about 340 kB and decodes about three frames a second, Weather's page
-60 kB, Home none. On the development PC a robot frame takes 230 µs to
-decode and colour and 44 µs to draw while it turns (two views blended):
-about 4.6 and 0.9 ms on the handheld by the simulator's factor of 20, which
-only the device can confirm.
+holds about 370 kB and decodes two or three frames a second; every other
+page none. On the development PC a frame takes 230 µs to decode and colour
+at rest and 300 µs posed (its patches laid over it), and 45 µs to draw
+while it turns (two views blended): about twenty times that on the
+handheld by the simulator's factor, which only the device can confirm.
 
 ### Your own robot in the Robot app
 
-The Robot app shows the shell's own generic robot until a team installs its
-own, made from its CAD with one command:
+The Robot app shows Numbers until a team installs its own robot, made
+from its CAD with one command (its mechanisms stay as the CAD has them:
+posing them takes the steps Numbers' bake renders, `numbers()` in
+`tools/bake3d/models.py`):
 
     tools/bake3d/robot.sh ROBOT.glb [robot.map] [robot3d.pack]
 
@@ -1060,7 +1064,7 @@ system update is needed, and an update leaves it where it is.
    see (under 1.2% of the robot across) and whatever `hide` names, reduces
    the rest to about 250,000 triangles, renders it all the way round with
    its parts marked (90 views, as the shell's own robot), and packs it: about
-   a minute and a half and 900 kB for a simple robot, longer for a large
+   a minute and a half and 1 MB for a simple robot, longer for a large
    assembly. It prints how many solids went to each part: a part with none
    means a glob to fix.
 

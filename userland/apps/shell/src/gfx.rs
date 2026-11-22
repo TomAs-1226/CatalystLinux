@@ -483,16 +483,10 @@ impl Gfx {
         &self.missing_icons
     }
 
-    /// A 3D object (`object3d`), centred on (`cx`, `cy`), turned to `view`,
-    /// `scale` times the size it was rendered at. False if there is none of
-    /// that name, so the caller can draw its icon instead.
-    #[allow(clippy::too_many_arguments)]
-    pub fn object(&mut self, name: &str, size: &str, cx: f32, cy: f32, view: crate::object3d::View, scale: f32, alpha: f32) -> bool {
-        self.object_looking(name, size, cx, cy, view, scale, alpha, &crate::object3d::Looks::plain())
-    }
-
-    /// The same, its parts and the whole as `looks` says (a robot's parts
-    /// by what they report, a battery's cells by its charge).
+    /// The robot in three dimensions (`object3d`), centred on (`cx`, `cy`),
+    /// turned and posed as `view` says, `scale` times the size it was
+    /// rendered at, its parts and the whole as `looks` says. False if there
+    /// is no such object, so the caller can draw something else.
     #[allow(clippy::too_many_arguments)]
     pub fn object_looking(&mut self, name: &str, size: &str, cx: f32, cy: f32, view: crate::object3d::View, scale: f32, alpha: f32, looks: &crate::object3d::Looks) -> bool {
         let fault = self.fault();
@@ -770,34 +764,13 @@ impl Gfx {
         }
     }
 
-    /// An object on a page arriving swings round into place from a quarter
-    /// turn away as the page rises in: how far it still has to turn, in
-    /// degrees (0 once it has, and always in the calm version).
-    pub fn arriving_turn(&self) -> f32 {
-        match self.reveal {
-            Some(since) if !self.calm => 40.0 * role::release().solve(1.0, 0.0, since).0,
-            _ => 0.0,
-        }
-    }
-
-    /// What a page says when it has nothing to show: its object in three
-    /// dimensions where there is one (`object3d::for_empty`), turning into
-    /// place as the page arrives, otherwise its icon; and the line under it,
-    /// cut short rather than run off the panel.
+    /// What a page says when it has nothing to show.
     pub fn empty(&mut self, icon: &str, line: &str) {
         let t = self.tokens;
         let cy = (self.top() + H) * 0.5;
-        let style = self.ty.caption;
-        let line = self.text.fit(line, &style, W - 2.0 * PAD);
-        if let Some((object, size, looks)) = crate::object3d::for_empty(icon, &self.objects) {
-            let turn = self.arriving_turn();
-            if self.object_looking(object, size, W * 0.5, cy - 13.0, crate::object3d::View::yaw(turn), 1.0, 1.0, &looks) {
-                self.text_at(W * 0.5, cy + 24.0, Align::Center, &line, style, t.dim);
-                return;
-            }
-        }
         self.icon(icon, false, W * 0.5, cy - 12.0, 24.0, t.faint);
-        self.text_at(W * 0.5, cy + 12.0, Align::Center, &line, style, t.dim);
+        let style = self.ty.caption;
+        self.text_at(W * 0.5, cy + 12.0, Align::Center, line, style, t.dim);
     }
 
     /// Run the glass pass over everything drawn so far: on the GPU when it

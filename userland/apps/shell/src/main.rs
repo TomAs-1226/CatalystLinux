@@ -425,7 +425,7 @@ fn main() {
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--objects") {
-        return gallery3d::run(std::path::Path::new(&dir), value("--preview-pack").as_deref().map(std::path::Path::new), value("--all-pack").as_deref().map(std::path::Path::new));
+        return gallery3d::run(std::path::Path::new(&dir));
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(path) = value("--start-movie") {
