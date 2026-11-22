@@ -146,15 +146,12 @@ pub fn memory_short() -> bool {
     memory_available_mb().is_some_and(|mb| mb < MEMORY_FLOOR_MB)
 }
 
-/// The shell has gone into deep standby: background work waits for it to wake.
-static DEEP: AtomicBool = AtomicBool::new(false);
-
-pub fn set_deep(deep: bool) {
-    DEEP.store(deep, Ordering::Relaxed);
-}
-
+/// In deep standby (catalyst-power notes what it switched off there):
+/// background work waits for it to wake. Music standby, where music plays
+/// with the screen off, is not deep: songs looked ahead still come, so
+/// Wi-Fi can rest once they have.
 pub fn deep() -> bool {
-    DEEP.load(Ordering::Relaxed)
+    super::on_device() && Path::new("/run/catalyst-deep").exists() && !super::playing()
 }
 
 /// On the charger, and the charge: from the fuel gauge.

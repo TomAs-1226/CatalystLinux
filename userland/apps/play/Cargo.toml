@@ -1,0 +1,18 @@
+[package]
+name = "catalyst-play"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Music's player: decodes a song (Opus, AAC, MP3, FLAC, Vorbis, ALAC, WAV) and plays it to ALSA; also reads a song's tags and writes Ogg Opus with them"
+
+[[bin]]
+name = "catalyst-play"
+path = "src/main.rs"
+
+[dependencies]
+# Pure Rust demuxers and decoders (no Opus: libopus does that, loaded at run
+# time like libasound, so nothing C is linked at build time).
+symphonia = { version = "0.5", default-features = false, features = ["aac", "alac", "flac", "mp3", "pcm", "vorbis", "wav", "isomp4", "mkv", "ogg"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
