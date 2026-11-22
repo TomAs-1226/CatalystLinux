@@ -10,6 +10,37 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.8.0
+
+### Lyrics
+- Lyrics in Music: press Y on the song playing. The line being sung is large, the lines round it dimmed, and they move in time with the song, gliding when you skip ahead or back. Lyrics without timings scroll with ↑↓.
+- Lyrics come from LRCLIB, or from YouTube Music when you are signed in and LRCLIB has none. They are kept with each song, so they show offline after the first time, and songs you download get theirs as they are saved.
+- The island's card shows the line being sung. Settings › Music › Lyrics on the island turns it off.
+
+### Music on the island
+- While a song plays, the island shows its cover and bars that move with the music, and lie flat when it is paused. They stand still on StandBy and with the battery saver.
+- The island's card shows the song's progress in its cover's colour, and the next song slides in as the last one goes.
+
+### Sleep timer
+- Press T in Music to stop the music after 15, 30, 45 or 60 minutes, or at the end of the song. The last half minute fades out, then it pauses.
+- The island and Music count it down. It stays set when you leave Music, until the handheld restarts.
+
+### Sound
+- Spatial sound for headphones: Settings › Sound puts a song's two channels on a pair of speakers in front of you, in a small room, instead of inside your head. Off unless switched on, and never through the speaker.
+- With AirPods that track the head, spatial sound stays where it is as you turn, and comes round slowly if you stay turned. Head tracking runs only while spatial sound plays.
+- AirPods: each bud's battery and the case's in Settings › Bluetooth, and in the island as they connect; noise control (off, noise cancelling, transparency, adaptive) in Settings › Sound; take a bud out and Music pauses, put it back and it plays on.
+- Bluetooth headphones that take AAC (AirPods and most others) get it, at 256 kb/s, instead of SBC. Settings › Bluetooth shows the codec.
+- USB headphones with a volume of their own play songs bit for bit, at the song's own rate and depth. Settings › Sound › Quality says how a song plays: "44.1 kHz · 16-bit · bit-perfect".
+- An equalizer: flat, bass, vocal, treble, loudness (more bass and treble as the volume comes down), or five bands of your own.
+- Loudness match: every song as loud as the last, from its ReplayGain or R128 tags, or measured the first time it plays.
+- Gapless: songs meant to run on into each other (a live album, a DJ mix) play without a gap. A crossfade of up to 8 seconds, never within an album, in Settings › Sound.
+
+### Fixed
+- Your likes hold only the songs you liked on YouTube Music, not every song of every album you saved. The first look after the update takes the others out of Your likes (they stay in the library), and Liked music is no longer listed twice.
+- On the charger (a computer's USB counts), StandBy goes dark five minutes after it comes up; a key or a lift brings it back. Deep standby still waits until it is unplugged.
+- Music paused for ten minutes leaves the island and stops fetching the songs after it; play carries on where it was.
+- Deep standby, and music with the screen off, no longer take Wi-Fi away while songs are downloading.
+
 ## 0.7.0
 
 ### Computer companion
