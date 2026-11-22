@@ -314,6 +314,13 @@ pub struct Feed<'a> {
     pub notices: usize,
     /// The schedule's generation: a new one, and the match is read again.
     pub generation: u64,
+    /// Live activities, most important first; the one that has just
+    /// changed, and how open its card is (it comes down from the top for a
+    /// moment); music's level.
+    pub activities: &'a [crate::liveactivity::Activity],
+    pub opened: Option<&'a crate::liveactivity::Activity>,
+    pub open: f32,
+    pub level: f32,
 }
 
 /// A photo for the Photos face, decoded on a thread of its own.
@@ -434,6 +441,10 @@ pub struct Faces {
     minute: Option<u32>,
     drift: (f32, f32),
     scratch: Vec<u32>,
+    /// Music's face was turned to by itself (music started on the charger),
+    /// and whether music was playing at the last tick.
+    auto_music: bool,
+    music_seen: bool,
 }
 
 impl Default for Faces {
@@ -463,6 +474,8 @@ impl Faces {
             minute: None,
             drift: (0.0, 0.0),
             scratch: Vec::new(),
+            auto_music: false,
+            music_seen: false,
         }
     }
 
@@ -489,12 +502,24 @@ impl Faces {
         }
     }
 
+    /// The face turned to (or being turned to).
+    #[cfg(test)]
+    pub fn shown_face(&self) -> Face {
+        Face::ALL[self.at()]
+    }
+
+    fn at(&self) -> usize {
+        (self.pos.target().round().max(0.0) as usize).min(Face::ALL.len() - 1)
+    }
+
     /// Come up, on the face last shown.
     pub fn show(&mut self, choices: &Choices, calm: bool) {
         if self.showing {
             return;
         }
         self.showing = true;
+        self.auto_music = false;
+        self.music_seen = false;
         let at = choices.face.index() as f32;
         self.pos.jump(at);
         self.style_pos.jump(choices.clock.index() as f32);
@@ -550,6 +575,9 @@ impl Faces {
         self.pager_left = PAGER_FOR;
         self.pager.set(1.0);
         let faces = Face::ALL.len() as i32;
+        // Turned by hand: music's face is no longer the one picked for it.
+        self.auto_music = false;
+        choices.face = Face::ALL[self.at()];
         match key {
             Key::Up | Key::Down => {
                 let step = if key == Key::Down { 1 } else { -1 };
@@ -675,6 +703,30 @@ impl Faces {
             self.cache.stale = true;
             changed = true;
         }
+        // Music playing on the charger: its face, picked by itself (not
+        // kept as the face chosen); stopped, back to the one chosen.
+        let playing = feed.activities.iter().any(|a| a.kind == crate::liveactivity::Kind::Music && a.playing == Some(true));
+        let music = Face::Music.index();
+        if playing && !self.auto_music && self.at() != music && self.showing && !self.music_seen {
+            self.auto_music = true;
+            if calm {
+                self.pos.jump(music as f32);
+            } else {
+                self.pos.set(music as f32);
+            }
+            self.pager_left = PAGER_FOR;
+            self.pager.set(1.0);
+        }
+        if !feed.activities.iter().any(|a| a.kind == crate::liveactivity::Kind::Music) && self.auto_music {
+            self.auto_music = false;
+            self.pos.set(choices.face.index() as f32);
+        }
+        self.music_seen = playing;
+        // A card that has just changed comes down over the face.
+        moving |= feed.open > 0.004 && feed.open < 0.996;
+        if feed.opened.is_some() && feed.open > 0.004 {
+            changed = true;
+        }
         let photos = (self.pos.value() - Face::Photos.index() as f32).abs() < 1.0;
         changed |= self.photo.tick(dt, md, photos && self.showing);
         // The drift, a pixel at a time.
@@ -739,6 +791,18 @@ impl Faces {
             let r = if pos < 0.0 { Rect::new(0.0, 0.0, W, gap) } else { Rect::new(0.0, H - gap, W, gap) };
             g.canvas.fill_rect(r, g.tokens.ground, 1.0);
         }
+        // A live activity that has just changed: its card down from the top
+        // for a moment (music has its own face).
+        if let Some(a) = feed.opened.filter(|a| a.kind != crate::liveactivity::Kind::Music) {
+            let open = feed.open.clamp(0.0, 1.05);
+            if open > 0.004 {
+                let r = Rect::new(PAD, (6.0 - (1.0 - open) * 76.0).round(), W - 2.0 * PAD, 58.0);
+                let t = g.tokens;
+                g.shadow(r, 16.0, open.min(1.0));
+                g.canvas.rrect(r, 16.0, t.surface2, 1.0);
+                crate::liveactivity::draw_card(g, r.inset(3.0), a, feed.level, open.min(1.0));
+            }
+        }
         self.draw_pager(g, choices);
         redden(&mut g.canvas.px, night);
         g.tokens = day_tokens;
@@ -761,8 +825,10 @@ impl Faces {
         // Glass comes and goes by its refraction, never its opacity.
         g.glass(&[GlassShape { strength: p, ..GlassShape::new(platter, 5.0, 5) }]);
         let t = g.tokens;
+        let _ = choices;
+        let at = self.at();
         for i in 0..n {
-            let color = if i == choices.face.index() { t.ink } else { t.faint };
+            let color = if i == at { t.ink } else { t.faint };
             g.canvas.circle(platter.cx(), platter.y + 8.0 + i as f32 * 9.0, 2.0, color, p);
         }
     }
@@ -787,6 +853,7 @@ impl Faces {
             Face::Match => self.draw_match(g, (o.0 + self.give(), o.1)),
             Face::Weather => self.draw_weather(g, (o.0 + self.give(), o.1)),
             Face::Photos => self.draw_photos(g, feed, o),
+            Face::Music => self.draw_music(g, feed, (o.0 + self.give(), o.1)),
             Face::Everything => self.draw_everything(g, feed, choices, (o.0 + self.give(), o.1)),
         }
     }
@@ -1078,6 +1145,47 @@ impl Faces {
         g.text.draw(&mut g.canvas, o.0 + PAD + 8.0, baseline + 18.0, &line, &ty.caption, Color::hex(0xd8dbde), 1.0);
     }
 
+    /// Now playing: the cover large, the song, its time going by, and the
+    /// keys that work on it (Fn + W, Q, E), with the time small above.
+    fn draw_music(&mut self, g: &mut Gfx, feed: &Feed, o: (f32, f32)) {
+        let t = g.tokens;
+        let ty = g.ty;
+        ground(&mut g.canvas, &t, t.signal, o.0, o.1);
+        let Some(a) = feed.activities.iter().find(|a| a.kind == crate::liveactivity::Kind::Music) else {
+            return empty(g, o, "music_note", "nothing playing", "a song from Music shows here");
+        };
+        let size = 118.0;
+        let (cx, cy) = (o.0 + PAD + 8.0 + size * 0.5, o.1 + H * 0.5);
+        crate::liveactivity::draw_mark(g, cx, cy, size, &a.mark, 1.0);
+        let x = o.0 + PAD + 8.0 + size + 16.0;
+        let room = o.0 + W - PAD - 8.0 - x;
+        // The time, small, at the top right: StandBy is a clock too.
+        g.text.draw_aligned(&mut g.canvas, o.0 + W - PAD - 8.0, o.1 + 20.0, Align::Right, &self.time, &ty.label, t.dim, 1.0);
+        let lines = crate::help::wrap(g, &a.title, ty.name, room);
+        let mut y = o.1 + 46.0;
+        for line in lines.iter().take(2) {
+            g.text.draw(&mut g.canvas, x, y, line, &ty.name, t.ink, 1.0);
+            y += ty.name.size + 4.0;
+        }
+        let detail = g.text.fit(&a.detail, &ty.caption, room);
+        g.text.draw(&mut g.canvas, x, y, &detail, &ty.caption, t.dim, 1.0);
+        // The song's time going by.
+        let bar = Rect::new(x, o.1 + 104.0, room, 3.0);
+        g.canvas.rrect(bar, 1.5, t.meter, 1.0);
+        let done = a.meter.map_or(0.0, |m| m.now());
+        g.canvas.rrect_clipped(Rect::new(bar.x, bar.y, (bar.w * done).max(3.0), bar.h), 1.5, bar, 1.5, t.signal, 1.0);
+        if let Some(np) = crate::nowplaying::get().filter(|n| n.duration > 0.0) {
+            let at = np.position_now();
+            let times_y = bar.bottom() + 6.0 + ty.caption.size * 0.72;
+            g.text.draw(&mut g.canvas, x, times_y, &crate::liveactivity::clock_text(at as f64), &ty.caption, t.dim, 1.0);
+            let left = format!("−{}", crate::liveactivity::clock_text((np.duration - at).max(0.0) as f64));
+            g.text.draw_aligned(&mut g.canvas, x + room, times_y, Align::Right, &left, &ty.caption, t.dim, 1.0);
+        }
+        // The keys: previous, play or pause, next.
+        let xs = [x + room * 0.2, x + room * 0.5, x + room * 0.8];
+        crate::liveactivity::draw_music_keys(g, xs, o.1 + 138.0, a.playing == Some(true), 17.0, 1.0);
+    }
+
     /// A little of everything: the time and the day along the top, and a
     /// tile each for the charge, the next match, the weather and the next
     /// reminder (those there are), two by two.
@@ -1236,7 +1344,7 @@ mod tests {
                             let choices = Choices { face: *face, clock: *clock, ..Choices::default() };
                             let mut faces = Faces::new();
                             faces.show(&choices, true);
-                            let feed = Feed { reading: Some(&charging), h24: false, notices: 2, generation: 0 };
+                            let feed = Feed { reading: Some(&charging), h24: false, notices: 2, generation: 0, activities: &[], opened: None, open: 0.0, level: 0.0 };
                             faces.tick(0.1, 0.1, &feed, &choices, true);
                             assert_eq!(faces.pos.value(), i as f32);
                             faces.draw(&mut g, &robot, &feed, &choices);
@@ -1258,7 +1366,7 @@ mod tests {
         let mut c = Choices::default();
         faces.show(&c, true);
         assert!(faces.key(Key::Down, &mut c, false));
-        assert_eq!(c.face, Face::Charge);
+        assert_eq!(c.face, Face::Music, "the song playing comes after the clock");
         assert!(faces.key(Key::Char('f'), &mut c, false), "the bare arrow keys too");
         assert_eq!(c.face, Face::Clock);
         assert!(faces.key(Key::Up, &mut c, false), "past the first: a give, no change");

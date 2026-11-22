@@ -37,6 +37,9 @@ pub enum Key {
     /// Esc held for a second: leave whatever has the screen, even a program
     /// that takes every other key for itself. (A short Esc is still `Back`.)
     Leave,
+    /// Tab held for [`HOLD_TO_LOCK`]: lock the handheld, from any screen.
+    /// (A short Tab is still `Tab`, sent as it is let go.)
+    Lock,
 }
 
 /// The keys for sound and music, by what they do.
@@ -162,6 +165,94 @@ impl Hold {
         }
         false
     }
+}
+
+/// How long Tab is held before it locks the handheld. Long enough that no
+/// tap gets there (a typed Tab is down 60 to 150 ms), and longer than the
+/// platforms' long press (Android's 400 ms, iOS's context menu at 300 to
+/// 500 ms), as this one ends somewhere a passcode may be needed to leave;
+/// well short of Esc held to leave (1 s), which is the heavier act.
+pub const HOLD_TO_LOCK: Duration = Duration::from_millis(600);
+/// The hold's cue shows only after this: a tap never flashes it.
+pub const LOCK_CUE_AFTER: Duration = Duration::from_millis(150);
+
+/// Tab, watched for a hold. A tap is sent as Tab when the key comes up, so a
+/// press is never sent and then found to have been a hold; held for
+/// [`HOLD_TO_LOCK`] it is [`Key::Lock`], once, and nothing more when it
+/// comes up. Repeats while it is down (the kernel's, or a second press
+/// reported before the release) are nothing.
+#[derive(Default)]
+pub struct TabHold {
+    down: Option<std::time::Instant>,
+    fired: bool,
+}
+
+impl TabHold {
+    pub fn press(&mut self, now: std::time::Instant) {
+        if self.down.is_none() {
+            self.down = Some(now);
+            self.fired = false;
+            set_tab_down(Some(now));
+        }
+    }
+
+    /// Tab came up: a tap (Tab), unless it was a hold.
+    pub fn release(&mut self) -> Option<Key> {
+        let tap = self.down.take().is_some() && !self.fired;
+        self.fired = false;
+        set_tab_down(None);
+        tap.then_some(Key::Tab)
+    }
+
+    /// The hold, once it has been down long enough.
+    pub fn due(&mut self, now: std::time::Instant) -> Option<Key> {
+        let down = self.down?;
+        if self.fired || now.saturating_duration_since(down) < HOLD_TO_LOCK {
+            return None;
+        }
+        self.fired = true;
+        set_tab_down(None);
+        Some(Key::Lock)
+    }
+
+    /// When the hold will be due, for a wait to end in time for it.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn next(&self) -> Option<std::time::Instant> {
+        self.down.filter(|_| !self.fired).map(|d| d + HOLD_TO_LOCK)
+    }
+}
+
+/// Since when Tab has been held towards a lock (not yet a lock, nor let go):
+/// the shell draws the hold's cue from it.
+#[cfg(not(test))]
+static TAB_DOWN: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+#[cfg(not(test))]
+fn set_tab_down(at: Option<std::time::Instant>) {
+    if let Ok(mut down) = TAB_DOWN.lock() {
+        *down = at;
+    }
+}
+
+#[cfg(not(test))]
+pub fn tab_down_since() -> Option<std::time::Instant> {
+    TAB_DOWN.lock().ok()?.as_ref().copied()
+}
+
+// Each test thread its own, as the tests run side by side.
+#[cfg(test)]
+thread_local! {
+    static TAB_DOWN: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub fn set_tab_down(at: Option<std::time::Instant>) {
+    TAB_DOWN.with(|d| d.set(at));
+}
+
+#[cfg(test)]
+pub fn tab_down_since() -> Option<std::time::Instant> {
+    TAB_DOWN.with(std::cell::Cell::get)
 }
 
 /// How long a key is held before it repeats, and then how often.
@@ -532,6 +623,8 @@ pub mod device {
         /// Esc held down means leave; whether it is down, and for how long.
         esc: Hold,
         esc_down: bool,
+        /// Tab: a tap on release, a lock when held.
+        tab: TabHold,
         width: usize,
         height: usize,
         stride: usize,
@@ -676,6 +769,7 @@ pub mod device {
                 fb_path,
                 esc: Hold::default(),
                 esc_down: false,
+                tab: TabHold::default(),
                 width,
                 height,
                 stride,
@@ -788,6 +882,8 @@ pub mod device {
             }
             // Wake in time for a held key's next repeat.
             let timeout = self.repeat.next().map_or(timeout, |at| timeout.min(at.saturating_duration_since(std::time::Instant::now())));
+            // And for Tab's hold to come due.
+            let timeout = self.tab.next().map_or(timeout, |at| timeout.min(at.saturating_duration_since(std::time::Instant::now())));
             unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, timeout.as_millis() as i32) };
             if waker >= 0 && fds.last().is_some_and(|fd| fd.revents & libc::POLLIN != 0) {
                 let mut count = 0u64;
@@ -830,6 +926,16 @@ pub mod device {
             }
             let now = std::time::Instant::now();
             for (code, value, own) in events {
+                // Tab (not Ctrl-Tab, the recent apps, sent as it goes down):
+                // a tap when it comes up, a lock when held.
+                if code == 15 && !(self.ctrl && value == 1) {
+                    match value {
+                        1 => self.tab.press(now),
+                        0 => keys.extend(self.tab.release()),
+                        _ => {}
+                    }
+                    continue;
+                }
                 match value {
                     // Released: modifiers and Esc note it, and a held key stops repeating.
                     0 => {
@@ -847,6 +953,7 @@ pub mod device {
                 }
             }
             keys.extend(self.repeat.due(now));
+            keys.extend(self.tab.due(now));
             if changed {
                 self.find_inputs();
             }
@@ -939,6 +1046,8 @@ pub mod sim {
         window: Window,
         shown: Vec<u32>,
         esc: Hold,
+        /// Tab: a tap as it comes up, a lock when held.
+        tab: TabHold,
         /// The keys down at the last look, to find the ones just pressed and
         /// let go; the held one repeats on the shell's own clock.
         down: Vec<K>,
@@ -955,7 +1064,7 @@ pub mod sim {
             window.set_target_fps(0);
             #[cfg(windows)]
             show_icon(&window);
-            Sim { window, shown: Vec::new(), esc: Hold::default(), down: Vec::new(), repeat: Repeat::default(), panel: Vec::new() }
+            Sim { window, shown: Vec::new(), esc: Hold::default(), tab: TabHold::default(), down: Vec::new(), repeat: Repeat::default(), panel: Vec::new() }
         }
     }
 
@@ -1102,6 +1211,14 @@ pub mod sim {
             let shift = self.window.is_key_down(K::LeftShift) || self.window.is_key_down(K::RightShift);
             let ctrl = self.window.is_key_down(K::LeftCtrl) || self.window.is_key_down(K::RightCtrl);
             let leave = self.esc.update(self.window.is_key_down(K::Escape));
+            // Tab (not Ctrl-Tab): a tap as it comes up, a lock when held.
+            let tab = self.window.is_key_down(K::Tab);
+            let mut keys: Vec<Key> = Vec::new();
+            if tab && !self.down.contains(&K::Tab) && !ctrl {
+                self.tab.press(now);
+            } else if !tab && self.down.contains(&K::Tab) {
+                keys.extend(self.tab.release());
+            }
             // Alt held is the talk key, as on the handheld (`crate::voice`).
             crate::voice::set_talk_key(self.window.is_key_down(K::LeftAlt) || self.window.is_key_down(K::RightAlt));
             let down = self.window.get_keys();
@@ -1110,8 +1227,10 @@ pub mod sim {
             }
             let pressed: Vec<K> = down.iter().copied().filter(|k| !self.down.contains(k)).collect();
             self.down = down;
-            let mut keys: Vec<Key> = Vec::new();
             for k in pressed {
+                if k == K::Tab && !ctrl {
+                    continue;
+                }
                 // Esc counts once per press (held, it becomes Leave), and so
                 // does Ctrl-Space, which would otherwise open and shut the
                 // control centre in turns while held: neither repeats.
@@ -1121,6 +1240,7 @@ pub mod sim {
                 }
             }
             keys.extend(self.repeat.due(now));
+            keys.extend(self.tab.due(now));
             if leave {
                 keys.push(Key::Leave);
             }
@@ -1258,6 +1378,39 @@ mod tests {
         assert!(held.next().is_some());
         held.press(2u16, Key::Media(Media::PlayPause), t0);
         assert!(held.next().is_none());
+    }
+
+    #[test]
+    fn tab_tapped_is_tab_on_release_and_held_is_a_lock_once() {
+        let t0 = std::time::Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut tab = TabHold::default();
+        // A tap: nothing as it goes down, Tab as it comes up.
+        tab.press(at(0));
+        assert_eq!(tab.due(at(90)), None);
+        assert!(tab_down_since().is_some(), "the cue can be drawn from it");
+        assert_eq!(tab.release(), Some(Key::Tab));
+        assert_eq!(tab_down_since(), None);
+        // Down almost to the threshold, and let go: still a tap.
+        tab.press(at(1000));
+        assert_eq!(tab.due(at(1000 + 590)), None);
+        assert_eq!(tab.release(), Some(Key::Tab));
+        // Held: a lock at 0.6 s, once; its repeats and its release are nothing.
+        tab.press(at(2000));
+        assert_eq!(tab.next(), Some(at(2000) + HOLD_TO_LOCK));
+        tab.press(at(2100));
+        tab.press(at(2200));
+        assert_eq!(tab.due(at(2599)), None);
+        assert_eq!(tab.due(at(2600)), Some(Key::Lock));
+        assert_eq!(tab_down_since(), None, "the cue is done with");
+        assert_eq!(tab.due(at(3000)), None, "once");
+        assert_eq!(tab.next(), None);
+        tab.press(at(3100));
+        assert_eq!(tab.release(), None, "no Tab after the lock");
+        // And the next tap is a tap again.
+        tab.press(at(4000));
+        assert_eq!(tab.release(), Some(Key::Tab));
+        assert!(LOCK_CUE_AFTER < HOLD_TO_LOCK && HOLD_TO_LOCK < HOLD_TO_LEAVE);
     }
 
     #[test]

@@ -493,7 +493,7 @@ fn params() -> Vec<Param> {
 /// preview, and the shell's lock screen).
 pub fn info_now(robot: &Robot, h24: bool, reading: Option<crate::power::Reading>) -> Info {
     let unix = chrono::Utc::now().timestamp();
-    Info { h24, reading, next: crate::upnext::next_match(robot, unix).ok(), reminder: crate::upnext::next_reminder(unix), notices: 0, newest: None }
+    Info { h24, reading, next: crate::upnext::next_match(robot, unix).ok(), reminder: crate::upnext::next_reminder(unix), ..Info::default() }
 }
 
 /// Settings › Lock screen › Customise: the lock screen itself, live, with
@@ -698,6 +698,8 @@ pub struct Preview {
     calm: bool,
     h24: bool,
     ticked: std::time::Instant,
+    /// Music, for its face, read as the shell reads it.
+    acts: Vec<crate::liveactivity::Activity>,
 }
 
 impl Preview {
@@ -705,7 +707,7 @@ impl Preview {
         let mut faces = Faces::new();
         faces.show(&choices, true);
         let now = std::time::Instant::now();
-        Preview { faces, choices, reading: crate::power::reading_now(), read_at: now, calm, h24: true, ticked: now }
+        Preview { faces, choices, reading: crate::power::reading_now(), read_at: now, calm, h24: true, ticked: now, acts: Vec::new() }
     }
 }
 
@@ -740,14 +742,15 @@ impl Screen for Preview {
         // screens no time while nothing moves).
         let wall = self.ticked.elapsed().as_secs_f32().min(0.25);
         self.ticked = std::time::Instant::now();
-        let feed = Feed { reading: self.reading.as_ref(), h24: self.h24, notices: 0, generation: 0 };
+        self.acts = crate::liveactivity::music(crate::nowplaying::get().as_ref()).into_iter().collect();
+        let feed = Feed { reading: self.reading.as_ref(), h24: self.h24, notices: 0, generation: 0, activities: &self.acts, opened: None, open: 0.0, level: 1.0 };
         let (moving, changed) = self.faces.tick(wall, dt, &feed, &self.choices, self.calm);
         moving || changed
     }
 
     fn draw(&mut self, g: &mut Gfx, robot: &Robot) {
         self.h24 = g.clock.0;
-        let feed = Feed { reading: self.reading.as_ref(), h24: self.h24, notices: 0, generation: robot.schedule.generation() };
+        let feed = Feed { reading: self.reading.as_ref(), h24: self.h24, notices: 0, generation: robot.schedule.generation(), activities: &self.acts, opened: None, open: 0.0, level: 1.0 };
         self.choices = g.lock;
         self.faces.draw(g, robot, &feed, &self.choices);
     }
