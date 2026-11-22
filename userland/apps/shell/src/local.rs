@@ -84,6 +84,8 @@ pub fn start() -> Result<String, String> {
     if lm::healthy() {
         return Ok(lm::base_url());
     }
+    // A live activity while it loads (seconds, from the card).
+    let _loading = crate::liveactivity::task(crate::liveactivity::Kind::Assistant, format!("Loading {}", model.name), "on-device model");
     let mut child = lm::spawn_server(&dir, model)?;
     lm::wait_ready(&mut child, START_WITHIN)?;
     *running = Some(Running { child, last: Instant::now() });

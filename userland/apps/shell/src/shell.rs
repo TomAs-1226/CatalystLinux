@@ -808,6 +808,13 @@ pub struct Shell {
     /// gauge says; and whether it was on the charger at the last tick.
     charger: Option<bool>,
     charger_was: bool,
+    /// Live activities: music, timers, the queue, downloads… (liveactivity.rs).
+    activities: crate::liveactivity::Activities,
+    /// Tab held towards a lock: the cue round the island, 0 to 1, and
+    /// whether the screen was lit at the last tick (a wake brings the lock
+    /// screen's parts in again).
+    hold_cue: Animated,
+    lit_was: bool,
 }
 
 /// How long the island holds a reminder coming due (a message holds 2.4 s).
@@ -901,6 +908,7 @@ fn key_name(key: Key) -> String {
         Key::Ctrl('\n') => "ctrl enter".into(),
         Key::Ctrl(c) => format!("ctrl {c}"),
         Key::Leave => "esc held".into(),
+        Key::Lock => "tab held".into(),
     }
 }
 
@@ -997,6 +1005,9 @@ impl Shell {
             after_unlock: None,
             charger: None,
             charger_was: false,
+            activities: crate::liveactivity::Activities::new(),
+            hold_cue: Animated::new(0.0, role::smooth()).with_rest(0.004),
+            lit_was: true,
         }
     }
 
@@ -1094,7 +1105,7 @@ impl Shell {
         let text = text.into();
         // Said while it is locked or StandBy shows: kept for the lock
         // screen, and said again once it is unlocked (or StandBy is left).
-        if self.lock.engaged() || self.faces.showing() {
+        if self.lock.covering() || self.faces.showing() {
             self.lock.note(&text);
         }
         self.message = Some((text, MESSAGE_SECONDS));
@@ -1197,6 +1208,11 @@ impl Shell {
                 return;
             }
         }
+        // Tab held: the lock screen, from anywhere (the screen woken, StandBy
+        // or deep standby left for it). Locked already, it does nothing.
+        if key == Key::Lock {
+            return self.lock_by_hand();
+        }
         // The key that woke it from deep standby, still held: its repeats
         // are spent too, so none reaches the app as it wakes.
         if let Some((woke, last)) = self.woke_by.take() {
@@ -1215,6 +1231,12 @@ impl Shell {
         // StandBy: the arrows turn its faces; any other key leaves it below,
         // as a key wakes the screen from off.
         if self.standby_state() == crate::standby::State::Faces {
+            // Music's keys and the volume work on StandBy without leaving it.
+            if let Key::Media(media) = key {
+                self.media_on_lock(media);
+                self.moving = true;
+                return;
+            }
             let before = self.settings.lock;
             if self.faces.key(key, &mut self.settings.lock, self.settings.calm) {
                 if self.settings.lock != before {
@@ -1258,8 +1280,14 @@ impl Shell {
         // Locked: the lock screen takes every key. Nothing below this line
         // (the tour, the recent apps, the control centre, Spotlight, `?`, any
         // shortcut, the screen in front) is reached until the passcode is.
-        if self.lock.engaged() {
-            self.lock.key(key);
+        // Shown by hand with no passcode, any key lifts it, and is spent
+        // doing so. Music's keys (Fn + Q, W, E) and the volume work on it.
+        if self.lock.covering() {
+            if let Key::Media(media) = key {
+                self.media_on_lock(media);
+            } else {
+                self.lock.key(key);
+            }
             self.moving = true;
             return;
         }
@@ -1313,6 +1341,11 @@ impl Shell {
         if let Key::Media(media) = key {
             if let Some(said) = crate::sound::media_key(media) {
                 self.say(said);
+            }
+            // Music's own keys open the island on what is playing.
+            if matches!(media, crate::platform::Media::PlayPause | crate::platform::Media::Next | crate::platform::Media::Previous) {
+                self.activities.refresh();
+                self.activities.show(crate::liveactivity::Kind::Music, self.settings.calm);
             }
             self.moving = true;
             return;
@@ -2127,7 +2160,31 @@ impl Shell {
             }
         }
         self.draw_echo();
+        self.draw_hold_cue();
         self.draw_flash_and_standby();
+    }
+
+    /// Tab held towards a lock: a ring of the signal colour drawn round the
+    /// island from its top, clockwise, filling as Tab is held; full, the
+    /// lock screen comes down. Let go early, it draws back.
+    fn draw_hold_cue(&mut self) {
+        let p = self.hold_cue.value().clamp(0.0, 1.0);
+        if p <= 0.004 {
+            return;
+        }
+        let island = self.places.island.filter(|_| !self.stack.last().is_some_and(|(s, _)| s.full_screen())).unwrap_or_else(|| {
+            let h = self.gfx.island_h();
+            Rect::new((W - 64.0) * 0.5, 4.0, 64.0, h)
+        });
+        let r = island.inset(-2.5);
+        let path = capsule_path(r, p);
+        let g = &mut self.gfx;
+        let color = g.tokens.signal;
+        // A soft glow under the line, then the line; both fading in over the
+        // first part so the start is never a hard dot.
+        let fade = (p / 0.12).min(1.0);
+        g.canvas.polyline(&path, 4.0, color, 0.18 * fade);
+        g.canvas.polyline(&path, 1.8, color, 0.95 * fade);
     }
 
     /// Developer options › Show key presses: the last keys, each on a cap,
@@ -2177,7 +2234,7 @@ impl Shell {
         }
         if self.faces.visible() {
             let reading = self.shown_reading();
-            let feed = crate::faces::Feed { reading: reading.as_ref(), h24: self.settings.clock24, notices: self.lock.notices(), generation: self.robot.schedule.generation() };
+            let feed = crate::faces::Feed { reading: reading.as_ref(), h24: self.settings.clock24, notices: self.lock.notices(), generation: self.robot.schedule.generation(), activities: self.activities.list(), opened: self.activities.opened(), open: self.activities.open.value(), level: self.activities.level.value() };
             let Shell { gfx, faces, robot, settings, .. } = self;
             faces.draw(gfx, robot, &feed, &settings.lock);
         }
@@ -2517,16 +2574,33 @@ impl Shell {
         // so, its meter live beside the words.
         let talk = self.voice.island();
         let (label, icon) = talk.as_ref().map_or((label, icon), |talk| (talk.words.clone(), true));
+        // Live activities: with nothing being said, the most important
+        // carries the island, compact, and a second sits beside it as a
+        // bubble; one that has just changed opens the island to its card for
+        // a moment (liveactivity.rs).
+        let quiet = self.message.is_none() && talk.is_none() && hide <= 0.0;
+        let activity = if quiet { self.activities.list().first().cloned() } else { None };
+        let opened = if quiet { self.activities.opened().cloned() } else { None };
+        let second = if activity.is_some() { self.activities.list().get(1).cloned() } else { None };
+        let open = if opened.is_some() { self.activities.open.value().clamp(0.0, 1.08) } else { 0.0 };
+        let level = self.activities.level.value();
+        let label = activity.as_ref().map_or(label, |a| a.short.clone());
         let caption = g.ty.caption;
         let island_h = g.island_h();
         // A message may take most of the width; status stays out of the title's way.
         let room = if icon { 250.0 } else { 96.0 };
         let label = g.text.fit(&label, &caption, room);
-        let want = g.measure(&label, caption) + 34.0;
+        let want = match &activity {
+            Some(_) if self.activities.open.target() > 0.5 && opened.is_some() => W - 2.0 * PAD,
+            Some(a) => crate::liveactivity::compact_w(g, a),
+            None => g.measure(&label, caption) + 34.0,
+        };
         let want = want + talk.as_ref().map_or(0.0, |_| crate::voice::METER_ROOM);
-        if !icon {
+        if !icon && activity.is_none() {
             self.island_rest = want;
         }
+        // The bubble beside it takes room too, on both sides (it is centred).
+        let bubble = second.as_ref().map_or(0.0, |_| island_h + 6.0) * (1.0 - open).clamp(0.0, 1.0);
         // The title and the status give way to the island where they would
         // meet: out as soon as it is growing over them, back once it has
         // shrunk clear. (Two pixels' grace for the island's spring running a
@@ -2538,7 +2612,7 @@ impl Shell {
             }
             _ => 0.0,
         };
-        let reach = want.max(self.island_w.value() - 2.0).max(island_h);
+        let reach = (want + 2.0 * bubble).max(self.island_w.value() - 2.0).max(island_h);
         let beside = (W - reach) * 0.5 - PAD - 8.0;
         let clear_of = (W + reach) * 0.5 + 2.0;
         for (fade, fits) in [(&mut self.title_shown, title_w <= beside), (&mut self.status_shown, self.status_left >= clear_of)] {
@@ -2565,15 +2639,24 @@ impl Shell {
             self.island_w.jump(want);
         }
         let iw = self.island_w.value().max(island_h);
-        let island = Rect::new((W - iw) * 0.5, 4.0, iw, island_h);
+        let ih = island_h + (crate::liveactivity::OPEN_H - island_h) * open;
+        let island = Rect::new((W - iw) * 0.5, 4.0, iw, ih);
+        let island_radius = island_h * 0.5 + (crate::liveactivity::OPEN_RADIUS - island_h * 0.5) * open.min(1.0);
         self.places.island = Some(island);
+        let bubble_rect = Rect::new(island.right() + 6.0, 4.0, island_h, island_h);
         // Every glass shape goes through one pass; each family is its own
         // group. Spotlight's bar goes first in the island's: where the two
         // meet, it is the bar's; and the island's glass gives way as the
         // bar's materializes, so at rest the bar is the island, grown.
         let island_glass = bar.map_or(1.0, |b| 1.0 - b.strength);
         let mut shapes: Vec<GlassShape> = bar.into_iter().collect();
-        shapes.push(GlassShape { strength: island_glass, ..GlassShape::new(island, island_h * 0.5, 0) });
+        shapes.push(GlassShape { strength: island_glass, ..GlassShape::new(island, island_radius, 0) });
+        // The bubble: glass of its own group, so it stands apart from the
+        // island rather than melting into it; it materializes as the island
+        // closes and goes as it opens.
+        if second.is_some() && open < 0.98 {
+            shapes.push(GlassShape { strength: island_glass * (1.0 - open), ..GlassShape::new(bubble_rect, island_h * 0.5, 3) });
+        }
         let pager = g.pager.map(|(pages, current, ox)| {
             let w = pages as f32 * 9.0 + 7.0;
             (Rect::new((W - w) * 0.5 + ox, H - 13.0, w, 10.0), pages, current)
@@ -2602,12 +2685,27 @@ impl Shell {
         g.canvas.set_clip(island.inset(2.0));
         if let Some(talk) = &talk {
             crate::voice::draw_island(g, island, talk, &label, words * shown);
+        } else if let Some(a) = &activity {
+            // Open: the card, its words in once the island is most of the
+            // way there; closed: compact, its words in as the island settles.
+            if let (Some(o), true) = (&opened, open > 0.02) {
+                let card = ((open - 0.5) / 0.4).clamp(0.0, 1.0);
+                crate::liveactivity::draw_card(g, island.inset(4.0), o, level, card * shown);
+            }
+            let compact = (1.0 - open / 0.45).clamp(0.0, 1.0);
+            if compact > 0.0 {
+                let compact_rect = Rect::new(island.x, island.y, island.w, island_h);
+                crate::liveactivity::draw_compact(g, compact_rect, a, level, words * compact * shown);
+            }
         } else {
             let dot = if icon { t.signal } else if linked { t.ice } else { t.faint };
             g.canvas.circle(island.x + 12.0, island.cy(), 3.0, dot, shown);
             g.text_alpha(island.x + 22.0, island.cy(), &label, caption, t.ink, words * shown);
         }
         g.canvas.clear_clip();
+        if let (Some(b), true) = (&second, open < 0.5) {
+            crate::liveactivity::draw_bubble(g, bubble_rect, b, shown * (1.0 - open * 2.0));
+        }
         if g.take_motion_started() {
             self.moving = true;
         }
@@ -2625,6 +2723,43 @@ impl Shell {
         }
         screen.draw(g, robot);
     }
+}
+
+/// Points along a capsule's outline from the top of its middle, clockwise,
+/// `p` of the way round: the hold cue's line.
+fn capsule_path(r: Rect, p: f32) -> Vec<(f32, f32)> {
+    let rad = r.h * 0.5;
+    let straight = (r.w - r.h).max(0.0);
+    let arc = std::f32::consts::PI * rad;
+    let total = 2.0 * straight + 2.0 * arc;
+    let want = (p.clamp(0.0, 1.0) * total).max(0.5);
+    let (cy, left_c, right_c) = (r.cy(), r.x + rad, r.right() - rad);
+    let at = |d: f32| -> (f32, f32) {
+        // Top edge, middle to the right; the right end; the bottom, right to
+        // left; the left end; the top, left to the middle.
+        let half = straight * 0.5;
+        if d <= half {
+            return (r.cx() + d, r.y);
+        }
+        let d = d - half;
+        if d <= arc {
+            let a = d / rad;
+            return (right_c + rad * a.sin(), cy - rad * a.cos());
+        }
+        let d = d - arc;
+        if d <= straight {
+            return (right_c - d, r.bottom());
+        }
+        let d = d - straight;
+        if d <= arc {
+            let a = d / rad;
+            return (left_c - rad * a.sin(), cy + rad * a.cos());
+        }
+        let d = d - arc;
+        (left_c + d, r.y)
+    };
+    let steps = ((want / 2.0).ceil() as usize).max(2);
+    (0..=steps).map(|i| at(want * i as f32 / steps as f32)).collect()
 }
 
 /// A screen's title as the look writes it: Bezel's headings are lowercase,
@@ -3217,6 +3352,32 @@ impl Shell {
         self.charger = on;
     }
 
+    /// The galleries' and tests' live activities, as if just read (and
+    /// not read again).
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn pretend_activities(&mut self, list: Vec<crate::liveactivity::Activity>) {
+        self.activities.set(list, self.settings.calm);
+        self.dirty = true;
+    }
+
+    /// The galleries' hold cue, part way.
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn pretend_hold(&mut self, p: f32) {
+        self.hold_cue.jump(p);
+    }
+
+    /// The island closed again at once (for the galleries' still shots of it compact).
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn close_island_for_gallery(&mut self) {
+        self.activities.close_now();
+    }
+
+    /// The lock screen, as Tab held brings it (for the galleries).
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn lock_as_if_held(&mut self) {
+        self.lock_by_hand();
+    }
+
     /// Set down on the charger with the screen dimmed or off (or in deep
     /// standby): StandBy comes up at once, as a phone's does. True if it did.
     fn watch_charger(&mut self) -> bool {
@@ -3318,9 +3479,43 @@ impl Shell {
             self.leave_faces();
         }
         let reading = self.shown_reading();
-        let feed = crate::faces::Feed { reading: reading.as_ref(), h24: self.settings.clock24, notices: self.lock.notices(), generation: self.robot.schedule.generation() };
+        let feed = crate::faces::Feed { reading: reading.as_ref(), h24: self.settings.clock24, notices: self.lock.notices(), generation: self.robot.schedule.generation(), activities: self.activities.list(), opened: self.activities.opened(), open: self.activities.open.value(), level: self.activities.level.value() };
         let (faces_moving, faces_changed) = self.faces.tick(dt, motion_dt, &feed, &self.settings.lock, calm);
+        // Woken onto the lock screen: its parts rise in again.
+        let lit = !self.standby.asleep();
+        if lit && !self.lit_was {
+            self.lock.woke(calm);
+        }
+        self.lit_was = lit;
         let (lock_moving, lock_changed, unlocked) = self.lock.tick(dt, motion_dt, calm, self.settings.clock24);
+        // Live activities: read once a second while the screen is lit, not
+        // at all while it is off.
+        let unix = chrono::Utc::now().timestamp();
+        let sources = crate::liveactivity::Sources { robot: &self.robot, update: &self.update, unix };
+        let (acts_moving, acts_changed) = self.activities.tick(dt, motion_dt, lit, calm, &sources);
+        // Tab held towards a lock: the cue fills as it is held, and draws
+        // back if it is let go first.
+        let cue = crate::platform::tab_down_since().map(|at| {
+            let held = at.elapsed().as_secs_f32();
+            let (after, hold) = (crate::platform::LOCK_CUE_AFTER.as_secs_f32(), crate::platform::HOLD_TO_LOCK.as_secs_f32());
+            ((held - after) / (hold - after)).clamp(0.0, 1.0)
+        });
+        let cue_moving = match cue {
+            Some(p) => {
+                self.hold_cue.jump(p);
+                true
+            }
+            None => {
+                if self.hold_cue.target() != 0.0 {
+                    if calm {
+                        self.hold_cue.jump(0.0);
+                    } else {
+                        self.hold_cue.set(0.0);
+                    }
+                }
+                self.hold_cue.tick(motion_dt)
+            }
+        };
         if unlocked {
             self.say_kept();
             self.status.age = f32::MAX;
@@ -3328,10 +3523,55 @@ impl Shell {
         if !self.lock.visible() && !self.lock_scratch.is_empty() {
             self.lock_scratch = Vec::new();
         }
-        if faces_changed || lock_changed {
+        if faces_changed || lock_changed || acts_changed || cue_moving {
             self.dirty = true;
         }
-        faces_moving || lock_moving
+        faces_moving || lock_moving || acts_moving || cue_moving
+    }
+
+    /// Tab held: the lock screen comes down over whatever is showing (the
+    /// screen woken first, StandBy and deep standby left). With a passcode it
+    /// is locked; without, any key lifts it. Locked already: nothing.
+    fn lock_by_hand(&mut self) {
+        // Dark, in deep standby or StandBy: woken onto the lock screen (with a
+        // passcode it is there already, engaged when the screen went off).
+        if self.deep.on() {
+            self.standby.key();
+            self.leave_deep();
+        }
+        self.standby.wake_now();
+        self.leave_faces();
+        if self.lock.covering() {
+            self.moving = true;
+            self.dirty = true;
+            return;
+        }
+        if self.spotlight.visible() {
+            self.spotlight.gone_now();
+            self.spotlight_under = None;
+        }
+        // Shown first (coming down), then what was over the screen put away.
+        self.lock.show(self.settings.calm);
+        self.lock_now();
+        self.hold_cue.jump(0.0);
+        self.moving = true;
+        self.dirty = true;
+    }
+
+    /// Music's keys on the lock screen: the player asked (through
+    /// `nowplaying`), nothing unlocked; the volume as anywhere.
+    fn media_on_lock(&mut self, media: crate::platform::Media) {
+        use crate::nowplaying::Control;
+        use crate::platform::Media;
+        match media {
+            Media::PlayPause => crate::nowplaying::control(Control::PlayPause),
+            Media::Next => crate::nowplaying::control(Control::Next),
+            Media::Previous => crate::nowplaying::control(Control::Previous),
+            other => {
+                crate::sound::media_key(other);
+            }
+        }
+        self.activities.refresh();
     }
 
     /// What the lock screen shows besides the time, read every 20 s at most.
@@ -3343,6 +3583,9 @@ impl Shell {
         let mut info = self.lock_info.as_ref().map(|(i, _)| i.clone()).unwrap_or_default();
         info.notices = self.lock.notices();
         info.newest = self.lock.newest();
+        info.activities = self.activities.list().to_vec();
+        info.level = self.activities.level.value();
+        info.rise = self.lock.entering();
         info
     }
 
@@ -3709,7 +3952,7 @@ impl Shell {
     /// over the screens (`spotlight::set_locked`). Nothing that reaches past
     /// it (Spotlight) opens while it is.
     pub fn locked(&self) -> bool {
-        self.lock.engaged() || crate::spotlight::lock_held() || self.stack.iter().any(|(s, _)| s.locks())
+        self.lock.covering() || crate::spotlight::lock_held() || self.stack.iter().any(|(s, _)| s.locks())
     }
 
     /// Bring Spotlight up over whatever is showing: not over a lock, nor a
@@ -4875,7 +5118,7 @@ pub(crate) mod tests {
         assert!(!shell.animating(), "nothing moving at rest");
         // ↓ turns to the next face (and is kept); it stays StandBy.
         shell.key(Key::Down);
-        assert_eq!(shell.settings.lock.face, crate::lock::Face::Charge);
+        assert_eq!(shell.settings.lock.face, crate::lock::Face::Music);
         assert!(shell.animating(), "the page turn runs on the frame beat");
         assert_eq!(shell.frame_floor(), Some(crate::power::SAVER_FRAME_MS), "at most 30 frames a second");
         frames(&mut shell, 60, FRAME);
@@ -5009,7 +5252,7 @@ pub(crate) mod tests {
             Key::Ctrl('\t'), Key::Ctrl(' '), Key::Ctrl('q'), Key::Ctrl('c'), Key::Ctrl('k'), Key::Ctrl('f'),
             Key::Leave, Key::Back, Key::Tab, Key::Home, Key::End, Key::PageUp, Key::PageDown, Key::Delete,
             Key::Up, Key::Down, Key::Left, Key::Right, Key::BrightnessUp, Key::BrightnessDown,
-            Key::Char('/'), Key::Char('?'), Key::Char('`'), Key::Enter, Key::Ctrl('\n'),
+            Key::Char('/'), Key::Char('?'), Key::Char('`'), Key::Enter, Key::Ctrl('\n'), Key::Lock,
         ];
         keys.extend((1..=12).map(Key::F));
         for key in keys {
@@ -5081,6 +5324,241 @@ pub(crate) mod tests {
         assert!(!shell.faces_showing() && shell.lock.covers());
         type_code(&mut shell, "2468");
         assert!(!shell.locked());
+    }
+
+    /// Where the shell is, to tell it came back to the same place.
+    fn place(shell: &Shell) -> (usize, String, bool, bool, bool) {
+        (shell.stack.len(), shell.top_title().to_owned(), shell.spotlight_open(), shell.control_open(), shell.recents_open())
+    }
+
+    #[test]
+    fn tab_held_locks_from_every_context_and_any_key_lifts_it_without_a_passcode() {
+        use crate::standby::State;
+        // (what to do to get there, what is open over the screen)
+        type Setup = fn(&mut Shell);
+        let contexts: [(&str, Setup); 7] = [
+            ("home", |_| {}),
+            ("the terminal", |s| open_app(s, "Robot", "Terminal")),
+            ("settings", |s| open_app(s, "Robot", "Settings")),
+            ("spotlight", |s| {
+                s.key(Key::Ctrl('\n'));
+                frames(s, 30, FRAME);
+            }),
+            ("the control centre", |s| {
+                s.key(Key::Ctrl(' '));
+                frames(s, 30, FRAME);
+            }),
+            ("the recent apps", |s| {
+                open_app(s, "Robot", "Settings");
+                back_home(s);
+                s.key(Key::Ctrl('\t'));
+                frames(s, 30, FRAME);
+            }),
+            ("a dimmed screen", |s| {
+                s.settings.screen_off = 30;
+                for _ in 0..24 {
+                    s.tick(1.0);
+                }
+            }),
+        ];
+        for (name, setup) in contexts {
+            let mut shell = shell();
+            setup(&mut shell);
+            let overlay = shell.spotlight_open() || shell.control_open() || shell.recents_open();
+            let before = place(&shell);
+            shell.key(Key::Lock);
+            frames(&mut shell, 40, FRAME);
+            assert!(shell.lock.covering() && !shell.lock.engaged(), "{name}: shown, not locked (no passcode)");
+            assert!(shell.locked(), "{name}: nothing opens over it");
+            assert_eq!(shell.standby_state(), State::Awake, "{name}");
+            assert!(!shell.spotlight_open() && !shell.control_open() && !shell.recents_open(), "{name}: nothing left open over the screen");
+            // Spotlight, the recent apps and the control centre do not open over it.
+            for key in [Key::Ctrl('\n'), Key::Ctrl('\t'), Key::Ctrl(' ')] {
+                let mut again = shell_like(&shell);
+                again.key(key);
+                frames(&mut again, 10, FRAME);
+                assert!(!again.spotlight_open() && !again.control_open() && !again.recents_open(), "{name}: {key:?} over the lock");
+            }
+            // Held again while shown: nothing.
+            shell.key(Key::Lock);
+            assert!(shell.lock.covering());
+            // Any key lifts it, and is spent: back where it was.
+            shell.key(Key::Char('a'));
+            frames(&mut shell, 60, FRAME);
+            assert!(!shell.lock.covering() && !shell.lock.visible(), "{name}: lifted");
+            let after = place(&shell);
+            assert_eq!((after.0, after.1), (before.0, before.1), "{name}: back where it was");
+            if overlay {
+                assert!(!after.2 && !after.3 && !after.4, "{name}: what was over the screen stays put away");
+            }
+        }
+    }
+
+    /// A shell with the same lock shown, for a key tried on it alone.
+    fn shell_like(shown: &Shell) -> Shell {
+        let mut s = shell();
+        if shown.lock.covering() {
+            s.key(Key::Lock);
+            frames(&mut s, 20, FRAME);
+        }
+        s
+    }
+
+    #[test]
+    fn tab_held_locks_from_off_standby_and_deep_standby_and_needs_the_passcode() {
+        use crate::standby::State;
+        let mut shell = with_passcode("2468");
+        type_code(&mut shell, "2468");
+        assert!(!shell.locked());
+        // Off: woken onto the lock screen, locked.
+        shell.settings.screen_off = 30;
+        until_off(&mut shell, 60).expect("the screen goes off");
+        shell.key(Key::Lock);
+        frames(&mut shell, 30, FRAME);
+        assert_eq!(shell.standby_state(), State::Awake, "held in the dark, it wakes");
+        assert!(shell.lock.engaged() && shell.lock.visible());
+        // A tap of Tab on the lock screen is no way out either.
+        shell.key(Key::Tab);
+        assert!(shell.lock.engaged());
+        type_code(&mut shell, "2468");
+        assert!(!shell.locked());
+        // From the terminal, with text being typed: locked, and Tab (a tap)
+        // is still the terminal's afterwards.
+        open_app(&mut shell, "Robot", "Terminal");
+        shell.key(Key::Char('l'));
+        shell.key(Key::Tab);
+        assert!(!shell.locked(), "a tap is Tab, for completion");
+        shell.key(Key::Lock);
+        frames(&mut shell, 30, FRAME);
+        assert!(shell.lock.engaged());
+        type_code(&mut shell, "2468");
+        assert_eq!(shell.top_title(), "Terminal", "back where it was");
+        // From StandBy on the charger, and from deep standby. (The Terminal
+        // keeps Esc for itself: held, it leaves.)
+        shell.key(Key::Leave);
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(shell.stack.len(), 1);
+        shell.pretend_charger(Some(true));
+        for _ in 0..40 {
+            shell.tick(1.0);
+        }
+        assert!(shell.faces_showing() && shell.locked(), "StandBy locks with a passcode");
+        shell.key(Key::Lock);
+        frames(&mut shell, 30, FRAME);
+        assert!(!shell.faces_showing() && shell.lock.engaged() && shell.lock.visible(), "StandBy gives way to the lock screen");
+        let mut shell = with_passcode("2468");
+        type_code(&mut shell, "2468");
+        shell.settings.screen_off = 30;
+        shell.settings.battery.deep_after = 10;
+        until_deep(&mut shell, 700).expect("deep standby");
+        shell.key(Key::Lock);
+        frames(&mut shell, 30, FRAME);
+        assert_eq!((shell.deep_asleep(), shell.lock.engaged(), shell.lock.visible(), shell.standby_state()), (false, true, true, State::Awake));
+    }
+
+    #[test]
+    fn the_hold_cue_fills_while_tab_is_held_and_draws_back_if_let_go() {
+        let mut shell = shell();
+        let now = std::time::Instant::now();
+        crate::platform::set_tab_down(Some(now - std::time::Duration::from_millis(100)));
+        frames(&mut shell, 1, FRAME);
+        assert_eq!(shell.hold_cue.value(), 0.0, "not before the tap's time is past");
+        crate::platform::set_tab_down(Some(now - std::time::Duration::from_millis(375)));
+        frames(&mut shell, 1, FRAME);
+        assert!((shell.hold_cue.value() - 0.5).abs() < 0.05, "half way at 0.375 s: {}", shell.hold_cue.value());
+        assert!(shell.animating(), "it moves on the frame beat while held");
+        crate::platform::set_tab_down(None);
+        frames(&mut shell, 3, FRAME);
+        assert!(shell.hold_cue.value() > 0.1, "it draws back, not off at once");
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(shell.hold_cue.value(), 0.0);
+        assert!(!shell.lock.covering(), "let go early: no lock");
+    }
+
+    #[test]
+    fn musics_keys_work_on_the_lock_screen_without_unlocking() {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        static ASKED: AtomicU8 = AtomicU8::new(0);
+        crate::nowplaying::on_control(|c| {
+            ASKED.store(
+                match c {
+                    crate::nowplaying::Control::PlayPause => 1,
+                    crate::nowplaying::Control::Next => 2,
+                    crate::nowplaying::Control::Previous => 3,
+                },
+                Ordering::Relaxed,
+            )
+        });
+        crate::nowplaying::set(Some(crate::nowplaying::NowPlaying {
+            title: "Around the World".into(),
+            artist: "Daft Punk".into(),
+            album: "Homework".into(),
+            cover: None,
+            position: 10.0,
+            duration: 400.0,
+            playing: true,
+            at: std::time::Instant::now(),
+        }));
+        let mut shell = with_passcode("2468");
+        frames(&mut shell, 70, 1.0 / 30.0);
+        assert!(shell.activities.list().iter().any(|a| a.kind == crate::liveactivity::Kind::Music), "music on the lock screen");
+        for (media, asked) in [(crate::platform::Media::PlayPause, 1), (crate::platform::Media::Next, 2), (crate::platform::Media::Previous, 3)] {
+            shell.key(Key::Media(media));
+            assert_eq!(ASKED.load(Ordering::Relaxed), asked);
+            assert!(shell.lock.engaged(), "still locked");
+        }
+        // Without a passcode, shown by hand: music's keys do not lift it.
+        let mut open = self::shell();
+        open.key(Key::Lock);
+        open.key(Key::Media(crate::platform::Media::Next));
+        assert!(open.lock.covering());
+        crate::nowplaying::set(None);
+    }
+
+    #[test]
+    fn music_on_the_charger_turns_standby_to_its_face_and_back() {
+        let mut shell = shell();
+        shell.settings.screen_off = 30;
+        shell.pretend_charger(Some(true));
+        for _ in 0..40 {
+            shell.tick(1.0);
+        }
+        assert_eq!(shell.faces.shown_face(), crate::lock::Face::Clock);
+        crate::nowplaying::set(Some(crate::nowplaying::NowPlaying {
+            title: "Da Funk".into(),
+            artist: "Daft Punk".into(),
+            album: String::new(),
+            cover: None,
+            position: 0.0,
+            duration: 300.0,
+            playing: true,
+            at: std::time::Instant::now(),
+        }));
+        frames(&mut shell, 90, 1.0 / 30.0);
+        assert_eq!(shell.faces.shown_face(), crate::lock::Face::Music, "picked by itself");
+        assert_eq!(shell.settings.lock.face, crate::lock::Face::Clock, "not kept as the face chosen");
+        crate::nowplaying::set(None);
+        frames(&mut shell, 90, 1.0 / 30.0);
+        assert_eq!(shell.faces.shown_face(), crate::lock::Face::Clock, "back once it stops");
+    }
+
+    #[test]
+    fn a_live_activity_carries_the_island_and_a_change_opens_it_for_a_moment() {
+        let mut shell = shell();
+        shell.pretend_activities(crate::liveactivity::timers(Some((200.0, 300.0, 1)), None));
+        frames(&mut shell, 60 * 5, FRAME);
+        let island = shell.places.island.expect("the island");
+        shell.pretend_activities(crate::liveactivity::timers(Some((40.0, 300.0, 1)), None));
+        frames(&mut shell, 60, FRAME);
+        let open = shell.places.island.expect("the island");
+        assert!(open.h > island.h * 2.0 && open.w > island.w, "opened on the timer's last minute");
+        frames(&mut shell, 60 * 5, FRAME);
+        let closed = shell.places.island.expect("the island");
+        assert!((closed.h - island.h).abs() < 0.5, "closed again");
+        // Something said outranks it, and it comes back after.
+        shell.say("battery at 15%");
+        frames(&mut shell, 2, FRAME);
+        assert_eq!(shell.island_words, "battery at 15%");
     }
 
     #[test]

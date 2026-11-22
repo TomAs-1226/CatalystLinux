@@ -512,10 +512,10 @@ days, slide the switch off.
 **StandBy.** On the charger and left alone, the screen dims as ever, and
 where it would go off a StandBy face comes up instead; set down on the
 charger with the screen off (or in deep standby, within the minute), it
-comes up at once. Six faces, designed for this panel in the spirit of
+comes up at once. Seven faces, designed for this panel in the spirit of
 Bezel's standby scapes (`faces.rs`): a large clock (digits, a Braun-style
 dial with a second hand stepping into each second, or a dot matrix), the
-time with the charge and when it will be full, the team's next match and
+song playing, the time with the charge and when it will be full, the team's next match and
 those after it, the weather and the next hours, photos from the album, and
 a little of everything. ↑↓ turn the faces (the page spring, rubber-banding
 at either end, the page dots tucking away 2.5 s after the last key), ←→
@@ -547,6 +547,33 @@ dots), its colour, and what shows with it (the date, the charge, the next
 match, notices, the next reminder). Notices said while it is locked are
 kept: the lock screen says how many (their words only if Settings › Lock
 screen › Notices on it says so), and the island says them once it opens.
+
+**Locking by hand.** Hold Tab for 0.6 s, anywhere (the Terminal and text
+fields too): from 0.15 s a ring fills around the island, and let go before
+it closes it draws back and nothing happens. A tap is still Tab, given when
+the key comes up; a held Tab's repeats are not Tab; Ctrl-Tab is still the
+recent apps. With a passcode the handheld locks. Without one the lock screen
+comes down over the screen all the same, its parts rising into place, and
+any key lifts it back to where you were (that key is spent doing so).
+Holding Tab on the lock screen does nothing more. External apps that take
+the keyboard for themselves keep Tab.
+
+**Live activities.** What is going on now, in the island, on the lock
+screen and in StandBy (`liveactivity.rs`): the song playing in Music, Clock's
+timers (and the stopwatch while it runs), the team's next match (a countdown
+to queueing, then "queue now", in its alliance's colour), a reminder due in
+the next 15 minutes, downloads (the update, the catalogue's installs, and
+anything else that says it is working), the Assistant thinking or the
+on-device model loading, and the robot while it is enabled. The most
+important one fills the island; a second sits beside it in a glass bubble
+of its own. When one changes (a new song, a timer's last minute, "queue
+now", a download done) the island opens to show it for 3.5 s. The lock
+screen shows two cards, most important first, and says how many more there
+are. Music's keys (Fn + Q, W, E) play or pause and skip, on the lock screen
+too, without unlocking. On the charger StandBy turns to its Now playing face
+by itself while a song plays, and back when it stops. Activities are worked
+out once a second and only while the screen is on: none keeps the screen
+on or wakes it, and with the screen off they cost nothing.
 
 The passcode is kept only as an Argon2id hash (19 MiB, two passes, a random
 salt) in `/data/catalyst/passcode`, readable by root alone. It is checked on
