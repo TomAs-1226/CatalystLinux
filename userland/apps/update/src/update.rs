@@ -53,7 +53,11 @@ fn download_size(m: &Manifest, version: &str) -> u64 {
 
 pub fn check(dev: &Device) -> Result<(), String> {
     let before = status::read(dev);
-    if [state::DOWNLOADING, state::INSTALLING, state::TRYING].contains(&before.state.as_str()) {
+    // An install under way is left to finish; one cut off (the handheld
+    // switched off, the installer stopped) is not under way, though its
+    // status still says so, and would otherwise keep every check away for
+    // good: the handheld never updated again.
+    if before.state == state::TRYING || [state::DOWNLOADING, state::INSTALLING].contains(&before.state.as_str()) && Lock::held(dev) {
         return Ok(());
     }
     let (version, build) = dev.version();
@@ -168,6 +172,14 @@ fn room_of(path: &Path) -> Option<u64> {
 struct Lock(PathBuf);
 
 impl Lock {
+    /// Whether an installer holds it now: its process alive, and not this one.
+    fn held(dev: &Device) -> bool {
+        std::fs::read_to_string(saved(dev, "lock")).is_ok_and(|pid| {
+            let pid = pid.trim();
+            !pid.is_empty() && Path::new(&format!("/proc/{pid}")).exists() && pid != std::process::id().to_string()
+        })
+    }
+
     fn take(dev: &Device) -> Result<Lock, String> {
         std::fs::create_dir_all(&dev.state).map_err(|e| e.to_string())?;
         let path = saved(dev, "lock");
@@ -540,6 +552,15 @@ mod tests {
         let s = status::read(&dev);
         assert_eq!((s.state.as_str(), s.version.as_str(), s.notes.as_str()), (state::AVAILABLE, "0.2.0", "new glass"));
         assert!(s.size < std::fs::metadata(second.join("system.img.gz")).unwrap().len(), "a patch: {} bytes", s.size);
+
+        // An install cut off part way (switched off, stopped): its status
+        // still says installing, with nobody installing. A check is not kept
+        // away by it, or the handheld would never update again.
+        status::update(&dev, |s| s.state = state::INSTALLING.into());
+        std::fs::write(dev.state.join("lock"), "999999999").unwrap();
+        assert!(!Lock::held(&dev), "no such process");
+        check(&dev).unwrap();
+        assert_eq!(status::read(&dev).state, state::AVAILABLE, "found again");
 
         // Installed into system B, its kernel into slot-b, config.txt set to try it.
         install(&dev).unwrap();

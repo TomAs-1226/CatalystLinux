@@ -10,6 +10,11 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.6.5
+
+### Fixed
+- An update cut off part way (the handheld switched off, the installer stopped) no longer keeps the handheld from ever checking for updates again.
+
 ## 0.6.4
 
 ### Fixed
