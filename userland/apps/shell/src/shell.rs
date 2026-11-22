@@ -2908,7 +2908,10 @@ impl Shell {
             if compact > 0.0 {
                 let compact_rect = Rect::new(island.x, island.y, island.w, island_h);
                 crate::liveactivity::draw_compact(g, compact_rect, a, &look, words * compact * shown);
-                bars_seen = a.kind == crate::liveactivity::Kind::Music && words * compact * shown > 0.0;
+                // Still on StandBy (a night on the charger draws only as the
+                // face changes) and with the battery saver: not 60 frames a
+                // second for the bars.
+                bars_seen = a.kind == crate::liveactivity::Kind::Music && words * compact * shown > 0.0 && !self.faces.showing() && !self.settings.battery.saver;
             }
         } else {
             let dot = if icon || unread > 0 { t.signal } else if linked { t.ice } else { t.faint };
