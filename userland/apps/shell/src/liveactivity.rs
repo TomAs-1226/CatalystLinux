@@ -168,7 +168,11 @@ pub fn music(np: Option<&crate::nowplaying::NowPlaying>) -> Option<Activity> {
         (true, false) => np.album.clone(),
         (true, true) => String::new(),
     };
-    let mut a = Activity::new(Kind::Music, "music", 60, mark, np.title.clone(), detail, np.title.clone());
+    // Compact, music is its cover and its level, no words (the song's name
+    // is on the card the island opens to when the song changes, for a few
+    // seconds): with the name in it the island was wide for as long as
+    // anything played, and the time and the battery gave way to it.
+    let mut a = Activity::new(Kind::Music, "music", 60, mark, np.title.clone(), detail, String::new());
     if np.duration > 0.0 {
         let rate = if np.playing { 1.0 / np.duration } else { 0.0 };
         a.meter = Some(Meter::Moving { from: np.position_now() / np.duration, rate, at: Instant::now() });
@@ -787,6 +791,26 @@ pub fn compact_w(g: &mut Gfx, a: &Activity) -> f32 {
     (g.measure(&words, g.ty.caption) + COMPACT_PAD + trailing_w(a)).max(70.0).ceil()
 }
 
+/// The compact island's words in `room`: all of them where they fit; else
+/// what comes after the last " · " ("Q31 · queue 8:12": "queue 8:12"); else
+/// a time or a share at the end ("8:12", "46%"); else cut short.
+pub fn compact_words(g: &mut Gfx, a: &Activity, room: f32) -> String {
+    let style = g.ty.caption;
+    let mut tries = vec![a.short.clone()];
+    if let Some((_, tail)) = a.short.rsplit_once(" · ") {
+        tries.push(tail.to_owned());
+    }
+    if let Some((_, last)) = tries.last().and_then(|t| t.rsplit_once(' ')) {
+        if last.contains(':') || last.contains('%') {
+            tries.push(last.to_owned());
+        }
+    }
+    match tries.iter().find(|t| g.measure(t, style) <= room) {
+        Some(fits) => fits.clone(),
+        None => g.text.fit(tries.last().map_or("", String::as_str), &style, room),
+    }
+}
+
 /// The compact island's words at most, and what it adds round them (the
 /// mark, the edges).
 const COMPACT_WORDS: f32 = 150.0;
@@ -855,7 +879,7 @@ pub fn draw_compact(g: &mut Gfx, r: Rect, a: &Activity, level: f32, alpha: f32) 
     let mark = r.h - 8.0;
     draw_mark(g, r.x + 6.0 + mark * 0.5, r.cy(), mark, &a.mark, alpha);
     let ink = if a.urgent { t.signal } else { t.ink };
-    let words = g.text.fit(&a.short, &ty.caption, (r.w - COMPACT_PAD - trailing_w(a) + 2.0).clamp(0.0, COMPACT_WORDS));
+    let words = compact_words(g, a, (r.w - COMPACT_PAD - trailing_w(a) + 2.0).clamp(0.0, COMPACT_WORDS));
     g.text.draw(&mut g.canvas, r.x + 12.0 + mark, (r.cy() + ty.caption.size * 0.36).round(), &words, &ty.caption, ink, alpha);
     let end = r.right() - 11.0;
     if a.playing.is_some() {
@@ -982,6 +1006,27 @@ mod tests {
 
     fn song(playing: bool) -> NowPlaying {
         NowPlaying { title: "Around the World".into(), artist: "Daft Punk".into(), album: "Homework".into(), cover: None, position: 30.0, duration: 120.0, playing, at: Instant::now() }
+    }
+
+    #[test]
+    fn the_compact_island_keeps_what_matters_of_its_words_in_the_room_it_has() {
+        let mut g = Gfx::new(bezel::Tokens::dark());
+        let mut a = Activity::new(Kind::Match, "queue", 75, Mark::Icon("flag", Tint::Signal), "Q31", "on red", "Q31 · queue 8:12");
+        let room = |g: &mut Gfx, s: &str| g.measure(s, g.ty.caption) + 0.5;
+        let all = room(&mut g, "Q31 · queue 8:12");
+        assert_eq!(compact_words(&mut g, &a, all), "Q31 · queue 8:12", "room for all of it");
+        let tail = room(&mut g, "queue 8:12");
+        assert_eq!(compact_words(&mut g, &a, tail), "queue 8:12", "what follows the dot");
+        let time = room(&mut g, "8:12");
+        assert_eq!(compact_words(&mut g, &a, time), "8:12", "the time it says");
+        // A last word that is not a time or a share is not taken alone.
+        a.short = "3 of 12".into();
+        let twelve = room(&mut g, "12");
+        assert_ne!(compact_words(&mut g, &a, twelve), "12");
+        // Music has no words: its cover and its level.
+        let music = music(Some(&song(true))).unwrap();
+        assert!(music.short.is_empty());
+        assert!(compact_w(&mut g, &music) <= 70.0);
     }
 
     #[test]

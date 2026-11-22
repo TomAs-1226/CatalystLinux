@@ -2764,9 +2764,17 @@ impl Shell {
         let unread = if icon || activity.is_some() { 0 } else { self.notes.unread() };
         let count = (unread > 0).then(|| if unread > 99 { "99+".to_owned() } else { unread.to_string() });
         let count_w = count.as_ref().map_or(0.0, |c| g.measure(c, caption) + 8.0);
+        // Compact, the island does not reach the time and the battery: it is
+        // as wide as leaves them clear, its words what matters most of them
+        // (it opens to its card for the rest). The bubble beside it counts,
+        // on both sides. Something urgent (queue now, a timer's last minute)
+        // takes the room for the while it is.
+        let bubble_room = second.as_ref().map_or(0.0, |_| island_h + 6.0);
+        let compact_most = (2.0 * (self.status_left - 2.0) - W - 2.0 * bubble_room).max(70.0);
         let want = match &activity {
             Some(_) if self.activities.open.target() > 0.5 && opened.is_some() => W - 2.0 * PAD,
-            Some(a) => crate::liveactivity::compact_w(g, a),
+            Some(a) if a.urgent => crate::liveactivity::compact_w(g, a),
+            Some(a) => crate::liveactivity::compact_w(g, a).min(compact_most),
             None => g.measure(&label, caption) + 34.0 + count_w,
         };
         let want = want + talk.as_ref().map_or(0.0, |_| crate::voice::METER_ROOM);
@@ -6155,6 +6163,32 @@ pub(crate) mod tests {
         crate::nowplaying::set(None);
         frames(&mut shell, 90, 1.0 / 30.0);
         assert_eq!(shell.faces.shown_face(), crate::lock::Face::Clock, "back once it stops");
+    }
+
+    #[test]
+    fn a_song_playing_leaves_the_time_and_the_battery_in_view() {
+        crate::nowplaying::set(Some(crate::nowplaying::NowPlaying {
+            title: "A song with a name long enough to fill the whole island".into(),
+            artist: "Somebody".into(),
+            album: String::new(),
+            cover: None,
+            position: 10.0,
+            duration: 400.0,
+            playing: true,
+            at: std::time::Instant::now(),
+        }));
+        let mut shell = shell();
+        frames(&mut shell, 60 * 6, FRAME);
+        let music = shell.activities.list().iter().find(|a| a.kind == crate::liveactivity::Kind::Music).cloned().expect("music");
+        assert!(shell.activities.opened().is_none(), "no card open");
+        // Compact, music is its cover and its level: the song's name is on its card.
+        assert!(music.short.is_empty(), "{:?}", music.short);
+        // Whatever carries the island (the demo's queue, by the clock, may
+        // outrank music), the time and the battery stay in view.
+        let island = shell.places.island.expect("the island");
+        assert_eq!(shell.status_shown.target(), 1.0, "the time and the battery in view");
+        assert!(island.right() + 2.0 <= shell.status_left, "clear of them: {} and {}", island.right(), shell.status_left);
+        crate::nowplaying::set(None);
     }
 
     #[test]

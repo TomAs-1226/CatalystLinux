@@ -10,6 +10,12 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.6.7
+
+### Fixed
+- The island shrinks to music's cover and level while a song plays, like the Dynamic Island, so the time and battery stay in view; the song's name shows on the card it opens to when the song changes.
+- Live activities never push the time and battery away: the island keeps the part of its words that matters ("queue 8:12", then "8:12"). Only something urgent, like queueing now, takes the room while it lasts.
+
 ## 0.6.6
 
 ### Fixed
