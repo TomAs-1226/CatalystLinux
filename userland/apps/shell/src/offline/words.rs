@@ -270,6 +270,33 @@ const CONTRADICTS: [(&[&str], Kind); 2] = [
     (&["finished", "completed", "complete", "on time"], Kind::Auto),
 ];
 
+/// Judgements an answer may pass only if the facts make them (a model
+/// copies them from its example, or adds them of its own).
+const JUDGEMENTS: [&str; 9] = ["fully charged", "not charged", "undercharged", "low charge", "dead battery", "weak battery", "bad battery", "too hot", "overheating"];
+
+/// Each measurement in a text (°C, A, V, %) with the time nearest it ("84 °C
+/// at 2:10 in teleop, over 70 °C from 1:36": 84 with 2:10, 70 with 1:36), a
+/// time after it first when two are as near.
+fn pairs(text: &str) -> Vec<(f64, f64)> {
+    let said = numbers(text);
+    let mut out = Vec::new();
+    for (i, n) in said.iter().enumerate() {
+        if n.time || !matches!(n.unit, Some("C" | "A" | "V" | "%")) {
+            continue;
+        }
+        let after = said.iter().enumerate().skip(i + 1).find(|(_, s)| s.time).map(|(j, s)| (j - i, s.value));
+        let before = said.iter().enumerate().take(i).rev().find(|(_, s)| s.time).map(|(j, s)| (i - j, s.value));
+        let nearest = match (after, before) {
+            (Some(a), Some(b)) => Some(if a.0 <= b.0 { a.1 } else { b.1 }),
+            (a, b) => a.or(b).map(|x| x.1),
+        };
+        if let Some(t) = nearest {
+            out.push((n.value, t));
+        }
+    }
+    out
+}
+
 /// Causes and conclusions: the facts never draw one, so neither may an answer.
 const CAUSES: [&str; 19] = ["because", "due", "caused", "causing", "causes", "cause", "led", "leading", "result", "resulted", "resulting", "therefore", "hence", "indicating", "indicates", "indicate", "suggesting", "suggests", "means"];
 
@@ -482,6 +509,29 @@ pub fn check(answer: &str, lines: &[Line], question: &str, names: &[String]) -> 
             }
         }
     }
+    for judgement in JUDGEMENTS {
+        if answer_lower.contains(judgement) && !facts_lower.contains(judgement) {
+            problems.push(format!("says '{judgement}', which the facts do not"));
+            invented = true;
+        }
+    }
+    // A measurement said with a time: the time the facts give it.
+    let fact_pairs: Vec<(f64, f64)> = lines.iter().flat_map(|l| pairs(&l.text())).collect();
+    for clause in clauses(trimmed) {
+        let said = pairs(&clause);
+        let measures = numbers(&clause).iter().filter(|n| !n.time && matches!(n.unit, Some("C" | "A" | "V" | "%"))).count();
+        let times = numbers(&clause).iter().filter(|n| n.time).count();
+        if measures != 1 || times != 1 {
+            continue;
+        }
+        for (value, time) in said {
+            let known = fact_pairs.iter().any(|(v, _)| (v - value).abs() < 1e-6);
+            if known && !fact_pairs.iter().any(|(v, t)| (v - value).abs() < 1e-6 && (t - time).abs() < 1e-6) {
+                problems.push(format!("puts {value} at the wrong time"));
+                invented = true;
+            }
+        }
+    }
     for cause in CAUSES {
         if lower_words.iter().any(|w| w == cause) && !fact_words.iter().any(|w| w == cause) {
             problems.push(format!("gives a cause ('{cause}') the facts do not"));
@@ -632,6 +682,14 @@ mod tests {
             assert!(!v.ok, "{answer}");
             assert!(v.problems.iter().any(|p| p.starts_with(problem)), "{answer}: {:?}", v.problems);
         }
+        // A judgement the facts do not make; a measurement at another's time.
+        let heat = vec![Line { names: vec!["Elevator".into()], ..line("Q17", "Elevator reached 84 °C at 2:10 in teleop, over 70 °C from 1:36", Kind::Heat, "84 °C") }];
+        let v = check("Q17's elevator reached 84 °C from 1:36 in teleop.", &heat, "max elevator temperature in Q17", &names());
+        assert!(v.problems.iter().any(|p| p.starts_with("puts 84 at the wrong time")), "{:?}", v.problems);
+        assert!(check("Q17's Elevator reached 84 °C at 2:10 in teleop, over 70 °C from 1:36.", &heat, "max elevator temperature in Q17", &names()).ok);
+        let v = check("Q31 browned out once at 1:18 in teleop at 6.4 V. The battery was not fully charged.", &brownout(), "why did we brown out in Q31?", &names());
+        assert!(v.problems.iter().any(|p| p.starts_with("says 'fully charged'")), "{:?}", v.problems);
+        assert!(check("Q31 browned out at 1:18 in teleop when the battery fell to 6.4 V for 0.4 s, while FrontLeftDrive drew 70 A.", &brownout(), "why?", &names()).ok);
         // Cut off, or the facts pasted in as written.
         let pair = vec![Line { labels: vec!["Q14".into(), "Q12".into()], body: "brownouts 1 vs none, worse".into(), kind: Kind::Brownout, level: Level::Warn, negative: false, names: vec![], key: Some("1".into()) }];
         let v = check("Q14 vs Q12: brownouts 1 vs none, worse Q14 vs Q12: the difference between Q14 and Q", &pair, "compare Q14 and Q12", &names());
