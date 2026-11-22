@@ -722,6 +722,13 @@ pub fn cover(path: &Path) -> Option<Arc<Picture>> {
     None
 }
 
+/// Whether a cover is still being decoded (so whoever shows it looks again
+/// soon), rather than kept, or found not to read.
+pub fn cover_pending(path: &Path) -> bool {
+    let c = COVERS.lock().unwrap_or_else(|e| e.into_inner());
+    c.loading.as_ref().is_some_and(|(p, _)| p == path)
+}
+
 /// A cover file (JPEG or PNG), squared and shrunk to [`COVER_PX`].
 pub fn decode_cover(path: &Path) -> Option<Picture> {
     let bytes = std::fs::read(path).ok()?;

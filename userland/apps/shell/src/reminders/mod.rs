@@ -799,6 +799,20 @@ pub fn remind(typed: &str) {
     });
 }
 
+/// For the galleries: reminders typed ("charge the spares in 25 min"), on
+/// the book in use.
+#[cfg(not(target_arch = "aarch64"))]
+pub fn pretend(typed: &[&str]) {
+    with(|s| {
+        let n = Now { at: now(), zone: &Here, view: s.view.as_ref() };
+        for text in typed {
+            for p in parse::parse(text, &n).unwrap_or_default() {
+                s.book.add(p, &n);
+            }
+        }
+    });
+}
+
 // The shell, its screens and the other screens that show reminders share
 // one book. The tests run many shells at once, one to a thread: each has
 // its own, in memory.
@@ -860,6 +874,16 @@ pub fn upcoming(limit: usize) -> Vec<Upcoming> {
             .take(limit)
             .map(|r| Upcoming { id: r.id, text: r.text, when: r.when, at: r.at, due: r.due, pit: r.list == List::Pit, note: if let Link::Note(f) = r.link { Some(f) } else { None } })
             .collect()
+    })
+}
+
+/// Tick a reminder off (Enter on the reminders widget), as Enter in
+/// Reminders does: what the island says, if it is still there.
+pub fn done(id: u64) -> Option<String> {
+    with(|s| {
+        let h24 = s.h24;
+        let n = Now { at: now(), zone: &Here, view: s.view.as_ref() };
+        s.book.tick(id, &n, h24)
     })
 }
 

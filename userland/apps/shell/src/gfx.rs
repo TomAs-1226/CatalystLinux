@@ -125,8 +125,9 @@ pub struct Gfx {
     pub open_robot: bool,
     /// Whether a match's summary opens once its log is pulled.
     pub match_report: bool,
-    /// The glance page's cards, and the value pinned to it.
-    pub glance: Vec<crate::shell::Widget>,
+    /// The widgets on the glance page and on Home, and the value pinned to
+    /// the glance page.
+    pub widgets: crate::widgets::Layout,
     pub pinned: Option<String>,
     /// Home's arrangement (apps in order, apps hidden), and the clock's
     /// settings (24-hour, seconds).
@@ -331,7 +332,7 @@ impl Gfx {
             home: crate::shell::HomeStyle::Grid,
             open_robot: true,
             match_report: true,
-            glance: crate::shell::Settings::default().glance,
+            widgets: crate::widgets::Layout::starting(),
             pinned: None,
             arrangement: crate::shell::Arrangement::default(),
             clock: (true, false),

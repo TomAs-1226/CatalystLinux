@@ -92,7 +92,12 @@ pub fn side_color(side: Option<&str>) -> Color {
 
 /// The next match, when a team and its schedule are known; otherwise why not.
 pub fn next_match(robot: &Robot, now: i64) -> Result<NextMatch, String> {
-    let view = robot.schedule.view().ok_or("no team set")?;
+    next_match_in(robot.schedule.view().as_ref(), now)
+}
+
+/// The same, from a schedule already read (the widgets keep theirs).
+pub fn next_match_in(view: Option<&crate::schedule::View>, now: i64) -> Result<NextMatch, String> {
+    let view = view.ok_or("no team set")?;
     let Some(m) = view.next(now) else {
         return Err(view.problem.clone().filter(|p| !p.starts_with("saved")).unwrap_or_else(|| "no match coming".into()));
     };

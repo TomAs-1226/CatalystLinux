@@ -12,6 +12,7 @@
 //! catalyst-shell --standby-shots <dir>   StandBy's faces and the lock screen, to PNG
 //! catalyst-shell --cjk-shots <dir>   Chinese, Japanese and Korean text on the screens, to PNG
 //! catalyst-shell --activity-shots <dir>  live activities, Tab held, the lock screen with a song
+//! catalyst-shell --widget-shots <dir>    every widget at each size, and Home showing them
 //!     --robot <team|ip|host>     robot to connect to (overrides the saved one)
 //!     --demo                     a scripted robot instead of a real one
 //!     --arrive <seconds>         the scripted robot, plugged in that long after start
@@ -64,7 +65,6 @@ mod gfx;
 mod git;
 mod github;
 mod flow;
-mod glance;
 mod gpu;
 mod graphs;
 mod help;
@@ -129,6 +129,7 @@ mod units;
 mod upnext;
 mod voice;
 mod weather;
+mod widgets;
 mod wifi;
 mod wpilog;
 
@@ -219,7 +220,6 @@ fn settings_text(s: &shell::Settings) -> String {
         ("home", s.home.name().to_owned()),
         ("open_robot", s.open_robot.to_string()),
         ("match_report", s.match_report.to_string()),
-        ("glance", s.glance.iter().map(|w| w.name()).collect::<Vec<_>>().join(",")),
         ("pinned", s.pinned.clone().unwrap_or_default()),
         // App names cannot hold a line break, and commas are rare: a '|' between them.
         ("order", s.order.join("|")),
@@ -241,7 +241,8 @@ fn settings_text(s: &shell::Settings) -> String {
         ("face_down", s.face_down.to_string()),
         ("brightness", s.brightness.to_string()),
     ];
-    lines.iter().chain(s.battery.lines().iter()).chain(s.lock.lines().iter()).map(|(k, v)| format!("{k}={v}\n")).collect()
+    let widgets = s.widgets.lines();
+    lines.iter().chain(widgets.iter()).chain(s.battery.lines().iter()).chain(s.lock.lines().iter()).map(|(k, v)| format!("{k}={v}\n")).collect()
 }
 
 fn load_settings(settings: &mut shell::Settings) {
@@ -252,6 +253,9 @@ fn load_settings(settings: &mut shell::Settings) {
 
 /// Read settings from their file's text; anything not understood is left as it was.
 fn parse_settings(text: &str, settings: &mut shell::Settings) {
+    // The glance page's cards from before widgets, kept as widgets unless
+    // the file already says which widgets there are.
+    let (mut cards, mut saw_widgets) = (None, false);
     for line in text.lines() {
         if line.split_once('=').is_some_and(|(k, v)| settings.battery.parse(k, v) || settings.lock.parse(k, v)) {
             continue;
@@ -264,7 +268,12 @@ fn parse_settings(text: &str, settings: &mut shell::Settings) {
             Some(("home", v)) => settings.home = shell::HomeStyle::from_name(v).unwrap_or(settings.home),
             Some(("open_robot", v)) => settings.open_robot = v != "false",
             Some(("match_report", v)) => settings.match_report = v != "false",
-            Some(("glance", v)) => settings.glance = shell::Widget::list_from(v),
+            Some(("glance", v)) => cards = Some(v),
+            Some(("widgets", v)) => {
+                settings.widgets.glance = widgets::Layout::parse_glance(v);
+                saw_widgets = true;
+            }
+            Some(("home_widgets", v)) => settings.widgets.home = widgets::Layout::parse_home(v),
             Some(("pinned", v)) => settings.pinned = Some(v.trim().to_owned()).filter(|k| !k.is_empty()),
             Some(("theme", v)) => settings.theme = look::Theme::from_name(v).unwrap_or(settings.theme),
             Some(("wallpaper", v)) => settings.wallpaper = look::Wallpaper::from_name(v).unwrap_or(settings.wallpaper),
@@ -296,6 +305,9 @@ fn parse_settings(text: &str, settings: &mut shell::Settings) {
             Some(("face_down", v)) => settings.face_down = v != "false",
             _ => {}
         }
+    }
+    if let (Some(cards), false) = (cards, saw_widgets) {
+        settings.widgets.glance = widgets::Layout::from_cards(cards);
     }
 }
 
@@ -457,6 +469,12 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--activity-shots") {
         return activity_shots(std::path::Path::new(&dir));
+    }
+    // The widgets at each size, and Home showing them (on the demo robot).
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--widget-shots") {
+        tour_fixtures();
+        return widgets::gallery::shots(std::path::Path::new(&dir));
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--standby-shots") {
@@ -4095,6 +4113,34 @@ mod tests {
         assert_eq!(partial.columns, 3, "out of range: kept as it was");
         assert!(partial.gpu, "not in the file: the default (the gpu when it helps)");
         assert!(partial.lift_wake && partial.face_down, "not in the file: on, as they start");
+    }
+
+    #[test]
+    fn the_widgets_come_back_as_saved_and_the_glance_cards_of_before_become_widgets() {
+        use widgets::{Kind, Layout, Placed, Size};
+        let mut s = shell::Settings::default();
+        s.widgets = Layout { glance: vec![Placed::new(Kind::Photos, Size::Large, 0)], home: vec![Placed::new(Kind::Clock, Size::Wide, 5)] };
+        let saved = settings_text(&s);
+        let mut back = shell::Settings::default();
+        parse_settings(&saved, &mut back);
+        assert_eq!(settings_text(&back), saved);
+        assert_eq!(back.widgets.home[0].after, 5);
+        // A file from before widgets: its cards, as widgets.
+        let mut old = shell::Settings::default();
+        parse_settings("theme=bezel\nglance=robot,note\n", &mut old);
+        assert_eq!(old.widgets.glance.iter().map(|w| w.kind).collect::<Vec<_>>(), [Kind::Robot, Kind::Note]);
+        // Never chosen (the cards it came with): the new start.
+        let mut untouched = shell::Settings::default();
+        parse_settings("glance=device,robot,next_match,last_match\n", &mut untouched);
+        assert_eq!(untouched.widgets.glance.iter().map(|w| w.kind).collect::<Vec<_>>(), [Kind::NextMatch, Kind::Battery, Kind::Music]);
+        // Widgets saved since: the old line counts for nothing.
+        let mut both = shell::Settings::default();
+        parse_settings("glance=robot\nwidgets=clock:small\n", &mut both);
+        assert_eq!(both.widgets.glance.iter().map(|w| w.kind).collect::<Vec<_>>(), [Kind::Clock]);
+        // And an empty glance page stays empty.
+        let mut none = shell::Settings::default();
+        parse_settings("widgets=\n", &mut none);
+        assert!(none.widgets.glance.is_empty());
     }
 
     #[test]

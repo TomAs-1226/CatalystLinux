@@ -27,8 +27,11 @@ pub struct Settings {
     pub open_robot: bool,
     /// Show a match's summary once its log is pulled after the robot links.
     pub match_report: bool,
-    /// The glance page's cards, in order, two to a page.
-    pub glance: Vec<Widget>,
+    /// The widgets on the glance page and among Home's apps (widgets.rs).
+    pub widgets: crate::widgets::Layout,
+    /// Settings › Home › Widgets asked for a board to be edited, back on
+    /// Home. Never kept.
+    pub edit_widgets: Option<crate::widgets::Board>,
     /// The robot value pinned to the glance page (a key under `/Catalyst/`).
     pub pinned: Option<String>,
     pub theme: crate::look::Theme,
@@ -171,7 +174,8 @@ impl Default for Settings {
             home: HomeStyle::Grid,
             open_robot: true,
             match_report: true,
-            glance: vec![Widget::Device, Widget::Robot, Widget::NextMatch, Widget::LastMatch],
+            widgets: crate::widgets::Layout::starting(),
+            edit_widgets: None,
             pinned: None,
             theme,
             wallpaper,
@@ -200,59 +204,6 @@ impl Default for Settings {
             face_down: true,
             lock: crate::lock::Choices::default(),
         }
-    }
-}
-
-/// A card the glance page can carry.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Widget {
-    Device,
-    Robot,
-    NextMatch,
-    LastMatch,
-    Pinned,
-    Note,
-}
-
-impl Widget {
-    pub const ALL: [Widget; 6] = [Widget::Device, Widget::Robot, Widget::NextMatch, Widget::LastMatch, Widget::Pinned, Widget::Note];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Widget::Device => "device",
-            Widget::Robot => "robot",
-            Widget::NextMatch => "next_match",
-            Widget::LastMatch => "last_match",
-            Widget::Pinned => "pinned",
-            Widget::Note => "note",
-        }
-    }
-
-    /// What Settings calls it.
-    pub fn label(self) -> &'static str {
-        match self {
-            Widget::Device => "This handheld",
-            Widget::Robot => "The robot",
-            Widget::NextMatch => "Next match",
-            Widget::LastMatch => "Last match",
-            Widget::Pinned => "A pinned value",
-            Widget::Note => "A note",
-        }
-    }
-
-    pub fn from_name(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|w| w.name() == name)
-    }
-
-    /// The order a settings file lists, keeping each card once.
-    pub fn list_from(text: &str) -> Vec<Self> {
-        let mut out = Vec::new();
-        for w in text.split(',').filter_map(|n| Self::from_name(n.trim())) {
-            if !out.contains(&w) {
-                out.push(w);
-            }
-        }
-        out
     }
 }
 
@@ -323,6 +274,9 @@ pub enum Nav {
     Done,
     /// Back to Home, and take the tour there.
     Tour,
+    /// Back to Home from however deep (Settings › Home › Widgets, for Home
+    /// to edit its widgets).
+    Home,
 }
 
 pub trait Screen {
@@ -1495,7 +1449,28 @@ impl Shell {
             Nav::Spotlight => self.summon_spotlight(),
             Nav::Done => self.finish_top(),
             Nav::Tour => self.tour_from_home(),
+            Nav::Home => self.back_home(),
         }
+    }
+
+    /// Back to Home from however deep: the screens above it fade away over
+    /// it, as the tour's start does.
+    fn back_home(&mut self) {
+        if self.stack.len() <= 1 {
+            return;
+        }
+        if !self.settings.calm {
+            let mut fade = Animated::new(1.0, role::smooth()).with_rest(0.004);
+            fade.set(0.0);
+            self.curtain = Some((self.gfx.canvas.px.clone(), fade));
+        }
+        self.stack.truncate(1);
+        self.transition = None;
+        self.gfx.focus_reset();
+        if let Some((home, _)) = self.stack.last_mut() {
+            home.resume();
+        }
+        self.moving = true;
     }
 
     /// Bring the drawing in line with the settings: palette, calm, text size.
@@ -1507,7 +1482,9 @@ impl Shell {
         self.gfx.home = self.settings.home;
         self.gfx.open_robot = self.settings.open_robot;
         self.gfx.match_report = self.settings.match_report;
-        self.gfx.glance.clone_from(&self.settings.glance);
+        if self.gfx.widgets != self.settings.widgets {
+            self.gfx.widgets.clone_from(&self.settings.widgets);
+        }
         self.gfx.pinned.clone_from(&self.settings.pinned);
         let arrangement = self.settings.arrangement();
         if self.gfx.arrangement != arrangement {
@@ -4070,6 +4047,18 @@ impl Shell {
         self.open(screen, Path::Slide);
     }
 
+    /// How deep the stack of screens is (for the tests of other modules).
+    #[cfg(test)]
+    pub fn stack_depth(&self) -> usize {
+        self.stack.len()
+    }
+
+    /// What Home has in focus, where it is drawn (for the tests of other modules).
+    #[cfg(test)]
+    pub fn stack_spot(&self) -> Option<Rect> {
+        self.stack.first().and_then(|(s, _)| s.spot())
+    }
+
     /// The first picture is on the panel: the backlight, dark since power-on
     /// (so nothing the panel held before it was set up ever shows), rises
     /// to the level kept in the settings.
@@ -4511,7 +4500,8 @@ pub(crate) mod tests {
         shell.key(Key::Right);
         assert_eq!(title(&shell), "Catalyst");
         frames(&mut shell, 120, FRAME);
-        // From the glance page, Enter opens the robot out of its card.
+        // From the glance page, Enter opens what the widget nearest Home is
+        // about (the battery, at the right of the first row) out of it.
         shell.key(Key::Left);
         frames(&mut shell, 120, FRAME);
         shell.key(Key::Enter);
@@ -4952,38 +4942,51 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_glance_page_runs_left_in_pages_of_two_cards() {
+    fn the_glance_page_runs_left_in_pages_of_two_rows() {
+        use crate::widgets::{Kind, Placed, Size};
         let mut shell = shell();
-        // Device, robot | next match, last match.
+        // The robot and a pinned value above the next match; the last match
+        // large, a page of its own, to the left of that.
+        let w = |kind, size| Placed::new(kind, size, 0);
+        shell.settings.widgets.glance = vec![w(Kind::Robot, Size::Small), w(Kind::Pinned, Size::Small), w(Kind::NextMatch, Size::Wide), w(Kind::LastMatch, Size::Large)];
+        shell.apply_settings();
         shell.key(Key::Left);
         frames(&mut shell, 60, FRAME);
         assert_eq!(title(&shell), "Glance");
-        // On the robot's card first, the nearer one; left to the device's.
+        // On the pinned value first, the nearer one; left to the robot.
         shell.key(Key::Left);
-        // Left again: the next page, on its right-hand card (the last match).
+        // Left again: the next page, the last match.
         shell.key(Key::Left);
         frames(&mut shell, 60, FRAME);
         shell.key(Key::Enter);
         frames(&mut shell, 120, FRAME);
-        assert_eq!(title(&shell), "Match", "the last match's card opens its summary");
+        assert_eq!(title(&shell), "Match", "the last match opens its summary");
         shell.key(Key::Back);
         frames(&mut shell, 120, FRAME);
-        // Its neighbour is the next match: the schedule.
-        shell.key(Key::Left);
+        // Right: back onto the first page, at its left; Down, the next match below.
+        shell.key(Key::Right);
+        shell.key(Key::Down);
         shell.key(Key::Enter);
         frames(&mut shell, 120, FRAME);
         assert_eq!(title(&shell), "Schedule");
         shell.key(Key::Back);
         frames(&mut shell, 120, FRAME);
-        // Right four times: across this page's two cards, the first page's two, then Home.
-        for _ in 0..4 {
+        // Up to the robot; Up again from the top row is the control centre.
+        shell.key(Key::Up);
+        assert!(!shell.control_open());
+        shell.key(Key::Up);
+        assert!(shell.control_open());
+        shell.key(Key::Up);
+        frames(&mut shell, 120, FRAME);
+        // Right twice: across the first page's top row, then Home.
+        for _ in 0..2 {
             shell.key(Key::Right);
         }
         frames(&mut shell, 60, FRAME);
         assert_eq!(title(&shell), "Catalyst");
-        // A pinned value, chosen in Tables, has a card of its own.
+        // A pinned value, chosen in Tables, has a widget of its own.
         shell.settings.pinned = Some("Loop/Robot/LastMs".into());
-        shell.settings.glance = vec![Widget::Pinned];
+        shell.settings.widgets.glance = vec![w(Kind::Pinned, Size::Small)];
         shell.apply_settings();
         shell.key(Key::Left);
         frames(&mut shell, 60, FRAME);

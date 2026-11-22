@@ -162,6 +162,48 @@ pub fn stopwatch_running() -> Option<f64> {
     shared(|s| s.stopwatch.running().then(|| s.stopwatch.elapsed()))
 }
 
+/// Every timer, for the timers widget: (seconds left, its length, running,
+/// done), the soonest to run out first.
+pub fn timers_now() -> Vec<(f64, f64, bool, bool)> {
+    let mut all: Vec<(f64, f64, bool, bool)> = shared(|s| s.timers.iter().map(|t| (t.left(), t.total, t.running(), t.done)).collect());
+    all.sort_by(|a, b| (!a.2, a.0).partial_cmp(&(!b.2, b.0)).unwrap_or(std::cmp::Ordering::Equal));
+    all
+}
+
+/// The stopwatch, for the timers widget: its time, and whether it runs.
+pub fn stopwatch_now() -> (f64, bool) {
+    shared(|s| (s.stopwatch.elapsed(), s.stopwatch.running()))
+}
+
+/// The length Enter on the timers widget starts when there is no timer.
+pub const QUICK_TIMER: f64 = 300.0;
+
+/// Enter on the timers widget: a timer that ran out starts again; else the
+/// soonest pauses, or goes on; with none, one of five minutes starts. What
+/// the island says.
+pub fn widget_press() -> String {
+    let said = shared(|s| {
+        if let Some(t) = s.timers.iter_mut().find(|t| t.done) {
+            t.restart();
+            return Some(format!("timer {} again", length(t.total)));
+        }
+        let t = s.timers.iter_mut().min_by(|a, b| (!a.running(), a.left()).partial_cmp(&(!b.running(), b.left())).unwrap_or(std::cmp::Ordering::Equal))?;
+        let was = t.running();
+        t.pause_or_go();
+        Some(if was { format!("timer paused · {} left", length(t.left().ceil())) } else { "timer going".to_owned() })
+    });
+    said.unwrap_or_else(|| {
+        add_timer(QUICK_TIMER);
+        format!("timer {} started", length(QUICK_TIMER))
+    })
+}
+
+/// A zone's offset from UTC now, in seconds (the world clock widget asks on
+/// a thread of its own: on the handheld this starts `date`).
+pub fn offset_now(zone: &str) -> Option<i64> {
+    ask_offset(zone)
+}
+
 /// A timer is counting down (deep standby waits for it: it must be said
 /// when it runs out). The stopwatch need not be watched: it is a time kept.
 #[cfg_attr(test, allow(dead_code))]
@@ -398,6 +440,14 @@ impl Clock {
             clock.turn.jump(1.0);
         }
         clock.read_offsets();
+        clock
+    }
+
+    /// Open on the world's clocks (from the world clock widget).
+    pub fn on_world() -> Self {
+        let mut clock = Clock::new();
+        clock.page = PAGES.len() - 1;
+        clock.turn.jump(clock.page as f32);
         clock
     }
 
