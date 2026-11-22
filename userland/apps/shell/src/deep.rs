@@ -33,11 +33,13 @@
 //! with music playing, the same steps are taken with the sound left alone.
 //! catalyst-power keeps the radios (Bluetooth headphones may be what plays)
 //! and Wi-Fi while what plays next comes over the network (Music says, by
-//! `nowplaying::needs_network`); the USB host, the 5 V outputs and every
-//! light go off, the motion sensor stops, the shell's polling parks and it
-//! looks in once a minute. I2S, the codec and the amplifier belong to what
-//! plays, and the processor stays at its slowest, which decodes with room to
-//! spare. The music keys (Fn + Q, W, E; A, S, D) work without waking it.
+//! `nowplaying::needs_network`), and the USB host while USB headphones are
+//! what plays (sound.rs says); otherwise the USB host goes off, with the 5 V
+//! outputs and every light, the motion sensor stops, the shell's polling
+//! parks and it looks in once a minute. I2S, the codec and the amplifier
+//! belong to what plays, and the processor stays at its slowest, which
+//! decodes with room to spare. The music keys (Fn + Q, W, E; A, S, D) work
+//! without waking it.
 //! Any other key wakes it with every step undone, as from deep standby.
 //! Once the music has stopped for as long as the screen takes to go off, it
 //! moves on: to deep standby in place if its wait is over (Wi-Fi and the
@@ -750,12 +752,16 @@ impl Deep {
 
     /// catalyst-power's part, on its thread: what this kind keeps on.
     fn system(&mut self, deep: bool) {
-        let args = match (deep, self.kind) {
+        let mut args = match (deep, self.kind) {
             (false, _) => vec!["deep", "off"],
             (true, Kind::Deep) => vec!["deep", "on"],
             (true, Kind::Music { wifi: true }) => vec!["deep", "on", "keep-wifi", "keep-radios"],
             (true, Kind::Music { wifi: false }) => vec!["deep", "on", "keep-radios"],
         };
+        // USB headphones playing hang off the hub: the USB host stays.
+        if deep && matches!(self.kind, Kind::Music { .. }) && crate::sound::route().usb_playing().is_some() {
+            args.push("keep-usb");
+        }
         self.worker.send(args);
     }
 
@@ -950,6 +956,25 @@ mod tests {
         assert!((woke.seconds - 900.0).abs() < 1.0);
         d.system(false);
         assert_eq!(d.asked().last().unwrap(), &vec!["deep", "off"]);
+    }
+
+    #[test]
+    fn music_standby_keeps_the_usb_host_while_usb_headphones_play() {
+        crate::shell::tests::sandbox();
+        crate::sound::demo_plug(Some(crate::sound::demo_usb()));
+        let mut d = Deep::new();
+        d.begin_music(false);
+        d.system(true);
+        assert_eq!(d.asked(), [vec!["deep", "on", "keep-radios", "keep-usb"]]);
+        // The music stopped: deep standby takes the USB host too.
+        d.deepen(None);
+        d.system(true);
+        assert_eq!(d.asked().last().unwrap(), &vec!["deep", "on"]);
+        crate::sound::demo_plug(None);
+        let mut d = Deep::new();
+        d.begin_music(false);
+        d.system(true);
+        assert_eq!(d.asked(), [vec!["deep", "on", "keep-radios"]], "the speaker playing: the USB host goes");
     }
 
     #[test]

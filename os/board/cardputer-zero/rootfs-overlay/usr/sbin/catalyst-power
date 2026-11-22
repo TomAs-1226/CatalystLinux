@@ -7,10 +7,11 @@
 #   catalyst-power wifi-wake      and back, if it is switched on
 #   catalyst-power undervolt try|on|off|status|confirm
 #   catalyst-power panel try|on|off|status|confirm|revert
-#   catalyst-power deep on [keep-wifi] [keep-radios]|off|status
+#   catalyst-power deep on [keep-wifi] [keep-radios] [keep-usb]|off|status
 #                                 deep standby: everything a key need not
 #                                 have off, and back (see deep_on); music
-#                                 standby keeps the radios (and Wi-Fi)
+#                                 standby keeps the radios (and Wi-Fi, and
+#                                 the USB host while USB headphones play)
 #   catalyst-power boot           at start: a trial that never held is undone,
 #                                 and the panel's clock block put in if missing
 #
@@ -235,9 +236,12 @@ ensure_clock() {
 #   5. the red light dark.
 #
 # Music standby (music playing with the screen off) is the same with
-# `keep-radios` (Bluetooth headphones may be what plays) and, while what
+# `keep-radios` (Bluetooth headphones may be what plays), `keep-usb` while
+# USB headphones are what plays (they hang off the hub) and, while what
 # plays next comes over the network, `keep-wifi`. The sound itself is never
 # touched: I2S, the codec and the amplifier belong to whatever plays.
+# (catalyst-audio reads $DEEP too: the USB host or the radios taken away and
+# given back are not headphones unplugged or connected.)
 #
 # What each step switched off is noted in $DEEP, and `deep off` brings back
 # just that, in the reverse order. `deep on` again takes only the steps not
@@ -254,12 +258,14 @@ noted() {
 deep_on() {
 	keep_wifi=no
 	keep_radios=no
+	keep_usb=no
 	for keep in "$@"; do
 		case "$keep" in
 		keep-wifi) keep_wifi=yes ;;
 		keep-radios) keep_radios=yes ;;
+		keep-usb) keep_usb=yes ;;
 		*)
-			echo "catalyst-power deep on: keep-wifi or keep-radios, not $keep" >&2
+			echo "catalyst-power deep on: keep-wifi, keep-radios or keep-usb, not $keep" >&2
 			return 2
 			;;
 		esac
@@ -287,7 +293,7 @@ deep_on() {
 		[ -e "$m" ] || continue
 		[ "$(tr -d '\000' <"$m")" = peripheral ] && peripheral=yes
 	done
-	if [ $peripheral = no ] && ! noted usb; then
+	if [ $peripheral = no ] && [ $keep_usb = no ] && ! noted usb; then
 		for d in "$SYS"/bus/platform/drivers/dwc2/*.usb; do
 			[ -e "$d" ] || continue
 			name=${d##*/}
@@ -357,7 +363,7 @@ deep)
 	off) deep_off ;;
 	status) if [ -e "$DEEP" ]; then echo on; else echo off; fi ;;
 	*)
-		echo "usage: $0 deep on [keep-wifi] [keep-radios]|off|status" >&2
+		echo "usage: $0 deep on [keep-wifi] [keep-radios] [keep-usb]|off|status" >&2
 		exit 2
 		;;
 	esac

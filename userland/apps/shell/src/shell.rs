@@ -3927,6 +3927,14 @@ impl Shell {
         for n in crate::notify::take_posted() {
             self.notify(n);
         }
+        // Sound moving to USB headphones and back: said briefly, as a
+        // phone shows it. Not in deep standby, where it is the USB host
+        // going quiet and coming back.
+        if let Some(said) = crate::sound::take_said() {
+            if !self.deep.on() {
+                self.say(said);
+            }
+        }
     }
 
     /// What the battery's care asks for.
