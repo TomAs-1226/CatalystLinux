@@ -4,27 +4,52 @@
 #
 #   catalyst-audio start                  at boot (the catalyst-audio service)
 #   catalyst-audio status                 how it stands, as name=value lines
-#   catalyst-audio volume [N|+N|-N]       the volume, 0 to 100 (0 is silent;
-#                                         +N unmutes, N and -N leave mute be)
-#   catalyst-audio mute [on|off|toggle]   silence, the volume kept for after
+#   catalyst-audio volume [N|+N|-N] [main|usb]
+#                                         a volume, 0 to 100 (0 is silent;
+#                                         +N unmutes, N and -N leave mute be):
+#                                         the output's playing now, or the one
+#                                         named (main: the speaker, the jack's
+#                                         headphones and Bluetooth; usb: USB
+#                                         headphones)
+#   catalyst-audio mute [on|off|toggle]   silence, the volumes kept for after
 #   catalyst-audio test-tone              a short chime through what plays now
 #   catalyst-audio mic [builtin|headset]  which microphone records
 #   catalyst-audio mic-gain [N]           its amplifier, 0 to 14 (see below)
 #   catalyst-audio output speaker|bluetooth ADDRESS
-#   catalyst-audio route                  sound to the output chosen, if it is there
+#   catalyst-audio prefer usb|bluetooth   which plays while both are connected
+#   catalyst-audio route                  sound to the output there is, now
+#   catalyst-audio hotplug                a sound card came or went (mdev)
 #   catalyst-audio amp                    whether the speaker's amplifier is on
 #   catalyst-audio speaker                the speaker's settings for the jack, now
 #
 # The codec is an ES8389 on I2S, its card "ES8389Audio". Programs play to
 # ALSA's "default", which mixes them (dmix) at the system volume (the
 # "Master" control on the card) and goes to the speaker, or the headphones
-# when they are plugged in (the kernel switches, and mutes the speaker), or
-# Bluetooth headphones while they are chosen and connected. "default"
-# records from the microphone, shared (dsnoop), at whatever rate and
-# channels a program asks for. /usr/share/catalyst/asound.conf says how.
+# on the jack when they are plugged in (the kernel switches, and mutes the
+# speaker). Headphones of other kinds take over while they are connected:
+# USB headphones (below), and the Bluetooth ones chosen. With both there,
+# the one connected last plays (or the one chosen since with `prefer`).
+# "default" records from the handheld's microphone, shared (dsnoop), at
+# whatever rate and channels a program asks for, wherever sound plays.
+# /usr/share/catalyst/asound.conf says how.
 #
-# The choices are kept in /data/catalyst (audio-volume, audio-muted,
-# audio-mic, audio-mic-gain, audio-output) and set again at every start.
+# USB headphones: any USB sound card that plays (USB-C headphones with
+# their own converter, a USB headphone adapter), driven by snd-usb-audio,
+# which mdev loads as they are plugged in. mdev.conf runs `catalyst-audio
+# hotplug` as a sound card's control device comes and goes. Sound goes to
+# them through a dmix of their own, at a volume of their own: their own
+# playback control where they have one, else a software one ("USB Playback
+# Volume" on the codec's card). The codec plays nothing meanwhile, so the
+# speaker's amplifier stays off. They need the USB port to run the internal
+# hub (Settings › USB on "charging only", the USB switch to the hub's side)
+# and plug into USB-C1 or the USB-A port.
+#
+# The choices are kept in /data/catalyst (audio-volume, audio-volume-usb,
+# audio-muted, audio-mic, audio-mic-gain, audio-output) and set again at
+# every start. Where sound goes is in $RUN: output (local, bluetooth, or
+# "usb N" for card N, replaced only when it changes, so the shell can watch
+# it), usb (the USB card there, as name=value lines), and what was there at
+# the last look, to tell which came last.
 
 CARD=${CATALYST_AUDIO_CARD:-ES8389Audio}
 STATE=${CATALYST_AUDIO_STATE:-/data/catalyst}
@@ -32,9 +57,13 @@ RUN=${CATALYST_AUDIO_RUN:-/run/catalyst-audio}
 SHARE=${CATALYST_AUDIO_SHARE:-/usr/share/catalyst}
 PROC=${CATALYST_AUDIO_PROC:-/proc/asound}
 GPIOMEM=${CATALYST_AUDIO_GPIOMEM:-/dev/gpiomem}
+# What deep standby switched off (catalyst-power).
+DEEP=${CATALYST_AUDIO_DEEP:-/run/catalyst-deep}
 
 # Where it starts: loud enough for the small speaker, well short of full.
 DEFAULT_VOLUME=65
+# Headphones are close to the ear: they start lower.
+DEFAULT_USB_VOLUME=40
 # The microphone's amplifier: 8 is M5Stack's level (18.5 dB by the
 # datasheet; the driver's own scale calls it 24 dB). The codec takes 0-3
 # and 6-14; 4 and 5 are not allowed, so they become 6.
@@ -74,7 +103,7 @@ clamp() {
 is_muted() { [ -e "$STATE/audio-muted" ]; }
 
 # The volume as the card plays it: the saved level, or 0 while muted.
-apply_volume() {
+apply_main_volume() {
 	have_card || return 0
 	level=$(read_state audio-volume $DEFAULT_VOLUME)
 	is_muted && level=0
@@ -83,6 +112,35 @@ apply_volume() {
 		aplay -q -D catalyst_volume_init -t raw -f S16_LE -r 48000 -c 2 /dev/null >/dev/null 2>&1
 	fi
 	mixer cset name='Master Playback Volume' "$level,$level"
+}
+
+# The USB headphones' volume, on their own control (-M: in steps that sound
+# even, as alsamixer's) or on the software one, made first if need be.
+apply_usb_volume() {
+	n=$(usb_field card)
+	[ -n "$n" ] && [ -e "$PROC/card$n" ] || return 0
+	level=$(read_state audio-volume-usb $DEFAULT_USB_VOLUME)
+	is_muted && level=0
+	id=$(usb_field id)
+	control=$(usb_field mixer)
+	if [ -n "$control" ]; then
+		if [ "$(usb_field switch)" = yes ]; then
+			if [ "$level" = 0 ]; then switch=mute; else switch=unmute; fi
+			amixer -q -M -c "$id" sset "$control" "$level%" "$switch" >/dev/null 2>&1
+		else
+			amixer -q -M -c "$id" sset "$control" "$level%" >/dev/null 2>&1
+		fi
+	elif have_card; then
+		if [ -z "$(get_control 'USB Playback Volume')" ]; then
+			aplay -q -D catalyst_usb_volume_init -t raw -f S16_LE -r 48000 -c 2 /dev/null >/dev/null 2>&1
+		fi
+		mixer cset name='USB Playback Volume' "$level,$level"
+	fi
+}
+
+apply_volume() {
+	apply_main_volume
+	apply_usb_volume
 }
 
 apply_mic() {
@@ -109,18 +167,182 @@ bluetooth_connected() {
 	bluealsa-cli list-pcms 2>/dev/null | grep -qi "/$dev/a2dp"
 }
 
-# ALSA's configuration for the output chosen: the speaker's, with Bluetooth
-# put in front while its headphones are connected. Written whole, then put
-# in place, so a program starting meanwhile never reads half of it.
+# --- USB headphones -------------------------------------------------------
+
+# The first USB sound card that plays, as "NUMBER ID DEVICE": its number,
+# its name to ALSA (the number, if the name is not a plain word) and its
+# first playback device.
+usb_card() {
+	for dir in "$PROC"/card[0-9]*; do
+		[ -e "$dir/usbid" ] || continue
+		for pcm in "$dir"/pcm[0-9]*p; do
+			[ -d "$pcm" ] || continue
+			n=${dir##*/card}
+			id=$(cat "$dir/id" 2>/dev/null)
+			case "$id" in '' | *[!A-Za-z0-9_]*) id=$n ;; esac
+			dev=${pcm##*/pcm}
+			echo "$n $id ${dev%p}"
+			return 0
+		done
+	done
+	return 1
+}
+
+# A line of $RUN/usb.
+usb_field() {
+	sed -n "s/^$1=//p" "$RUN/usb" 2>/dev/null | head -n1
+}
+
+# The card's own playback volume, if it has one, as NAME,INDEX in $found:
+# a simple control that sets a playback level, one named for headphones
+# first. $switch is yes when it can also mute.
+usb_mixer() {
+	found=
+	has=
+	switch=no
+	IFS='
+'
+	for control in $(amixer -c "$1" scontrols 2>/dev/null | sed -n "s/^Simple mixer control '\(.*\)',\([0-9]*\)\$/\1,\2/p"); do
+		caps=" $(amixer -c "$1" sget "$control" 2>/dev/null | sed -n 's/^ *Capabilities: *//p') "
+		case "$caps" in *" pvolume "* | *" volume "*) ;; *) continue ;; esac
+		case "$control" in
+		Headphone* | Headset* | PCM* | Speaker* | Master*) ;;
+		*)
+			[ -z "$found" ] && found=$control && has=$caps
+			continue
+			;;
+		esac
+		found=$control
+		has=$caps
+		break
+	done
+	unset IFS
+	case "$has" in *" pswitch "* | *" switch "*) switch=yes ;; esac
+}
+
+# What is known of the USB card there (or nothing), written whole. Its own
+# control is looked for only when the card is new to $RUN/usb; usb_changed
+# says it was.
+describe_usb() {
+	usb_changed=
+	if [ -z "$1" ]; then
+		[ -e "$RUN/usb" ] && usb_changed=yes
+		rm -f "$RUN/usb"
+		return
+	fi
+	[ "$(usb_field card):$(usb_field usbid)" = "$1:$4" ] && return
+	usb_changed=yes
+	name=$(sed -n "s/^ *$1 \[[^]]*\]: [^ ]* - //p" "$PROC/cards" 2>/dev/null | head -n1)
+	usb_mixer "$2"
+	printf 'card=%s\nid=%s\ndevice=%s\nusbid=%s\nname=%s\nmixer=%s\nswitch=%s\n' \
+		"$1" "$2" "$3" "$4" "${name:-USB audio}" "$found" "$switch" >"$RUN/usb.$$"
+	mv "$RUN/usb.$$" "$RUN/usb"
+}
+
+# What deep standby has taken away (the USB host, or the radios).
+deep_holds() {
+	grep -qs "^$1 " "$DEEP" "$DEEP.new"
+}
+
+# --- where sound goes -----------------------------------------------------
+
+# ALSA's configuration for the output there is, and which that is: the
+# speaker's, with USB or Bluetooth headphones put in front while they are
+# connected. One look at a time (mdev, Bluetooth's watch and the shell may
+# all ask at once).
 route() {
 	mkdir -p "$RUN"
+	if command -v flock >/dev/null 2>&1; then
+		(
+			flock 9
+			route_now
+		) 9>"$RUN/lock"
+	else
+		route_now
+	fi
+}
+
+route_now() {
+	set -- $(usb_card)
+	usb_n=$1 usb_id=$2 usb_dev=$3 usb_key=
+	[ -n "$usb_n" ] && usb_key=$(cat "$PROC/card$usb_n/usbid" 2>/dev/null)
+	[ -n "$usb_n" ] && usb_key=${usb_key:-card$usb_n}
+	address=$(bluetooth_choice)
+	bt=
+	bluetooth_connected "$address" && bt=$address
+
+	# Which came last: what is here now and was not at the last look.
+	# Deep standby taking the USB host or the radios away (and giving them
+	# back) is neither unplugging nor connecting: what was there is kept.
+	latest=$(cat "$RUN/latest" 2>/dev/null)
+	if [ -n "$usb_key" ]; then
+		[ "$usb_key" = "$(cat "$RUN/seen-usb" 2>/dev/null)" ] || latest=usb
+		echo "$usb_key" >"$RUN/seen-usb"
+	elif ! deep_holds usb; then
+		rm -f "$RUN/seen-usb"
+	fi
+	if [ -n "$bt" ]; then
+		[ "$bt" = "$(cat "$RUN/seen-bluetooth" 2>/dev/null)" ] || latest=bluetooth
+		echo "$bt" >"$RUN/seen-bluetooth"
+	elif ! deep_holds radio; then
+		rm -f "$RUN/seen-bluetooth"
+	fi
+	# Chosen outright (the Sound page, with both there).
+	[ -n "${chosen:-}" ] && latest=$chosen
+	[ -n "$latest" ] && echo "$latest" >"$RUN/latest"
+
+	describe_usb "$usb_n" "$usb_id" "$usb_dev" "$usb_key"
+	# USB headphones with no control of their own need the codec's card for
+	# theirs (until it loads at boot, the speaker plays).
+	usb_ok=
+	if [ -n "$usb_n" ] && { [ -n "$(usb_field mixer)" ] || have_card; }; then
+		usb_ok=yes
+	fi
+	if [ -n "$usb_ok" ] && { [ -z "$bt" ] || [ "$latest" != bluetooth ]; }; then
+		out="usb $usb_n"
+	elif [ -n "$bt" ]; then
+		out=bluetooth
+	else
+		out=local
+	fi
+
+	was=$(cat "$RUN/output" 2>/dev/null)
+	# Their volume set before anything can play to them.
+	if [ "$out" = "usb $usb_n" ] && { [ "$out" != "$was" ] || [ -n "$usb_changed" ]; }; then
+		apply_usb_volume
+	fi
 	{
 		cat "$SHARE/asound.conf"
-		address=$(bluetooth_choice)
-		if bluetooth_connected "$address"; then
-			cat <<EOF
+		case "$out" in
+		bluetooth) bluetooth_conf "$bt" ;;
+		usb*) usb_conf ;;
+		esac
+	} >"$RUN/asound.conf.$$"
+	replace "$RUN/asound.conf.$$" "$RUN/asound.conf"
+	# The output last: the shell watches for it, and reads the rest then. Put
+	# again when the USB card there changed, even if what plays did not.
+	echo "$out" >"$RUN/output.$$"
+	if [ -n "$usb_changed" ]; then
+		mv "$RUN/output.$$" "$RUN/output"
+	else
+		replace "$RUN/output.$$" "$RUN/output"
+	fi
+}
 
-# Bluetooth: $address, connected (catalyst-audio route).
+# $1 put in place of $2 if it says something else (put whole, so a program
+# starting meanwhile never reads half of it); else let go.
+replace() {
+	if cmp -s "$1" "$2"; then
+		rm -f "$1"
+	else
+		mv "$1" "$2"
+	fi
+}
+
+bluetooth_conf() {
+	cat <<EOF
+
+# Bluetooth: $1, connected (catalyst-audio route).
 pcm.!default {
 	type asym
 	playback.pcm "catalyst_bluetooth"
@@ -130,12 +352,12 @@ pcm.!default {
 pcm.catalyst_bluetooth {
 	type plug
 	slave.pcm "catalyst_bluetooth_volume"
-	hint.description "Catalyst: Bluetooth $address, at the system volume"
+	hint.description "Catalyst: Bluetooth $1, at the system volume"
 }
 
 pcm.catalyst_bluetooth_volume {
 	type softvol
-	slave.pcm "bluealsa:DEV=$address,PROFILE=a2dp"
+	slave.pcm "bluealsa:DEV=$1,PROFILE=a2dp"
 	control {
 		name "Master Playback Volume"
 		card $CARD
@@ -145,13 +367,71 @@ pcm.catalyst_bluetooth_volume {
 	resolution 101
 }
 EOF
-			echo bluetooth >"$RUN/output.$$"
-		else
-			echo local >"$RUN/output.$$"
-		fi
-	} >"$RUN/asound.conf.$$"
-	mv "$RUN/asound.conf.$$" "$RUN/asound.conf"
-	mv "$RUN/output.$$" "$RUN/output"
+}
+
+# USB headphones: plug (any rate, format or channels a program asks for),
+# their software volume if they have no control of their own, and a dmix
+# as the speaker's (ALSA picks a format and rate near those the card takes),
+# with a key of its own for each card number.
+usb_conf() {
+	if [ -n "$(usb_field mixer)" ]; then first=catalyst_usb_mix; else first=catalyst_usb_volume; fi
+	cat <<EOF
+
+# USB headphones: $(usb_field name), card $usb_n, connected (catalyst-audio route).
+pcm.!default {
+	type asym
+	playback.pcm "catalyst_usb"
+	capture.pcm "catalyst_capture"
+}
+
+pcm.catalyst_usb {
+	type plug
+	slave.pcm "$first"
+	hint.description "Catalyst: USB headphones, at their own volume"
+}
+EOF
+	[ "$first" = catalyst_usb_volume ] && cat <<EOF
+
+pcm.catalyst_usb_volume {
+	type softvol
+	slave.pcm "catalyst_usb_mix"
+	control {
+		name "USB Playback Volume"
+		card $CARD
+	}
+	min_dB -50.0
+	max_dB 0.0
+	resolution 101
+}
+EOF
+	cat <<EOF
+
+pcm.catalyst_usb_mix {
+	type dmix
+	ipc_key $((51830 + usb_n))
+	ipc_key_add_uid false
+	ipc_perm 0666
+	slave {
+		pcm "hw:CARD=$usb_id,DEV=$usb_dev"
+		rate 48000
+		channels 2
+		period_size 2048
+		buffer_size 16384
+	}
+	bindings {
+		0 0
+		1 1
+	}
+}
+EOF
+}
+
+# Whose volume the output playing now has.
+owner_now() {
+	case "$(cat "$RUN/output" 2>/dev/null)" in
+	usb*) echo usb ;;
+	*) echo main ;;
+	esac
 }
 
 # The headphones' jack, as the kernel sees it.
@@ -202,15 +482,34 @@ print("on" if struct.unpack_from("<I", m, 0x34)[0] >> 24 & 1 else "off")
 status() {
 	if have_card; then echo "card=$CARD"; else echo "card=none"; fi
 	address=$(bluetooth_choice)
-	if [ "$(cat "$RUN/output" 2>/dev/null)" = bluetooth ]; then
-		echo "output=bluetooth"
-	elif headphones_in; then
-		echo "output=headphones"
-	else
-		echo "output=speaker"
+	case "$(cat "$RUN/output" 2>/dev/null)" in
+	bluetooth) echo "output=bluetooth" ;;
+	usb*) echo "output=usb" ;;
+	*)
+		if headphones_in; then
+			echo "output=headphones"
+		else
+			echo "output=speaker"
+		fi
+		;;
+	esac
+	if [ -n "$address" ]; then
+		echo "bluetooth=$address"
+		if [ "$(cat "$RUN/seen-bluetooth" 2>/dev/null)" = "$address" ]; then
+			echo "bluetooth_connected=yes"
+		else
+			echo "bluetooth_connected=no"
+		fi
 	fi
-	[ -n "$address" ] && echo "bluetooth=$address"
+	# The USB headphones there, whether or not they play.
+	n=$(usb_field card)
+	if [ -n "$n" ] && [ -e "$PROC/card$n" ]; then
+		echo "usb=$(usb_field id)"
+		echo "usb_name=$(usb_field name)"
+		if [ -n "$(usb_field mixer)" ]; then echo "usb_mixer=own"; else echo "usb_mixer=software"; fi
+	fi
 	echo "volume=$(read_state audio-volume $DEFAULT_VOLUME)"
+	echo "volume_usb=$(read_state audio-volume-usb $DEFAULT_USB_VOLUME)"
 	if is_muted; then echo "muted=yes"; else echo "muted=no"; fi
 	echo "mic=$(read_state audio-mic builtin)"
 	echo "mic_gain=$(read_state audio-mic-gain $DEFAULT_MIC_GAIN)"
@@ -228,6 +527,29 @@ wait_card() {
 	have_card
 }
 
+# mdev, as a sound card's control device comes or goes ($MDEV is
+# snd/controlC<N>): sound routed again once the card is whole. A card's
+# /proc entries come last as it arrives, once every device of it is in,
+# and go first as it leaves. In the background, so mdev carries on with the
+# next event meanwhile (CATALYST_AUDIO_WAIT: waited for, for the tests).
+hotplug() {
+	n=${MDEV##*controlC}
+	case "$n" in '' | *[!0-9]*) n= ;; esac
+	i=0
+	if [ -n "$n" ] && [ "${ACTION:-}" = add ]; then
+		while [ ! -e "$PROC/card$n/id" ] && [ "$i" -lt 30 ]; do
+			sleep 0.1
+			i=$((i + 1))
+		done
+	elif [ -n "$n" ]; then
+		while [ -e "$PROC/card$n" ] && [ "$i" -lt 30 ]; do
+			sleep 0.1
+			i=$((i + 1))
+		done
+	fi
+	route
+}
+
 case "$1" in
 start)
 	route
@@ -240,35 +562,49 @@ start)
 	apply_volume
 	apply_mic
 	speaker
+	# USB headphones plugged in before the codec's card was there (their
+	# software volume lives on it).
+	route
 	;;
 status)
 	status
 	;;
 volume)
+	# `volume usb`: that one's level, as `volume` says the one playing.
+	case "$2" in main | usb) set -- volume "" "$2" ;; esac
+	owner=${3:-$(owner_now)}
+	case "$owner" in
+	main) file=audio-volume start_at=$DEFAULT_VOLUME ;;
+	usb) file=audio-volume-usb start_at=$DEFAULT_USB_VOLUME ;;
+	*)
+		echo "usage: $0 volume [N|+N|-N] [main|usb]" >&2
+		exit 2
+		;;
+	esac
 	case "$2" in
-	'') read_state audio-volume $DEFAULT_VOLUME ;;
+	'') read_state $file $start_at ;;
 	+* | -*)
-		now=$(read_state audio-volume $DEFAULT_VOLUME)
+		now=$(read_state $file $start_at)
 		step=${2#?}
-		case "$step" in '' | *[!0-9]*) echo "usage: $0 volume [N|+N|-N]" >&2; exit 2 ;; esac
+		case "$step" in '' | *[!0-9]*) echo "usage: $0 volume [N|+N|-N] [main|usb]" >&2; exit 2 ;; esac
 		case "$2" in +*) now=$((now + step)) ;; *) now=$((now - step)) ;; esac
 		[ "$now" -lt 0 ] && now=0
 		[ "$now" -gt 100 ] && now=100
-		write_state audio-volume "$now"
+		write_state $file "$now"
 		# Turning it up says "I want to hear it": unmuted.
 		case "$2" in +*) rm -f "$STATE/audio-muted" ;; esac
 		apply_volume
 		echo "$now"
 		;;
 	*[!0-9]*)
-		echo "usage: $0 volume [N|+N|-N]" >&2
+		echo "usage: $0 volume [N|+N|-N] [main|usb]" >&2
 		exit 2
 		;;
 	*)
 		# A level, muted or not: muting is its own (the shell sets the two
 		# apart, so a level chosen while muted is not heard on the way).
-		now=$(clamp "$2" $DEFAULT_VOLUME 100)
-		write_state audio-volume "$now"
+		now=$(clamp "$2" $start_at 100)
+		write_state $file "$now"
 		apply_volume
 		echo "$now"
 		;;
@@ -346,9 +682,27 @@ output)
 	esac
 	route
 	;;
+prefer)
+	case "$2" in
+	usb | bluetooth) chosen=$2 ;;
+	*)
+		echo "usage: $0 prefer usb|bluetooth" >&2
+		exit 2
+		;;
+	esac
+	route
+	cat "$RUN/output"
+	;;
 route)
 	route
 	cat "$RUN/output"
+	;;
+hotplug)
+	if [ -n "${CATALYST_AUDIO_WAIT:-}" ]; then
+		hotplug
+	else
+		hotplug </dev/null >/dev/null 2>&1 &
+	fi
 	;;
 amp)
 	amp
@@ -358,7 +712,7 @@ speaker)
 	status | grep '^speaker_mix='
 	;;
 *)
-	echo "usage: $0 start|status|volume|mute|test-tone|mic|mic-gain|output|route|amp|speaker" >&2
+	echo "usage: $0 start|status|volume|mute|test-tone|mic|mic-gain|output|prefer|route|hotplug|amp|speaker" >&2
 	exit 2
 	;;
 esac

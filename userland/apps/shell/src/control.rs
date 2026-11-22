@@ -404,7 +404,7 @@ impl Control {
         let sound = crate::sound::level();
         let bars = [
             ("lightbulb", format!("{}%", self.level), self.bar.value(), t.ice),
-            (sound.icon(), if sound.muted { "off".into() } else { format!("{}%", sound.volume) }, self.volume.value(), if sound.muted { t.faint } else { t.ice }),
+            (crate::sound::icon(), if sound.muted { "off".into() } else { format!("{}%", sound.volume) }, self.volume.value(), if sound.muted { t.faint } else { t.ice }),
         ];
         let value_w = g.measure("100%", ty.label);
         for (i, (icon, value, fill, color)) in bars.into_iter().enumerate() {

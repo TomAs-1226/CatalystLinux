@@ -8,8 +8,22 @@
 //! thread of its own, so a held key never waits on a process (and a run of
 //! presses is applied as the last of them).
 //!
-//! On a computer (the simulator) nothing plays: the level is kept in memory
-//! and the microphone's meter moves as if someone were talking.
+//! **Where sound goes** is catalyst-audio's to decide: the speaker (or
+//! headphones on the jack, which the kernel switches), USB headphones while
+//! they are plugged in, Bluetooth headphones while they are connected; of
+//! USB and Bluetooth, the one connected last. It writes its answer to
+//! /run/catalyst-audio, and a thread here sleeps on a watch of that folder
+//! (mdev runs catalyst-audio as a USB sound card comes or goes), so nothing
+//! is polled. As sound moves, Music follows: on where it was through the
+//! new headphones, or paused when the USB headphones it played through come
+//! out (as a phone does, rather than carry on aloud); the island says so,
+//! and the volume keys move the volume of what plays now. USB headphones
+//! keep a volume of their own; the speaker, the jack and Bluetooth share
+//! the main one, as before.
+//!
+//! On a computer (the simulator) nothing plays: the level is kept in memory,
+//! the microphone's meter moves as if someone were talking, and USB
+//! headphones are plugged in and out by the gallery.
 
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -28,10 +42,15 @@ use crate::shell::{Cx, Nav, Screen};
 
 const SCRIPT: &str = "/usr/sbin/catalyst-audio";
 const STATE: &str = "/data/catalyst";
+/// Where catalyst-audio says where sound goes: `output` (local, bluetooth,
+/// or "usb N" for card N) and `usb` (the USB headphones there).
+const RUN: &str = "/run/catalyst-audio";
 /// What the volume keys move it by.
 pub const STEP: u32 = 5;
 /// catalyst-audio's own starting level, for a handheld that has never set one.
 const DEFAULT_VOLUME: u32 = 65;
+/// And for USB headphones, close to the ear.
+const DEFAULT_USB_VOLUME: u32 = 40;
 /// The microphone's amplifier settings the codec allows (4 and 5 are not),
 /// and what each gives, by the ES8389's datasheet.
 const MIC_GAINS: [(u32, &str); 13] = [
@@ -93,35 +112,95 @@ impl Level {
     }
 }
 
-static LEVEL: Mutex<Option<Level>> = Mutex::new(None);
+/// Whose volume: the main one (the speaker, the jack's headphones and
+/// Bluetooth, as catalyst-audio's "Master") or USB headphones' own. Each is
+/// kept for its own (audio-volume, audio-volume-usb); silence is one for all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Owner {
+    Main,
+    Usb,
+}
+
+impl Owner {
+    /// Its name to catalyst-audio.
+    fn word(self) -> &'static str {
+        match self {
+            Owner::Main => "main",
+            Owner::Usb => "usb",
+        }
+    }
+
+    fn file(self) -> &'static str {
+        match self {
+            Owner::Main => "audio-volume",
+            Owner::Usb => "audio-volume-usb",
+        }
+    }
+
+    fn start_at(self) -> u32 {
+        match self {
+            Owner::Main => DEFAULT_VOLUME,
+            Owner::Usb => DEFAULT_USB_VOLUME,
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// The volumes as known here (each read once from catalyst-audio's files),
+/// and silence.
+struct Levels {
+    volume: [Option<u32>; 2],
+    muted: Option<bool>,
+}
+
+static LEVELS: Mutex<Levels> = Mutex::new(Levels { volume: [None, None], muted: None });
 
 /// Tests that change the volume hold this, one at a time: it is the one
 /// volume the whole shell shares.
 #[cfg(test)]
 pub static TEST_LOCK: Mutex<()> = Mutex::new(());
-static WORKER: OnceLock<Mutex<Sender<Level>>> = OnceLock::new();
+static WORKER: OnceLock<Mutex<Sender<(Owner, Level)>>> = OnceLock::new();
 
-/// The level as saved by catalyst-audio (its files on /data).
-fn read_saved() -> Level {
+/// A volume as saved by catalyst-audio (its files on /data).
+fn saved_volume(owner: Owner) -> u32 {
     if !on_device() {
-        return Level { volume: DEFAULT_VOLUME, muted: false };
+        return owner.start_at();
     }
-    let volume = std::fs::read_to_string(Path::new(STATE).join("audio-volume")).ok().and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or(DEFAULT_VOLUME).min(100);
-    Level { volume, muted: Path::new(STATE).join("audio-muted").exists() }
+    std::fs::read_to_string(Path::new(STATE).join(owner.file())).ok().and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or(owner.start_at()).min(100)
 }
 
-/// The volume now.
+fn saved_muted() -> bool {
+    on_device() && Path::new(STATE).join("audio-muted").exists()
+}
+
+/// The volume now: of what plays now.
 pub fn level() -> Level {
-    *LEVEL.lock().unwrap().get_or_insert_with(read_saved)
+    level_for(route().owner())
 }
 
-/// Set the volume and mute together, at once here and soon on the handheld.
+fn level_for(owner: Owner) -> Level {
+    let mut l = LEVELS.lock().unwrap();
+    let volume = *l.volume[owner.index()].get_or_insert_with(|| saved_volume(owner));
+    let muted = *l.muted.get_or_insert_with(saved_muted);
+    Level { volume, muted }
+}
+
+/// Set the volume of what plays now, and mute, together: at once here and
+/// soon on the handheld.
 pub fn set_level(level: Level) -> Level {
+    let owner = route().owner();
     let level = Level { volume: level.volume.min(100), muted: level.muted };
-    *LEVEL.lock().unwrap() = Some(level);
+    {
+        let mut l = LEVELS.lock().unwrap();
+        l.volume[owner.index()] = Some(level.volume);
+        l.muted = Some(level.muted);
+    }
     if on_device() {
         let sender = WORKER.get_or_init(|| Mutex::new(start_worker()));
-        sender.lock().unwrap().send(level).ok();
+        sender.lock().unwrap().send((owner, level)).ok();
     }
     level
 }
@@ -139,32 +218,60 @@ pub fn toggle_mute() -> Level {
     set_level(Level { muted: !now.muted, ..now })
 }
 
-/// The thread that hands levels to catalyst-audio, the last of a run of them.
-fn start_worker() -> Sender<Level> {
-    let (tx, rx): (Sender<Level>, Receiver<Level>) = channel();
+/// What the island says of a level: "volume 60%", or "headphones 60%"
+/// while USB headphones play (it is theirs), or "sound off".
+pub fn said(level: Level) -> String {
+    match route().owner() {
+        Owner::Usb if level.heard() > 0 => format!("headphones {}%", level.volume),
+        _ => level.words(),
+    }
+}
+
+/// The volume's icon: headphones while USB ones play and are heard.
+pub fn icon() -> &'static str {
+    let l = level();
+    if route().owner() == Owner::Usb && l.heard() > 0 {
+        "headphones"
+    } else {
+        l.icon()
+    }
+}
+
+/// The thread that hands levels to catalyst-audio, the last of a run of
+/// them for each output.
+fn start_worker() -> Sender<(Owner, Level)> {
+    let (tx, rx): (Sender<(Owner, Level)>, Receiver<(Owner, Level)>) = channel();
     std::thread::Builder::new()
         .name("sound".into())
         .stack_size(128 * 1024)
         .spawn(move || {
             // As saved when the shell started: only what changes is sent.
-            let mut applied = read_saved();
-            while let Ok(mut want) = rx.recv() {
+            let mut applied = [saved_volume(Owner::Main), saved_volume(Owner::Usb)];
+            let mut applied_muted = saved_muted();
+            while let Ok((owner, level)) = rx.recv() {
                 // Presses that came meanwhile: only the last counts.
-                while let Ok(newer) = rx.try_recv() {
-                    want = newer;
+                let mut want = [None, None];
+                want[owner.index()] = Some(level.volume);
+                let mut muted = level.muted;
+                while let Ok((owner, newer)) = rx.try_recv() {
+                    want[owner.index()] = Some(newer.volume);
+                    muted = newer.muted;
                 }
                 // Muting first and unmuting last, so a level set while
                 // muted is never heard on the way.
-                if want.muted && !applied.muted {
+                if muted && !applied_muted {
                     run(&["mute", "on"]).ok();
                 }
-                if want.volume != applied.volume {
-                    run(&["volume", &want.volume.to_string()]).ok();
+                for owner in [Owner::Main, Owner::Usb] {
+                    if let Some(volume) = want[owner.index()].filter(|v| *v != applied[owner.index()]) {
+                        run(&["volume", &volume.to_string(), owner.word()]).ok();
+                        applied[owner.index()] = volume;
+                    }
                 }
-                if !want.muted && applied.muted {
+                if !muted && applied_muted {
                     run(&["mute", "off"]).ok();
                 }
-                applied = want;
+                applied_muted = muted;
             }
         })
         .ok();
@@ -180,6 +287,354 @@ fn run(args: &[&str]) -> Result<String, String> {
         let why = String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or_default().trim().to_owned();
         Err(if why.is_empty() { format!("catalyst-audio {} failed", args.join(" ")) } else { why })
     }
+}
+
+// ------------------------------------------------------------------ where ---
+
+/// What plays, as catalyst-audio routed it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Out {
+    /// The codec: the speaker, or headphones on the jack.
+    #[default]
+    Handheld,
+    Bluetooth,
+    Usb,
+}
+
+/// USB headphones plugged in: a USB sound card that plays.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Usb {
+    pub card: u32,
+    /// What they call themselves ("USB-C to 3.5mm Headphone Jack Adapter").
+    pub name: String,
+    /// A volume control of their own (else catalyst-audio's software one).
+    pub own_volume: bool,
+}
+
+/// Where sound goes, and the USB headphones there (playing or not).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Route {
+    pub out: Out,
+    pub usb: Option<Usb>,
+}
+
+impl Route {
+    /// From catalyst-audio's `output` and `usb` files.
+    pub fn parse(output: &str, usb: &str) -> Route {
+        let field = |key: &str| usb.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix('=')).map(str::trim);
+        let usb = field("card").and_then(|c| c.parse().ok()).map(|card| Usb {
+            card,
+            name: field("name").filter(|n| !n.is_empty()).unwrap_or("USB audio").to_owned(),
+            own_volume: field("mixer").is_some_and(|m| !m.is_empty()),
+        });
+        let out = match output.split_whitespace().next() {
+            Some("bluetooth") => Out::Bluetooth,
+            Some("usb") if usb.is_some() => Out::Usb,
+            _ => Out::Handheld,
+        };
+        Route { out, usb }
+    }
+
+    /// Whose volume plays.
+    pub fn owner(&self) -> Owner {
+        if self.out == Out::Usb {
+            Owner::Usb
+        } else {
+            Owner::Main
+        }
+    }
+
+    /// The card USB headphones play through, while they are what plays.
+    pub fn usb_playing(&self) -> Option<u32> {
+        if self.out == Out::Usb {
+            self.usb.as_ref().map(|u| u.card)
+        } else {
+            None
+        }
+    }
+
+    fn usb_card(&self) -> Option<u32> {
+        self.usb.as_ref().map(|u| u.card)
+    }
+}
+
+// The route as last read, and what the island is to say of it: one for the
+// whole shell, or one a test (each test's shell is its own).
+#[cfg(not(test))]
+static ROUTE: Mutex<Option<Route>> = Mutex::new(None);
+#[cfg(not(test))]
+static SAID: Mutex<Option<String>> = Mutex::new(None);
+#[cfg(test)]
+thread_local! {
+    static ROUTE: std::cell::RefCell<Option<Route>> = const { std::cell::RefCell::new(None) };
+    static SAID: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+fn with_route<T>(f: impl FnOnce(&mut Option<Route>) -> T) -> T {
+    #[cfg(not(test))]
+    return f(&mut ROUTE.lock().unwrap_or_else(|e| e.into_inner()));
+    #[cfg(test)]
+    ROUTE.with(|r| f(&mut r.borrow_mut()))
+}
+
+fn set_said(words: String) {
+    #[cfg(not(test))]
+    {
+        *SAID.lock().unwrap_or_else(|e| e.into_inner()) = Some(words);
+    }
+    #[cfg(test)]
+    SAID.with(|s| *s.borrow_mut() = Some(words));
+}
+
+/// What the island is to say of sound moving, since the shell last asked.
+pub fn take_said() -> Option<String> {
+    #[cfg(not(test))]
+    return SAID.lock().unwrap_or_else(|e| e.into_inner()).take();
+    #[cfg(test)]
+    SAID.with(|s| s.borrow_mut().take())
+}
+
+/// Times sound has moved, for a page showing where it goes to look again.
+static MOVES: AtomicU32 = AtomicU32::new(0);
+
+pub fn moves() -> u32 {
+    MOVES.load(Ordering::Relaxed)
+}
+
+/// Where sound goes now.
+pub fn route() -> Route {
+    with_route(|r| r.get_or_insert_with(read_route).clone())
+}
+
+fn read_route() -> Route {
+    if !on_device() {
+        return Route::default();
+    }
+    let read = |name: &str| std::fs::read_to_string(Path::new(RUN).join(name)).unwrap_or_default();
+    Route::parse(&read("output"), &read("usb"))
+}
+
+/// What Music does as sound moves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Follow {
+    /// On from where it is, through what plays now.
+    Carry,
+    /// Paused: the USB headphones it played through came out.
+    Pause,
+    /// As it is.
+    Stay,
+}
+
+/// Headphones that take over carry the music on; USB headphones pulled out
+/// pause it. Bluetooth headphones going away are left as before (the player
+/// finds its sound gone, and says so).
+pub fn follow(old: &Route, new: &Route) -> Follow {
+    if let Some(played) = old.usb_playing() {
+        if new.usb_card() != Some(played) {
+            return Follow::Pause;
+        }
+    }
+    if old.out == new.out && old.usb_playing() == new.usb_playing() {
+        return Follow::Stay;
+    }
+    match (old.out, new.out) {
+        (Out::Bluetooth, Out::Handheld) => Follow::Stay,
+        _ => Follow::Carry,
+    }
+}
+
+/// The island's words as sound moves (`music`: Music was playing, or has
+/// just been paused by the headphones coming out).
+pub const PLUGGED: &str = "playing on usb headphones";
+pub const UNPLUGGED: &str = "usb headphones unplugged";
+pub const UNPLUGGED_PAUSED: &str = "headphones unplugged · paused";
+
+pub fn announce(old: &Route, new: &Route, music: bool) -> Option<&'static str> {
+    if new.out == Out::Usb && old.usb_playing() != new.usb_playing() {
+        return Some(PLUGGED);
+    }
+    if old.usb_card().is_some() && old.usb_card() != new.usb_card() {
+        return Some(if music && old.out == Out::Usb { UNPLUGGED_PAUSED } else { UNPLUGGED });
+    }
+    None
+}
+
+/// Sound went somewhere else: Music follows, the island is to say so, and
+/// the shell wakes to.
+fn moved(new: Route) {
+    let old = with_route(|r| std::mem::replace(r, Some(new.clone()))).unwrap_or_default();
+    if old == new {
+        return;
+    }
+    MOVES.fetch_add(1, Ordering::Relaxed);
+    // (The tests' player is the music tests' own: it is left to them.)
+    let music = !cfg!(test) && (crate::music::playing() | crate::music::paused_unplugged());
+    if !cfg!(test) {
+        crate::music::moved(follow(&old, &new));
+    }
+    if let Some(words) = announce(&old, &new, music) {
+        set_said(words.into());
+    }
+    crate::platform::wake();
+}
+
+/// The USB card is no longer there (pulled out): Music's player asks, as its
+/// sound stops, whether that is why.
+pub fn usb_gone(card: u32) -> bool {
+    if on_device() {
+        !Path::new(&format!("/proc/asound/card{card}")).exists()
+    } else {
+        route().usb_card() != Some(card)
+    }
+}
+
+/// catalyst-audio's word of where sound goes, as it changes: a watch on its
+/// folder, read when it puts a new `output` there (USB headphones come or
+/// go, Bluetooth headphones connect). The thread sleeps in the read: nothing
+/// is polled, and nothing of it runs on the frame.
+#[cfg(target_os = "linux")]
+fn watch() {
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+    std::fs::create_dir_all(RUN).ok();
+    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
+    if fd < 0 {
+        return;
+    }
+    let mut events = unsafe { std::fs::File::from_raw_fd(fd) };
+    let dir = std::ffi::CString::new(RUN).unwrap();
+    if unsafe { libc::inotify_add_watch(fd, dir.as_ptr(), libc::IN_MOVED_TO | libc::IN_CLOSE_WRITE) } < 0 {
+        return;
+    }
+    // Anything routed between the start's look and the watch.
+    moved(read_route());
+    let mut buf = [0u8; 1024];
+    loop {
+        match events.read(&mut buf) {
+            Ok(n) if n > 0 => {
+                if names_in(&buf[..n]).iter().any(|name| name == "output") {
+                    moved(read_route());
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            _ => return,
+        }
+    }
+}
+
+/// The file names in a run of inotify events (each a 16-byte header, the
+/// last field the length of the name after it, padded with NULs).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn names_in(buf: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut at = 0;
+    while at + 16 <= buf.len() {
+        let len = u32::from_ne_bytes([buf[at + 12], buf[at + 13], buf[at + 14], buf[at + 15]]) as usize;
+        let name = buf.get(at + 16..at + 16 + len).unwrap_or_default();
+        names.push(String::from_utf8_lossy(name).trim_end_matches('\0').to_owned());
+        at += 16 + len;
+    }
+    names
+}
+
+/// The simulator's USB headphones plugged in (Some) or pulled out, as the
+/// handheld's hotplug would: sound follows, and the island says so.
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+pub fn demo_plug(usb: Option<Usb>) {
+    let out = match (&usb, crate::bluetooth::demo_connected()) {
+        (Some(_), _) => Out::Usb,
+        (None, Some(_)) => Out::Bluetooth,
+        (None, None) => Out::Handheld,
+    };
+    moved(Route { out, usb });
+}
+
+/// The simulator's USB headphones: an adapter with a volume of its own.
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+pub fn demo_usb() -> Usb {
+    Usb { card: 1, name: "USB-C to 3.5mm Headphone Jack Adapter".into(), own_volume: true }
+}
+
+/// With USB and Bluetooth headphones both there: which plays.
+fn prefer(usb: bool) -> Result<(), String> {
+    if on_device() {
+        return run(&["prefer", if usb { "usb" } else { "bluetooth" }]).map(|_| ());
+    }
+    let now = route();
+    moved(Route { out: if usb { Out::Usb } else { Out::Bluetooth }, ..now });
+    Ok(())
+}
+
+// ------------------------------------------------------------- USB's setup ---
+
+/// How USB headphones stand: playing, there, or what they wait for. They
+/// need the CM0's one USB port running the internal hub, which carries
+/// USB-C1 and the USB-A port: Settings › USB on charging only (a computer's
+/// modes make the port a device, from the next start) and the board's USB
+/// switch on the hub's side. USB-C2 goes to the CM0 alone, for a computer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Setup {
+    Playing,
+    /// Plugged in, with Bluetooth headphones playing (connected after them).
+    Connected,
+    /// Ready for them: plugged into USB-C1 or USB-A, they play.
+    #[default]
+    Ready,
+    /// The host runs but no hub answers: the USB switch is on USB-C2's side.
+    NoHub,
+    /// A mode for a computer is chosen in Settings › USB.
+    DeviceMode,
+    /// Back on charging only, the port is a device until the next start.
+    Restart,
+}
+
+impl Setup {
+    /// From what is there (USB headphones, playing or not), the USB mode
+    /// chosen, whether the port runs as a device, and whether the hub answers.
+    pub fn of(usb: bool, playing: bool, mode: usize, as_device: bool, hub: bool) -> Setup {
+        match () {
+            _ if usb && playing => Setup::Playing,
+            _ if usb => Setup::Connected,
+            _ if mode != 0 => Setup::DeviceMode,
+            _ if as_device => Setup::Restart,
+            _ if !hub => Setup::NoHub,
+            _ => Setup::Ready,
+        }
+    }
+
+    /// Its value on a row.
+    pub fn value(self) -> &'static str {
+        match self {
+            Setup::Playing => "playing",
+            Setup::Connected => "plugged in",
+            Setup::Ready => "not plugged in",
+            Setup::NoHub => "switch to hub",
+            Setup::DeviceMode => "set up usb",
+            Setup::Restart => "after a restart",
+        }
+    }
+
+    /// Plugged in, playing or not.
+    pub fn there(self) -> bool {
+        matches!(self, Setup::Playing | Setup::Connected)
+    }
+}
+
+/// The internal hub answers: a hub on the bus other than the controller's
+/// own (`usb1`), as the GL852G is when the switch is on its side.
+fn hub_present() -> bool {
+    std::fs::read_dir("/sys/bus/usb/devices").into_iter().flatten().flatten().any(|e| {
+        let name = e.file_name().to_string_lossy().into_owned();
+        !name.starts_with("usb") && !name.contains(':') && std::fs::read_to_string(e.path().join("bDeviceClass")).is_ok_and(|c| c.trim() == "09")
+    })
+}
+
+/// The gallery's choice of how USB stands, in the simulator.
+static DEMO_SETUP: Mutex<Option<Setup>> = Mutex::new(None);
+
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+pub fn demo_setup(setup: Option<Setup>) {
+    *DEMO_SETUP.lock().unwrap() = setup;
 }
 
 // ----------------------------------------------------------------- chimes ---
@@ -210,9 +665,15 @@ fn play_file(name: &'static str) {
         .ok();
 }
 
-/// At start: the reminders' chime.
+/// At start: the reminders' chime, where sound goes (as catalyst-audio left
+/// it: the shell may have restarted with headphones in), and its watch.
 pub fn start() {
     crate::reminders::set_chime(reminder_chime);
+    #[cfg(target_os = "linux")]
+    if on_device() {
+        with_route(|r| *r = Some(read_route()));
+        std::thread::Builder::new().name("sound-watch".into()).stack_size(64 * 1024).spawn(watch).ok();
+    }
 }
 
 // ------------------------------------------------------------------- keys ---
@@ -220,9 +681,9 @@ pub fn start() {
 /// A sound or music key, over any screen: what the island says.
 pub fn media_key(key: Media) -> Option<String> {
     match key {
-        Media::VolumeUp => Some(step(STEP as i32).words()),
-        Media::VolumeDown => Some(step(-(STEP as i32)).words()),
-        Media::Mute => Some(toggle_mute().words()),
+        Media::VolumeUp => Some(said(step(STEP as i32))),
+        Media::VolumeDown => Some(said(step(-(STEP as i32)))),
+        Media::Mute => Some(said(toggle_mute())),
         Media::PlayPause | Media::Next | Media::Previous => crate::music::media_key(key),
     }
 }
@@ -247,6 +708,7 @@ pub enum Output {
     Speaker,
     Headphones,
     Bluetooth,
+    Usb,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -258,21 +720,29 @@ pub enum Mic {
     Headset,
 }
 
-/// What catalyst-audio says of things (`catalyst-audio status`).
+/// What catalyst-audio says of things (`catalyst-audio status`), and how
+/// USB headphones stand.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Status {
     pub card: bool,
     pub output: Output,
     pub bluetooth: Option<String>,
+    pub bluetooth_connected: bool,
+    /// USB headphones plugged in (playing or not): what they call themselves.
+    pub usb: Option<String>,
+    pub usb_own_volume: bool,
     pub volume: u32,
+    pub volume_usb: u32,
     pub muted: bool,
     pub mic: Mic,
     pub mic_gain: u32,
     pub playing: bool,
+    pub setup: Setup,
 }
 
 pub fn parse_status(text: &str) -> Status {
-    let mut s = Status { volume: DEFAULT_VOLUME, mic_gain: DEFAULT_MIC_GAIN, ..Status::default() };
+    let mut s = Status { volume: DEFAULT_VOLUME, volume_usb: DEFAULT_USB_VOLUME, mic_gain: DEFAULT_MIC_GAIN, ..Status::default() };
+    let mut usb_name = None;
     for line in text.lines() {
         let Some((name, value)) = line.split_once('=') else { continue };
         let value = value.trim();
@@ -282,11 +752,17 @@ pub fn parse_status(text: &str) -> Status {
                 s.output = match value {
                     "headphones" => Output::Headphones,
                     "bluetooth" => Output::Bluetooth,
+                    "usb" => Output::Usb,
                     _ => Output::Speaker,
                 }
             }
             "bluetooth" if !value.is_empty() => s.bluetooth = Some(value.to_owned()),
+            "bluetooth_connected" => s.bluetooth_connected = value == "yes",
+            "usb" if !value.is_empty() => s.usb = Some(value.to_owned()),
+            "usb_name" if !value.is_empty() => usb_name = Some(value.to_owned()),
+            "usb_mixer" => s.usb_own_volume = value == "own",
             "volume" => s.volume = value.parse().unwrap_or(s.volume).min(100),
+            "volume_usb" => s.volume_usb = value.parse().unwrap_or(s.volume_usb).min(100),
             "muted" => s.muted = value == "yes",
             "mic" => s.mic = if value == "headset" { Mic::Headset } else { Mic::Builtin },
             "mic_gain" => s.mic_gain = value.parse().unwrap_or(s.mic_gain),
@@ -294,19 +770,48 @@ pub fn parse_status(text: &str) -> Status {
             _ => {}
         }
     }
+    // Named by what they call themselves, where they say.
+    if let (Some(usb), Some(name)) = (&mut s.usb, usb_name) {
+        *usb = name;
+    }
     s
 }
 
 /// How things stand now: off the drawing thread.
 fn read_status() -> Result<Status, String> {
-    if !on_device() {
-        let l = level();
+    let mut s = if on_device() {
+        run(&["status"]).map(|text| parse_status(&text))?
+    } else {
+        let r = route();
         let mic = *DEMO_MIC.lock().unwrap();
         let bluetooth = crate::bluetooth::demo_connected();
-        let output = if bluetooth.is_some() { Output::Bluetooth } else { Output::Speaker };
-        return Ok(Status { card: true, output, bluetooth, volume: l.volume, muted: l.muted, mic: mic.0, mic_gain: mic.1, playing: false });
-    }
-    run(&["status"]).map(|text| parse_status(&text))
+        let output = match r.out {
+            Out::Usb => Output::Usb,
+            _ if bluetooth.is_some() => Output::Bluetooth,
+            _ => Output::Speaker,
+        };
+        let (main, usb_level) = (level_for(Owner::Main), level_for(Owner::Usb));
+        Status {
+            card: true,
+            output,
+            bluetooth_connected: bluetooth.is_some(),
+            bluetooth,
+            usb: r.usb.as_ref().map(|u| u.name.clone()),
+            usb_own_volume: r.usb.as_ref().is_some_and(|u| u.own_volume),
+            volume: main.volume,
+            volume_usb: usb_level.volume,
+            muted: main.muted,
+            mic: mic.0,
+            mic_gain: mic.1,
+            playing: false,
+            setup: Setup::Ready,
+        }
+    };
+    s.setup = match *DEMO_SETUP.lock().unwrap() {
+        Some(setup) if !on_device() && s.usb.is_none() => setup,
+        _ => Setup::of(s.usb.is_some(), s.output == Output::Usb, crate::usb::mode(), crate::usb::running_as_device(), !on_device() || hub_present()),
+    };
+    Ok(s)
 }
 
 static DEMO_MIC: Mutex<(Mic, u32)> = Mutex::new((Mic::Builtin, DEFAULT_MIC_GAIN));
@@ -443,25 +948,31 @@ enum Row {
     Volume,
     Mute,
     Output,
+    Usb,
     Test,
     Microphone,
     MicGain,
     Bluetooth,
 }
 
-const ROWS: [Row; 7] = [Row::Volume, Row::Mute, Row::Output, Row::Test, Row::Microphone, Row::MicGain, Row::Bluetooth];
+const ROWS: [Row; 8] = [Row::Volume, Row::Mute, Row::Output, Row::Usb, Row::Test, Row::Microphone, Row::MicGain, Row::Bluetooth];
+
+/// Search's places on the page (screens.rs).
+pub const USB_ROW: usize = 3;
 
 /// How long the microphone's level is shown after the last key, in seconds.
 const LISTEN_FOR: f32 = 30.0;
 
-/// Settings › Sound: the volume, silence, where sound goes, a test sound,
-/// the microphone (with its level, live, while it is chosen) and its gain,
-/// and Bluetooth.
+/// Settings › Sound: the volume, silence, where sound goes, USB headphones,
+/// a test sound, the microphone (with its level, live, while it is chosen)
+/// and its gain, and Bluetooth.
 pub struct SoundScreen {
     list: ListState,
     status: Option<Status>,
     reading: Option<Job<Result<Status, String>>>,
     read_at: Instant,
+    /// Sound's moves seen: another, and it is read again at once.
+    moves: u32,
     /// The volume bar, gliding to the level.
     bar: detent::Animated,
     /// The microphone's meter, while its row is chosen.
@@ -482,6 +993,7 @@ impl SoundScreen {
             status: None,
             reading: None,
             read_at: Instant::now(),
+            moves: moves(),
             bar: detent::Animated::new(level().volume as f32 / 100.0, detent::role::hold()).with_rest(0.003),
             meter: None,
             meter_bar: detent::Animated::new(0.0, detent::role::tick()).with_rest(0.003),
@@ -495,6 +1007,7 @@ impl SoundScreen {
 
     fn read_now(&mut self) {
         self.read_at = Instant::now();
+        self.moves = moves();
         self.reading = Some(Job::start(read_status));
     }
 
@@ -506,6 +1019,12 @@ impl SoundScreen {
         if self.working.is_none() {
             self.working = Some((row, Job::start(work)));
         }
+    }
+
+    /// The Bluetooth headphones there, by name, if they are connected.
+    fn bluetooth_there(&self) -> Option<String> {
+        let st = self.status.as_ref()?;
+        st.bluetooth.as_deref().filter(|_| st.bluetooth_connected).map(crate::bluetooth::name_of)
     }
 
     fn describe(&self, row: Row) -> (&'static str, String, bool) {
@@ -521,10 +1040,16 @@ impl SoundScreen {
                     Some(s) => match s.output {
                         Output::Speaker => "speaker".into(),
                         Output::Headphones => "headphones".into(),
+                        Output::Usb => "usb headphones".into(),
                         Output::Bluetooth => crate::bluetooth::name_of(s.bluetooth.as_deref().unwrap_or_default()),
                     },
                 };
                 ("Playing on", value, st.is_some_and(|s| s.card))
+            }
+            Row::Usb => {
+                let setup = st.map(|s| s.setup);
+                let value = setup.map_or("…", Setup::value);
+                ("USB headphones", value.into(), setup.is_some_and(Setup::there))
             }
             Row::Test => ("Test sound", (if matches!(self.working, Some((Row::Test, _))) { "playing…" } else { "" }).into(), true),
             Row::Microphone => ("Microphone", (if st.is_some_and(|s| s.mic == Mic::Headset) { "headset's" } else { "handheld's" }).into(), true),
@@ -534,20 +1059,33 @@ impl SoundScreen {
     }
 
     /// What the keys do on a row: the longest that fits whole first.
-    fn hint(&self, row: Row) -> &'static [&'static str] {
+    fn hint(&self, row: Row) -> Vec<String> {
+        let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let usb_plays = self.status.as_ref().is_some_and(|s| s.output == Output::Usb);
         match row {
-            Row::Volume => &["←→: volume · fn + s, fn + d anywhere", "←→: volume"],
-            Row::Mute => &["enter: mute or unmute · fn + a anywhere", "enter: mute or unmute"],
+            Row::Volume if usb_plays => words(&["←→: the headphones' own · fn + s, fn + d", "←→: the headphones' volume"]),
+            Row::Volume => words(&["←→: volume · fn + s, fn + d anywhere", "←→: volume"]),
+            Row::Mute => words(&["enter: mute or unmute · fn + a anywhere", "enter: mute or unmute"]),
             Row::Output => match self.status.as_ref().map(|s| s.output) {
-                Some(Output::Headphones) => &["the speaker is off while headphones are in", "speaker off: headphones in"],
-                Some(Output::Bluetooth) => &["bluetooth headphones, while connected", "bluetooth, while connected"],
-                _ => &["headphones take over when plugged in", "headphones take over"],
+                Some(Output::Headphones) => words(&["the speaker is off while headphones are in", "speaker off: headphones in"]),
+                Some(Output::Usb) => words(&["usb headphones · the speaker stays off", "usb headphones"]),
+                Some(Output::Bluetooth) => words(&["bluetooth headphones, while connected", "bluetooth, while connected"]),
+                _ => words(&["headphones take over when plugged in", "headphones take over"]),
             },
-            Row::Test => &["enter: a short chime, at this volume", "enter: a short chime"],
-            Row::Microphone if self.meter.as_ref().is_some_and(|m| !m.working()) => &["the microphone could not be opened", "no microphone"],
-            Row::Microphone => &["←→: the handheld's or a headset's", "←→: which microphone"],
-            Row::MicGain => &["←→: how much the mic is amplified", "←→: mic gain"],
-            Row::Bluetooth => &["enter: headphones and speakers", "enter: bluetooth"],
+            Row::Usb => match (self.status.as_ref().map(|s| s.setup), self.bluetooth_there()) {
+                (Some(Setup::Playing), Some(bt)) => vec![format!("enter: play on {bt} instead"), "enter: play on bluetooth".into()],
+                (Some(Setup::Playing), None) => words(&["their own volume: fn + s, fn + d · enter: more", "their own volume: fn + s, fn + d", "their own volume"]),
+                (Some(Setup::Connected), _) => words(&["bluetooth came after them · enter: play here", "enter: play on these instead", "enter: play here"]),
+                (Some(Setup::NoHub), _) => words(&["usb switch to the hub's side · enter: more", "usb switch to the hub's side"]),
+                (Some(Setup::DeviceMode), _) => words(&["usb › charging only, switch to hub, restart", "enter: how to set them up"]),
+                (Some(Setup::Restart), _) => words(&["restart, the usb switch on the hub's side", "restart for usb headphones"]),
+                _ => words(&["into usb-c1 or usb-a · enter: more", "into usb-c1 or usb-a"]),
+            },
+            Row::Test => words(&["enter: a short chime, at this volume", "enter: a short chime"]),
+            Row::Microphone if self.meter.as_ref().is_some_and(|m| !m.working()) => words(&["the microphone could not be opened", "no microphone"]),
+            Row::Microphone => words(&["←→: the handheld's or a headset's", "←→: which microphone"]),
+            Row::MicGain => words(&["←→: how much the mic is amplified", "←→: mic gain"]),
+            Row::Bluetooth => words(&["enter: headphones and speakers", "enter: bluetooth"]),
         }
     }
 }
@@ -562,15 +1100,16 @@ impl Screen for SoundScreen {
         let row = self.row();
         let left_right = matches!(key, Key::Left | Key::Right);
         let step = if key == Key::Left { -1 } else { 1 };
+        let setup = self.status.as_ref().map(|s| s.setup);
         match key {
             Key::Back => return Nav::Pop,
             Key::Left | Key::Right if row == Row::Volume => {
                 let l = step_volume(step * STEP as i32);
                 self.bar.set(l.volume as f32 / 100.0);
-                *cx.say = Some(l.words());
+                *cx.say = Some(said(l));
             }
             Key::Enter | Key::Char(' ') if row == Row::Mute => {
-                *cx.say = Some(toggle_mute().words());
+                *cx.say = Some(said(toggle_mute()));
             }
             Key::Enter if row == Row::Test => {
                 if self.working.is_none() {
@@ -594,6 +1133,16 @@ impl Screen for SoundScreen {
                 }
                 self.start(Row::MicGain, move || set_mic_gain(gain));
             }
+            // Both there: Enter plays on the other.
+            Key::Enter if row == Row::Usb && setup == Some(Setup::Playing) && self.bluetooth_there().is_some() => {
+                if let Some(bt) = self.bluetooth_there() {
+                    *cx.say = Some(format!("playing on {bt}"));
+                }
+                self.start(Row::Usb, || prefer(false));
+            }
+            Key::Enter if row == Row::Usb && setup == Some(Setup::Connected) => self.start(Row::Usb, || prefer(true)),
+            Key::Enter | Key::Right if row == Row::Usb => return Nav::Push(Box::new(UsbAudioPage::new())),
+            Key::Enter if row == Row::Output && setup == Some(Setup::Playing) => return Nav::Push(Box::new(UsbAudioPage::new())),
             Key::Enter | Key::Right if row == Row::Bluetooth => return Nav::Push(Box::new(crate::bluetooth::BluetoothScreen::new())),
             Key::Enter if row == Row::Output && self.status.as_ref().is_some_and(|s| s.output == Output::Bluetooth) => {
                 return Nav::Push(Box::new(crate::bluetooth::BluetoothScreen::new()))
@@ -632,7 +1181,9 @@ impl Screen for SoundScreen {
     }
 
     fn tick(&mut self, dt: f32) -> bool {
-        if self.read_at.elapsed().as_secs_f32() >= 2.0 && self.reading.is_none() && self.working.is_none() {
+        // Read again every two seconds, and at once as sound moves.
+        let moved = self.moves != moves();
+        if (moved || self.read_at.elapsed().as_secs_f32() >= 2.0) && self.reading.is_none() && self.working.is_none() {
             self.read_now();
         }
         // The microphone is listened to only while its row is chosen.
@@ -685,7 +1236,8 @@ impl Screen for SoundScreen {
         }
         self.list.scrollbar(g, ROWS.len(), top, bottom);
         let hint = self.hint(self.row());
-        g.hint_any(hint);
+        let choices: Vec<&str> = hint.iter().map(String::as_str).collect();
+        g.hint_any(&choices);
     }
 }
 
@@ -712,6 +1264,113 @@ pub fn step_volume(delta: i32) -> Level {
     step(delta)
 }
 
+// --------------------------------------------------------- USB audio page ---
+
+/// Settings › Sound › USB headphones: where they plug in and what they do,
+/// or what they wait for (the USB mode, the switch, a restart), with how
+/// they stand now in the row at the foot.
+pub struct UsbAudioPage {
+    status: Option<Status>,
+    reading: Option<Job<Result<Status, String>>>,
+    read_at: Instant,
+    moves: u32,
+    changed: bool,
+}
+
+impl UsbAudioPage {
+    pub fn new() -> Self {
+        let mut page = UsbAudioPage { status: None, reading: None, read_at: Instant::now(), moves: moves(), changed: true };
+        page.read_now();
+        page
+    }
+
+    fn read_now(&mut self) {
+        self.read_at = Instant::now();
+        self.moves = moves();
+        self.reading = Some(Job::start(read_status));
+    }
+}
+
+/// The page's words for how USB headphones stand (`name`: what the ones
+/// plugged in call themselves).
+pub fn usb_words(setup: Setup, name: &str) -> String {
+    match setup {
+        Setup::Playing => format!("{name}. Sound plays here at their own volume (fn\u{a0}+\u{a0}s, fn\u{a0}+\u{a0}d); pulled out, it goes back to the speaker and music pauses."),
+        Setup::Connected => format!("{name}, plugged in. Bluetooth headphones connected after them play: the ones connected last do."),
+        Setup::Ready => "USB-C headphones, or a USB headphone adapter, plug into USB-C1 or the USB-A port, not USB-C2 (it charges). Sound goes to them at their own volume.".into(),
+        Setup::NoHub => "The USB switch is on USB-C2's side, a computer's. Slide it to the hub's side, then plug the headphones into USB-C1 or USB-A.".into(),
+        Setup::DeviceMode => "A computer's USB mode has the port. For headphones: Settings › USB on charging only, the USB switch to the hub's side, and restart.".into(),
+        Setup::Restart => "USB is on charging only now. Restart with the USB switch on the hub's side, and headphones in USB-C1 or USB-A play.".into(),
+    }
+}
+
+impl Screen for UsbAudioPage {
+    fn title(&self) -> &str {
+        // Short enough to sit whole beside the island at the largest text.
+        "USB"
+    }
+
+    fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
+        match key {
+            Key::Back => Nav::Pop,
+            Key::Char('r') => {
+                self.read_now();
+                Nav::Stay
+            }
+            _ => Nav::Stay,
+        }
+    }
+
+    fn update(&mut self, cx: &mut Cx) -> Nav {
+        if let Some(done) = self.reading.as_ref().and_then(Job::get) {
+            self.reading = None;
+            match done {
+                Ok(s) => {
+                    self.changed |= self.status.as_ref() != Some(&s);
+                    self.status = Some(s);
+                }
+                Err(why) => *cx.say = Some(why),
+            }
+        }
+        Nav::Stay
+    }
+
+    fn resume(&mut self) {
+        self.read_now();
+        self.changed = true;
+    }
+
+    fn tick(&mut self, _dt: f32) -> bool {
+        // Read again every two seconds, and at once as sound moves.
+        if (self.moves != moves() || self.read_at.elapsed().as_secs_f32() >= 2.0) && self.reading.is_none() {
+            self.read_now();
+        }
+        std::mem::take(&mut self.changed)
+    }
+
+    fn busy(&self) -> bool {
+        true
+    }
+
+    fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
+        let t = g.tokens;
+        let ty = g.ty;
+        let top = g.top();
+        let setup = self.status.as_ref().map_or(Setup::Ready, |s| s.setup);
+        let name = self.status.as_ref().and_then(|s| s.usb.clone()).unwrap_or_default();
+        let line_h = ty.caption.size + 4.0;
+        let lines = crate::help::wrap(g, &usb_words(setup, &name), ty.caption, W - 2.0 * PAD);
+        for (i, line) in lines.iter().enumerate() {
+            g.text_alpha(PAD, top + 2.0 + line_h * (i as f32 + 0.5), line, ty.caption, t.dim, 1.0);
+        }
+        let row_h = g.row_h();
+        let r = Rect::new(PAD, crate::gfx::H - PAD - g.hint_h() - row_h, W - 2.0 * PAD, row_h);
+        let lit = setup.there();
+        crate::bluetooth::icon_row(g, r, "headphones", lit, "USB headphones", setup.value(), if lit { t.ink } else { t.dim }, true);
+        g.hint("esc back");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -724,8 +1383,125 @@ mod tests {
         // No card, and anything it does not say, as it starts.
         let s = parse_status("card=none\nsomething=else\n");
         assert!(!s.card);
-        assert_eq!((s.output, s.volume, s.mic, s.mic_gain), (Output::Speaker, DEFAULT_VOLUME, Mic::Builtin, DEFAULT_MIC_GAIN));
+        assert_eq!((s.output, s.volume, s.volume_usb, s.mic, s.mic_gain, s.usb), (Output::Speaker, DEFAULT_VOLUME, DEFAULT_USB_VOLUME, Mic::Builtin, DEFAULT_MIC_GAIN, None));
         assert_eq!(parse_status("output=headphones").output, Output::Headphones);
+        // USB headphones, by what they call themselves, and Bluetooth there too.
+        let s = parse_status("output=usb\nbluetooth=0C:A6:94:12:34:56\nbluetooth_connected=yes\nusb=Adapter\nusb_name=USB-C to 3.5mm Adapter\nusb_mixer=own\nvolume_usb=45\n");
+        assert_eq!((s.output, s.usb.as_deref(), s.usb_own_volume, s.volume_usb, s.bluetooth_connected), (Output::Usb, Some("USB-C to 3.5mm Adapter"), true, 45, true));
+        assert_eq!(parse_status("usb=Device\nusb_mixer=software").usb.as_deref(), Some("Device"), "no name: its card's");
+    }
+
+    #[test]
+    fn where_sound_goes_is_read_from_catalyst_audios_files() {
+        let usb = "card=1\nid=Adapter\ndevice=0\nusbid=05ac:110a\nname=USB-C to 3.5mm Headphone Jack Adapter\nmixer=PCM,0\nswitch=yes\n";
+        let r = Route::parse("usb 1\n", usb);
+        assert_eq!((r.out, r.usb_playing(), r.owner()), (Out::Usb, Some(1), Owner::Usb));
+        assert_eq!(r.usb, Some(Usb { card: 1, name: "USB-C to 3.5mm Headphone Jack Adapter".into(), own_volume: true }));
+        let r = Route::parse("bluetooth\n", "card=2\nmixer=\n");
+        assert_eq!((r.out, r.usb_playing(), r.owner(), r.usb.map(|u| (u.name, u.own_volume))), (Out::Bluetooth, None, Owner::Main, Some(("USB audio".into(), false))));
+        assert_eq!(Route::parse("local\n", ""), Route::default());
+        assert_eq!(Route::parse("", ""), Route::default(), "nothing routed yet");
+        assert_eq!(Route::parse("usb 1\n", "").out, Out::Handheld, "no card described: not USB");
+    }
+
+    fn usb_route(card: u32) -> Route {
+        Route { out: Out::Usb, usb: Some(Usb { card, ..demo_usb() }) }
+    }
+
+    #[test]
+    fn music_carries_on_through_headphones_and_pauses_as_usb_ones_come_out() {
+        let speaker = Route::default();
+        let bluetooth = Route { out: Out::Bluetooth, usb: None };
+        let usb = usb_route(1);
+        let both_bt = Route { out: Out::Bluetooth, usb: usb.usb.clone() };
+        assert_eq!(follow(&speaker, &usb), Follow::Carry, "plugged in");
+        assert_eq!(follow(&usb, &speaker), Follow::Pause, "pulled out");
+        assert_eq!(follow(&usb, &bluetooth), Follow::Pause, "pulled out, Bluetooth there");
+        assert_eq!(follow(&usb, &both_bt), Follow::Carry, "Bluetooth connected after them");
+        assert_eq!(follow(&both_bt, &usb), Follow::Carry, "chosen again");
+        assert_eq!(follow(&usb, &usb_route(2)), Follow::Pause, "another card: these came out");
+        assert_eq!(follow(&speaker, &bluetooth), Follow::Carry, "Bluetooth connected");
+        assert_eq!(follow(&bluetooth, &speaker), Follow::Stay, "Bluetooth gone: as before");
+        assert_eq!(follow(&bluetooth, &usb), Follow::Carry);
+        assert_eq!(follow(&usb, &usb), Follow::Stay);
+        assert_eq!(follow(&speaker, &Route { out: Out::Handheld, usb: usb.usb.clone() }), Follow::Stay, "plugged in, not yet playing");
+    }
+
+    #[test]
+    fn the_island_says_headphones_in_and_out() {
+        let speaker = Route::default();
+        let usb = usb_route(1);
+        let both_bt = Route { out: Out::Bluetooth, usb: usb.usb.clone() };
+        assert_eq!(announce(&speaker, &usb, false), Some(PLUGGED));
+        assert_eq!(announce(&usb, &speaker, true), Some(UNPLUGGED_PAUSED));
+        assert_eq!(announce(&usb, &speaker, false), Some(UNPLUGGED));
+        assert_eq!(announce(&both_bt, &Route { out: Out::Bluetooth, usb: None }, true), Some(UNPLUGGED), "not what played: nothing paused");
+        assert_eq!(announce(&both_bt, &usb, false), Some(PLUGGED), "chosen over Bluetooth");
+        assert_eq!(announce(&usb, &both_bt, false), None, "Bluetooth's page says so");
+        assert_eq!(announce(&speaker, &Route { out: Out::Bluetooth, usb: None }, false), None);
+        // Whole in the island at every text size (it gives a message 250 px).
+        let mut g = Gfx::new(bezel::Tokens::dark());
+        for size in [crate::gfx::TextSize::Compact, crate::gfx::TextSize::Standard, crate::gfx::TextSize::Large] {
+            g.set_text_size(size);
+            for words in [PLUGGED, UNPLUGGED, UNPLUGGED_PAUSED, "headphones 100%"] {
+                assert!(g.measure(words, g.ty.caption) <= 250.0, "{words:?} at {size:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn sound_moving_is_said_and_the_volume_keys_follow_it() {
+        let _one_at_a_time = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_level(Level { volume: 50, muted: false });
+        LEVELS.lock().unwrap().volume[Owner::Usb.index()] = None;
+        take_said();
+        let before = moves();
+        demo_plug(Some(demo_usb()));
+        assert_eq!(take_said().as_deref(), Some(PLUGGED));
+        assert!(moves() > before, "pages look again");
+        // Their own volume: it starts where theirs does, and moves alone.
+        assert_eq!(level().volume, DEFAULT_USB_VOLUME);
+        assert_eq!(media_key(Media::VolumeUp).as_deref(), Some("headphones 45%"));
+        assert_eq!(icon(), "headphones");
+        demo_plug(None);
+        assert_eq!(take_said().as_deref(), Some(UNPLUGGED));
+        assert_eq!(level().volume, 50, "the speaker's, as it was");
+        assert_eq!(media_key(Media::VolumeDown).as_deref(), Some("volume 45%"));
+        demo_plug(Some(demo_usb()));
+        assert_eq!(level().volume, 45, "theirs, remembered");
+        demo_plug(None);
+        assert!(take_said().is_some());
+        demo_plug(None);
+        assert_eq!(take_said(), None, "nothing moved: nothing said");
+    }
+
+    #[test]
+    fn usb_headphones_say_what_they_wait_for() {
+        assert_eq!(Setup::of(true, true, 1, true, false), Setup::Playing, "there and playing, whatever else");
+        assert_eq!(Setup::of(true, false, 0, false, true), Setup::Connected);
+        assert_eq!(Setup::of(false, false, 2, true, false), Setup::DeviceMode, "a computer's mode: set USB first");
+        assert_eq!(Setup::of(false, false, 2, false, true), Setup::DeviceMode, "chosen, not yet restarted");
+        assert_eq!(Setup::of(false, false, 0, true, false), Setup::Restart, "charging only again, still a device");
+        assert_eq!(Setup::of(false, false, 0, false, false), Setup::NoHub);
+        assert_eq!(Setup::of(false, false, 0, false, true), Setup::Ready);
+    }
+
+    #[test]
+    fn inotify_names_are_read_from_its_events() {
+        let mut buf = Vec::new();
+        for name in ["output.123", "output"] {
+            let len = 16usize;
+            buf.extend_from_slice(&1i32.to_ne_bytes());
+            buf.extend_from_slice(&0x80u32.to_ne_bytes());
+            buf.extend_from_slice(&0u32.to_ne_bytes());
+            buf.extend_from_slice(&(len as u32).to_ne_bytes());
+            let mut padded = name.as_bytes().to_vec();
+            padded.resize(len, 0);
+            buf.extend_from_slice(&padded);
+        }
+        assert_eq!(names_in(&buf), ["output.123", "output"]);
+        assert_eq!(names_in(&buf[..20]), [""], "cut short: no name");
+        assert!(names_in(&buf[..10]).is_empty());
     }
 
     #[test]
@@ -749,14 +1525,68 @@ mod tests {
     #[test]
     fn every_hint_fits_whole_at_every_text_size() {
         let mut g = Gfx::new(bezel::Tokens::dark());
-        let page = SoundScreen::new();
-        for size in [crate::gfx::TextSize::Standard, crate::gfx::TextSize::Large] {
-            g.set_text_size(size);
-            let caption = g.ty.caption;
-            for row in ROWS {
-                let shortest = page.hint(row).last().unwrap();
-                assert!(g.measure(shortest, caption) <= W - 2.0 * PAD, "{shortest:?} at {size:?}");
+        let mut page = SoundScreen::new();
+        let sizes = [crate::gfx::TextSize::Compact, crate::gfx::TextSize::Standard, crate::gfx::TextSize::Large];
+        let setups = [Setup::Playing, Setup::Connected, Setup::Ready, Setup::NoHub, Setup::DeviceMode, Setup::Restart];
+        for output in [Output::Speaker, Output::Headphones, Output::Bluetooth, Output::Usb] {
+            for setup in setups {
+                for bt in [false, true] {
+                    page.status = Some(Status { output, setup, bluetooth: Some("0C:A6:94:12:34:56".into()), bluetooth_connected: bt, card: true, ..Status::default() });
+                    for size in sizes {
+                        g.set_text_size(size);
+                        let caption = g.ty.caption;
+                        for row in ROWS {
+                            let hints = page.hint(row);
+                            let shortest = hints.last().unwrap();
+                            assert!(g.measure(shortest, caption) <= W - 2.0 * PAD, "{shortest:?} at {size:?}");
+                        }
+                    }
+                }
             }
+        }
+    }
+
+    #[test]
+    fn every_row_fits_whole_at_every_text_size() {
+        let mut g = Gfx::new(bezel::Tokens::dark());
+        let mut page = SoundScreen::new();
+        let width = W - 2.0 * PAD - 5.0;
+        for look in [crate::look::Theme::Catalyst, crate::look::Theme::Bezel] {
+            g.theme = look;
+            for size in [crate::gfx::TextSize::Compact, crate::gfx::TextSize::Standard, crate::gfx::TextSize::Large] {
+                g.set_text_size(size);
+                let (name_style, value_style) = if look == crate::look::Theme::Bezel { (g.ty.label, g.ty.body) } else { (g.ty.body, g.ty.label) };
+                for setup in [Setup::Playing, Setup::Connected, Setup::Ready, Setup::NoHub, Setup::DeviceMode, Setup::Restart] {
+                    page.status = Some(Status { output: Output::Usb, setup, card: true, ..Status::default() });
+                    for row in ROWS {
+                        let (name, value, _) = page.describe(row);
+                        let name = if look == crate::look::Theme::Bezel { name.to_lowercase() } else { name.to_owned() };
+                        let need = g.measure(&name, name_style) + g.measure(&value, value_style) + 30.0;
+                        assert!(need <= width, "{name} · {value} at {size:?} in {look:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_usb_page_says_it_all_above_its_row_at_every_text_size() {
+        let mut g = Gfx::new(bezel::Tokens::dark());
+        let name = "USB-C to 3.5mm Headphone Jack Adapter";
+        for size in [crate::gfx::TextSize::Compact, crate::gfx::TextSize::Standard, crate::gfx::TextSize::Large] {
+            g.set_text_size(size);
+            let ty = g.ty;
+            // Clear of the row by a little air, not touching it.
+            let room = crate::gfx::H - PAD - g.hint_h() - g.row_h() - g.top() - 2.0 - 8.0;
+            for setup in [Setup::Playing, Setup::Connected, Setup::Ready, Setup::NoHub, Setup::DeviceMode, Setup::Restart] {
+                let lines = crate::help::wrap(&mut g, &usb_words(setup, name), ty.caption, W - 2.0 * PAD);
+                let tall = lines.len() as f32 * (ty.caption.size + 4.0);
+                assert!(tall <= room, "{setup:?} at {size:?}: {} lines", lines.len());
+            }
+            // Its title whole beside the island at rest with no robot set.
+            let rest = g.measure("no robot set", ty.caption) + 34.0;
+            let title = UsbAudioPage::new().title().to_owned();
+            assert!(g.measure(&title, ty.title) <= (W - rest) * 0.5 - PAD - 8.0, "{title} at {size:?}");
         }
     }
 

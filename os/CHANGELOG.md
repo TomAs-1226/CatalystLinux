@@ -17,6 +17,14 @@ the first section (this introduction) is not shown.
 - Signed in, Your library in Music has your playlists (Liked music first), the albums you saved and your artists, as YouTube Music lists them. Each opens to play, shuffle or download all for offline.
 - Your library shows at once, offline too: it is kept on the card and brought up to date in the background whenever Music opens online. Offline, a playlist you downloaded opens from the card.
 
+### USB headphones
+- USB-C headphones, or a USB headphone adapter, play: plug them into USB-C1 or the USB-A port and sound moves to them, the song playing too, with the speaker off. The island says so.
+- Pulled out, sound goes back to the speaker and music pauses, as a phone does.
+- Their volume is their own and kept for them: the volume keys move it while they play.
+- With Bluetooth headphones too, the ones connected last play; Enter on Settings › Sound › USB headphones swaps.
+- Settings › Sound shows where sound plays, and what USB headphones need while USB is set for a computer: charging only, the USB switch on the hub's side, and a restart.
+- Music with the screen off keeps playing through them: music standby leaves the USB host on for them.
+
 ## 0.6.7
 
 ### Fixed

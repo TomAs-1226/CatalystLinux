@@ -245,7 +245,7 @@ $P deep on
 $P deep off
 sleep 0.3
 check "Wi-Fi switched off meanwhile: not started again" "$(cat "$T/rc.log")" "catalyst-wifi stop"
-check "the usage is said" "$($P deep sideways 2>&1 >/dev/null | head -n1)" "usage: $T/catalyst-power deep on [keep-wifi] [keep-radios]|off|status"
+check "the usage is said" "$($P deep sideways 2>&1 >/dev/null | head -n1)" "usage: $T/catalyst-power deep on [keep-wifi] [keep-radios] [keep-usb]|off|status"
 
 echo "== music standby: the radios and Wi-Fi kept, then deep once the music stops"
 fresh
@@ -263,9 +263,20 @@ $P deep off
 wifi_back
 check "all back: the radio, Wi-Fi, the red light, 5 V, USB" "$(cat "$S/class/rfkill/rfkill0/soft"):$(tr '\n' ',' <"$T/rc.log"):$(cat "$S/class/leds/ACT/trigger"):$(cat "$S/class/leds/grove_5v_out/brightness"):$(cat "$S/bus/platform/drivers/dwc2/bind")" "0:catalyst-wifi stop,catalyst-wifi start,:mmc0:1:3f980000.usb"
 check "not deep" "$($P deep status)" "off"
+
+echo "== music standby on USB headphones: the USB host kept, until the music stops"
+fresh
+$P deep on keep-radios keep-usb
+check "the USB host left bound (the headphones hang off the hub)" "$(cat "$S/bus/platform/drivers/dwc2/unbind")" ""
+check "the rest off: Wi-Fi, 5 V, the red light" "$(cut -d' ' -f1 "$T/run/catalyst-deep" | tr '\n' ' ')" "wifi out red "
+$P deep on
+check "the music stopped: the USB host too, last" "$(cut -d' ' -f1 "$T/run/catalyst-deep" | tr '\n' ' '):$(cat "$S/bus/platform/drivers/dwc2/unbind")" "wifi out red radio usb :3f980000.usb"
+$P deep off
+wifi_back
+check "all back" "$(cat "$S/bus/platform/drivers/dwc2/bind"):$(cat "$S/class/rfkill/rfkill0/soft"):$($P deep status)" "3f980000.usb:0:off"
 fresh
 out=$($P deep on keep-everything 2>&1 || echo "exit $?")
-check "only what can be kept" "$out" "catalyst-power deep on: keep-wifi or keep-radios, not keep-everything
+check "only what can be kept" "$out" "catalyst-power deep on: keep-wifi, keep-radios or keep-usb, not keep-everything
 exit 2"
 check "and nothing taken" "$($P deep status)" "off"
 

@@ -624,10 +624,11 @@ days, slide the switch off.
 Music keeps deep standby away, since it would cut the sound off, but not
 the rest of it. Half a minute after the screen goes dark with music
 playing (Music tells `nowplaying`), the same steps are taken with the sound
-left alone (`catalyst-power deep on keep-radios [keep-wifi]`):
+left alone (`catalyst-power deep on keep-radios [keep-wifi] [keep-usb]`):
 
 - **off:** the USB host (dwc2 unbound: the hub and the Ethernet chip; not
-  while a computer has the handheld as its device), the Grove and HAT 5 V
+  while a computer has the handheld as its device, nor while USB headphones
+  are what plays), the Grove and HAT 5 V
   outputs, the keyboard's lights and the red light, the motion sensor's
   polling, and the shell's own polling (the robot's link let go, its
   threads parked); the shell looks in once a minute, with a second of timer
@@ -1700,19 +1701,60 @@ on MIC1 (MIC1P, against its ground on MIC1N); a headset's comes in on MIC2.
   stereo; capture from the microphone, shared (dsnoop). The configuration is
   `/usr/share/catalyst/asound.conf`; `catalyst-audio` writes it to
   `/run/catalyst-audio/asound.conf` at boot, where `/etc/asound.conf` leads,
-  with Bluetooth headphones in front while they are the output.
+  with USB or Bluetooth headphones in front while they are the output.
 - **Volume:** Fn + S and Fn + D (quieter, louder) and Fn + A (mute) over any
   screen, the bar beside the brightness in the control centre, and Settings ›
-  Sound. One volume for everything ("Master" on the card, a software volume
-  from -50 dB to 0 dB, linear in decibels), kept on `/data/catalyst`.
+  Sound. One volume for the speaker, the jack and Bluetooth ("Master" on the
+  card, a software volume from -50 dB to 0 dB, linear in decibels), and one
+  of their own for USB headphones, both kept on `/data/catalyst`; the keys
+  move the one of what plays. Mute silences both.
 - **Settings › Sound:** the volume, mute, where sound is playing (speaker,
-  headphones, or Bluetooth), a test chime, the microphone (the handheld's or
-  a headset's) with its level live while the row is chosen, and its gain.
+  headphones, USB headphones or Bluetooth), USB headphones and what they
+  need, a test chime, the microphone (the handheld's or a headset's) with
+  its level live while the row is chosen, and its gain.
 - **Reminders** chime through it as they come due; the pit's have a
   brighter, quicker sound of their own. Muted, nothing plays.
 
-`catalyst-audio status|volume|mute|test-tone|mic|mic-gain|output|route|amp`
+`catalyst-audio status|volume|mute|test-tone|mic|mic-gain|output|prefer|route|amp`
 does the same from the Terminal; `amixer -c ES8389Audio` shows every control.
+
+### USB headphones
+
+USB-C headphones with their own converter, or a USB headphone adapter (any
+USB Audio Class sound card that plays), work as a phone's do.
+
+- **Where:** USB-C1 or the USB-A port, which hang off the internal hub (a
+  GL852G, with the Ethernet chip). The CM0 has one USB port, and the board's
+  USB switch gives it either to the hub or straight to USB-C2 (the charging
+  port) for a computer. So headphones need Settings › USB on *charging
+  only* (a computer's modes set the controller to the device role, from the
+  next start) and the switch on the hub's side; Settings › Sound ›
+  USB headphones says which of those is missing (it sees the mode, the role
+  the controller started in, and whether the hub answers).
+- **Plugged in:** mdev loads `snd-usb-audio` by the device's modalias, and
+  its rule for sound cards' control devices runs `catalyst-audio hotplug`,
+  which routes `default` to them (their own dmix) once the card is whole.
+  The speaker's amplifier stays off, as the codec plays nothing. The shell
+  watches `/run/catalyst-audio/output` (inotify, on a thread that sleeps
+  until it changes): the island says *playing on usb headphones*, and a song
+  playing starts again where it was, through them.
+- **Pulled out:** `default` goes back to the speaker and Music pauses (the
+  player may find its sound gone first; that too is a pause, not a failure).
+- **Volume:** their own playback control where they have one (set as
+  alsamixer would, with `amixer -M`, and muted by its switch), else a
+  software one, "USB Playback Volume" on the codec's card, made and set
+  before sound reaches them. It starts at 40% and is kept in
+  `audio-volume-usb`.
+- **With Bluetooth headphones too:** the ones connected last play; Enter on
+  Settings › Sound › USB headphones (or `catalyst-audio prefer usb|bluetooth`)
+  swaps. Deep standby stopping the USB host or the radios, and giving them
+  back, does not count as connecting.
+- **Music standby** leaves the USB host on while they are what plays
+  (`catalyst-power deep on keep-usb`); once the music stops, it goes too.
+- **Restarts:** where sound goes lives in `/run/catalyst-audio`, so a shell
+  restarted with headphones in carries on with them; at boot
+  `catalyst-audio start` finds them already plugged in.
+- The microphone stays the handheld's: a USB headset's is not used.
 
 ### Recording, for programs that listen
 

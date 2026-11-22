@@ -60,7 +60,7 @@ use crate::photos::Picture;
 use crate::robot::Robot;
 use crate::shell::{Cx, Screen};
 
-pub use player::{media_key, playing, tile};
+pub use player::{media_key, moved, paused_unplugged, playing, tile};
 
 /// The assistant's shots: no downloads asked for and none saved, so each
 /// set starts as the first did.

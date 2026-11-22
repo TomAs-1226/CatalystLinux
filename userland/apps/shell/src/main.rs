@@ -15,6 +15,7 @@
 //! catalyst-shell --cjk-shots <dir>   Chinese, Japanese and Korean text on the screens, to PNG
 //! catalyst-shell --activity-shots <dir>  live activities, Tab held, the lock screen with a song
 //! catalyst-shell --notify-shots <dir>    notifications: the centre, Quiet, the island, the lock screen
+//! catalyst-shell --usb-audio-shots <dir> USB headphones: the island, Settings › Sound, its USB page
 //! catalyst-shell --clip-shots <dir>   the clipboard's history, quick capture, copy mode, to PNG
 //! catalyst-shell clip …           the clipboard for scripts (`catalyst-clip`, a link to this)
 //! catalyst-shell --widget-shots <dir>    every widget at each size, and Home showing them
@@ -607,6 +608,10 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--notify-shots") {
         return notify_shots(std::path::Path::new(&dir));
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--usb-audio-shots") {
+        return usb_audio_shots(std::path::Path::new(&dir));
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--standby-shots") {
@@ -3272,7 +3277,7 @@ fn sound_shots(shell: &mut Shell, press: &dyn Fn(&mut Shell, &[Key], usize), sav
     settle(shell, 40);
     save(shell, "141b-sound");
     // Down to the microphone: its level, live.
-    press(shell, &[Down, Down, Down, Down], 20);
+    press(shell, &[Down, Down, Down, Down, Down], 20);
     real_time(shell, 0.6);
     save(shell, "141c-sound-microphone");
     // Bluetooth: off, then on (it asks for a restart), then the simulator's
@@ -4217,6 +4222,129 @@ fn activity_shots(dir: &std::path::Path) {
     save(&mut shell, "d05-standby-nothing-playing");
     faces::pretend_time(None);
     println!("live activity shots in {}", dir.display());
+}
+
+/// USB headphones, to PNG: the island as they go in, the volume keys on
+/// their own volume, the control centre's headphones, the island as they
+/// come out with a song playing (paused); Settings › Sound with them
+/// playing, and its USB row and page in each state they can be in, in both
+/// looks at each text size.
+#[cfg(not(target_arch = "aarch64"))]
+fn usb_audio_shots(dir: &std::path::Path) {
+    use gfx::TextSize::{Compact, Large, Standard};
+    use sound::Setup;
+    use Key::*;
+    std::fs::create_dir_all(dir).expect("create the screenshot folder");
+    tour_fixtures();
+    let settle = |shell: &mut Shell, frames: usize| {
+        for _ in 0..frames {
+            if shell.tick(1.0 / 60.0) {
+                shell.draw();
+            }
+        }
+    };
+    let real_time = |shell: &mut Shell, seconds: f32| {
+        let until = Instant::now() + Duration::from_secs_f32(seconds);
+        while Instant::now() < until {
+            settle(shell, 6);
+            std::thread::sleep(Duration::from_millis(40));
+        }
+    };
+    let save = |shell: &mut Shell, name: &str| {
+        shell.draw();
+        platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}.png")), 3);
+        println!("{name}");
+    };
+    let fresh = |light: bool, bezel: bool, text: gfx::TextSize, robot: bool| {
+        let mut shell = Shell::new(if robot { Robot::demo() } else { Robot::none() });
+        shell.settings.light = light;
+        if bezel {
+            (shell.settings.theme, shell.settings.wallpaper, shell.settings.accent) = (look::Theme::Bezel, look::Wallpaper::Glow, bezel::Accent::Orange);
+        }
+        shell.settings.text = text;
+        shell.apply_settings();
+        settle(&mut shell, 100);
+        shell
+    };
+    bluetooth::demo_reset();
+    sound::demo_plug(None);
+    sound::set_level(sound::Level { volume: 65, muted: false });
+    sound::take_said();
+
+    // Plugged in, over Home: the island says so.
+    let mut shell = fresh(false, false, Standard, true);
+    sound::demo_plug(Some(sound::demo_usb()));
+    settle(&mut shell, 40);
+    save(&mut shell, "u01-island-plugged-in");
+    settle(&mut shell, 200);
+    // The volume keys move theirs.
+    shell.key(Media(platform::Media::VolumeUp));
+    settle(&mut shell, 30);
+    save(&mut shell, "u02-island-their-volume");
+    settle(&mut shell, 200);
+    // The control centre: their volume, with headphones for its icon.
+    shell.key(Ctrl(' '));
+    settle(&mut shell, 90);
+    save(&mut shell, "u03-control-centre-headphones");
+    shell.key(Back);
+    settle(&mut shell, 90);
+    // A song playing through them; pulled out, it pauses and the island says so.
+    let songs = music::find_songs("juniper").unwrap_or_default();
+    music::play_list(songs);
+    shell.show(Box::new(music::MusicScreen::new()));
+    real_time(&mut shell, 1.6);
+    settle(&mut shell, 60);
+    save(&mut shell, "u04-music-on-headphones");
+    sound::demo_plug(None);
+    real_time(&mut shell, 0.3);
+    settle(&mut shell, 30);
+    save(&mut shell, "u05-island-unplugged-paused");
+    music::stop_for_shots();
+    sound::take_said();
+    let mut missing = shell.gfx.missing_icons().clone();
+
+    // Settings › Sound and its USB page, in both looks at each text size.
+    let looks = [("catalyst", false, false), ("bezel-light", true, true)];
+    for (look_name, light, bezel) in looks {
+        for (size_name, size) in [("compact", Compact), ("standard", Standard), ("large", Large)] {
+            let tag = format!("{look_name}-{size_name}");
+            // Playing on them.
+            sound::demo_setup(None);
+            sound::demo_plug(Some(sound::demo_usb()));
+            let mut shell = fresh(light, bezel, size, false);
+            sound::take_said();
+            shell.show(Box::new(sound::SoundScreen::new().at(sound::USB_ROW)));
+            real_time(&mut shell, 0.4);
+            settle(&mut shell, 60);
+            save(&mut shell, &format!("u1-sound-playing-{tag}"));
+            shell.show(Box::new(sound::UsbAudioPage::new()));
+            real_time(&mut shell, 0.4);
+            settle(&mut shell, 60);
+            save(&mut shell, &format!("u2-usb-page-playing-{tag}"));
+            // A computer's USB mode chosen: what to do instead.
+            sound::demo_plug(None);
+            sound::take_said();
+            sound::demo_setup(Some(Setup::DeviceMode));
+            shell.show(Box::new(sound::SoundScreen::new().at(sound::USB_ROW)));
+            real_time(&mut shell, 0.4);
+            settle(&mut shell, 60);
+            save(&mut shell, &format!("u3-sound-usb-mode-{tag}"));
+            for (setup, name) in [(Setup::DeviceMode, "usb-mode"), (Setup::Restart, "restart"), (Setup::NoHub, "no-hub"), (Setup::Ready, "ready")] {
+                sound::demo_setup(Some(setup));
+                shell.show(Box::new(sound::UsbAudioPage::new()));
+                real_time(&mut shell, 0.4);
+                settle(&mut shell, 60);
+                save(&mut shell, &format!("u4-usb-page-{name}-{tag}"));
+            }
+            missing.extend(shell.gfx.missing_icons().iter().cloned());
+        }
+    }
+    sound::demo_setup(None);
+    if !missing.is_empty() {
+        eprintln!("icons asked for that are not built in: {}", missing.iter().cloned().collect::<Vec<_>>().join(", "));
+        std::process::exit(1);
+    }
+    println!("USB headphone shots in {}", dir.display());
 }
 
 /// Notifications, to PNG: the notification centre (both tones, the Bezel

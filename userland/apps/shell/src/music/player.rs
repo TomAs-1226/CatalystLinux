@@ -13,6 +13,11 @@
 //! Everything that changes is told to `nowplaying` for the lock screen,
 //! StandBy and the island, and whether what plays next needs the network
 //! (so music standby can switch Wi-Fi off once it is all here).
+//!
+//! As sound moves (sound.rs), the song follows: started again where it was
+//! through headphones that take over, and paused when the USB headphones it
+//! played through come out. The player may find them gone first (its sound
+//! stops with an error): that too is a pause, not a failure.
 
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -101,6 +106,8 @@ enum Cmd {
     /// A line from the player, and its end.
     Said(u64, String),
     Closed(u64),
+    /// Sound moved: what the song does.
+    Moved(crate::sound::Follow),
 }
 
 struct Shared {
@@ -146,12 +153,15 @@ static PLAYER: OnceLock<Player> = OnceLock::new();
 static NEEDS_NETWORK: AtomicBool = AtomicBool::new(false);
 /// Times ALSA ran dry since the shell started (also in /run/catalyst-music/xruns).
 static XRUNS: AtomicU32 = AtomicU32::new(0);
+/// When the song was last paused by the USB headphones it played through
+/// coming out (for the island's words, which may come a moment after).
+static UNPLUGGED_AT: Mutex<Option<Instant>> = Mutex::new(None);
 
 fn player() -> &'static Player {
     PLAYER.get_or_init(|| {
         let (tx, rx) = channel::<Cmd>();
         let state = Arc::new(Mutex::new(Shared { queue: Vec::new(), at: 0, phase: Phase::Empty, offset: 0.0, anchor: None, length: None, loading: None, buffering: false, shuffle: false, repeat: Repeat::Off, unshuffled: None }));
-        let worker = Worker { tx: tx.clone(), state: state.clone(), sound: None, gen: 0, errors: Arc::new(Mutex::new(String::new())), retry_at: None, busy_tries: 0, ffmpeg_for: None, fetch_failed: None, sim_due: None };
+        let worker = Worker { tx: tx.clone(), state: state.clone(), sound: None, gen: 0, errors: Arc::new(Mutex::new(String::new())), retry_at: None, busy_tries: 0, ffmpeg_for: None, fetch_failed: None, sim_due: None, played_on: None };
         std::thread::Builder::new().name("music".into()).stack_size(256 * 1024).spawn(move || worker.run(rx)).ok();
         fetch::on_event(|e| {
             if let Some(p) = PLAYER.get() {
@@ -192,6 +202,19 @@ pub fn playing() -> bool {
     PLAYER.get().is_some_and(|p| matches!(p.state.lock().unwrap().phase, Phase::Playing | Phase::Loading))
 }
 
+
+/// Sound moved (sound.rs): the song follows, if there is a player at all.
+pub fn moved(follow: crate::sound::Follow) {
+    if let Some(p) = PLAYER.get() {
+        p.tx.send(Cmd::Moved(follow)).ok();
+    }
+}
+
+/// The song was paused a moment ago because the USB headphones it played
+/// through came out (once: the flag is taken).
+pub fn paused_unplugged() -> bool {
+    UNPLUGGED_AT.lock().unwrap().take().is_some_and(|at| at.elapsed() < Duration::from_secs(5))
+}
 
 pub fn play(list: Vec<Track>, at: usize, radio: bool) {
     send(Cmd::Play(list, at, radio));
@@ -297,6 +320,9 @@ struct Worker {
     fetch_failed: Option<String>,
     /// The simulator's songs are "found" a moment after they are asked for.
     sim_due: Option<Instant>,
+    /// The USB headphones' card the player was started on, if they were
+    /// what played.
+    played_on: Option<u32>,
 }
 
 impl Worker {
@@ -313,7 +339,7 @@ impl Worker {
             };
             match cmd {
                 Ok(cmd) => {
-                    if !matches!(cmd, Cmd::Fetch(_) | Cmd::Said(..) | Cmd::Closed(_) | Cmd::Radio(..)) {
+                    if !matches!(cmd, Cmd::Fetch(_) | Cmd::Said(..) | Cmd::Closed(_) | Cmd::Radio(..) | Cmd::Moved(_)) {
                         self.retry_at = None;
                         self.busy_tries = 0;
                     }
@@ -510,6 +536,27 @@ impl Worker {
             Cmd::Said(gen, line) if gen == self.gen => self.said(&line),
             Cmd::Closed(gen) if gen == self.gen => self.closed(),
             Cmd::Said(..) | Cmd::Closed(_) => {}
+            Cmd::Moved(follow) => self.moved(follow),
+        }
+    }
+
+    /// Sound moved while a song plays (or is on its way): on from where it
+    /// is through the headphones that took over, or paused as the USB ones
+    /// it played through came out. A song still being found opens what
+    /// plays then by itself.
+    fn moved(&mut self, follow: crate::sound::Follow) {
+        use crate::sound::Follow;
+        let (active, position) = {
+            let s = self.state.lock().unwrap();
+            (matches!(s.phase, Phase::Playing | Phase::Loading), s.position())
+        };
+        match follow {
+            Follow::Pause if active => {
+                *UNPLUGGED_AT.lock().unwrap() = Some(Instant::now());
+                self.pause();
+            }
+            Follow::Carry if active && self.sound.is_some() => self.start(position),
+            _ => {}
         }
     }
 
@@ -717,6 +764,7 @@ impl Worker {
         let gen = self.gen;
         let ffmpeg = self.ffmpeg_for.as_deref() == Some(track.id.as_str()) || !Path::new(library::PLAYER).exists();
         let mut cmd = if ffmpeg { ffmpeg_command(path, at) } else { player_command(path, at, size) };
+        self.played_on = crate::sound::route().usb_playing();
         let child = polite::polite(&mut cmd, Manner::Playing).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
         let mut child = match child {
             Ok(c) => c,
@@ -847,6 +895,17 @@ impl Worker {
                 let mut s = self.state.lock().unwrap();
                 s.offset = position;
                 s.phase = Phase::Loading;
+            }
+            // Its sound stopped because the USB headphones came out: paused
+            // where it was, as their going would pause it anyway.
+            _ if self.played_on.is_some_and(crate::sound::usb_gone) => {
+                {
+                    let mut s = self.state.lock().unwrap();
+                    s.offset = position;
+                    s.anchor = None;
+                }
+                *UNPLUGGED_AT.lock().unwrap() = Some(Instant::now());
+                self.pause();
             }
             _ => {
                 let said = short_error(&why, played);
@@ -1007,6 +1066,20 @@ mod tests {
         toggle();
         assert!(wait(&|n| n.phase == Phase::Paused));
         next();
+        assert!(wait(&|n| n.phase == Phase::Playing && n.at == 3));
+        // Sound moving: on through headphones that take over; paused as the
+        // USB ones it played through come out, and left paused after.
+        moved(crate::sound::Follow::Carry);
+        assert!(wait(&|n| n.phase == Phase::Playing && n.at == 3));
+        moved(crate::sound::Follow::Pause);
+        assert!(wait(&|n| n.phase == Phase::Paused && n.at == 3));
+        assert!(paused_unplugged(), "the island says it was paused");
+        assert!(!paused_unplugged(), "once");
+        moved(crate::sound::Follow::Carry);
+        moved(crate::sound::Follow::Stay);
+        std::thread::sleep(Duration::from_millis(120));
+        assert_eq!(now().phase, Phase::Paused, "paused: nothing to carry on");
+        toggle();
         assert!(wait(&|n| n.phase == Phase::Playing && n.at == 3));
         // Back from the start of a song is the song before.
         previous();
