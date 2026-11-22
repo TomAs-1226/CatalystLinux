@@ -4,6 +4,9 @@ members = [
     "crates/detent", "crates/bezel", "crates/nt4", "crates/apriltag", "crates/localmodel", "crates/speech", "apps/shell", "apps/play", "apps/update", "apps/flasher", "apps/ai-cli",
     # The computer companion: the handheld's service, the Windows app, and what they share.
     "crates/companion-proto", "apps/companiond", "apps/companion",
+    # Music's sound after the decoder (spatial, the equalizer, loudness,
+    # crossfades), and the AirPods' own protocol.
+    "crates/audiofx", "crates/aap",
     # Apps for the catalogue: the kit they are written with, the package
     # format and its tool, and the apps themselves.
     "crates/kit", "crates/appkg", "catalogue/hello", "catalogue/sudoku", "catalogue/battleship", "catalogue/typing", "catalogue/orbits",
@@ -24,6 +27,8 @@ catalyst-kit = { path = "crates/kit" }
 catalyst-appkg = { path = "crates/appkg" }
 catalyst-companion-proto = { path = "crates/companion-proto" }
 speech = { path = "crates/speech" }
+audiofx = { path = "crates/audiofx" }
+aap = { path = "crates/aap" }
 
 # The device build: small, fast, no unwinding tables.
 [profile.release]

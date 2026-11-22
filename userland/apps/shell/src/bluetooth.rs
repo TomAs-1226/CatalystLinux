@@ -192,6 +192,33 @@ static LAST: Mutex<Option<Status>> = Mutex::new(None);
 struct Reading {
     status: Status,
     devices: Vec<Device>,
+    /// The codec the device playing plays with (catalyst-audio's word).
+    codec: Option<Codec>,
+}
+
+/// A Bluetooth stream's codec and rate: "AAC", 48000.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Codec {
+    pub address: String,
+    pub name: String,
+    pub rate: Option<u32>,
+}
+
+impl Codec {
+    /// catalyst-audio's /run/catalyst-audio/bluetooth.
+    pub fn parse(text: &str) -> Option<Codec> {
+        let field = |k: &str| text.lines().find_map(|l| l.strip_prefix(k)?.strip_prefix('=')).map(str::trim).filter(|v| !v.is_empty());
+        Some(Codec { address: field("address")?.to_uppercase(), name: field("codec")?.to_owned(), rate: field("rate").and_then(|r| r.parse().ok()) })
+    }
+
+    /// "AAC · 48 kHz".
+    pub fn words(&self) -> String {
+        match self.rate {
+            Some(r) if r % 1000 == 0 => format!("{} · {} kHz", self.name, r / 1000),
+            Some(r) => format!("{} · {:.1} kHz", self.name, r as f32 / 1000.0),
+            None => self.name.clone(),
+        }
+    }
 }
 
 fn read(scan: bool) -> Result<Reading, String> {
@@ -204,7 +231,8 @@ fn read(scan: bool) -> Result<Reading, String> {
         } else {
             Vec::new()
         };
-        Reading { status, devices }
+        let codec = std::fs::read_to_string("/run/catalyst-audio/bluetooth").ok().and_then(|t| Codec::parse(&t));
+        Reading { status, devices, codec }
     } else {
         demo_read(scan)
     };
@@ -339,7 +367,20 @@ fn demo_read(scan: bool) -> Reading {
             name: crate::device::name(),
             connected: devices.iter().find(|x| x.connected).map(|x| x.address.clone()),
         },
+        // As bluealsa would play to them: AAC to AirPods, SBC to the rest.
+        codec: devices.iter().find(|x| x.connected).map(|x| Codec { address: x.address.clone(), name: if x.name.contains("AirPods") { "AAC".into() } else { "SBC".into() }, rate: Some(48_000) }),
         devices,
+    }
+}
+
+/// The made-up room with AirPods Pro paired and playing (the galleries).
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+pub fn demo_airpods() {
+    let mut d = demo();
+    let d = d.as_mut().unwrap();
+    (d.enabled, d.restarted, d.found) = (true, true, true);
+    if !d.devices.iter().any(|x| x.address == "F4:34:F0:12:34:56") {
+        d.devices.insert(0, Device { address: "F4:34:F0:12:34:56".into(), paired: true, connected: true, kind: Kind::Headphones, name: "AirPods Pro".into() });
     }
 }
 
@@ -387,12 +428,18 @@ enum Row {
     Restart,
     Seen,
     Device(usize),
+    /// Under the device playing: the codec it plays with.
+    Codec,
+    /// Under AirPods playing: a bud's battery, or the case's.
+    Battery(aap::Part),
     Look,
 }
 
 /// Settings › Bluetooth: switching it on (once with a restart), the devices
 /// paired and found, pairing, connecting and forgetting them, and a look
-/// round for more.
+/// round for more. Under the device playing, the codec it plays with; under
+/// AirPods, the battery of each bud and the case (as they say it, over
+/// their own protocol: airpods.rs).
 pub struct BluetoothScreen {
     list: ListState,
     reading: Option<Job<Result<Reading, String>>>,
@@ -404,7 +451,22 @@ pub struct BluetoothScreen {
     working: Option<(Work, String, Job<Result<String, String>>)>,
     /// Asked once: forget this device (or restart); a second press does it.
     armed: Option<Row>,
+    /// The AirPods connected, as last looked at.
+    pods: Option<crate::airpods::State>,
+    /// Each battery row's bar, gliding to its level.
+    bars: [detent::Animated; 4],
     changed: bool,
+}
+
+const PARTS: [aap::Part; 4] = [aap::Part::Left, aap::Part::Right, aap::Part::Case, aap::Part::Headphones];
+
+fn part_name(p: aap::Part) -> &'static str {
+    match p {
+        aap::Part::Left => "Left bud",
+        aap::Part::Right => "Right bud",
+        aap::Part::Case => "Case",
+        aap::Part::Headphones => "Battery",
+    }
 }
 
 impl BluetoothScreen {
@@ -418,10 +480,27 @@ impl BluetoothScreen {
             looked: false,
             working: None,
             armed: None,
+            pods: crate::airpods::now(),
+            bars: std::array::from_fn(|_| detent::Animated::new(0.0, detent::role::hold()).with_rest(0.003)),
             changed: true,
         };
         page.read_now(false);
         page
+    }
+
+    /// The AirPods connected, if they are this device.
+    fn pods_for(&self, address: &str) -> Option<&crate::airpods::State> {
+        self.pods.as_ref().filter(|p| p.address.eq_ignore_ascii_case(address))
+    }
+
+    /// The codec the device playing plays with, if it is this one.
+    fn codec_for(&self, address: &str) -> Option<&Codec> {
+        self.last.as_ref()?.codec.as_ref().filter(|c| c.address.eq_ignore_ascii_case(address))
+    }
+
+    /// The device the rows under it belong to: the one playing.
+    fn playing(&self) -> Option<&Device> {
+        self.devices().iter().find(|d| d.connected)
     }
 
     fn read_now(&mut self, scan: bool) {
@@ -450,7 +529,18 @@ impl BluetoothScreen {
                 if !st.name.is_empty() {
                     rows.push(Row::Seen);
                 }
-                rows.extend((0..self.devices().len()).map(Row::Device));
+                for (i, d) in self.devices().iter().enumerate() {
+                    rows.push(Row::Device(i));
+                    if !d.connected {
+                        continue;
+                    }
+                    if self.codec_for(&d.address).is_some() {
+                        rows.push(Row::Codec);
+                    }
+                    if let Some(p) = self.pods_for(&d.address) {
+                        rows.extend(PARTS.iter().filter(|part| p.cell(**part).is_some()).map(|part| Row::Battery(*part)));
+                    }
+                }
                 rows.push(Row::Look);
             }
             _ => {}
@@ -503,6 +593,14 @@ impl BluetoothScreen {
                 }
                 None => Default::default(),
             },
+            Row::Codec => {
+                let codec = self.playing().and_then(|d| self.codec_for(&d.address));
+                ("Codec".into(), codec.map(Codec::words).unwrap_or_default(), true)
+            }
+            Row::Battery(part) => {
+                let cell = self.playing().and_then(|d| self.pods_for(&d.address)).and_then(|p| p.cell(part));
+                (part_name(part).into(), cell.map(crate::airpods::cell_words).unwrap_or_default(), cell.is_some_and(|c| c.level > 10))
+            }
             Row::Look => ("Look for devices".into(), (if self.scanning { "looking…" } else { "" }).into(), true),
         }
     }
@@ -523,6 +621,14 @@ impl BluetoothScreen {
                 Some(d) => vec![format!("{} · enter: pair and play here", d.kind.words()), "enter: pair and play here".into()],
                 None => Vec::new(),
             },
+            Row::Codec => match self.playing().and_then(|d| self.codec_for(&d.address)).map(|c| c.name.as_str()) {
+                Some("AAC") => words(&["aac, as an iphone sends it, 256 kb/s", "aac, as an iphone sends it", "aac"]),
+                Some("SBC") => words(&["sbc: the codec every pair takes", "sbc, which every pair takes", "sbc"]),
+                Some(other) => vec![format!("{}, chosen with these headphones", other.to_lowercase()), other.to_lowercase()],
+                None => Vec::new(),
+            },
+            Row::Battery(aap::Part::Case) => words(&["the case's, while it is open near them", "the case's, while open", "the case"]),
+            Row::Battery(_) => words(&["as the airpods say it, over their own link", "as the airpods say it", "the airpods'"]),
             Row::Look if self.scanning => words(&["put headphones in pairing mode now", "pairing mode now"]),
             Row::Look => words(&["enter: look again · headphones in pairing mode", "enter: look again"]),
         }
@@ -618,11 +724,27 @@ impl Screen for BluetoothScreen {
         Nav::Stay
     }
 
-    fn tick(&mut self, _dt: f32) -> bool {
+    fn tick(&mut self, dt: f32) -> bool {
         if self.read_at.elapsed().as_secs_f32() >= 3.0 && self.reading.is_none() && self.working.is_none() {
             self.read_now(false);
         }
-        std::mem::take(&mut self.changed) || self.scanning || self.working.is_some()
+        let pods = crate::airpods::now();
+        if pods != self.pods {
+            let row = self.rows().get(self.list.focus).copied();
+            self.pods = pods;
+            let rows = self.rows();
+            self.list.focus = row.and_then(|r| rows.iter().position(|x| *x == r)).unwrap_or(self.list.focus.min(rows.len().saturating_sub(1)));
+            self.changed = true;
+        }
+        let mut moving = false;
+        for (bar, part) in self.bars.iter_mut().zip(PARTS) {
+            let level = self.pods.as_ref().and_then(|p| p.cell(part)).map_or(0.0, |c| c.level as f32 / 100.0);
+            if bar.target() != level {
+                bar.set(level);
+            }
+            moving |= bar.tick(dt);
+        }
+        std::mem::take(&mut self.changed) || self.scanning || self.working.is_some() || moving
     }
 
     fn busy(&self) -> bool {
@@ -641,7 +763,8 @@ impl Screen for BluetoothScreen {
             let (name, value, lit) = self.describe(row);
             // A device's kind leads its row: headphones, a speaker.
             let icon = match row {
-                Row::Device(d) => self.devices().get(d).map(|d| d.kind.icon()),
+                // AirPods by their own shape, as the island shows them.
+                Row::Device(d) => self.devices().get(d).map(|d| if self.pods_for(&d.address).is_some_and(|p| !aap::is_max(&p.model)) { "earbuds" } else { d.kind.icon() }),
                 Row::Look => Some(if self.scanning { "bluetooth_searching" } else { "search" }),
                 _ => None,
             };
@@ -653,6 +776,18 @@ impl Screen for BluetoothScreen {
                     icon_row(g, r, icon, on, &name, &value, value_color, i == self.list.focus);
                 }
                 None => g.row(r, &name, &value, value_color, i == self.list.focus),
+            }
+            // A battery's level as a bar between its name and value, as the
+            // volume's is on Sound.
+            if let Row::Battery(part) = row {
+                let at = PARTS.iter().position(|p| *p == part).unwrap_or(0);
+                // The same for every part, so the bars line up.
+                let name_w = PARTS.iter().map(|p| part_name(*p)).map(|n| g.measure(&n.to_lowercase(), ty.label).max(g.measure(n, ty.body))).fold(0.0, f32::max) + 22.0;
+                let value_w = g.measure("100 % · charging", ty.body).max(g.measure(&value, ty.label)) + 22.0;
+                let room = r.w - name_w - value_w;
+                if room > 24.0 {
+                    g.meter(Rect::new(r.x + name_w, r.cy() - 3.0, room, 6.0), self.bars[at].value(), t.ice);
+                }
             }
             below = below.max(r.bottom());
         }
@@ -714,15 +849,49 @@ mod tests {
         let mut g = Gfx::new(bezel::Tokens::dark());
         let mut page = BluetoothScreen::new();
         let dev = |paired, connected| Device { address: "11:22:33:44:55:66".into(), paired, connected, kind: Kind::Headphones, name: "x".into() };
-        page.last = Some(Reading { status: Status { enabled: true, radio: Radio::On, name: "atlas".into(), ..Status::default() }, devices: vec![dev(true, true), dev(true, false), dev(false, false)] });
-        let rows = [Row::Switch, Row::Restart, Row::Seen, Row::Device(0), Row::Device(1), Row::Device(2), Row::Look];
-        for size in [crate::gfx::TextSize::Standard, crate::gfx::TextSize::Large] {
+        page.last = Some(Reading { status: Status { enabled: true, radio: Radio::On, name: "atlas".into(), ..Status::default() }, devices: vec![dev(true, true), dev(true, false), dev(false, false)], codec: Some(Codec { address: "11:22:33:44:55:66".into(), name: "AAC".into(), rate: Some(44_100) }) });
+        let rows = [Row::Switch, Row::Restart, Row::Seen, Row::Device(0), Row::Device(1), Row::Device(2), Row::Codec, Row::Battery(aap::Part::Left), Row::Battery(aap::Part::Case), Row::Look];
+        for size in [crate::gfx::TextSize::Compact, crate::gfx::TextSize::Standard, crate::gfx::TextSize::Large] {
             g.set_text_size(size);
             let caption = g.ty.caption;
             for row in rows {
                 let hints = page.hint(row);
                 let shortest = hints.last().unwrap();
                 assert!(g.measure(shortest, caption) <= W - 2.0 * PAD, "{shortest:?} at {size:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_codec_and_airpods_battery_sit_under_the_device_playing() {
+        assert_eq!(Codec::parse("address=f4:34:f0:12:34:56\ncodec=AAC\nrate=44100\nicon=audio-headphones\n").map(|c| c.words()), Some("AAC · 44.1 kHz".into()));
+        assert_eq!(Codec::parse("address=F4:34:F0:12:34:56\ncodec=SBC\nrate=48000\n").map(|c| c.words()), Some("SBC · 48 kHz".into()));
+        assert_eq!(Codec::parse("codec=\n"), None);
+        let mut page = BluetoothScreen::new();
+        let pods = Device { address: "F4:34:F0:12:34:56".into(), paired: true, connected: true, kind: Kind::Headphones, name: "AirPods Pro".into() };
+        let other = Device { address: "0C:A6:94:12:34:56".into(), paired: true, connected: false, kind: Kind::Headphones, name: "WH-1000XM4".into() };
+        page.last = Some(Reading { status: Status { enabled: true, radio: Radio::On, ..Status::default() }, devices: vec![pods, other], codec: Codec::parse("address=F4:34:F0:12:34:56\ncodec=AAC\nrate=48000\n") });
+        crate::airpods::demo(true);
+        page.pods = crate::airpods::now();
+        crate::airpods::demo(false);
+        assert_eq!(page.rows(), [Row::Switch, Row::Device(0), Row::Codec, Row::Battery(aap::Part::Left), Row::Battery(aap::Part::Right), Row::Battery(aap::Part::Case), Row::Device(1), Row::Look]);
+        assert_eq!(page.describe(Row::Codec).1, "AAC · 48 kHz");
+        assert_eq!(page.describe(Row::Battery(aap::Part::Right)).1, "78 %");
+        assert_eq!(page.describe(Row::Battery(aap::Part::Case)).1, "46 % · charging");
+        // Every row whole, at every text size, in both looks.
+        let mut g = Gfx::new(bezel::Tokens::dark());
+        let width = W - 2.0 * PAD - 5.0;
+        for look in [crate::look::Theme::Catalyst, crate::look::Theme::Bezel] {
+            g.theme = look;
+            for size in [crate::gfx::TextSize::Compact, crate::gfx::TextSize::Standard, crate::gfx::TextSize::Large] {
+                g.set_text_size(size);
+                let (name_style, value_style) = if look == crate::look::Theme::Bezel { (g.ty.label, g.ty.body) } else { (g.ty.body, g.ty.label) };
+                for row in page.rows() {
+                    let (name, value, _) = page.describe(row);
+                    let name = if look == crate::look::Theme::Bezel { name.to_lowercase() } else { name };
+                    let need = g.measure(&name, name_style) + g.measure(&value, value_style) + 50.0;
+                    assert!(need <= width, "{name} · {value} at {size:?} in {look:?}");
+                }
             }
         }
     }

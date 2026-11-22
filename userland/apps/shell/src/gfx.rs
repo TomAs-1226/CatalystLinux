@@ -716,6 +716,22 @@ impl Gfx {
         }
     }
 
+    /// A meter for a value either side of nothing (an equalizer's band):
+    /// its track, a mark at the middle, and the fill from the middle to
+    /// `value` (-1 to 1), clipped by the track as a meter's is.
+    pub fn balance(&mut self, r: Rect, value: f32, fill: Color) {
+        let track = r.offset(self.ox, 0.0);
+        let radius = r.h * 0.5;
+        self.canvas.rrect(track, radius, self.tokens.meter, 1.0);
+        let mid = track.x + track.w * 0.5;
+        let reach = track.w * 0.5 * value.clamp(-1.0, 1.0);
+        if reach.abs() > 0.5 {
+            let (x, w) = if reach > 0.0 { (mid, reach) } else { (mid + reach, -reach) };
+            self.canvas.rrect_clipped(Rect::new(x, track.y, w, track.h), 2.0, track, radius, fill, 1.0);
+        }
+        self.canvas.rrect(Rect::new(mid - 0.5, track.y - 2.0, 1.0, track.h + 4.0), 0.5, self.tokens.dim, 1.0);
+    }
+
     /// A tile holding one glanceable value: a quiet label above, the value in
     /// the display voice, and its unit.
     pub fn stat(&mut self, r: Rect, label: &str, value: Option<String>, unit: &str, size: f32) {

@@ -2,8 +2,8 @@
 //!
 //! - **Equalizer bars** at the compact island's end: four, rising and
 //!   falling with the song while it plays and settling flat as it pauses.
-//!   They follow catalyst-play's level (`music::LEVEL_FILE`: the low, middle
-//!   and high bands as heard, 30 times a second) while it writes one; else a
+//!   They follow catalyst-play's level (`music::LEVEL_FILE`: the left and
+//!   right loudness as heard, each period) while it writes one; else a
 //!   motion seeded by the song, a beat and its off-beats over a slow swell.
 //!   Each bar rides a Detent spring (Bezel's hold role: a value following a
 //!   hand) to a new height twenty times a second. They run only while the
@@ -152,23 +152,15 @@ impl Bars {
     }
 }
 
-/// catalyst-play's level line, `SEQ LOW MID HIGH` (0–100 each).
-pub fn parse_level(line: &str) -> Option<(u32, [f32; 3])> {
-    let mut words = line.split_whitespace().map(|w| w.parse::<u32>().ok());
-    let seq = words.next()??;
-    let mut bands = [0.0; 3];
-    for b in &mut bands {
-        *b = words.next()?? as f32 / 100.0;
-    }
-    Some((seq, bands))
-}
-
 /// The level, on the handheld (a few bytes from memory); none elsewhere.
 fn read_level() -> Option<(u32, [f32; 3])> {
     if !cfg!(target_arch = "aarch64") {
         return None;
     }
-    parse_level(&std::fs::read_to_string(crate::music::LEVEL_FILE).ok()?)
+    // catalyst-play's left and right loudness (audiofx::levels): the bars
+    // take the left, the two together, and the right.
+    let (seq, left, right) = audiofx::levels::read(std::path::Path::new(crate::music::LEVEL_FILE))?;
+    Some((u32::from(seq), [left, (left + right) * 0.5, right]))
 }
 
 /// A song's seed for the bars' motion: from its name.
@@ -332,13 +324,6 @@ mod tests {
         assert!(a > 0.1, "a red palette: #{:06x}", seed_hex(red));
         assert_eq!(cover_hue(&solid(32, 32, |x, _| [x as u8 * 8; 3])), None, "grey: the accent's own");
         assert_eq!(cover_hue(&Picture { w: 0, h: 0, rgb: Vec::new() }), None);
-    }
-
-    #[test]
-    fn the_level_line_is_read_and_anything_else_is_not() {
-        assert_eq!(parse_level("004211 072 055 031\n"), Some((4211, [0.72, 0.55, 0.31])));
-        assert_eq!(parse_level("004211 072 055"), None);
-        assert_eq!(parse_level(""), None);
     }
 
     #[test]

@@ -475,6 +475,8 @@ fn moved(new: Route) {
     if let Some(words) = announce(&old, &new, music) {
         set_said(words.into());
     }
+    // AirPods come and go with Bluetooth: their protocol's thread looks.
+    crate::airpods::look();
     crate::platform::wake();
 }
 
@@ -673,6 +675,7 @@ pub fn start() {
     if on_device() {
         with_route(|r| *r = Some(read_route()));
         std::thread::Builder::new().name("sound-watch".into()).stack_size(64 * 1024).spawn(watch).ok();
+        crate::airpods::start();
     }
 }
 
@@ -728,6 +731,9 @@ pub struct Status {
     pub output: Output,
     pub bluetooth: Option<String>,
     pub bluetooth_connected: bool,
+    /// The codec and rate it plays with (AAC, SBC).
+    pub bluetooth_codec: Option<String>,
+    pub bluetooth_rate: Option<u32>,
     /// USB headphones plugged in (playing or not): what they call themselves.
     pub usb: Option<String>,
     pub usb_own_volume: bool,
@@ -758,6 +764,8 @@ pub fn parse_status(text: &str) -> Status {
             }
             "bluetooth" if !value.is_empty() => s.bluetooth = Some(value.to_owned()),
             "bluetooth_connected" => s.bluetooth_connected = value == "yes",
+            "bluetooth_codec" if !value.is_empty() => s.bluetooth_codec = Some(value.to_owned()),
+            "bluetooth_rate" => s.bluetooth_rate = value.parse().ok(),
             "usb" if !value.is_empty() => s.usb = Some(value.to_owned()),
             "usb_name" if !value.is_empty() => usb_name = Some(value.to_owned()),
             "usb_mixer" => s.usb_own_volume = value == "own",
@@ -795,6 +803,8 @@ fn read_status() -> Result<Status, String> {
             card: true,
             output,
             bluetooth_connected: bluetooth.is_some(),
+            bluetooth_codec: bluetooth.as_ref().map(|_| "AAC".to_owned()),
+            bluetooth_rate: bluetooth.as_ref().map(|_| 48_000),
             bluetooth,
             usb: r.usb.as_ref().map(|u| u.name.clone()),
             usb_own_volume: r.usb.as_ref().is_some_and(|u| u.own_volume),
@@ -941,6 +951,109 @@ fn level_of(peak: f32) -> f32 {
     ((20.0 * peak.log10() + 60.0) / 60.0).clamp(0.0, 1.0)
 }
 
+// ------------------------------------------------------- music's sound ---
+
+/// Music's sound settings (spatial sound, the equalizer, loudness
+/// matching, the crossfade), as the player reads them from /data
+/// (audiofx::settings). Kept here once read; changed here at once.
+static FX: Mutex<Option<audiofx::settings::Fx>> = Mutex::new(None);
+
+pub fn fx() -> audiofx::settings::Fx {
+    FX.lock().unwrap().get_or_insert_with(|| if on_device() { audiofx::settings::load(Path::new(audiofx::settings::PATH)) } else { Default::default() }).clone()
+}
+
+/// A setting changed: written for the player (which reads it within half
+/// a second, while a song plays), and the AirPods' head tracking looked at.
+pub fn set_fx(change: impl FnOnce(&mut audiofx::settings::Fx)) -> audiofx::settings::Fx {
+    let mut fx = fx();
+    change(&mut fx);
+    *FX.lock().unwrap() = Some(fx.clone());
+    if on_device() {
+        audiofx::settings::save(Path::new(audiofx::settings::PATH), &fx).ok();
+    }
+    crate::airpods::look();
+    fx
+}
+
+/// What the player is playing, and how (/run/catalyst-music/stream).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Stream {
+    pub codec: String,
+    pub rate: u32,
+    pub bits: u32,
+    pub out_rate: u32,
+    pub bit_perfect: bool,
+    pub processing: Vec<String>,
+    pub tracking: bool,
+}
+
+pub fn parse_stream(text: &str) -> Stream {
+    let mut s = Stream::default();
+    for line in text.lines() {
+        let Some((k, v)) = line.split_once('=') else { continue };
+        let v = v.trim();
+        match k.trim() {
+            "codec" => s.codec = v.to_owned(),
+            "rate" => s.rate = v.parse().unwrap_or(0),
+            "bits" => s.bits = v.parse().unwrap_or(0),
+            "out_rate" => s.out_rate = v.parse().unwrap_or(0),
+            "bitperfect" => s.bit_perfect = v == "yes",
+            "processing" if v != "none" => s.processing = v.split(',').map(str::to_owned).collect(),
+            "tracking" => s.tracking = v == "yes",
+            _ => {}
+        }
+    }
+    s
+}
+
+static DEMO_STREAM: Mutex<Option<Stream>> = Mutex::new(None);
+
+/// The simulator's song, as the player would say it (the galleries).
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+pub fn demo_stream(s: Option<Stream>) {
+    *DEMO_STREAM.lock().unwrap() = s;
+}
+
+/// What plays now, while Music plays.
+pub fn stream() -> Option<Stream> {
+    if !on_device() {
+        return DEMO_STREAM.lock().unwrap().clone();
+    }
+    if !crate::music::playing() {
+        return None;
+    }
+    std::fs::read_to_string("/run/catalyst-music/stream").ok().map(|t| parse_stream(&t)).filter(|s| s.rate > 0)
+}
+
+/// "44.1 kHz", "48 kHz", "96 kHz".
+fn khz(rate: u32) -> String {
+    let k = rate as f32 / 1000.0;
+    if (k - k.round()).abs() < 0.05 {
+        format!("{} kHz", k.round() as u32)
+    } else {
+        format!("{k:.1} kHz")
+    }
+}
+
+/// How a song plays, the longest first: "44.1 kHz · 16-bit · bit-perfect".
+pub fn quality_words(s: &Stream) -> Vec<String> {
+    let how = if s.bit_perfect {
+        "bit-perfect".to_owned()
+    } else if s.processing.iter().any(|p| p == "spatial") {
+        if s.tracking { "spatial, head tracked" } else { "spatial" }.to_owned()
+    } else if s.processing.iter().any(|p| p == "eq") {
+        "equalized".into()
+    } else if s.processing.iter().any(|p| p == "loudness") {
+        "level matched".into()
+    } else if s.processing.iter().any(|p| p == "resampled") {
+        format!("to {}", khz(s.out_rate))
+    } else {
+        "mixed".into()
+    };
+    let short = how.split(',').next().unwrap_or(&how).to_owned();
+    vec![format!("{} · {}-bit · {how}", khz(s.rate), s.bits), format!("{} · {short}", khz(s.rate)), short]
+}
+
 // ----------------------------------------------------------------- screen ---
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -949,23 +1062,40 @@ enum Row {
     Mute,
     Output,
     Usb,
+    /// How the song playing plays: its rate and depth, bit-perfect or not.
+    Quality,
+    Spatial,
+    /// The AirPods' noise control, while they are connected.
+    Noise,
+    Equalizer,
+    Loudness,
+    Crossfade,
     Test,
     Microphone,
     MicGain,
     Bluetooth,
 }
 
-const ROWS: [Row; 8] = [Row::Volume, Row::Mute, Row::Output, Row::Usb, Row::Test, Row::Microphone, Row::MicGain, Row::Bluetooth];
+/// Every row the page can have, in order; some only now and then (rows()).
+const ALL: [Row; 14] = [Row::Volume, Row::Mute, Row::Output, Row::Usb, Row::Quality, Row::Spatial, Row::Noise, Row::Equalizer, Row::Loudness, Row::Crossfade, Row::Test, Row::Microphone, Row::MicGain, Row::Bluetooth];
 
-/// Search's places on the page (screens.rs).
+/// Search's places on the page (screens.rs): rows of `ALL`.
 pub const USB_ROW: usize = 3;
+pub const SPATIAL_ROW: usize = 5;
+pub const EQ_ROW: usize = 7;
+pub const LOUDNESS_ROW: usize = 8;
+pub const CROSSFADE_ROW: usize = 9;
+pub const TEST_ROW: usize = 10;
+pub const MIC_ROW: usize = 11;
 
 /// How long the microphone's level is shown after the last key, in seconds.
 const LISTEN_FOR: f32 = 30.0;
 
 /// Settings › Sound: the volume, silence, where sound goes, USB headphones,
-/// a test sound, the microphone (with its level, live, while it is chosen)
-/// and its gain, and Bluetooth.
+/// how the song playing plays, Music's sound (spatial sound, the AirPods'
+/// noise control, the equalizer, loudness matching, the crossfade), a test
+/// sound, the microphone (with its level, live, while it is chosen) and its
+/// gain, and Bluetooth.
 pub struct SoundScreen {
     list: ListState,
     status: Option<Status>,
@@ -983,6 +1113,10 @@ pub struct SoundScreen {
     /// sleeps deep) does not record on.
     last_key: Instant,
     working: Option<(Row, Job<Result<(), String>>)>,
+    /// The song playing, and the AirPods there, as last looked at.
+    stream: Option<Stream>,
+    pods: Option<crate::airpods::State>,
+    looked: Instant,
     changed: bool,
 }
 
@@ -999,6 +1133,9 @@ impl SoundScreen {
             meter_bar: detent::Animated::new(0.0, detent::role::tick()).with_rest(0.003),
             working: None,
             last_key: Instant::now(),
+            stream: stream(),
+            pods: crate::airpods::now(),
+            looked: Instant::now(),
             changed: true,
         };
         page.read_now();
@@ -1011,8 +1148,22 @@ impl SoundScreen {
         self.reading = Some(Job::start(read_status));
     }
 
+    /// The rows there are now: how the song plays only while one does, the
+    /// noise control only while AirPods that have it are connected.
+    fn rows(&self) -> Vec<Row> {
+        let noise = self.pods.as_ref().is_some_and(|p| p.noise.is_some());
+        ALL.into_iter()
+            .filter(|r| match r {
+                Row::Quality => self.stream.is_some(),
+                Row::Noise => noise,
+                _ => true,
+            })
+            .collect()
+    }
+
     fn row(&self) -> Row {
-        ROWS[self.list.focus.min(ROWS.len() - 1)]
+        let rows = self.rows();
+        rows[self.list.focus.min(rows.len() - 1)]
     }
 
     fn start(&mut self, row: Row, work: impl FnOnce() -> Result<(), String> + Send + 'static) {
@@ -1027,9 +1178,16 @@ impl SoundScreen {
         st.bluetooth.as_deref().filter(|_| st.bluetooth_connected).map(crate::bluetooth::name_of)
     }
 
+    /// Spatial sound turned by the head now.
+    fn tracking(&self) -> bool {
+        self.stream.as_ref().is_some_and(|s| s.tracking) || (!on_device() && fx().spatial && self.pods.as_ref().is_some_and(|p| p.head == crate::airpods::Head::Tracking))
+    }
+
     fn describe(&self, row: Row) -> (&'static str, String, bool) {
         let st = self.status.as_ref();
         let l = level();
+        let fx = fx();
+        let on_off = |b: bool| -> String { (if b { "on" } else { "off" }).into() };
         match row {
             Row::Volume => ("Volume", if l.muted { "off".into() } else { format!("{}%", l.volume) }, !l.muted),
             Row::Mute => ("Sound", (if l.muted { "muted" } else { "on" }).into(), !l.muted),
@@ -1051,6 +1209,12 @@ impl SoundScreen {
                 let value = setup.map_or("…", Setup::value);
                 ("USB headphones", value.into(), setup.is_some_and(Setup::there))
             }
+            Row::Quality => ("Quality", self.stream.as_ref().map(|s| quality_words(s).remove(0)).unwrap_or_default(), self.stream.as_ref().is_some_and(|s| s.bit_perfect)),
+            Row::Spatial => ("Spatial sound", if !fx.spatial { "off".into() } else if self.tracking() { "head tracked".into() } else { "on".into() }, fx.spatial),
+            Row::Noise => ("Noise control", self.pods.as_ref().and_then(|p| p.noise).map_or("", |m| m.word()).into(), self.pods.as_ref().is_some_and(|p| p.noise.is_some_and(|m| m != aap::NoiseMode::Off))),
+            Row::Equalizer => ("Equalizer", if fx.eq == audiofx::eq::Preset::Flat { "off".into() } else { fx.eq.word().into() }, fx.eq != audiofx::eq::Preset::Flat),
+            Row::Loudness => ("Loudness match", on_off(fx.loudness), fx.loudness),
+            Row::Crossfade => ("Crossfade", if fx.crossfade == 0 { "off".into() } else { format!("{} s", fx.crossfade) }, fx.crossfade > 0),
             Row::Test => ("Test sound", (if matches!(self.working, Some((Row::Test, _))) { "playing…" } else { "" }).into(), true),
             Row::Microphone => ("Microphone", (if st.is_some_and(|s| s.mic == Mic::Headset) { "headset's" } else { "handheld's" }).into(), true),
             Row::MicGain => ("Mic gain", mic_gain_words(st.map_or(DEFAULT_MIC_GAIN, |s| s.mic_gain)).into(), true),
@@ -1058,10 +1222,26 @@ impl SoundScreen {
         }
     }
 
+    /// A row's value as it fits beside its name in `room`: the quality's
+    /// longest wording that does; the rest as they are.
+    fn fitted(&self, g: &mut Gfx, row: Row, room: f32) -> String {
+        let (name, value, _) = self.describe(row);
+        if row != Row::Quality {
+            return value;
+        }
+        let bezel = g.theme == crate::look::Theme::Bezel;
+        let (name_style, value_style) = if bezel { (g.ty.label, g.ty.body) } else { (g.ty.body, g.ty.label) };
+        let name = if bezel { name.to_lowercase() } else { name.to_owned() };
+        let free = room - g.measure(&name, name_style) - 30.0;
+        let words = self.stream.as_ref().map(quality_words).unwrap_or_default();
+        words.iter().find(|w| g.measure(w, value_style) <= free).or(words.last()).cloned().unwrap_or(value)
+    }
+
     /// What the keys do on a row: the longest that fits whole first.
     fn hint(&self, row: Row) -> Vec<String> {
         let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let usb_plays = self.status.as_ref().is_some_and(|s| s.output == Output::Usb);
+        let fx = fx();
         match row {
             Row::Volume if usb_plays => words(&["←→: the headphones' own · fn + s, fn + d", "←→: the headphones' volume"]),
             Row::Volume => words(&["←→: volume · fn + s, fn + d anywhere", "←→: volume"]),
@@ -1069,7 +1249,10 @@ impl SoundScreen {
             Row::Output => match self.status.as_ref().map(|s| s.output) {
                 Some(Output::Headphones) => words(&["the speaker is off while headphones are in", "speaker off: headphones in"]),
                 Some(Output::Usb) => words(&["usb headphones · the speaker stays off", "usb headphones"]),
-                Some(Output::Bluetooth) => words(&["bluetooth headphones, while connected", "bluetooth, while connected"]),
+                Some(Output::Bluetooth) => match self.status.as_ref().and_then(|s| s.bluetooth_codec.as_deref()) {
+                    Some(codec) => vec![format!("bluetooth, {} · enter: more", codec.to_lowercase()), format!("bluetooth, {}", codec.to_lowercase())],
+                    None => words(&["bluetooth headphones, while connected", "bluetooth, while connected"]),
+                },
                 _ => words(&["headphones take over when plugged in", "headphones take over"]),
             },
             Row::Usb => match (self.status.as_ref().map(|s| s.setup), self.bluetooth_there()) {
@@ -1081,6 +1264,30 @@ impl SoundScreen {
                 (Some(Setup::Restart), _) => words(&["restart, the usb switch on the hub's side", "restart for usb headphones"]),
                 _ => words(&["into usb-c1 or usb-a · enter: more", "into usb-c1 or usb-a"]),
             },
+            Row::Quality => match &self.stream {
+                Some(s) if s.bit_perfect => words(&["the song as it was made, to the headphones", "the song as it was made"]),
+                Some(_) if usb_plays => words(&["spatial, equalizer, loudness off: bit-perfect", "effects off: bit-perfect"]),
+                _ => words(&["bit-perfect through usb headphones", "bit-perfect over usb"]),
+            },
+            Row::Spatial if !fx.spatial => words(&["enter: speakers around you · headphones only", "enter: speakers around you", "enter: on"]),
+            Row::Spatial if self.tracking() => {
+                let yaw = self.pods.as_ref().map_or(0.0, |p| p.pose.0).round() as i32;
+                let side = match yaw {
+                    0 => "ahead".to_owned(),
+                    y if y > 0 => format!("{y}° right"),
+                    y => format!("{}° left", -y),
+                };
+                vec![format!("head tracked · {side} · enter: off"), format!("head {side} · enter: off"), "enter: off".into()]
+            }
+            Row::Spatial if self.pods.as_ref().is_some_and(|p| p.head == crate::airpods::Head::Unsupported) => words(&["these airpods do not track the head", "no head tracking here"]),
+            Row::Spatial => words(&["virtual speakers, for headphones · enter: off", "virtual speakers · enter: off", "enter: off"]),
+            Row::Noise => match self.pods.as_ref().map(|p| p.noise_modes().len()) {
+                Some(4) => words(&["←→: off, cancelling, transparency, adaptive", "←→: noise control"]),
+                _ => words(&["←→: off, noise cancelling or transparency", "←→: noise control"]),
+            },
+            Row::Equalizer => words(&["enter: presets, and five bands by hand", "enter: presets and bands"]),
+            Row::Loudness => words(&["enter: every song as loud as the last", "enter: on or off"]),
+            Row::Crossfade => words(&["←→: up to 8 s · never within an album", "←→: up to 8 s"]),
             Row::Test => words(&["enter: a short chime, at this volume", "enter: a short chime"]),
             Row::Microphone if self.meter.as_ref().is_some_and(|m| !m.working()) => words(&["the microphone could not be opened", "no microphone"]),
             Row::Microphone => words(&["←→: the handheld's or a headset's", "←→: which microphone"]),
@@ -1116,6 +1323,29 @@ impl Screen for SoundScreen {
                     self.start(Row::Test, test_tone);
                 }
             }
+            Key::Enter | Key::Left | Key::Right if row == Row::Spatial => {
+                let on = set_fx(|f| f.spatial = !f.spatial).spatial;
+                *cx.say = Some((if on { "spatial sound on" } else { "spatial sound off" }).into());
+            }
+            Key::Enter | Key::Left | Key::Right if row == Row::Noise => {
+                if let Some(p) = &self.pods {
+                    let modes = p.noise_modes();
+                    let at = p.noise.and_then(|m| modes.iter().position(|x| *x == m)).unwrap_or(0) as i32;
+                    let to = modes[(at + step).rem_euclid(modes.len() as i32) as usize];
+                    crate::airpods::set_noise(to);
+                    self.pods = crate::airpods::now();
+                    *cx.say = Some(to.word().into());
+                }
+            }
+            Key::Enter | Key::Right if row == Row::Equalizer => return Nav::Push(Box::new(crate::equalizer::EqualizerPage::new())),
+            Key::Enter | Key::Left | Key::Right if row == Row::Loudness => {
+                let on = set_fx(|f| f.loudness = !f.loudness).loudness;
+                *cx.say = Some((if on { "loudness matched" } else { "loudness as mastered" }).into());
+            }
+            Key::Left | Key::Right if row == Row::Crossfade => {
+                let s = set_fx(|f| f.crossfade = (f.crossfade as i32 + step).clamp(0, audiofx::crossfade::MOST as i32) as u8).crossfade;
+                *cx.say = Some(if s == 0 { "gapless, no crossfade".into() } else { format!("crossfade {s} s") });
+            }
             Key::Enter | Key::Left | Key::Right if row == Row::Microphone => {
                 let mic = if self.status.as_ref().is_some_and(|s| s.mic == Mic::Headset) { Mic::Builtin } else { Mic::Headset };
                 if let Some(s) = &mut self.status {
@@ -1148,7 +1378,10 @@ impl Screen for SoundScreen {
                 return Nav::Push(Box::new(crate::bluetooth::BluetoothScreen::new()))
             }
             Key::Char('r') => self.read_now(),
-            other if !left_right => crate::screens::list_key(&mut self.list, other, ROWS.len()),
+            other if !left_right => {
+                let n = self.rows().len();
+                crate::screens::list_key(&mut self.list, other, n)
+            }
             _ => {}
         }
         self.changed = true;
@@ -1186,6 +1419,20 @@ impl Screen for SoundScreen {
         if (moved || self.read_at.elapsed().as_secs_f32() >= 2.0) && self.reading.is_none() && self.working.is_none() {
             self.read_now();
         }
+        // The song and the AirPods, twice a second: rows come and go with
+        // them, the focus kept on the row it was on.
+        if self.looked.elapsed().as_secs_f32() >= 0.5 {
+            self.looked = Instant::now();
+            let (stream, pods) = (stream(), crate::airpods::now());
+            if stream != self.stream || pods != self.pods {
+                let row = self.row();
+                self.stream = stream;
+                self.pods = pods;
+                let rows = self.rows();
+                self.list.focus = rows.iter().position(|r| *r == row).unwrap_or(self.list.focus.min(rows.len() - 1));
+                self.changed = true;
+            }
+        }
         // The microphone is listened to only while its row is chosen.
         let listening = self.row() == Row::Microphone && self.working.is_none() && self.last_key.elapsed().as_secs_f32() < LISTEN_FOR;
         if listening && self.meter.is_none() {
@@ -1213,10 +1460,12 @@ impl Screen for SoundScreen {
         let t = g.tokens;
         let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         let width = W - 2.0 * PAD - 5.0;
-        for (i, y) in self.list.layout(g, ROWS.len(), top, row_h, 3.0, bottom) {
-            let row = ROWS[i];
+        let rows = self.rows();
+        for (i, y) in self.list.layout(g, rows.len(), top, row_h, 3.0, bottom) {
+            let row = rows[i];
             let r = Rect::new(PAD, y, width, row_h);
-            let (name, value, lit) = self.describe(row);
+            let (name, _, lit) = self.describe(row);
+            let value = self.fitted(g, row, r.w);
             let focused = i == self.list.focus;
             g.row(r, name, &value, if lit { t.ink } else { t.dim }, focused);
             // The volume and the microphone carry a bar between name and value.
@@ -1234,7 +1483,7 @@ impl Screen for SoundScreen {
                 }
             }
         }
-        self.list.scrollbar(g, ROWS.len(), top, bottom);
+        self.list.scrollbar(g, rows.len(), top, bottom);
         let hint = self.hint(self.row());
         let choices: Vec<&str> = hint.iter().map(String::as_str).collect();
         g.hint_any(&choices);
@@ -1252,9 +1501,11 @@ pub fn summary() -> String {
 }
 
 impl SoundScreen {
-    /// Opened at one of its rows (from search).
-    pub fn at(mut self, row: usize) -> Self {
-        self.list.focus = row.min(ROWS.len() - 1);
+    /// Opened at one of its rows (from search): a row of `ALL`, wherever it
+    /// sits among the rows there are now.
+    pub fn at(mut self, place: usize) -> Self {
+        let want = ALL[place.min(ALL.len() - 1)];
+        self.list.focus = self.rows().iter().position(|r| *r == want).unwrap_or(0);
         self
     }
 }
@@ -1558,7 +1809,7 @@ mod tests {
                     for size in sizes {
                         g.set_text_size(size);
                         let caption = g.ty.caption;
-                        for row in ROWS {
+                        for row in ALL {
                             let hints = page.hint(row);
                             let shortest = hints.last().unwrap();
                             assert!(g.measure(shortest, caption) <= W - 2.0 * PAD, "{shortest:?} at {size:?}");
@@ -1581,7 +1832,7 @@ mod tests {
                 let (name_style, value_style) = if look == crate::look::Theme::Bezel { (g.ty.label, g.ty.body) } else { (g.ty.body, g.ty.label) };
                 for setup in [Setup::Playing, Setup::Connected, Setup::Ready, Setup::NoHub, Setup::DeviceMode, Setup::Restart] {
                     page.status = Some(Status { output: Output::Usb, setup, card: true, ..Status::default() });
-                    for row in ROWS {
+                    for row in ALL {
                         let (name, value, _) = page.describe(row);
                         let name = if look == crate::look::Theme::Bezel { name.to_lowercase() } else { name.to_owned() };
                         let need = g.measure(&name, name_style) + g.measure(&value, value_style) + 30.0;
@@ -1658,5 +1909,90 @@ mod tests {
         page.key(Key::Enter, &mut cx);
         assert_eq!(crate::usb::mode(), 1, "left as it was");
         crate::usb::set(0).unwrap();
+    }
+
+    #[test]
+    fn how_a_song_plays_is_said_shortest_last() {
+        let s = parse_stream("codec=flac\nrate=44100\nbits=16\nout_rate=44100\nout_bits=16\ndevice=hw\noutput=usb\nbitperfect=yes\nprocessing=none\ntracking=no\n");
+        assert!(s.bit_perfect && s.processing.is_empty());
+        assert_eq!(quality_words(&s), ["44.1 kHz · 16-bit · bit-perfect", "44.1 kHz · bit-perfect", "bit-perfect"]);
+        let spatial = parse_stream("rate=48000\nbits=16\nout_rate=48000\nbitperfect=no\nprocessing=spatial,loudness\ntracking=yes\n");
+        assert_eq!(quality_words(&spatial)[0], "48 kHz · 16-bit · spatial, head tracked");
+        assert_eq!(quality_words(&spatial)[2], "spatial");
+        let resampled = parse_stream("rate=96000\nbits=24\nout_rate=48000\nprocessing=resampled\n");
+        assert_eq!(quality_words(&resampled)[0], "96 kHz · 24-bit · to 48 kHz");
+        assert_eq!(quality_words(&parse_stream("rate=48000\nbits=16\nprocessing=none\n"))[0], "48 kHz · 16-bit · mixed");
+    }
+
+    #[test]
+    fn rows_come_with_the_song_and_the_airpods_and_search_finds_them() {
+        let mut page = SoundScreen::new();
+        page.stream = None;
+        page.pods = None;
+        assert!(!page.rows().contains(&Row::Quality) && !page.rows().contains(&Row::Noise));
+        assert_eq!(page.rows()[USB_ROW], Row::Usb, "the USB row stays where search expects it");
+        page.stream = Some(parse_stream("rate=44100\nbits=16\nbitperfect=yes\n"));
+        crate::airpods::demo(true);
+        page.pods = crate::airpods::now();
+        crate::airpods::demo(false);
+        assert_eq!(page.rows().len(), ALL.len());
+        let page = page.at(TEST_ROW);
+        assert_eq!(page.row(), Row::Test);
+        let page = SoundScreen::new().at(SPATIAL_ROW);
+        assert_eq!(page.row(), Row::Spatial);
+    }
+
+    #[test]
+    fn the_quality_and_noise_rows_fit_whole_at_every_text_size() {
+        let mut g = Gfx::new(bezel::Tokens::dark());
+        let mut page = SoundScreen::new();
+        let width = W - 2.0 * PAD - 5.0;
+        crate::airpods::demo(true);
+        page.pods = crate::airpods::now();
+        crate::airpods::demo(false);
+        let streams = ["rate=44100\nbits=16\nbitperfect=yes\n", "rate=48000\nbits=16\nprocessing=spatial\ntracking=yes\n", "rate=192000\nbits=24\nout_rate=48000\nprocessing=resampled\n"];
+        for look in [crate::look::Theme::Catalyst, crate::look::Theme::Bezel] {
+            g.theme = look;
+            for size in [crate::gfx::TextSize::Compact, crate::gfx::TextSize::Standard, crate::gfx::TextSize::Large] {
+                g.set_text_size(size);
+                let (name_style, value_style) = if look == crate::look::Theme::Bezel { (g.ty.label, g.ty.body) } else { (g.ty.body, g.ty.label) };
+                for s in streams {
+                    page.stream = Some(parse_stream(s));
+                    for mode in [aap::NoiseMode::Off, aap::NoiseMode::Cancelling, aap::NoiseMode::Transparency, aap::NoiseMode::Adaptive] {
+                        page.pods.as_mut().unwrap().noise = Some(mode);
+                        for row in [Row::Quality, Row::Noise, Row::Spatial, Row::Equalizer, Row::Loudness, Row::Crossfade] {
+                            let (name, _, _) = page.describe(row);
+                            let value = page.fitted(&mut g, row, width);
+                            let name = if look == crate::look::Theme::Bezel { name.to_lowercase() } else { name.to_owned() };
+                            let need = g.measure(&name, name_style) + g.measure(&value, value_style) + 30.0;
+                            assert!(need <= width, "{name} · {value} at {size:?} in {look:?}");
+                            let hints = page.hint(row);
+                            assert!(g.measure(hints.last().unwrap(), g.ty.caption) <= W - 2.0 * PAD, "{hints:?} at {size:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn music_settings_change_with_their_keys() {
+        let (mut robot, mut settings, mut say) = (crate::robot::Robot::demo(), crate::shell::Settings::default(), None);
+        let mut cx = Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true };
+        set_fx(|f| f.crossfade = 0);
+        let mut page = SoundScreen::new().at(CROSSFADE_ROW);
+        page.key(Key::Right, &mut cx);
+        page.key(Key::Right, &mut cx);
+        assert_eq!(fx().crossfade, 2);
+        for _ in 0..3 {
+            page.key(Key::Left, &mut cx);
+        }
+        assert_eq!(fx().crossfade, 0, "never below none");
+        let mut page = SoundScreen::new().at(SPATIAL_ROW);
+        let was = fx().spatial;
+        page.key(Key::Enter, &mut cx);
+        assert_eq!(fx().spatial, !was);
+        page.key(Key::Enter, &mut cx);
+        assert_eq!(fx().spatial, was);
     }
 }

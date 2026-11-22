@@ -91,7 +91,10 @@ echo closed >"$T/proc/ES8389Audio/pcm0p/sub0/status"
 EOF
 cat >"$T/bin/bluealsa-cli" <<EOF
 #!/bin/sh
-cat "$T/bluealsa-pcms" 2>/dev/null
+case "\$1" in
+info) cat "$T/bluealsa-info" 2>/dev/null ;;
+*) cat "$T/bluealsa-pcms" 2>/dev/null ;;
+esac
 EOF
 chmod +x "$T/bin/"*
 PATH="$T/bin:$PATH"
@@ -165,8 +168,13 @@ check "to that device, over A2DP" "$(grep -c 'bluealsa:DEV=0C:A6:94:12:34:56,PRO
 check "at the same volume control" "$(grep -c 'name "Master Playback Volume"' "$T/run/asound.conf")" "3"
 check "the microphone stays the handheld's" "$(sed -n '/^# Bluetooth/,$p' "$T/run/asound.conf" | grep -c 'capture.pcm "catalyst_capture"')" "1"
 check "status says so" "$(status_of output):$(status_of bluetooth)" "bluetooth:0C:A6:94:12:34:56"
+printf 'Device: /org/bluez/hci0/dev_0C_A6_94_12_34_56\nSelected codec: AAC\nSampling: 48000 Hz\n' >"$T/bluealsa-info"
+$P route >/dev/null
+check "its codec and rate, for the player and the pages" "$(sed -n 's/^codec=//p' "$T/run/bluetooth"):$(sed -n 's/^rate=//p' "$T/run/bluetooth")" "AAC:48000"
+check "status says the codec" "$(status_of bluetooth_codec):$(status_of bluetooth_rate)" "AAC:48000"
 rm "$T/bluealsa-pcms"
 check "gone: back to the speaker" "$($P route)" "local"
+check "and its stream no longer described" "$([ -e "$T/run/bluetooth" ] && echo there || echo gone)" "gone"
 $P output speaker
 check "the speaker chosen again" "$($P output):$(status_of bluetooth)" "speaker:"
 

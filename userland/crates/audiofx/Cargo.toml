@@ -1,0 +1,8 @@
+[package]
+name = "audiofx"
+description = "Music's sound between the decoder and the device: spatial sound for headphones, the equalizer, loudness matching, crossfades and gapless trimming, and the settings and head pose the shell hands the player."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

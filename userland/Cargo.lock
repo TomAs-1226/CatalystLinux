@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "aap"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -123,6 +130,10 @@ dependencies = [
  "libc",
  "system-deps",
 ]
+
+[[package]]
+name = "audiofx"
+version = "0.1.0"
 
 [[package]]
 name = "autocfg"
@@ -388,6 +399,7 @@ dependencies = [
 name = "catalyst-play"
 version = "0.1.0"
 dependencies = [
+ "audiofx",
  "libc",
  "symphonia",
 ]
@@ -396,8 +408,10 @@ dependencies = [
 name = "catalyst-shell"
 version = "0.1.0"
 dependencies = [
+ "aap",
  "apriltag",
  "argon2",
+ "audiofx",
  "bezel",
  "catalyst-appkg",
  "chacha20poly1305",

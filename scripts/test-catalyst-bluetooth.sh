@@ -134,6 +134,32 @@ echo "bluetooth 11:22:33:44:55:66" >"$T/output"
 $P forget 0C:A6:94:12:34:56
 check "forgetting another leaves the choice alone" "$(grep -c '^output speaker$' "$T/audio.log")" "0"
 
+echo "== codecs"
+# bluealsa-cli as it answers for AirPods connected on SBC: AAC there too.
+cat >"$T/bin/bluealsa-cli" <<EOF
+#!/bin/sh
+case "\$1" in
+list-pcms) echo /org/bluealsa/hci0/dev_0C_A6_94_12_34_56/a2dpsrc/sink ;;
+info) printf 'Device: /org/bluez/hci0/dev_0C_A6_94_12_34_56\nAvailable codecs: SBC:ffff0235 AAC:80ff8c80\nSelected codec: %s\nSampling: 44100 Hz\n' "\$(cat "$T/codec" 2>/dev/null || echo SBC:ffff0235)" ;;
+codec) echo "\$3" >"$T/codec" ;;
+monitor) printf 'PCMAdded /org/bluealsa/hci0/dev_0C_A6_94_12_34_56/a2dpsrc/sink\nPCMRemoved /org/bluealsa/hci0/dev_0C_A6_94_12_34_56/a2dpsrc/sink\n' ;;
+esac
+exit 0
+EOF
+check "what it plays with, and could" "$($P codec 0C:A6:94:12:34:56 | tr '\n' ' ')" "selected=SBC available=SBC AAC rate=44100 "
+check "AAC chosen" "$($P codec 0C:A6:94:12:34:56 AAC | head -n1):$(cat "$T/codec")" "selected=AAC:AAC"
+check "nothing playing to a device not there" "$($P codec 11:22:33:44:55:ff 2>&1 || true)" "not playing"
+# bluealsa built with AAC: asked for it at 256 kb/s, variable; built
+# without (an older image's), not, as it would refuse the options.
+eval "$(sed -n '/^bluealsa_bin() {/,/^}/p;/^aac_options() {/,/^}/p' "$T/catalyst-bluetooth")"
+printf '#!/bin/sh\necho "  --aac-afterburner  --aac-bitrate=BPS  --aac-vbr"\n' >"$T/bin/bluealsa"
+chmod +x "$T/bin/bluealsa"
+check "AAC asked for where bluealsa has it" "$(aac_options)" "--aac-bitrate=256000 --aac-vbr"
+printf '#!/bin/sh\necho "  --sbc-quality=MODE"\n' >"$T/bin/bluealsa"
+check "and not where it has not" "$(aac_options)" ""
+rm "$T/bin/bluealsa"
+check "bluealsa is started with them" "$(grep -c -- '-S -p a2dp-source $(aac_options)$' "$T/catalyst-bluetooth")" "1"
+
 echo "== sound follows the headphones"
 : >"$T/audio.log"
 $P watch

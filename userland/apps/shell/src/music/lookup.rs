@@ -143,7 +143,10 @@ pub fn stream_from(v: &Value) -> Result<Stream, String> {
     let expires = v["streamingData"]["expiresInSeconds"].as_str().and_then(|s| s.parse::<u64>().ok()).unwrap_or(6 * 3600);
     let formats = v["streamingData"]["adaptiveFormats"].as_array().ok_or("no streams")?;
     let audio = |itag: u64| formats.iter().find(|f| f["itag"].as_u64() == Some(itag) && f["url"].is_string());
-    let (f, ext, rate) = [(251, "webm", 48_000), (250, "webm", 48_000), (249, "webm", 48_000), (140, "m4a", 44_100), (139, "m4a", 44_100)]
+    // Opus first (251 at about 160 kb/s): as good as AAC at 256, at the
+    // 48 kHz the codec and Bluetooth run at, cheap to decode, and with its
+    // pre-skip and length to play gaplessly. Premium's AAC 256 (141) next.
+    let (f, ext, rate) = [(251, "webm", 48_000), (250, "webm", 48_000), (249, "webm", 48_000), (141, "m4a", 44_100), (140, "m4a", 44_100), (139, "m4a", 44_100)]
         .into_iter()
         .find_map(|(itag, ext, rate)| audio(itag).map(|f| (f, ext, rate)))
         .ok_or("no audio stream this player can use")?;
