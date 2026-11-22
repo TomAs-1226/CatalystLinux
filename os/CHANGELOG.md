@@ -10,6 +10,40 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.6.0
+
+### Home and the lock screen
+- Flow, a new Home style: your apps as album covers. Hold left or right to fly through them, Enter turns one over to show what it is and says right now, Enter again opens it. Settings › Home › Home screen.
+- Lock the handheld by holding Tab for a moment, from anywhere; a ring fills around the island as you hold. Without a passcode, any key takes you back.
+- Live activities in the island, on the lock screen and in StandBy: the song playing, timers, your next match and when to queue, a reminder due soon, downloads, the Assistant thinking, and the robot while it is enabled.
+- Music's keys (Fn + Q, W, E) play, pause and skip on the lock screen without unlocking; on the charger StandBy turns to Now playing.
+- Screens use the whole height: lists run to the bottom and fade out under it. The Terminal shows one more line.
+
+### Music
+- Music finds a song in about a third of a second, and a new, lighter player plays smoothly even when the handheld is busy or Wi-Fi stalls.
+- Every song you play is kept, so it plays again with no internet. Music opens on your Library when offline.
+- A Library on the card (/data/music/library): artists, albums, songs, played and playlists, with your own music too, and album covers.
+- Download whole albums, playlists, an artist's top songs, your likes or everything you've played, with covers; Wi-Fi only or while charging if you choose.
+- Japanese, Chinese and Korean show everywhere: song titles, file names, notes, web pages, Spotlight and the Assistant.
+
+### Assistant
+- Works offline: ask about your matches with no internet and no key, answered from the logs on the handheld. Every number is checked against the log.
+- Ctrl R shows the newest match's report, worst first, with times.
+- Settings › On-device model offers Fastest, Balanced and Smartest, measured on this handheld. Balanced (LFM2.5 230M) is the new default.
+- The model gives its memory back two minutes after its last answer, and at once when the screen goes off; it never pushes the rest of the handheld into swap.
+
+### Robot
+- The Robot app shows Numbers in 3D: its intake slides out, its hood rises and its flywheel spins as the robot reports them; a hot part glows amber, a fault red, and the bumpers take your alliance colour.
+
+### Battery
+- Music standby: playing with the screen off, the USB host, 5 V outputs, lights and motion sensor switch off, and Wi-Fi too once what plays next is downloaded.
+- Far fewer wakeups while idle, and the backlight follows a perceptual curve: about 40% less of its power at the usual brightness. You may want to raise brightness a step once.
+- The screen never stalls because something else filled the memory: the shell is kept in RAM.
+
+### Fixed
+- The speaker plays both channels from the moment the handheld starts.
+- Setup's choice pages start on Next, and setup carries on by itself once Wi-Fi joins.
+
 ## 0.5.6
 
 ### Fixed

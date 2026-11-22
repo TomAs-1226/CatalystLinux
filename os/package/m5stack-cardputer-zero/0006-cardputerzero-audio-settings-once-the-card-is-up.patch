@@ -1,0 +1,48 @@
+From: Catalyst Linux
+Subject: [PATCH] cardputerzero-audio: the jack's settings only once the card is up
+
+At card probe, and at the jack's first report while the card is still
+being bound, the codec's controls do not exist yet, so each setting failed
+with -ENOENT ("failed to set IF DACL Mixer DACR DACL Mixer=on: -2") before
+the sync work applied them properly. They are now applied only once the
+card is instantiated (by the sync work, and by every jack change after),
+and a line says when they have all landed: "speaker: 2 settings applied".
+
+--- a/modules/CardputerZero/cardputerzero-audio.c	2026-11-21 17:53:43.660044752 -0800
++++ b/modules/CardputerZero/cardputerzero-audio.c	2026-11-21 17:54:58.819036275 -0800
+@@ -216,9 +216,18 @@
+ 	struct device *dev = simple_priv_to_dev(&cz->simple);
+ 	struct cardputerzero_control_setting *settings;
+ 	unsigned int num_settings;
++	unsigned int failed = 0;
+ 	unsigned int i;
+ 	int ret;
+ 
++	/*
++	 * Catalyst Linux: before the card is up the codec's controls do not
++	 * exist yet (each would fail with -ENOENT): the sync work applies them
++	 * once it is.
++	 */
++	if (!snd_soc_card_is_instantiated(card))
++		return;
++
+ 	if (hp_inserted) {
+ 		settings = cz->hp_present_controls;
+ 		num_settings = cz->num_hp_present_controls;
+@@ -230,10 +239,15 @@
+ 	for (i = 0; i < num_settings; i++) {
+ 		ret = cardputerzero_set_enum_control(card, settings[i].control,
+ 						     settings[i].value);
+-		if (ret)
++		if (ret) {
+ 			dev_warn(dev, "failed to set %s=%s: %d\n",
+ 				 settings[i].control, settings[i].value, ret);
++			failed++;
++		}
+ 	}
++	if (num_settings && !failed)
++		dev_info(dev, "%s: %u settings applied\n",
++			 hp_inserted ? "headphones" : "speaker", num_settings);
+ }
+ 
+ #define CARDPUTERZERO_SYNC_EVERY_MS	200

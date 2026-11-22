@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/detent", "crates/bezel", "crates/nt4", "crates/apriltag", "crates/localmodel", "crates/speech", "apps/shell", "apps/update", "apps/flasher", "apps/ai-cli",
+    "crates/detent", "crates/bezel", "crates/nt4", "crates/apriltag", "crates/localmodel", "crates/speech", "apps/shell", "apps/play", "apps/update", "apps/flasher", "apps/ai-cli",
     # Apps for the catalogue: the kit they are written with, the package
     # format and its tool, and the apps themselves.
     "crates/kit", "crates/appkg", "catalogue/hello", "catalogue/sudoku", "catalogue/battleship", "catalogue/typing", "catalogue/orbits",

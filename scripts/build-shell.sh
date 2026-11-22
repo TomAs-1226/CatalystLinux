@@ -43,11 +43,12 @@ if rustc --print cfg --target "$TARGET" $CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL
 fi
 
 cd "$HERE/userland"
-# The shell, the system updater it starts, `ai` for the Terminal, and
-# `catalyst-ui` (Catalyst Kit's screens for shell scripts).
-cargo build --release --target "$TARGET" -p catalyst-shell -p catalyst-update -p catalyst-ai -p catalyst-kit
+# The shell, the system updater it starts, `ai` for the Terminal,
+# `catalyst-ui` (Catalyst Kit's screens for shell scripts), and Music's
+# player `catalyst-play`.
+cargo build --release --target "$TARGET" -p catalyst-shell -p catalyst-update -p catalyst-ai -p catalyst-kit -p catalyst-play
 mkdir -p "$BUILD/out"
-for bin in catalyst-shell catalyst-update ai catalyst-ui; do
+for bin in catalyst-shell catalyst-update ai catalyst-ui catalyst-play; do
 	cp "$CARGO_TARGET_DIR/$TARGET/release/$bin" "$BUILD/out/"
 	ls -l "$BUILD/out/$bin"
 	file "$BUILD/out/$bin"

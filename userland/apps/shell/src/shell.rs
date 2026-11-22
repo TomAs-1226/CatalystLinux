@@ -3561,6 +3561,8 @@ impl Shell {
         // at all while it is off.
         let unix = chrono::Utc::now().timestamp();
         let sources = crate::liveactivity::Sources { robot: &self.robot, update: &self.update, unix };
+        // Music in front shows the song itself: no card over it.
+        self.activities.quiet = self.stack.last().filter(|(s, _)| s.title() == "Music").map(|_| crate::liveactivity::Kind::Music);
         let (acts_moving, acts_changed) = self.activities.tick(dt, motion_dt, lit, calm, &sources);
         // Tab held towards a lock: the cue fills as it is held, and draws
         // back if it is let go first.

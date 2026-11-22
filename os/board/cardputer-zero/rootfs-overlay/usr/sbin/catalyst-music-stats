@@ -1,0 +1,83 @@
+#!/bin/sh
+# catalyst-music-stats [SECONDS]   what music playing costs, measured
+#
+# Watches for SECONDS (60 unless given) and prints, as key=value lines:
+#   cpu_total        the whole system's processor use, % of one core
+#   cpu_player       catalyst-play's (or ffmpeg's), % of one core
+#   cpu_shell        the shell's, % of one core
+#   wakeups_player   the player's context switches a second (its threads)
+#   wakeups_shell    the shell's, the same
+#   interrupts       interrupts a second, the whole system
+#   current_ma       the battery's current, averaged (the fuel gauge, read
+#                    every 5 s: an estimate, since the gauge itself averages)
+#   power_mw         that times the battery's voltage: an estimate too
+#   rss_player_kb    the player's resident memory
+#   xruns            times the sound ran dry since the shell started
+# Run it with the screen off (music in a pocket) for the number that
+# matters most: `sleep 70; catalyst-music-stats 60` over SSH, then press
+# nothing.
+set -u
+SECONDS_=${1:-60}
+case "$SECONDS_" in '' | *[!0-9]*) echo "usage: $0 [seconds]" >&2; exit 2 ;; esac
+HZ=100
+
+pid_of() { pidof "$1" 2>/dev/null | cut -d' ' -f1; }
+
+# A process's processor time (ticks), its threads' context switches.
+ticks() { [ -n "$1" ] && awk '{ print $14 + $15 }' "/proc/$1/stat" 2>/dev/null || echo 0; }
+switches() {
+	[ -n "$1" ] || { echo 0; return; }
+	cat /proc/"$1"/task/*/status 2>/dev/null | awk '/^(voluntary|nonvoluntary)_ctxt_switches/ { n += $2 } END { print n + 0 }'
+}
+cpu_all() { awk '/^cpu / { print $2 + $3 + $4 + $7 + $8 }' /proc/stat; }
+intr() { awk '/^intr/ { print $2 }' /proc/stat; }
+
+gauge=""
+for d in /sys/class/power_supply/*; do
+	[ -e "$d/current_now" ] && [ -e "$d/capacity" ] && gauge=$d && break
+done
+
+player=$(pid_of catalyst-play)
+[ -n "$player" ] || player=$(pid_of ffmpeg)
+shell=$(pid_of catalyst-shell)
+[ -n "$player" ] || echo "note: nothing is playing (no catalyst-play): the numbers are the shell idle" >&2
+
+p0=$(ticks "$player"); s0=$(ticks "$shell"); c0=$(cpu_all); i0=$(intr)
+pw0=$(switches "$player"); sw0=$(switches "$shell")
+sum_ma=0; sum_mw=0; reads=0
+left=$SECONDS_
+while [ "$left" -gt 0 ]; do
+	step=5
+	[ "$left" -lt 5 ] && step=$left
+	sleep "$step"
+	left=$((left - step))
+	if [ -n "$gauge" ]; then
+		ua=$(cat "$gauge/current_now" 2>/dev/null || echo 0)
+		uv=$(cat "$gauge/voltage_now" 2>/dev/null || echo 0)
+		ua=${ua#-}
+		sum_ma=$((sum_ma + ua / 1000))
+		sum_mw=$((sum_mw + ua / 1000 * (uv / 1000) / 1000))
+		reads=$((reads + 1))
+	fi
+done
+p1=$(ticks "$player"); s1=$(ticks "$shell"); c1=$(cpu_all); i1=$(intr)
+pw1=$(switches "$player"); sw1=$(switches "$shell")
+
+pct() { awk -v t="$1" -v s="$SECONDS_" -v hz=$HZ 'BEGIN { printf "%.1f", 100 * t / hz / s }'; }
+rate() { awk -v n="$1" -v s="$SECONDS_" 'BEGIN { printf "%.1f", n / s }'; }
+echo "seconds=$SECONDS_"
+echo "cpu_total=$(pct $((c1 - c0)))"
+echo "cpu_player=$(pct $((p1 - p0)))"
+echo "cpu_shell=$(pct $((s1 - s0)))"
+echo "wakeups_player=$(rate $((pw1 - pw0)))"
+echo "wakeups_shell=$(rate $((sw1 - sw0)))"
+echo "interrupts=$(rate $((i1 - i0)))"
+if [ "$reads" -gt 0 ]; then
+	echo "current_ma=$((sum_ma / reads))"
+	echo "power_mw=$((sum_mw / reads))"
+else
+	echo "current_ma=unknown"
+	echo "power_mw=unknown"
+fi
+[ -n "$player" ] && echo "rss_player_kb=$(awk '/^VmRSS/ { print $2 }' /proc/$player/status 2>/dev/null)"
+echo "xruns=$(cat /run/catalyst-music/xruns 2>/dev/null || echo 0)"

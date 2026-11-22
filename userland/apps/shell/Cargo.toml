@@ -45,6 +45,10 @@ rqrr = { version = "0.11", default-features = false }
 # where that is all the panel needs (scaled in the decoder, so a 3280 × 2464
 # photo never needs its whole 24 MB). No thread pool.
 jpeg-decoder = { version = "0.3", default-features = false }
+# Music's album covers on the card (512 and 96 px), and the simulated
+# camera's photos (on the handheld, catalyst-camera writes those through
+# libjpeg-turbo). Pure Rust.
+jpeg-encoder = "0.7"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
@@ -53,6 +57,3 @@ libc = "0.2"
 # device image.
 [target.'cfg(not(target_arch = "aarch64"))'.dependencies]
 minifb = { version = "0.29", default-features = false }
-# The simulated camera's photos (on the handheld, catalyst-camera writes
-# them through libjpeg-turbo).
-jpeg-encoder = "0.7"

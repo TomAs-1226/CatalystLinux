@@ -13,6 +13,7 @@
 #   catalyst-audio output speaker|bluetooth ADDRESS
 #   catalyst-audio route                  sound to the output chosen, if it is there
 #   catalyst-audio amp                    whether the speaker's amplifier is on
+#   catalyst-audio speaker                the speaker's settings for the jack, now
 #
 # The codec is an ES8389 on I2S, its card "ES8389Audio". Programs play to
 # ALSA's "default", which mixes them (dmix) at the system volume (the
@@ -154,6 +155,29 @@ EOF
 }
 
 # The headphones' jack, as the kernel sees it.
+# The control that mixes the right channel into the left (the speaker hangs
+# off the left output alone), by what its name ends with: DAPM names it
+# after its widget ("IF DACL Mixer DACR DACL Mixer").
+mix_control() {
+	amixer -c "$CARD" controls 2>/dev/null | sed -n "s/.*name='\([^']*DACR DACL Mixer\)'.*/\1/p" | head -n1
+}
+
+# What the kernel sets as headphones come and go (patch 0005), set here too
+# at start: without headphones both channels to the speaker, 6 dB down so
+# the sum does not clip; with them, each to its own side at 0 dB. The
+# kernel does it at every jack change after.
+speaker() {
+	have_card || return 0
+	mix=$(mix_control)
+	if headphones_in; then
+		[ -n "$mix" ] && mixer cset name="$mix" off
+		mixer cset name='DACL Playback Volume' 191
+	else
+		[ -n "$mix" ] && mixer cset name="$mix" on
+		mixer cset name='DACL Playback Volume' 179
+	fi
+}
+
 headphones_in() {
 	case "$(get_control 'Headphones Jack')" in on) return 0 ;; esac
 	return 1
@@ -190,6 +214,8 @@ status() {
 	if is_muted; then echo "muted=yes"; else echo "muted=no"; fi
 	echo "mic=$(read_state audio-mic builtin)"
 	echo "mic_gain=$(read_state audio-mic-gain $DEFAULT_MIC_GAIN)"
+	mix=$(mix_control)
+	if [ -n "$mix" ]; then echo "speaker_mix=$(get_control "$mix")"; else echo "speaker_mix=missing"; fi
 	if playing; then echo "playing=yes"; else echo "playing=no"; fi
 }
 
@@ -213,6 +239,7 @@ start)
 	fi
 	apply_volume
 	apply_mic
+	speaker
 	;;
 status)
 	status
@@ -326,8 +353,12 @@ route)
 amp)
 	amp
 	;;
+speaker)
+	speaker
+	status | grep '^speaker_mix='
+	;;
 *)
-	echo "usage: $0 start|status|volume|mute|test-tone|mic|mic-gain|output|route|amp" >&2
+	echo "usage: $0 start|status|volume|mute|test-tone|mic|mic-gain|output|route|amp|speaker" >&2
 	exit 2
 	;;
 esac

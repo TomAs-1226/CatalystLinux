@@ -7,8 +7,9 @@ SHELL_BIN="$BUILD/out/catalyst-shell"
 UPDATE_BIN="$BUILD/out/catalyst-update"
 AI_BIN="$BUILD/out/ai"
 UI_BIN="$BUILD/out/catalyst-ui"
+PLAY_BIN="$BUILD/out/catalyst-play"
 
-if [ ! -x "$SHELL_BIN" ] || [ ! -x "$UPDATE_BIN" ] || [ ! -x "$AI_BIN" ] || [ ! -x "$UI_BIN" ]; then
+if [ ! -x "$SHELL_BIN" ] || [ ! -x "$UPDATE_BIN" ] || [ ! -x "$AI_BIN" ] || [ ! -x "$UI_BIN" ] || [ ! -x "$PLAY_BIN" ]; then
 	echo "catalyst-shell has not been built: run scripts/build-image.sh toolchain, then scripts/build-shell.sh" >&2
 	exit 1
 fi
@@ -17,6 +18,8 @@ install -D -m 0755 "$UPDATE_BIN" "$TARGET_DIR/usr/bin/catalyst-update"
 install -D -m 0755 "$AI_BIN" "$TARGET_DIR/usr/bin/ai"
 # The handheld's own screens for apps that are shell scripts.
 install -D -m 0755 "$UI_BIN" "$TARGET_DIR/usr/bin/catalyst-ui"
+# Music's player (decodes and plays a song; reads and writes its tags).
+install -D -m 0755 "$PLAY_BIN" "$TARGET_DIR/usr/bin/catalyst-play"
 # The key the app catalogue is signed with: without it the catalogue
 # installs nothing (scripts/pack-catalogue.sh makes one).
 if [ ! -s "$TARGET_DIR/etc/catalyst/apps.pub" ]; then

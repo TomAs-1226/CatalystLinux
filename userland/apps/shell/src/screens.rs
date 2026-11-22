@@ -2223,6 +2223,8 @@ enum Item {
     /// (sound.rs, bluetooth.rs).
     SoundSection,
     BluetoothSection,
+    /// Settings › Music: what Music keeps on the card (music/settings.rs).
+    MusicSection,
     /// Setup's page offered to a computer, outside first start.
     FromComputer,
     // Appearance.
@@ -2385,7 +2387,7 @@ fn glance_items(order: &[Widget]) -> Vec<Item> {
 
 /// Where everything in Settings is, for search: what it is called, the
 /// section it is in, and its place there (none: the section itself).
-const SETTING_PLACES: [(&str, Item, Option<usize>); 75] = [
+const SETTING_PLACES: [(&str, Item, Option<usize>); 79] = [
     ("Robot settings", Item::RobotSection, None),
     ("Open Robot on link", Item::RobotSection, Some(0)),
     ("Match report after a match", Item::RobotSection, Some(1)),
@@ -2438,6 +2440,10 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 75] = [
     ("Microphone", Item::SoundSection, Some(4)),
     ("Bluetooth", Item::BluetoothSection, None),
     ("Bluetooth headphones and speakers", Item::BluetoothSection, Some(0)),
+    ("Music", Item::MusicSection, None),
+    ("Played songs kept offline", Item::MusicSection, Some(0)),
+    ("Clear played songs", Item::MusicSection, Some(2)),
+    ("Music downloads", Item::MusicSection, Some(3)),
     ("Name & time", Item::NameSection, None),
     ("Handheld name", Item::NameSection, Some(0)),
     ("Time zone", Item::NameSection, Some(1)),
@@ -2517,6 +2523,9 @@ pub fn open_setting(index: usize) -> Box<dyn Screen> {
     if section == Item::BluetoothSection {
         return Box::new(crate::bluetooth::BluetoothScreen::new());
     }
+    if section == Item::MusicSection {
+        return Box::new(crate::music::MusicSettings::new().at(place.unwrap_or(0)));
+    }
     match SettingsApp::section(section) {
         Some(mut page) => {
             page.list.focus = place.unwrap_or(0);
@@ -2540,7 +2549,7 @@ impl SettingsApp {
         use Item::*;
         Self::page(
             "Settings",
-            vec![RobotSection, Appearance, TextSection, HomeSection, Display, LockSection, StandBySection, BatterySection, Network, SoundSection, BluetoothSection, NameSection, UsbSection, KeysSection, OnDeviceModel, Access, UpdateSection, Help, About, FromComputer],
+            vec![RobotSection, Appearance, TextSection, HomeSection, Display, LockSection, StandBySection, BatterySection, Network, SoundSection, BluetoothSection, MusicSection, NameSection, UsbSection, KeysSection, OnDeviceModel, Access, UpdateSection, Help, About, FromComputer],
         )
     }
 
@@ -2705,6 +2714,7 @@ impl SettingsApp {
             OnDeviceModel => section("On-device model", crate::local::summary()),
             SoundSection => section("Sound", crate::sound::summary()),
             BluetoothSection => section("Bluetooth", crate::bluetooth::summary()),
+            MusicSection => section("Music", crate::music::summary()),
             Mode => ("Mode".into(), (if g.tokens.tone == bezel::Tone::Light { "light" } else { "dark" }).into(), true),
             AccentColor => ("Accent".into(), g.accent.name().into(), true),
             HomeScreen => ("Home screen".into(), g.home.name().into(), true),
@@ -3052,6 +3062,7 @@ impl Screen for SettingsApp {
             Key::Enter | Key::Right if item == Item::OnDeviceModel => return Nav::Push(Box::new(crate::local::ModelPage::new())),
             Key::Enter | Key::Right if item == Item::SoundSection => return Nav::Push(Box::new(crate::sound::SoundScreen::new())),
             Key::Enter | Key::Right if item == Item::BluetoothSection => return Nav::Push(Box::new(crate::bluetooth::BluetoothScreen::new())),
+            Key::Enter | Key::Right if item == Item::MusicSection => return Nav::Push(Box::new(crate::music::MusicSettings::new())),
             // Lower voltage, switched on: what it does, and a restart to try it.
             Key::Enter | Key::Right if item == Item::Undervolt && crate::power::undervolt().asks_to_try() => return Nav::Push(Box::new(crate::power::TryUndervolt::new())),
             Key::Enter | Key::Right if item == Item::KeyboardLesson => return Nav::Push(Box::new(crate::setup::Setup::lesson())),

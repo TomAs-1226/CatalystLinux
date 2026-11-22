@@ -518,6 +518,9 @@ pub struct Activities {
     first: bool,
     /// Set by hand (the tests and the galleries): not read again.
     pinned: bool,
+    /// What the screen in front already shows itself (Music, a song): a
+    /// change to it does not open the island over that screen.
+    pub quiet: Option<Kind>,
 }
 
 impl Default for Activities {
@@ -540,6 +543,7 @@ impl Activities {
             update_ready: None,
             first: true,
             pinned: false,
+            quiet: None,
         }
     }
 
@@ -555,6 +559,9 @@ impl Activities {
 
     /// Open the island on this kind for a moment (a music key pressed).
     pub fn show(&mut self, kind: Kind, calm: bool) {
+        if self.quiet == Some(kind) {
+            return;
+        }
         if let Some(a) = self.list.iter().find(|a| a.kind == kind) {
             self.open_id = Some(a.id.clone());
             self.open_left = OPEN_FOR;
@@ -634,7 +641,7 @@ impl Activities {
         let mut opened = None;
         for a in &list {
             let was = self.seen.iter().find(|(id, _)| *id == a.id).map(|(_, s)| s);
-            if was != Some(&a.state) && opened.is_none() && !self.first {
+            if was != Some(&a.state) && opened.is_none() && !self.first && self.quiet != Some(a.kind) {
                 opened = Some(a.id.clone());
             }
         }
