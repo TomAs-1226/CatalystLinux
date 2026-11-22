@@ -1,0 +1,170 @@
+From: Catalyst Linux
+Subject: [PATCH] panel-mipi-dbi-m: the framebuffer in cached memory, and the link at 62.5 MHz when the core clock is held
+
+A full frame took about 33 ms to reach the panel, so nothing moved faster
+than 30 frames a second:
+
+- 11 ms before the first byte: each flush swaps every pixel's bytes (the
+  SPI controller has no 16-bit words), reading the framebuffer a pixel at a
+  time, and the DMA helpers put it in write-combined memory, where each
+  read goes to RAM. In cached memory: under a millisecond.
+- 28 ms on the wire: the SPI divider is worked out once, from the core
+  clock at boot (400 MHz), and the firmware then runs the core at 250 most
+  of the time: 31 MHz. With the core held at 250 by config.txt, the
+  divider is chosen for it: 62.5 MHz, the ST7789's own limit, 14 ms.
+
+Measured on a CardputerZero: a full frame's first byte 0.8 ms after the
+write (was 9 to 13), the wire at 62.1 MHz (was 31), the whole frame in
+about 15 ms (was 33).
+
+link_hz (next to tearing_effect) says the link's speed when it is known,
+for the shell to pace its frames by; 0 while the core clock moves, when the
+link is as it was.
+
+--- a/modules/st7789v-1.0/panel-mipi-dbi-m.c
++++ b/modules/st7789v-1.0/panel-mipi-dbi-m.c
+@@ -33,6 +33,7 @@
+ #include <drm/drm_modes.h>
+ #include <drm/drm_modeset_helper.h>
+ 
++#include <soc/bcm2835/raspberrypi-firmware.h>
+ #include <video/mipi_display.h>
+ 
+ 
+@@ -115,6 +116,7 @@
+     u64 write_ps;		/* time a flush takes a pixel, smoothed; 0 until known */
+     unsigned int te_followed, te_led, te_unsynced;	/* flushes, by how they went */
+     struct mutex display_lock;		/* Serialize reset and display transfers */
++    u32 link_hz;		/* Catalyst Linux: the link's speed when the core clock is held, else 0 */
+ };
+ 
+ static inline struct panel_mipi_dbi_device *
+@@ -419,9 +421,26 @@
+ 
+ static DEVICE_ATTR_RO(tearing_effect);
+ 
++/*
++ * Catalyst Linux: how fast the link runs, in Hz, when that is known (the
++ * core clock held: see panel_mipi_dbi_fast_link), else 0. The shell paces
++ * its frames by it: a full frame takes 108800 bytes of it.
++ */
++static ssize_t link_hz_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++    struct drm_device *drm = spi_get_drvdata(to_spi_device(dev));
++
++    if (!drm)
++        return -ENODEV;
++    return sysfs_emit(buf, "%u\n", to_panel_mipi_dbi_device(drm_to_mipi_dbi_dev(drm))->link_hz);
++}
++
++static DEVICE_ATTR_RO(link_hz);
++
+ static struct attribute *panel_mipi_dbi_attrs[] = {
+     &dev_attr_reset.attr,
+     &dev_attr_tearing_effect.attr,
++    &dev_attr_link_hz.attr,
+     NULL,
+ };
+ 
+@@ -658,10 +677,37 @@
+ 
+ DEFINE_DRM_GEM_DMA_FOPS(panel_mipi_dbi_fops);
+ 
++/*
++ * Catalyst Linux: the framebuffer in cached memory.
++ *
++ * The SPI controller has no 16-bit words, so each flush swaps every pixel's
++ * bytes into a buffer of its own, reading the framebuffer a pixel at a time
++ * (drm_fb_swab, told the memory is cached). In the DMA helpers' default
++ * write-combined memory, each of those reads went out to RAM: about 11 ms
++ * of a full frame's flush, before its first byte was sent. Cached, it is
++ * well under one.
++ *
++ * The processor writes it (the fbdev shadow's copy) and reads it (the swap).
++ * Where the panel takes the buffer as it is (no swap: not this panel), the
++ * SPI core maps it for the transfer, which writes the cache back first.
++ * Buffers imported from elsewhere stay write-combined (the helper's rule).
++ */
++static struct drm_gem_object *panel_mipi_dbi_gem_create_object(struct drm_device *drm,
++                                                               size_t size)
++{
++    struct drm_gem_dma_object *dma_obj = kzalloc(sizeof(*dma_obj), GFP_KERNEL);
++
++    if (!dma_obj)
++        return ERR_PTR(-ENOMEM);
++    dma_obj->map_noncoherent = true;
++    return &dma_obj->base;
++}
++
+ static const struct drm_driver panel_mipi_dbi_driver = {
+     .driver_features	= DRIVER_GEM | DRIVER_MODESET | DRIVER_ATOMIC,
+     .fops			= &panel_mipi_dbi_fops,
+     DRM_GEM_DMA_DRIVER_OPS_VMAP,
++    .gem_create_object	= panel_mipi_dbi_gem_create_object,
+     DRM_FBDEV_DMA_DRIVER_OPS,
+     .debugfs_init		= mipi_dbi_debugfs_init,
+     .name			= "panel-mipi-dbi",
+@@ -709,6 +755,55 @@
+     return 0;
+ }
+ 
++/*
++ * Catalyst Linux: the link as fast as the panel takes it, when it can be.
++ *
++ * The BCM2835's SPI clock is the core clock over an even divider, which the
++ * controller works out once, from the core clock as it was at boot. Left to
++ * itself the firmware moves the core clock between 250 and 400 MHz with the
++ * load, so a divider chosen at 400 ran the link at 31 MHz most of the time
++ * (and a faster one would run it past the panel at 400). Held still
++ * (Catalyst Linux's config.txt: core_freq and core_freq_min the same), the
++ * link takes the fastest divider within the ST7789's 62.5 MHz: at 250 MHz,
++ * 62.5 MHz, a full frame in 14 ms. Otherwise it keeps the Device Tree's.
++ */
++#define CATALYST_PANEL_MAX_HZ		62500000
++
++static void panel_mipi_dbi_fast_link(struct panel_mipi_dbi_device *panel, struct spi_device *spi)
++{
++    struct {
++        u32 id;
++        u32 rate;
++    } low = { RPI_FIRMWARE_CORE_CLK_ID, 0 }, high = { RPI_FIRMWARE_CORE_CLK_ID, 0 };
++    struct device_node *np;
++    struct rpi_firmware *fw;
++    u32 div;
++    int ret;
++
++    np = of_find_compatible_node(NULL, NULL, "raspberrypi,bcm2835-firmware");
++    if (!np)
++        return;
++    fw = rpi_firmware_get(np);
++    of_node_put(np);
++    if (!fw)
++        return;
++    ret = rpi_firmware_property(fw, RPI_FIRMWARE_GET_MIN_CLOCK_RATE, &low, sizeof(low));
++    if (!ret)
++        ret = rpi_firmware_property(fw, RPI_FIRMWARE_GET_MAX_CLOCK_RATE, &high, sizeof(high));
++    rpi_firmware_put(fw);
++    if (ret || !low.rate || low.rate != high.rate) {
++        dev_info(&spi->dev, "core clock moves (%u to %u MHz): link at %u Hz\n",
++                 low.rate / 1000000, high.rate / 1000000, spi->max_speed_hz);
++        return;
++    }
++    div = DIV_ROUND_UP(low.rate, CATALYST_PANEL_MAX_HZ);
++    div += div % 2;
++    spi->max_speed_hz = low.rate / div;
++    panel->link_hz = spi->max_speed_hz;
++    dev_info(&spi->dev, "core clock held at %u MHz: link at %u Hz\n",
++             low.rate / 1000000, spi->max_speed_hz);
++}
++
+ static int panel_mipi_dbi_spi_probe(struct spi_device *spi)
+ {
+     struct device *dev = &spi->dev;
+@@ -763,6 +858,7 @@
+     ret = mipi_dbi_spi_init(spi, dbi, dc);
+     if (ret)
+         return ret;
++    panel_mipi_dbi_fast_link(panel, spi);
+ 
+     if (device_property_present(dev, "write-only"))
+         dbi->read_commands = NULL;

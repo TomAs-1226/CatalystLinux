@@ -402,7 +402,7 @@ def tools(vm):
     # sound), built apart from the kernel, load against this kernel. 0.5.5's
     # panel driver had been built for the kernel before, the kernel would not
     # take it, and the panel stayed dark on the handheld.
-    out = vm.run("cd /lib/modules/$(uname -r)/updates && for m in *.ko*; do modprobe ${m%%.ko*} 2>/dev/null; done; "
+    out = vm.run("dmesg -n 1; cd /lib/modules/$(uname -r)/updates && for m in *.ko*; do modprobe ${m%%.ko*} 2>/dev/null; done; "
                  "dmesg | grep -c -E 'disagrees about version|Unknown symbol|Exec format error|invalid module format'; ls | wc -l", 180)
     f = out.split()
     check("the board's own drivers all load against this kernel", f[:1] == ["0"] and len(f) == 2 and f[1].isdigit() and int(f[1]) >= 8, " ".join(f))
@@ -602,7 +602,7 @@ def updates(vm):
                       "echo '|'; tail -4 /tmp/b/tryboot.txt 2>/dev/null | tr '\n' ' '; umount /tmp/b")
         parts = [p.strip() for p in boot.split("|")]
         check("config.txt starts system A and tries system B", len(parts) == 4 and "[all] os_prefix=slot-a/ [tryboot] os_prefix=slot-b/" in parts[0], parts[0] if parts else boot)
-        check("system B's kernel is in slot-b, rooted on system B", len(parts) == 4 and "root=/dev/mmcblk0p3" in parts[1] and int(parts[2] or 0) > 3, boot)
+        check("system B's kernel is in slot-b, rooted on system B", len(parts) == 4 and "root=/dev/mmcblk0p3" in parts[1] and int("".join(c for c in parts[2].split()[-1:][0] if c.isdigit()) or 0) > 3 if parts[2].split() else False, boot)
         # The Pi firmware for this chip reads tryboot.txt, not config.txt, on
         # the start an update is tried in (the emulator has no firmware, so
         # only the file is checked): it must start system B.

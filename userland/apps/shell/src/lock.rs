@@ -15,10 +15,11 @@
 //!   a thread of its own. A wrong one shakes the field (a spring kicked
 //!   sideways, five visible swings) and tints its rim; from the fifth wrong
 //!   one in a row each try waits longer, even across a restart.
-//! - **Notices** said while it is locked are kept for it. By default their
-//!   words wait until it is unlocked (Apple's "when unlocked", and the safe
-//!   choice for a handheld on a desk in the pits): the lock screen says how
-//!   many, and when; Settings › Lock screen can show the words.
+//! - **Notifications** not yet seen show on it, newest first, as many as
+//!   fit (notify.rs). By default their words wait until it is unlocked
+//!   (Apple's "when unlocked", and the safe choice for a handheld on a desk
+//!   in the pits): each says only its app, and when; Settings › Lock screen
+//!   can show the words. ↑ ↓ pick one, and once unlocked it opens.
 //! - **Its look** is the user's own: Settings › Lock screen › Customise
 //!   picks the clock (centre, left, dots), its colour, and what shows with
 //!   it (the date, the charge, the next match, notices, the next reminder),
@@ -384,9 +385,12 @@ pub struct Info {
     pub reading: Option<Reading>,
     pub next: Option<crate::upnext::NextMatch>,
     pub reminder: Option<crate::upnext::Reminder>,
-    /// Notices since it locked: how many, the newest's words, and when.
+    /// Notifications not yet seen: how many, and the newest of them, newest
+    /// first (the lock screen shows a few; their words only if chosen).
     pub notices: usize,
-    pub newest: Option<(String, i64)>,
+    pub notes: Vec<crate::notify::Notification>,
+    /// The notification picked on the lock screen (↑ ↓): unlocked, it opens.
+    pub pick: Option<u64>,
     /// Live activities, most important first (the lock screen shows two).
     pub activities: Vec<crate::liveactivity::Activity>,
     /// Music's level (1 playing, 0 paused, springing between).
@@ -446,14 +450,15 @@ fn items(choices: &Choices, info: &Info, unix: i64, editing: bool) -> Vec<Item> 
             }
             Show::Notices => {
                 let count = match info.notices {
-                    0 => "no notices".to_owned(),
-                    1 => "1 notice".to_owned(),
-                    n => format!("{n} notices"),
+                    0 => "no notifications".to_owned(),
+                    1 => "1 notification".to_owned(),
+                    n => format!("{n} notifications"),
                 };
-                match (info.notices, &info.newest) {
+                let newest = info.notes.first().map(|n| n.title.clone());
+                match (info.notices, newest) {
                     (0, _) if !editing => None,
-                    (1, Some((text, _))) if choices.previews => Some((Some("notifications"), None, text.clone(), Some(count))),
-                    (n, Some((text, _))) if choices.previews && n > 1 => Some((Some("notifications"), None, format!("{text} · +{}", n - 1), Some(count))),
+                    (1, Some(text)) if choices.previews => Some((Some("notifications"), None, text, Some(count))),
+                    (n, Some(text)) if choices.previews && n > 1 => Some((Some("notifications"), None, format!("{text} · +{}", n - 1), Some(count))),
                     _ => Some((Some("notifications"), None, count, None)),
                 }
             }
@@ -545,6 +550,20 @@ fn flow(g: &mut Gfx, chips: &[Item], x: f32, width: f32, cy: f32, align: Align, 
 pub struct Layout {
     pub places: Vec<(Part, Rect)>,
     pub field: (f32, f32),
+    /// The notifications shown, by id, and where.
+    pub rows: Vec<(u64, Rect)>,
+    /// Everything drawn, by what it is, as far as it reaches (for the test
+    /// that no two meet).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub parts: Vec<(String, Rect)>,
+}
+
+impl Layout {
+    /// The time and the date as drawn (`ink`), and the chips where they went.
+    fn of(places: Vec<(Part, Rect)>, field: (f32, f32), mut ink: Vec<(String, Rect)>) -> Layout {
+        ink.extend(places.iter().filter(|(p, _)| matches!(p, Part::Item(_))).map(|(_, r)| ("chip".to_owned(), *r)));
+        Layout { places, field, rows: Vec::new(), parts: ink }
+    }
 }
 
 /// Draw the lock screen's face (all but the field) as `choices` have it.
@@ -556,10 +575,11 @@ pub struct Layout {
 /// - **Dots**: the same, the time set in dots.
 /// - **Stacked**: the hours over the minutes, large, down the left; the
 ///   date, the chips and the field down the right.
-/// - **With live activities** (music playing, a timer, the queue), any of
-///   them: the time smaller along the top (in its style and colour) with the
-///   date and the chips beside it, and the activities' cards beneath, the
-///   most important first: one large, or two.
+/// - **With live activities** (music playing, a timer, the queue) or
+///   notifications not yet seen, any of them: the time smaller along the
+///   top (in its style and colour) with the date and the chips beside it,
+///   and beneath, the activities' cards (the most important first: one
+///   large, or two) and the notifications, as many as fit.
 pub fn draw_face(g: &mut Gfx, choices: &Choices, info: &Info, now: NaiveDateTime, editing: bool) -> Layout {
     let t = g.tokens;
     let ty = g.ty;
@@ -571,12 +591,14 @@ pub fn draw_face(g: &mut Gfx, choices: &Choices, info: &Info, now: NaiveDateTime
     let date_on = choices.shows(Show::Date);
     let date_alpha = if date_on { 1.0 } else { 0.3 };
     let mut chips = items(choices, info, unix, editing);
-    if !info.activities.is_empty() {
+    let notes = choices.shows(Show::Notices) && !info.notes.is_empty();
+    if !info.activities.is_empty() || notes {
         // What an activity already shows is not a chip as well.
         use crate::liveactivity::Kind;
         chips.retain(|c| !info.activities.iter().any(|a| (c.0 == Show::Match && a.kind == Kind::Match) || (c.0 == Show::Reminder && a.kind == Kind::Reminder)));
         return band(g, choices, info, now, &time, &chips, editing, tint, date_alpha);
     }
+    let mut ink: Vec<(String, Rect)> = Vec::new();
     match choices.lock_face {
         LockFace::Centre | LockFace::Dots => {
             let date_cy = 15.0;
@@ -587,6 +609,7 @@ pub fn draw_face(g: &mut Gfx, choices: &Choices, info: &Info, now: NaiveDateTime
                 let (dy, alpha) = rise(info, 0.0);
                 g.text.draw_aligned(&mut g.canvas, W * 0.5, (date_cy + dy + ty.caption.size * 0.36).round(), Align::Center, &date, &ty.caption, t.dim, date_alpha * alpha);
                 places.push((Part::Date, Rect::new((W - w) * 0.5 - 6.0, date_cy - 8.0, w + 12.0, 16.0)));
+                ink.push(("date".into(), Rect::new((W - w) * 0.5, date_cy - ty.caption.size * 0.5, w, ty.caption.size)));
             }
             let (dy, alpha) = rise(info, 1.0);
             let below = if choices.lock_face == LockFace::Dots {
@@ -595,6 +618,7 @@ pub fn draw_face(g: &mut Gfx, choices: &Choices, info: &Info, now: NaiveDateTime
                 draw_dots(g, &time, &time, 1.0, W * 0.5, top + dy, pitch, tint, alpha);
                 let w = cols as f32 * pitch;
                 places.push((Part::Time, Rect::new((W - w) * 0.5 - 4.0, top - 6.0, w + 8.0, 6.0 * pitch + 12.0)));
+                ink.push(("time".into(), Rect::new((W - w) * 0.5, top - pitch * 0.5, w, 7.0 * pitch)));
                 top + 6.0 * pitch + 19.0
             } else {
                 let style = ty.display(54.0);
@@ -604,10 +628,11 @@ pub fn draw_face(g: &mut Gfx, choices: &Choices, info: &Info, now: NaiveDateTime
                 let baseline = (27.0 + cap).round();
                 tab.draw(g, &time, &time, 1.0, (W - w) * 0.5, baseline + dy, tint, alpha);
                 places.push((Part::Time, Rect::new((W - w) * 0.5 - 6.0, baseline - cap - 3.0, w + 12.0, cap + 6.0)));
+                ink.push(("time".into(), Rect::new((W - w) * 0.5, baseline - cap, w, cap)));
                 baseline + 19.0
             };
             flow(g, &chips, PAD, W - 2.0 * PAD, below, Align::Center, FIELD_Y - 4.0, info, 2.0, &mut places);
-            Layout { places, field: (W * 0.5, W - 2.0 * PAD - 12.0) }
+            Layout::of(places, (W * 0.5, W - 2.0 * PAD - 12.0), ink)
         }
         LockFace::Stacked => {
             // The hours over the minutes, down the left.
@@ -626,6 +651,7 @@ pub fn draw_face(g: &mut Gfx, choices: &Choices, info: &Info, now: NaiveDateTime
             tab.draw(g, minutes, minutes, 1.0, x, second + dy, tint, alpha);
             let w = tab.width("88");
             places.push((Part::Time, Rect::new(x - 6.0, top - 4.0, w + 12.0, 2.0 * cap + gap + 8.0)));
+            ink.push(("time".into(), Rect::new(x, top, w, 2.0 * cap + gap)));
             // The rest down the right.
             let col = x + w + 16.0;
             let width = W - PAD - 2.0 - col;
@@ -635,22 +661,31 @@ pub fn draw_face(g: &mut Gfx, choices: &Choices, info: &Info, now: NaiveDateTime
                 let (dy, alpha) = rise(info, 1.0);
                 let dw = g.text.draw(&mut g.canvas, col, (top + 6.0 + dy + ty.caption.size * 0.36).round(), &date, &ty.caption, t.dim, date_alpha * alpha);
                 places.push((Part::Date, Rect::new(col - 6.0, top - 2.0, dw + 12.0, 16.0)));
+                ink.push(("date".into(), Rect::new(col, top + 6.0 - ty.caption.size * 0.5, dw, ty.caption.size)));
             }
             flow(g, &chips, col, width, top + 30.0, Align::Left, FIELD_Y - 4.0, info, 2.0, &mut places);
-            Layout { places, field: (col + width * 0.5, width) }
+            Layout::of(places, (col + width * 0.5, width), ink)
         }
     }
 }
 
-/// The lock screen with live activities: the time along the top in its
-/// style and colour, the date and chips at the right of it, and beneath, the
-/// activities' cards: one large, or the two most important (a third and
-/// more said in a chip).
+/// The lock screen with live activities or notifications: the time along
+/// the top in its style and colour; at the right of it the date, and under
+/// the date one row of chips; and beneath them all (below whichever of the
+/// time and the chips reaches lower, so nothing ever runs under another),
+/// the activities' cards and the notifications.
+///
+/// - Two activities or more: their two cards (a third and more said in a
+///   chip), the notifications counted in a chip.
+/// - One: its card, and under it the newest notification if the card keeps
+///   room enough (else the card alone, the notifications in a chip).
+/// - None: the notifications, as many as fit, the last saying how many more.
 #[allow(clippy::too_many_arguments)]
 fn band(g: &mut Gfx, choices: &Choices, info: &Info, now: NaiveDateTime, time: &str, chips: &[Item], editing: bool, tint: Color, date_alpha: f32) -> Layout {
     let t = g.tokens;
     let ty = g.ty;
     let mut places = Vec::new();
+    let mut parts: Vec<(String, Rect)> = Vec::new();
     let x = PAD + 6.0;
     let top = 8.0;
     let (dy, alpha) = rise(info, 0.0);
@@ -668,42 +703,155 @@ fn band(g: &mut Gfx, choices: &Choices, info: &Info, now: NaiveDateTime, time: &
         (tab.width(time), cap)
     };
     places.push((Part::Time, Rect::new(x - 6.0, top - 4.0, time_w + 12.0, time_h + 8.0)));
-    // The date and the chips, at the right of the time.
+    parts.push(("time".into(), Rect::new(x - 1.0, top, time_w, time_h)));
+    let mut head = top + time_h;
+    // The date at the right of the time, and a row of chips under it.
     let right = W - PAD - 2.0;
     let room = right - (x + time_w + 14.0);
+    let date_cy = top + 6.0;
+    let mut date_bottom = top;
     if choices.shows(Show::Date) || editing {
         let date = date_text(now);
         let date = if g.measure(&date, ty.caption) > room { short_date(now) } else { date };
         let (dy, alpha) = rise(info, 1.0);
         let dw = g.measure(&date, ty.caption);
-        g.text.draw_aligned(&mut g.canvas, right, (top + 6.0 + dy + ty.caption.size * 0.36).round(), Align::Right, &date, &ty.caption, t.dim, date_alpha * alpha);
+        g.text.draw_aligned(&mut g.canvas, right, (date_cy + dy + ty.caption.size * 0.36).round(), Align::Right, &date, &ty.caption, t.dim, date_alpha * alpha);
         places.push((Part::Date, Rect::new(right - dw - 6.0, top - 2.0, dw + 12.0, 16.0)));
+        let r = Rect::new(right - dw, date_cy - ty.caption.size * 0.5, dw, ty.caption.size);
+        parts.push(("date".into(), r));
+        date_bottom = r.bottom();
+        head = head.max(r.bottom());
     }
+    let chip_h = (ty.caption.size + 9.0).round();
+    let chips_cy = (date_bottom + 4.0 + chip_h * 0.5).round();
+    // What goes beneath, and whether the notifications get rows of their
+    // own there (the room is worked out as if the chips' row were there).
+    let acts = &info.activities[..info.activities.len().min(2)];
+    let notes: &[crate::notify::Notification] = if choices.shows(Show::Notices) { &info.notes } else { &[] };
+    let bottom = FIELD_Y - 6.0;
+    let gap = 5.0;
+    let content_top = (head.max(chips_cy + chip_h * 0.5) + 6.0).round();
+    let avail = bottom - content_top;
+    let (card_min, one_h, two_h) = (ty.body.size + ty.caption.size + 11.0, note_h(g, false), note_h(g, true));
+    let note_row = match acts.len() {
+        _ if notes.is_empty() => None,
+        0 => Some(0.0),
+        // Under one card: two lines if the card keeps its room, else one.
+        1 if choices.previews && avail - gap - two_h >= card_min => Some(two_h),
+        1 if avail - gap - one_h >= card_min => Some(one_h),
+        _ => None,
+    };
     let more = info.activities.len().saturating_sub(2);
-    let mut chips: Vec<Item> = chips.to_vec();
+    let mut chips: Vec<Item> = chips.iter().filter(|c| !(note_row.is_some() && c.0 == Show::Notices)).cloned().collect();
     if more > 0 {
         chips.push((Show::Notices, Some("graphic_eq"), None, format!("+{more}"), None, true));
     }
-    let cards_top = top + time_h + 10.0;
-    flow(g, &chips, right - room, room, top + 27.0, Align::Right, cards_top - 2.0, info, 2.0, &mut places);
-    // The cards.
-    let bottom = FIELD_Y - 6.0;
-    let shown = &info.activities[..info.activities.len().min(2)];
-    let gap = 5.0;
-    let h = ((bottom - cards_top) - gap * (shown.len() as f32 - 1.0)) / shown.len() as f32;
-    for (i, a) in shown.iter().enumerate() {
-        let (dy, alpha) = rise(info, 3.0 + i as f32);
-        let r = Rect::new(PAD, (cards_top + i as f32 * (h + gap) + dy).round(), W - 2.0 * PAD, h.floor());
+    let before = places.len();
+    flow(g, &chips, right - room, room, chips_cy, Align::Right, chips_cy + chip_h * 0.5, info, 2.0, &mut places);
+    for (_, r) in &places[before..] {
+        parts.push(("chip".into(), *r));
+        head = head.max(r.bottom());
+    }
+    // Beneath: from below the time and the chips down to above the field.
+    let content_top = (head + 6.0).round();
+    let avail = bottom - content_top;
+    let mut rows = Vec::new();
+    let card = |g: &mut Gfx, parts: &mut Vec<(String, Rect)>, a: &crate::liveactivity::Activity, y: f32, h: f32, order: f32| {
+        let (dy, alpha) = rise(info, order);
+        let r = Rect::new(PAD, (y + dy).round(), W - 2.0 * PAD, h.floor());
         g.canvas.rrect(r, g.radius(14.0).min(r.h * 0.5), t.surface1, alpha);
         crate::liveactivity::draw_card(g, r, a, info.level, alpha);
+        parts.push(("card".into(), Rect::new(PAD, y.round(), W - 2.0 * PAD, h.floor())));
+    };
+    match (acts.len(), note_row) {
+        (0, _) => {
+            // As many as fit, each as tall as its words need, stacked up
+            // from just above the field (as a phone's do): two lines where
+            // they show and there is room, else one each.
+            let want = notes.len().min(3);
+            let fit = |h: f32| (((avail + gap) / (h + gap)).floor().max(1.0) as usize).min(want);
+            let two = choices.previews && fit(two_h) >= fit(one_h);
+            let h = if two { two_h } else { one_h };
+            let n = fit(h);
+            let first = (bottom - n as f32 * h - (n as f32 - 1.0) * gap).max(content_top);
+            for (i, n_) in notes.iter().take(n).enumerate() {
+                let y = first + i as f32 * (h + gap);
+                let left = if i + 1 == n { notes.len() - n } else { 0 };
+                let r = note(g, info, n_, y, h, two, choices.previews, left, 3.0 + i as f32);
+                parts.push(("note".into(), r));
+                rows.push((n_.id, r));
+            }
+        }
+        (1, Some(h)) => {
+            card(g, &mut parts, &acts[0], content_top, avail - gap - h, 3.0);
+            let two = h > one_h;
+            let r = note(g, info, &notes[0], bottom - h, h, two, choices.previews, notes.len() - 1, 4.0);
+            parts.push(("note".into(), r));
+            rows.push((notes[0].id, r));
+        }
+        (n, _) => {
+            let h = (avail - gap * (n as f32 - 1.0)) / n as f32;
+            for (i, a) in acts.iter().enumerate() {
+                card(g, &mut parts, a, content_top + i as f32 * (h + gap), h, 3.0 + i as f32);
+            }
+        }
     }
-    Layout { places, field: (W * 0.5, W - 2.0 * PAD - 12.0) }
+    Layout { places, field: (W * 0.5, W - 2.0 * PAD - 12.0), rows, parts }
+}
+
+/// A notification's row on the lock screen: two lines (its title, and the
+/// start of what it says) or one.
+fn note_h(g: &Gfx, two: bool) -> f32 {
+    let ty = g.ty;
+    if two {
+        ty.body.size + ty.caption.size + 13.0
+    } else {
+        ty.body.size + 12.0
+    }
+}
+
+/// A notification on the lock screen, its top at `y`: its app's symbol;
+/// its title (and on a second line the start of what it says) where the
+/// words show, else its app's name alone; when, at the right, or on the
+/// last row how many more there are. Picked (↑ ↓), it has the focus ring.
+/// Where it went, as at rest.
+#[allow(clippy::too_many_arguments)]
+fn note(g: &mut Gfx, info: &Info, n: &crate::notify::Notification, y: f32, h: f32, two: bool, words: bool, more: usize, order: f32) -> Rect {
+    let t = g.tokens;
+    let ty = g.ty;
+    let (dy, alpha) = rise(info, order);
+    let at = Rect::new(PAD, y.round(), W - 2.0 * PAD, h.floor());
+    let r = Rect::new(at.x, at.y + dy.round(), at.w, at.h);
+    let radius = g.radius(12.0).min(r.h * 0.5);
+    g.canvas.rrect(r, radius, t.surface1, alpha);
+    let x = r.x + 30.0;
+    let side = if more > 0 { format!("+{more}") } else { crate::notify::ago(n.at, chrono::Utc::now().timestamp()) };
+    let side_w = g.measure(&side, ty.caption);
+    let title = if words { n.title.as_str() } else { n.app.as_str() };
+    let line2 = two && words && !n.body.is_empty();
+    let (first_cy, second_cy) = if line2 {
+        let block = ty.body.size + 3.0 + ty.caption.size;
+        let top = r.cy() - block * 0.5;
+        (top + ty.body.size * 0.5, top + ty.body.size + 3.0 + ty.caption.size * 0.5)
+    } else {
+        (r.cy(), r.cy())
+    };
+    g.icon_alpha(&n.icon, true, r.x + 15.0, first_cy, 14.0, t.ink, alpha);
+    g.text.draw_aligned(&mut g.canvas, r.right() - 10.0, (first_cy + ty.caption.size * 0.36).round(), Align::Right, &side, &ty.caption, t.dim, alpha);
+    let room = r.right() - 10.0 - side_w - 8.0 - x;
+    let title = g.text.fit(title, &ty.body, room);
+    g.text.draw(&mut g.canvas, x, (first_cy + ty.body.size * 0.36).round(), &title, &ty.body, t.ink, alpha);
+    if line2 {
+        let body = g.text.fit(n.body.lines().next().unwrap_or(""), &ty.caption, r.right() - 10.0 - x);
+        g.text.draw(&mut g.canvas, x, (second_cy + ty.caption.size * 0.36).round(), &body, &ty.caption, t.dim, alpha);
+    }
+    if info.pick == Some(n.id) {
+        g.canvas.stroke_rrect(r.inset(-2.5), radius + 2.5, 1.5, g.ring_color(), alpha);
+    }
+    at
 }
 
 // ------------------------------------------------------------- the layer ---
-
-/// At most this many notices are kept for the lock screen.
-const NOTICES_KEPT: usize = 20;
 
 /// The lock, over everything while it is engaged.
 pub struct Lock {
@@ -727,7 +875,12 @@ pub struct Lock {
     checking: Option<std::sync::mpsc::Receiver<bool>>,
     tries: Tries,
     wrong_words: Option<String>,
-    notices: Vec<(String, i64)>,
+    /// The notifications shown last frame, by id, top first; the one picked
+    /// among them (↑ ↓); and, once unlocked with one picked, it (for the
+    /// shell to open).
+    rows: Vec<u64>,
+    pick: Option<u64>,
+    opened: Option<u64>,
     /// A warning that outranks the lock (the battery running out).
     alert: Option<String>,
     /// The second last drawn of a wait, and the minute of the clock.
@@ -757,7 +910,9 @@ impl Lock {
             checking: None,
             tries: Tries::load(passcode::unix_now()),
             wrong_words: None,
-            notices: Vec::new(),
+            rows: Vec::new(),
+            pick: None,
+            opened: None,
             alert: None,
             drawn: (0, String::new()),
         }
@@ -848,25 +1003,28 @@ impl Lock {
         self.tries = Tries::load(passcode::unix_now());
     }
 
-    /// Kept for the lock screen: something was said while it was locked.
-    pub fn note(&mut self, text: &str) {
-        self.notices.push((text.to_owned(), passcode::unix_now()));
-        if self.notices.len() > NOTICES_KEPT {
-            self.notices.remove(0);
-        }
+    /// The notification picked on the lock screen, if any.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn pick(&self) -> Option<u64> {
+        self.pick
     }
 
-    pub fn notices(&self) -> usize {
-        self.notices.len()
+    /// Unlocked with a notification picked: it, once (to be opened).
+    pub fn take_opened(&mut self) -> Option<u64> {
+        self.opened.take()
     }
 
-    /// The notices kept, newest last, handed over once it is unlocked.
-    pub fn take_notices(&mut self) -> Vec<(String, i64)> {
-        std::mem::take(&mut self.notices)
-    }
-
-    pub fn newest(&self) -> Option<(String, i64)> {
-        self.notices.last().cloned()
+    /// ↑ ↓ among the notifications shown: from none to the first (↓) or the
+    /// last (↑), and on to none again past either end.
+    fn step_pick(&mut self, down: bool) {
+        let at = self.pick.and_then(|id| self.rows.iter().position(|r| *r == id));
+        let next = match (at, down) {
+            (None, true) => Some(0),
+            (None, false) => self.rows.len().checked_sub(1),
+            (Some(i), true) => (i + 1 < self.rows.len()).then_some(i + 1),
+            (Some(i), false) => i.checked_sub(1),
+        };
+        self.pick = next.map(|i| self.rows[i]);
     }
 
     /// A warning shown over the lock (the battery running out).
@@ -885,10 +1043,17 @@ impl Lock {
         self.checking.is_some()
     }
 
-    /// A key on the lock screen. Shown as a curtain (no passcode), any key
-    /// lifts it, and is spent doing so.
+    /// A key on the lock screen. ↑ and ↓ pick a notification shown on it
+    /// (unlocked, it opens). Shown as a curtain (no passcode), Enter lifts
+    /// it (and opens the one picked) and any other key lifts it, spent
+    /// doing so.
     pub fn key(&mut self, key: Key) {
+        if matches!(key, Key::Up | Key::Down) && !self.rows.is_empty() && self.checking.is_none() {
+            self.step_pick(key == Key::Down);
+            return;
+        }
         if self.curtain && !self.engaged {
+            self.opened = if key == Key::Enter { self.pick } else { None };
             self.open();
             self.lifted = true;
             return;
@@ -940,6 +1105,7 @@ impl Lock {
     fn open(&mut self) {
         self.engaged = false;
         self.curtain = false;
+        self.pick = None;
         self.entering = None;
         self.shown.set_with(0.0, role::release());
         self.field.clear();
@@ -974,6 +1140,8 @@ impl Lock {
                 Ok(true) => {
                     self.checking = None;
                     self.tries.passed();
+                    // A notification picked before the passcode: it opens.
+                    self.opened = self.pick;
                     self.open();
                     unlocked = true;
                 }
@@ -1007,7 +1175,9 @@ impl Lock {
 
     fn prompt(&self) -> Prompt {
         let wait = self.wait();
-        if self.curtain {
+        if self.curtain && self.pick.is_some() {
+            Prompt::Asks("enter opens it".into())
+        } else if self.curtain {
             Prompt::Curtain
         } else if !self.engaged {
             Prompt::Open
@@ -1019,6 +1189,8 @@ impl Lock {
             Prompt::Wrong(words.clone())
         } else if let Some(alert) = &self.alert {
             Prompt::Alert(alert.clone())
+        } else if self.pick.is_some() && self.field.is_empty() {
+            Prompt::Asks("your passcode, and it opens".into())
         } else {
             Prompt::Asks("type your passcode".into())
         }
@@ -1036,7 +1208,17 @@ impl Lock {
             scratch.clone_from(&g.canvas.px);
         }
         let now = crate::faces::local_now();
-        let layout = draw_face(g, choices, info, now, false);
+        let layout = if self.pick.is_some() {
+            draw_face(g, choices, &Info { pick: self.pick, ..info.clone() }, now, false)
+        } else {
+            draw_face(g, choices, info, now, false)
+        };
+        // What can be picked is what shows; one picked that went (opened
+        // elsewhere, put away) is let go.
+        self.rows = layout.rows.iter().map(|(id, _)| *id).collect();
+        if self.pick.is_some_and(|id| !self.rows.contains(&id)) {
+            self.pick = None;
+        }
         let (cx, most) = layout.field;
         let prompt = self.prompt();
         let (dy, _) = rise(info, 5.0);
@@ -1111,19 +1293,30 @@ mod tests {
         assert!(f.is_empty());
     }
 
+    /// Notifications as they come: the newest first.
+    fn notes(n: usize) -> Vec<crate::notify::Notification> {
+        let all = [
+            ("Schedule", "flag", "time to queue for Q31", "red · with 1507, 5254"),
+            ("Reminders", "checklist", "swap the battery", "after Q31"),
+            ("Clock", "timer", "timer 5 min done", ""),
+            ("Music", "download_done", "12 songs saved", "in the library, to play offline"),
+        ];
+        all.iter().cycle().take(n).enumerate().map(|(i, (app, icon, title, body))| crate::notify::Notification { id: i as u64 + 1, at: 1_000 - i as i64 * 60, ..crate::notify::Notification::new(app, icon, *title).body(*body) }).collect()
+    }
+
     fn info(notices: usize) -> Info {
         let robot = crate::robot::Robot::demo();
         let mut info = crate::lockpages::info_now(&robot, false, Some(Reading::demo()));
+        info.notes = notes(notices);
         info.notices = notices;
-        info.newest = (notices > 0).then(|| ("time to queue for Q31".to_owned(), 0));
         info
     }
 
     #[test]
-    fn notices_words_wait_until_unlocked_unless_chosen() {
+    fn notifications_words_wait_until_unlocked_unless_chosen() {
         let c = Choices::default();
         let words: Vec<String> = items(&c, &info(2), 0, false).into_iter().map(|i| i.3).collect();
-        assert!(words.contains(&"2 notices".to_owned()), "{words:?}");
+        assert!(words.contains(&"2 notifications".to_owned()), "{words:?}");
         assert!(!words.iter().any(|w| w.contains("queue")), "no words by default: {words:?}");
         let shown = Choices { previews: true, ..c };
         let words: Vec<String> = items(&shown, &info(2), 0, false).into_iter().map(|i| i.3).collect();
@@ -1143,7 +1336,9 @@ mod tests {
             for face in LockFace::ALL {
                 for (editing, previews) in [(false, false), (false, true), (true, false)] {
                     let c = Choices { lock_face: *face, previews, ..Choices::default() };
-                    let layout = draw_face(&mut g, &c, &info(3), now, editing);
+                    // Counted only (their rows are the band's: tested below).
+                    let info = Info { notes: Vec::new(), ..info(3) };
+                    let layout = draw_face(&mut g, &c, &info, now, editing);
                     let time = layout.places.iter().find(|(p, _)| *p == Part::Time).expect("the time").1;
                     let (cx, most) = layout.field;
                     assert!(cx - most * 0.5 >= PAD - 0.5 && cx + most * 0.5 <= W - PAD + 0.5);
@@ -1169,6 +1364,114 @@ mod tests {
             }
             assert!(g.missing_icons().is_empty(), "{:?}", g.missing_icons());
         }
+    }
+
+    /// The live activities a lock screen may show, the most important first.
+    fn activities(n: usize) -> Vec<crate::liveactivity::Activity> {
+        let song = crate::nowplaying::NowPlaying {
+            title: "Around the World".into(),
+            artist: "Daft Punk".into(),
+            album: "Homework".into(),
+            cover: None,
+            position: 80.0,
+            duration: 429.0,
+            playing: true,
+            at: std::time::Instant::now(),
+        };
+        let mut all = crate::liveactivity::timers(Some((272.0, 300.0, 1)), None);
+        all.extend(crate::liveactivity::music(Some(&song)));
+        all.extend(crate::liveactivity::reminder(Some(&crate::upnext::Reminder { title: "swap the battery".into(), due: Some(chrono::Utc::now().timestamp() + 600) }), chrono::Utc::now().timestamp()));
+        all.truncate(n);
+        all
+    }
+
+    /// Thomas's: "the battery charging thing clips with the music thing".
+    /// Charging or not, no activity to three, no notification to four, the
+    /// words shown or not, every face, every text size, both tones, with
+    /// the field (locked, or the curtain) and without it (the editor): no
+    /// two things drawn on the lock screen meet, and all are on the panel.
+    #[test]
+    fn nothing_on_the_lock_screen_runs_into_anything_else() {
+        crate::shell::tests::sandbox();
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 11, 21).unwrap().and_hms_opt(12, 59, 0).unwrap();
+        let charging = Reading { flow: crate::power::Flow::Charging, minutes_to_full: Some(42), ..Reading::demo() };
+        let mut checked = 0;
+        let mut wrong = Vec::new();
+        for tokens in [bezel::Tokens::dark(), bezel::Tokens::light()] {
+            for size in [crate::gfx::TextSize::Compact, crate::gfx::TextSize::Standard, crate::gfx::TextSize::Large] {
+                let mut g = Gfx::new(tokens);
+                g.set_text_size(size);
+                for face in LockFace::ALL {
+                    for reading in [Reading::demo(), charging.clone()] {
+                        for acts in 0..=3 {
+                            for notes in [0, 1, 4] {
+                                for previews in [false, true] {
+                                    for (editing, prompt) in [(false, Some(Prompt::Asks("your passcode, and it opens".into()))), (false, Some(Prompt::Curtain)), (true, None)] {
+                                        let c = Choices { lock_face: *face, previews, ..Choices::default() };
+                                        let mut info = info(notes);
+                                        info.reading = Some(reading.clone());
+                                        info.activities = activities(acts);
+                                        let layout = draw_face(&mut g, &c, &info, now, editing);
+                                        let mut parts = layout.parts.clone();
+                                        if let Some(prompt) = prompt {
+                                            let (cx, most) = layout.field;
+                                            let mut field = Field::new();
+                                            field.draw(&mut g, cx, FIELD_Y, most, &prompt);
+                                            let w = field.width.value();
+                                            parts.push(("field".into(), Rect::new(cx - w * 0.5, FIELD_Y, w, FIELD_H)));
+                                        }
+                                        let case = format!("{face:?} {} {:?} charging {} acts {acts} notes {notes} words {previews} editing {editing}", size.name(), tokens.tone, !reading.flow.on_battery());
+                                        for (i, (a, ra)) in parts.iter().enumerate() {
+                                            if ra.x < 0.0 || ra.right() > W || ra.y < 0.0 || ra.bottom() > H {
+                                                wrong.push(format!("{a} {ra:?} off the panel: {case}"));
+                                            }
+                                            for (b, rb) in &parts[i + 1..] {
+                                                let apart = ra.right() + 2.0 <= rb.x || ra.x >= rb.right() + 2.0 || ra.bottom() + 2.0 <= rb.y || ra.y >= rb.bottom() + 2.0;
+                                                if !apart {
+                                                    wrong.push(format!("{a} {ra:?} meets {b} {rb:?}: {case}"));
+                                                }
+                                            }
+                                        }
+                                        checked += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 1000, "only {checked}");
+        assert!(wrong.is_empty(), "{} of {checked}:\n{}", wrong.len(), wrong.iter().take(20).cloned().collect::<Vec<_>>().join("\n"));
+    }
+
+    #[test]
+    fn a_notification_picked_on_the_lock_screen_opens_once_unlocked() {
+        let mut lock = Lock::new();
+        lock.curtain = true;
+        lock.rows = vec![7, 9];
+        // ↓ to the first, ↓ to the next, ↓ past the last: none; ↑ from none: the last.
+        lock.key(Key::Down);
+        assert_eq!(lock.pick(), Some(7));
+        lock.key(Key::Down);
+        assert_eq!(lock.pick(), Some(9));
+        lock.key(Key::Down);
+        assert_eq!(lock.pick(), None);
+        lock.key(Key::Up);
+        assert_eq!(lock.pick(), Some(9));
+        assert!(lock.covering(), "picking lifts nothing");
+        assert!(matches!(lock.prompt(), Prompt::Asks(w) if w == "enter opens it"));
+        // Enter on the curtain: lifted, and that one to open.
+        lock.key(Key::Enter);
+        assert!(!lock.covering());
+        assert_eq!(lock.take_opened(), Some(9));
+        assert_eq!(lock.take_opened(), None, "once");
+        // Any other key lifts it with nothing to open.
+        lock.curtain = true;
+        lock.rows = vec![7];
+        lock.key(Key::Down);
+        lock.key(Key::Char('a'));
+        assert!(!lock.covering() && lock.take_opened().is_none());
     }
 
     #[test]

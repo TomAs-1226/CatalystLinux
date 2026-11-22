@@ -245,6 +245,14 @@ impl MusicScreen {
         self.go(page);
     }
 
+    /// Now playing, over the page it was started from (search, a list, the
+    /// library, downloads): Esc goes back there. One now-playing page at
+    /// most in the way back.
+    fn to_playing(&mut self) {
+        self.back.retain(|(page, _)| !matches!(page, Page::Playing));
+        self.push(Page::Playing);
+    }
+
     /// Back to the page above (or to `fallback` if there is none).
     fn pop(&mut self, fallback: Page) {
         match self.back.pop() {
@@ -446,6 +454,8 @@ impl Screen for MusicScreen {
         let page = self.page.clone();
         match page {
             Page::Playing => match key {
+                // Back to the list it was started from; from the top, out of Music.
+                Key::Back if !self.back.is_empty() => self.pop(Page::Start),
                 Key::Back => return Nav::Pop,
                 Key::Enter | Key::Char(' ') => player::toggle(),
                 Key::Left => player::previous(),
@@ -473,9 +483,9 @@ impl Screen for MusicScreen {
                 let row = rows.get(self.list.focus).copied().unwrap_or(StartRow::Search);
                 match key {
                     Key::Back => return Nav::Pop,
-                    Key::Tab if n.track().is_some() => self.go(Page::Playing),
+                    Key::Tab if n.track().is_some() => self.to_playing(),
                     Key::Enter | Key::Right => match row {
-                        StartRow::NowPlaying => self.go(Page::Playing),
+                        StartRow::NowPlaying => self.to_playing(),
                         StartRow::Search => {
                             self.push(Page::Search);
                             self.typing = true;
@@ -486,7 +496,7 @@ impl Screen for MusicScreen {
                         StartRow::Song(i) => {
                             // Quick picks are a mix already: played as a list; likes too.
                             player::play(self.picks.clone(), i, false);
-                            self.go(Page::Playing);
+                            self.to_playing();
                         }
                         StartRow::Account => self.push(Page::Account),
                     },
@@ -524,14 +534,14 @@ impl Screen for MusicScreen {
                         if self.list.focus < self.results.len() {
                             // On the card: what was found, in order, from this one.
                             player::play(self.results.clone(), self.list.focus, false);
-                            self.go(Page::Playing);
+                            self.to_playing();
                         }
                     }
                     Key::Enter | Key::Right if self.filter == Filter::Songs => {
                         if let Some(t) = self.results.get(self.list.focus) {
                             // A song alone: its radio after it.
                             player::play(vec![t.clone()], 0, true);
-                            self.go(Page::Playing);
+                            self.to_playing();
                         }
                     }
                     Key::Enter | Key::Right => {
@@ -561,8 +571,7 @@ impl Screen for MusicScreen {
                 Key::Back => self.pop(Page::Playing),
                 Key::Enter | Key::Right => {
                     player::jump(self.list.focus);
-                    self.back.clear();
-                    self.go(Page::Playing);
+                    self.pop(Page::Playing);
                 }
                 Key::Delete => player::remove(self.list.focus),
                 other => crate::screens::list_key(&mut self.list, other, n.queue.len()),
@@ -612,7 +621,7 @@ impl Screen for MusicScreen {
                             if !all.is_empty() {
                                 player::play(all, 0, false);
                                 player::shuffle();
-                                self.go(Page::Playing);
+                                self.to_playing();
                             }
                         }
                         None => {}
@@ -686,14 +695,12 @@ impl Screen for MusicScreen {
                     Key::Enter | Key::Right => match rows.get(self.list.focus).copied() {
                         Some(ListRow::Play) => {
                             player::play(list.songs.clone(), 0, false);
-                            self.back.clear();
-                            self.go(Page::Playing);
+                            self.to_playing();
                         }
                         Some(ListRow::Shuffle) => {
                             player::play(list.songs.clone(), 0, false);
                             player::shuffle();
-                            self.back.clear();
-                            self.go(Page::Playing);
+                            self.to_playing();
                         }
                         Some(ListRow::Download) if armed => {
                             let songs: Vec<(Track, Meta)> = list.songs.iter().cloned().zip(list.metas.iter().cloned()).collect();
@@ -706,8 +713,7 @@ impl Screen for MusicScreen {
                         Some(ListRow::Download) => self.armed = true,
                         Some(ListRow::Song(i)) => {
                             player::play(list.songs.clone(), i, false);
-                            self.back.clear();
-                            self.go(Page::Playing);
+                            self.to_playing();
                         }
                         None => {}
                     },

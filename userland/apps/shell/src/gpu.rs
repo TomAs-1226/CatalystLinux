@@ -118,6 +118,7 @@ mod stub {
         pub fn flow(&mut self, _: &mut Canvas, _: &crate::flow::Scene, _: [&crate::flow::art::Atlas; 2]) -> Result<bool, String> {
             Ok(false)
         }
+        pub fn idle(&mut self, _: std::time::Instant) {}
     }
 }
 
@@ -243,6 +244,8 @@ mod vc {
         glReadPixels: fn(i32, i32, i32, i32, u32, u32, *mut c_void);
         glEnable: fn(u32);
         glBlendFuncSeparate: fn(u32, u32, u32, u32);
+        glDeleteTextures: fn(i32, *const u32);
+        glDeleteFramebuffers: fn(i32, *const u32);
     });
 
     const EGL_PLATFORM_SURFACELESS_MESA: u32 = 0x31DD;
@@ -711,7 +714,21 @@ void main() {{
         flow_sent: [(usize, usize, u64); 2],
         use_flow: bool,
         flow_ms: (f32, f32),
+        /// When Flow and a growing window were last drawn here: their
+        /// textures go back to the kernel's pool (CMA, shared with every
+        /// other GPU and camera buffer) once they have not been for a while.
+        flow_last: Option<std::time::Instant>,
+        grow_last: Option<std::time::Instant>,
+        /// The rows the glass pass touches, as they were before it: put back
+        /// if the GPU fails part way, so the processor draws the frame whole.
+        undo: Vec<u32>,
     }
+
+    /// Flow's atlases go back this long after Flow was last drawn here (one
+    /// upload, a few milliseconds, when it is next on screen).
+    const FLOW_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
+    /// A growing window's two pictures go back this long after the last one.
+    const GROW_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
 
     impl Gpu {
         /// Load Mesa, make a GLES 2 context on the GPU (no window: the panel
@@ -809,6 +826,9 @@ void main() {{
                 flow_sent: [(0, 0, 0); 2],
                 use_flow: false,
                 flow_ms: (0.0, 0.0),
+                flow_last: None,
+                grow_last: None,
+                undo: Vec::new(),
             };
             let software = ["softpipe", "llvmpipe", "swrast", "software"].iter().any(|s| gpu.renderer.to_lowercase().contains(s));
             if software && !allow_software {
@@ -816,7 +836,95 @@ void main() {{
             }
             gpu.build()?;
             gpu.self_test()?;
+            // What the test needed and the jobs taken do not: back to the pool.
+            gpu.trim();
             Ok(gpu)
+        }
+
+        /// Let go of the textures of jobs this GPU does not take (the
+        /// processor is quicker at them here), and of Flow's test atlases.
+        /// Taken up again, they are made again (`use_everything`).
+        fn trim(&mut self) {
+            if !self.use_glass {
+                self.release_glass();
+            }
+            if !self.use_grow {
+                self.release_grow();
+            }
+            self.release_flow();
+        }
+
+        fn delete_textures(&self, textures: &[u32]) {
+            let live: Vec<u32> = textures.iter().copied().filter(|t| *t != 0).collect();
+            if !live.is_empty() {
+                unsafe { (self.gl.glDeleteTextures)(live.len() as i32, live.as_ptr()) };
+            }
+        }
+
+        fn release_glass(&mut self) {
+            self.delete_textures(&[self.scene, self.frost[0].texture, self.frost[1].texture]);
+            let fbos: Vec<u32> = self.frost.iter().map(|t| t.fbo).filter(|f| *f != 0).collect();
+            if !fbos.is_empty() {
+                unsafe { (self.gl.glDeleteFramebuffers)(fbos.len() as i32, fbos.as_ptr()) };
+            }
+            self.scene = 0;
+            self.frost = [Target { texture: 0, fbo: 0 }; 2];
+            self.kept.clear();
+        }
+
+        fn release_grow(&mut self) {
+            self.delete_textures(&[self.under, self.over]);
+            (self.under, self.over, self.pictures) = (0, 0, None);
+        }
+
+        fn release_flow(&mut self) {
+            self.delete_textures(&self.flow_tex);
+            self.flow_tex = [0; 2];
+            self.flow_sent = [(0, 0, 0); 2];
+        }
+
+        /// The glass's scene and frost, made if they were let go.
+        fn ensure_glass(&mut self) -> Result<(), String> {
+            if self.scene == 0 {
+                self.scene = self.texture(W, H, true);
+                self.frost = [self.target(FW, FH, true)?, self.target(FW, FH, true)?];
+                self.check("making the glass's textures")?;
+            }
+            Ok(())
+        }
+
+        /// The two pictures a window grows between, made if they were let go.
+        fn ensure_grow(&mut self) -> Result<(), String> {
+            if self.under == 0 {
+                (self.under, self.over, self.pictures) = (self.texture(W, H, true), self.texture(W, H, true), None);
+                self.check("making a window's textures")?;
+            }
+            Ok(())
+        }
+
+        /// Now and then (every tick of the shell): textures not drawn with
+        /// for a while go back to the kernel's pool.
+        pub fn idle(&mut self, now: std::time::Instant) {
+            let stale = |last: Option<std::time::Instant>, after| last.is_some_and(|t| now.saturating_duration_since(t) >= after);
+            if self.flow_tex[0] != 0 && stale(self.flow_last, FLOW_IDLE) {
+                self.release_flow();
+                self.flow_last = None;
+            }
+            if self.under != 0 && stale(self.grow_last, GROW_IDLE) {
+                self.release_grow();
+                self.grow_last = None;
+            }
+        }
+
+        /// What its textures hold now, in bytes (all 32-bit texels).
+        pub fn texture_bytes(&self) -> usize {
+            let panel = (W * H * 4) as usize;
+            let frost = (FW * FH * 4) as usize;
+            let mut bytes = panel; // what is drawn, read back from
+            bytes += if self.scene != 0 { panel + 2 * frost } else { 0 };
+            bytes += if self.under != 0 { 2 * panel } else { 0 };
+            bytes += self.flow_sent.iter().zip(self.flow_tex).filter(|(_, t)| *t != 0).map(|((w, h, _), _)| w * h * 4).sum::<usize>();
+            bytes
         }
 
         /// Let go of the GPU on this thread, so another can take it up.
@@ -868,7 +976,7 @@ void main() {{
                 Some(why) => format!("flow on the processor ({why})"),
                 None => job("flow", self.use_flow, self.flow_ms),
             };
-            format!("{} · {} · {flow}", job("glass", self.use_glass, self.glass_ms), job("windows", self.use_grow, self.grow_ms))
+            format!("{} · {} · {flow} · textures {:.2} mb", job("glass", self.use_glass, self.glass_ms), job("windows", self.use_grow, self.grow_ms), self.texture_bytes() as f32 / 1e6)
         }
 
         fn build(&mut self) -> Result<(), String> {
@@ -1071,6 +1179,7 @@ void main() {{
             if groups.windows(2).any(|g| g[0] == g[1]) {
                 return Ok(false);
             }
+            self.ensure_glass()?;
             let (w, h) = (canvas.w, canvas.h);
             let dark = tokens.tone == Tone::Dark;
             let len = (light.0 * light.0 + light.1 * light.1).sqrt().max(1e-6);
@@ -1109,6 +1218,20 @@ void main() {{
             if let (Some(y0), Some(y1)) = (changed.iter().map(|r| r.0).min(), changed.iter().map(|r| r.1).max()) {
                 self.upload(self.scene, &canvas.px, y0, y1);
             }
+            // The rows any glass may touch, as they are: should the GPU fail
+            // part way, they go back, and the processor draws all the glass.
+            let rows = (jobs.iter().map(|j| j.1 .1).min().unwrap_or(0), jobs.iter().map(|j| j.1 .3).max().unwrap_or(0));
+            let span = ((rows.0.max(0) * w) as usize, (rows.1.min(h) * w) as usize);
+            self.undo.clear();
+            self.undo.extend_from_slice(&canvas.px[span.0..span.1.max(span.0)]);
+            let undo = |gpu: &mut Self, canvas: &mut Canvas, why: String| -> Result<bool, String> {
+                canvas.px[span.0..span.0 + gpu.undo.len()].copy_from_slice(&gpu.undo);
+                gpu.kept.clear();
+                Err(why)
+            };
+            if let Err(why) = self.check("sending the scene up") {
+                return undo(self, canvas, why);
+            }
             for (s, region, key, before, last) in jobs {
                 if let Some(last) = last.filter(|k| k.key == key && k.region == region && k.before == before) {
                     // Nothing under this glass has changed: neither has the glass.
@@ -1125,10 +1248,16 @@ void main() {{
                 }
                 self.frost_patch(region);
                 self.glass_shape(s, region, tokens, light, dark, calm);
+                // Out of memory (or anything else) before a pixel comes back.
+                if let Err(why) = self.check("drawing glass") {
+                    return undo(self, canvas, why);
+                }
                 let (gx0, gy0) = (((s.rect.x - REACH).floor() as i32).max(0), ((s.rect.y - REACH).floor() as i32).max(0));
                 let (gx1, gy1) = (((s.rect.right() + REACH).ceil() as i32).min(w), ((s.rect.bottom() + REACH + SHADOW_OFFSET).ceil() as i32).min(h));
                 self.read_back(canvas, (gx0, gy0, gx1, gy1));
-                self.check("drawing glass")?;
+                if let Err(why) = self.check("reading glass back") {
+                    return undo(self, canvas, why);
+                }
                 let after = gather(&canvas.px, region);
                 self.kept.push(Kept { group: s.group, key, region, before, after });
             }
@@ -1196,9 +1325,12 @@ void main() {{
             if !self.use_grow || under.len() != (W * H) as usize || over.len() != under.len() || canvas.px.len() != under.len() {
                 return Ok(false);
             }
+            self.grow_last = Some(std::time::Instant::now());
+            self.ensure_grow()?;
             if self.pictures != Some(pictures) {
                 self.upload(self.under, under, 0, H);
                 self.upload(self.over, over, 0, H);
+                self.check("sending a window up")?;
                 self.pictures = Some(pictures);
             }
             let p = self.grow;
@@ -1215,8 +1347,11 @@ void main() {{
             self.uniform4(p, "u_tile", tile);
             self.uniform1(p, "u_screen", morph.map_or(1.0, |m| m.screen.clamp(0.0, 1.0)));
             self.rect(0.0, 0.0, W as f32, H as f32);
-            self.read_back(canvas, (0, 0, W, H));
+            // Failing here or reading back, the caller draws the whole frame
+            // on the processor over whatever came back.
             self.check("growing a window")?;
+            self.read_back(canvas, (0, 0, W, H));
+            self.check("reading a window back")?;
             Ok(true)
         }
 
@@ -1232,6 +1367,7 @@ void main() {{
             if x0 >= x1 {
                 return Ok(true);
             }
+            self.flow_last = Some(std::time::Instant::now());
             for (i, atlas) in atlases.iter().enumerate() {
                 let sent = (atlas.w, atlas.h, atlas.generation);
                 if self.flow_sent[i] == sent && self.flow_tex[i] != 0 {
@@ -1247,6 +1383,11 @@ void main() {{
                 unsafe {
                     (self.gl.glBindTexture)(GL_TEXTURE_2D, self.flow_tex[i]);
                     (self.gl.glTexImage2D)(GL_TEXTURE_2D, 0, GL_RGBA as i32, atlas.h as i32, atlas.w as i32, 0, GL_RGBA, GL_UNSIGNED_BYTE, atlas.px.as_ptr() as *const c_void);
+                }
+                // Nothing drawn yet: failing here, the processor draws Flow.
+                if let Err(why) = self.check("sending flow's cards up") {
+                    self.flow_sent[i] = (0, 0, 0);
+                    return Err(why);
                 }
                 self.flow_sent[i] = sent;
             }
@@ -1317,8 +1458,11 @@ void main() {{
                 }
             }
             unsafe { (self.gl.glDisable)(GL_BLEND) };
-            self.read_back(canvas, (x0, 0, x1, H));
+            // Failing here or reading back, the processor draws the strip
+            // again from its ground up, over whatever came back.
             self.check("drawing flow")?;
+            self.read_back(canvas, (x0, 0, x1, H));
+            self.check("reading flow back")?;
             Ok(true)
         }
 
@@ -1573,6 +1717,26 @@ void main() {{
                 eprintln!("flow {name}: {d}");
                 assert!(d.close(), "flow {name}: {d}");
             }
+            // Not drawn for a while: Flow's atlases and the window's pictures go
+            // back to the pool, and come again, the same, when next needed.
+            let held = gpu.texture_bytes();
+            let later = std::time::Instant::now() + FLOW_IDLE + GROW_IDLE;
+            let window = Rect::new(40.5, 30.25, 150.0, 80.0);
+            let mut over = scene.clone();
+            over.px.iter_mut().for_each(|p| *p ^= 0x00ff_ffff);
+            let mut grown = scene.clone();
+            assert!(gpu.grow(&mut grown, &scene.px, &over.px, 7, window, 9.0, tokens.ground, None).unwrap());
+            gpu.idle(later);
+            assert!(gpu.flow_tex == [0; 2] && gpu.under == 0, "let go after a while");
+            assert!(gpu.texture_bytes() < held, "{} of {held} bytes held", gpu.texture_bytes());
+            let mut again = scene.clone();
+            assert!(gpu.grow(&mut again, &scene.px, &over.px, 7, window, 9.0, tokens.ground, None).unwrap());
+            assert!(grown.px == again.px, "made again, the same window");
+            let mut cpu = Canvas::new(W, H);
+            crate::flow::render::render(&mut cpu.px, &flow, [&cards, &face]);
+            let mut on_gpu = Canvas::new(W, H);
+            assert!(gpu.flow(&mut on_gpu, &flow, [&cards, &face]).unwrap());
+            assert!(Difference::of(&cpu.px, &on_gpu.px).close(), "flow sent up again");
             // As the shell does it: opened on a thread of its own, drawn with on this one.
             drop(gpu);
             let mut handed = std::thread::spawn(|| Gpu::open(true).inspect(|g| g.release())).join().unwrap().unwrap();

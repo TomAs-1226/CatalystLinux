@@ -40,6 +40,17 @@ start() {
 	# second to see whether it should, for huge pages this kernel does not
 	# have. Memory is still compacted when an allocation asks for it.
 	echo 0 >/proc/sys/vm/compaction_proactiveness 2>/dev/null
+
+	# Writes go to the card a little at a time: from 4 MB held back, and never
+	# more than 16 MB. The default (a fifth of memory, about 85 MB) let a song
+	# being saved or an update installing build up, then write all at once
+	# while everything else waited on the card: the screen stuttered.
+	echo 4194304 >/proc/sys/vm/dirty_background_bytes
+	echo 16777216 >/proc/sys/vm/dirty_bytes
+	# BFQ for the card: it honours I/O priorities (mq-deadline, the default,
+	# ignores them), so downloads, updates and indexing, all at the idle
+	# class, wait behind what the screen reads.
+	echo bfq >/sys/block/mmcblk0/queue/scheduler 2>/dev/null
 	eend 0
 }
 
