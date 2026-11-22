@@ -862,6 +862,40 @@ pub fn download_wait() -> Option<&'static str> {
     fetch::waits(true)
 }
 
+/// What playing comes to after the assistant's pause, carry on, next or
+/// back: what was done ("paused"), and the song it is on.
+pub fn control(action: &str) -> Result<(String, String), String> {
+    use player::Phase;
+    let now = player::now();
+    let Some(track) = now.track().cloned() else { return Err("nothing is playing".into()) };
+    let song = format!("{} · {}", track.title, track.artist);
+    let playing = matches!(now.phase, Phase::Playing | Phase::Loading);
+    match action {
+        "pause" if !playing => Ok(("paused already".into(), song)),
+        "resume" if playing => Ok(("playing already".into(), song)),
+        "pause" | "resume" => {
+            player::toggle();
+            Ok((if playing { "paused".into() } else { "playing again".into() }, song))
+        }
+        "next" => match now.queue.get(now.at + 1) {
+            Some(next) => {
+                player::next();
+                Ok(("next song".into(), format!("{} · {}", next.title, next.artist)))
+            }
+            None => Err("this is the last song in the queue".into()),
+        },
+        "previous" => {
+            player::previous();
+            let back = (now.position <= player::RESTART_AFTER && now.at > 0).then(|| &now.queue[now.at - 1]);
+            Ok(match back {
+                Some(t) => ("back a song".into(), format!("{} · {}", t.title, t.artist)),
+                None => ("from the start".into(), song),
+            })
+        }
+        other => Err(format!("music cannot {other}")),
+    }
+}
+
 /// Music in Spotlight: the songs it knows, played from there, and, for
 /// anything typed, a search of YouTube Music, after the rest.
 pub struct Spotlight;

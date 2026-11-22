@@ -184,7 +184,7 @@ impl Robot {
 
     /// The demo robot told to say something of its own (a hot motor, low
     /// volts, a mode), whatever its script says: for the galleries and tests.
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub fn demo_say(&mut self, key: &str, value: Value) {
         if let Source::Demo { overrides, table, .. } = &mut self.source {
             overrides.insert(key.to_owned(), value.clone());

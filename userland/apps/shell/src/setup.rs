@@ -431,7 +431,7 @@ impl Setup {
     }
 
     /// The receiving page with what a computer sent, for the gallery.
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub fn showing_received(answers: &crate::remote::Answers) -> Self {
         let mut setup = Setup { from_settings: true, ..Self::new() };
         setup.received = crate::remote::received(answers);

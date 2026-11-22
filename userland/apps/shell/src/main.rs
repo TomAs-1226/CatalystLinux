@@ -4475,6 +4475,7 @@ mod tests {
     /// reminders_gallery -- --ignored`.
     #[test]
     #[ignore]
+    #[cfg(not(target_arch = "aarch64"))]
     fn reminders_gallery() {
         shell::tests::sandbox();
         let dir = std::env::var_os("CATALYST_SHOTS").map(std::path::PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("catalyst-reminder-shots"));

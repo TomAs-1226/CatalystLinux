@@ -1222,6 +1222,13 @@ impl Shell {
         self.stack.last().map_or("", |(screen, _)| screen.title())
     }
 
+    /// The screen in front is at work (a question being answered): the
+    /// Assistant's gallery waits for it to finish.
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn top_busy(&self) -> bool {
+        self.stack.last().is_some_and(|(screen, _)| screen.busy())
+    }
+
     /// First start: setup, over Home, for the start animation to give way to.
     pub fn start_setup(&mut self) {
         self.stack.push((Box::new(crate::setup::Setup::new()), Path::Slide));
@@ -3519,7 +3526,7 @@ impl Shell {
     }
 
     /// The galleries' and tests' charger.
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub fn pretend_charger(&mut self, on: Option<bool>) {
         self.charger = on;
         // The lock screen reads the charge afresh.
@@ -3528,7 +3535,7 @@ impl Shell {
 
     /// The galleries' and tests' live activities, as if just read (and
     /// not read again).
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub fn pretend_activities(&mut self, list: Vec<crate::liveactivity::Activity>) {
         self.activities.set(list, self.settings.calm);
         self.dirty = true;
@@ -4117,7 +4124,7 @@ impl Shell {
 
     /// Deep standby as if it had lasted `seconds` drawing what `reading`
     /// says, for the gallery and the tests.
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub fn deep_for(&mut self, seconds: f32, reading: crate::power::Reading) {
         if !self.deep.on() {
             self.enter_deep();
@@ -4191,7 +4198,7 @@ impl Shell {
     }
 
     /// A screen opened straight away, for the gallery.
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub fn show(&mut self, screen: Box<dyn Screen>) {
         self.open(screen, Path::Slide);
     }

@@ -43,10 +43,12 @@
 //! It acts on the handheld too (`device`): reminders, timers, notes, music,
 //! apps, settings, downloads, several in one turn, each a row as it is
 //! done, with a live activity while it works; what could change something
-//! asks first on the confirm page. It briefs (`briefing`): the next match or
-//! the day at a glance, made by a template offline. And it remembers what it
-//! is told to (`memory`), in a short plain file the person can read and
-//! delete, never a secret.
+//! asks first on the confirm page. Offline, or with no internet, plain
+//! requests are read by rules into the same tools. It briefs (`briefing`):
+//! the next match or the day at a glance, made by a template offline. And it
+//! remembers what it is told to (`memory`), in a short plain file the person
+//! can read and delete, never a secret, that leaves the handheld only with
+//! a question to OpenAI or Claude.
 //!
 //! The simulator answers from a script with the demo robot, unless told to
 //! ask the real services (`CATALYST_AI_LIVE`).
@@ -334,9 +336,10 @@ pub fn tile() -> (String, Option<&'static str>) {
     })
 }
 
-/// The simulator answers from a script unless told otherwise.
+/// The simulator answers from a script unless told otherwise, and so do the
+/// tests, the handheld's own ARM build of them too (which has no key).
 pub(crate) fn demo() -> bool {
-    !cfg!(target_arch = "aarch64") && std::env::var_os("CATALYST_AI_LIVE").is_none()
+    (cfg!(test) || !cfg!(target_arch = "aarch64")) && std::env::var_os("CATALYST_AI_LIVE").is_none()
 }
 
 // ----------------------------------------------------------------- tools ---
@@ -909,6 +912,8 @@ fn dedupe(sources: Vec<Source>, n: usize) -> Vec<Source> {
 const SOURCES_SHOWN: usize = 6;
 
 impl Chat {
+    /// A conversation that remembers nothing (the tests).
+    #[cfg(test)]
     pub fn new(service: Service) -> Self {
         Self::for_mode(service, Mode::Assistant)
     }
@@ -1428,7 +1433,7 @@ fn demo_reply(service: Service, body: &Value) -> Value {
         let (text, calls) = match (rounds, calls) {
             (0, Err(answer)) => (answer, Vec::new()),
             (0, Ok(calls)) => (String::new(), calls),
-            _ => (demo_said(&demo_results(service, body)), Vec::new()),
+            _ => (said_from(&demo_results(service, body)), Vec::new()),
         };
         return demo_shape(service, rounds, &text, &calls);
     }
@@ -1474,99 +1479,30 @@ fn demo_shape(service: Service, rounds: usize, text: &str, calls: &[(&str, Value
 }
 
 /// What the scripted service does for a question that asks the handheld to
-/// do something (to brief, to remember): the calls, all in its first turn;
-/// or, for "what do you remember", the answer at once, from its prompt.
-/// `None` for any other question.
+/// do something (to brief, to remember): the calls, all in its first turn,
+/// read by the same rules that serve offline (`device::rules`); or, for
+/// "what do you remember", the answer at once, from its prompt. `None` for
+/// any other question.
 #[allow(clippy::type_complexity)]
 fn demo_device(question: &str, system: &str) -> Option<Result<Vec<(&'static str, Value)>, String>> {
-    let lower = question.to_lowercase();
-    // The words after `needle`, as typed (or lower case, where case changed lengths).
-    let after = |needle: &str| -> Option<String> {
-        let at = lower.find(needle)? + needle.len();
-        let from = if question.len() == lower.len() { question.get(at..) } else { lower.get(at..) };
-        from.map(|s| s.trim().to_owned())
-    };
-    let upto = |s: String, stops: &[&str]| -> String {
-        let cut = stops.iter().filter_map(|w| s.to_lowercase().find(w)).min().unwrap_or(s.len());
-        s[..cut].trim().trim_end_matches(['.', '?', '!']).to_owned()
-    };
-    match memory::command(question) {
-        Some(memory::Command::List) => {
-            let kept: Vec<&str> = system.lines().filter_map(|l| l.strip_prefix("- ")).collect();
-            return Some(Err(match kept.len() {
-                0 => "Nothing yet: tell me to remember something and I'll keep it on the handheld.".to_owned(),
-                _ => format!("I remember:\n{}", kept.iter().map(|k| format!("· {k}")).collect::<Vec<_>>().join("\n")),
-            }));
-        }
-        Some(memory::Command::Forget(what)) if what == "everything" => return Some(Ok(vec![("memory_forget", json!({"fact": "", "everything": true}))])),
-        Some(memory::Command::Forget(what)) => return Some(Ok(vec![("memory_forget", json!({"fact": if what.is_empty() { "that".to_owned() } else { what }, "everything": false}))])),
-        Some(memory::Command::Remember(fact)) => return Some(Ok(vec![("memory_save", json!({"fact": memory::as_kept(&fact), "replaces": ""}))])),
-        None => {}
+    if memory::command(question) == Some(memory::Command::List) {
+        let kept: Vec<&str> = system.lines().filter_map(|l| l.strip_prefix("- ")).collect();
+        return Some(Err(match kept.len() {
+            0 => "Nothing yet: tell me to remember something and I'll keep it on the handheld.".to_owned(),
+            _ => format!("I remember:\n{}", kept.iter().map(|k| format!("· {k}")).collect::<Vec<_>>().join("\n")),
+        }));
     }
     if let Some(kind) = briefing::asked(question) {
         return Some(Ok(vec![("briefing", json!({"kind": kind.map_or("auto", briefing::Kind::name)}))]));
     }
-    let mut calls: Vec<(&'static str, Value)> = Vec::new();
-    if let Some(rest) = after("download ") {
-        if lower.contains("update") {
-            calls.push(("start_download", json!({"what": "update"})));
-        } else {
-            let name = upto(rest, &[" and ", ","]);
-            let kind = if name.to_lowercase().ends_with(" album") { "album" } else if lower.contains("songs by") || name.to_lowercase().ends_with(" artist") { "artist" } else { "playlist" };
-            let mut query = name.clone();
-            for cut in ["my ", "our ", "the "] {
-                if query.to_lowercase().starts_with(cut) {
-                    query = query[cut.len()..].to_owned();
-                }
-            }
-            for cut in [" playlist", " album", " artist"] {
-                if query.to_lowercase().ends_with(cut) {
-                    query.truncate(query.len() - cut.len());
-                }
-            }
-            calls.push(("music_download", json!({"query": query.trim(), "kind": kind})));
-        }
-    }
-    if let Some(rest) = after("remind me to ").or_else(|| after("remind me ")) {
-        calls.push(("reminder_add", json!({"text": rest.trim_end_matches(['.', '!'])})));
-    }
-    if lower.contains("timer") {
-        let stop = lower.contains("stop") || lower.contains("cancel");
-        let length = lower.split_whitespace().collect::<Vec<_>>().windows(2).find(|w| w[0].chars().all(|c| c.is_ascii_digit()) && w[1].starts_with("min")).map(|w| format!("{} min", w[0])).unwrap_or_default();
-        calls.push(("timer", json!({"action": if stop { "stop" } else { "start" }, "length": if length.is_empty() && !stop { "5 min".to_owned() } else { length }})));
-    }
-    if let Some(rest) = after("note that ").or_else(|| after("make a note: ")).or_else(|| after("note: ")) {
-        calls.push(("note_add", json!({"title": "", "text": rest, "append_to": ""})));
-    }
-    if let Some(rest) = after("play ").filter(|_| lower.starts_with("play ")) {
-        calls.push(("music_play", json!({"query": rest})));
-    }
-    for (words, setting) in [("battery saver", "battery_saver"), ("wi-fi", "wifi"), ("wifi", "wifi"), ("bluetooth", "bluetooth"), ("light mode", "light_mode")] {
-        if lower.contains(words) && (lower.contains(" on") || lower.contains(" off")) && !calls.iter().any(|(_, v)| v["setting"] == setting) {
-            let on = lower.contains(" on") && !lower.contains(" off");
-            calls.push(("setting_set", json!({"setting": setting, "value": if on { "on" } else { "off" }})));
-        }
-    }
-    if let Some(rest) = after("brightness to ") {
-        calls.push(("setting_set", json!({"setting": "brightness", "value": upto(rest, &[" "])})));
-    }
-    if lower.contains("next match") && calls.is_empty() {
-        calls.push(("next_match", json!({})));
-    }
-    if let Some(rest) = after("open ").filter(|_| lower.starts_with("open ")) {
-        let rest = upto(rest, &[" and "]);
-        let (app, page) = match rest.to_lowercase().strip_suffix(" settings") {
-            Some(page) => ("Settings".to_owned(), page.trim_start_matches("the ").to_owned()),
-            None => (rest.trim_start_matches("the ").to_owned(), String::new()),
-        };
-        calls.push(("open_app", json!({"app": app, "page": page})));
-    }
-    (!calls.is_empty()).then_some(Ok(calls))
+    device::rules(question).map(Ok)
 }
 
-/// What the scripted service says once its tools are done: what each said
-/// it did (a briefing's summary), and what did not happen.
-fn demo_said(results: &[String]) -> String {
+/// What tools' results say was done, a sentence each: what each said it did
+/// (a briefing's few words), what was left as it was, and what did not work.
+/// The scripted service's answer, and what is said aloud for requests read
+/// by rules.
+fn said_from(results: &[String]) -> String {
     let mut said = Vec::new();
     for r in results {
         match serde_json::from_str::<Value>(r) {
@@ -1892,6 +1828,15 @@ pub struct Assistant {
     h24: bool,
     saver: bool,
     light: bool,
+    /// The calls under way were read by rules, not made by a model
+    /// (offline, or with no internet): no model is asked once they are done.
+    by_rules: bool,
+    /// When the question under way was asked: a long one is a notification
+    /// once it is answered.
+    began: Option<std::time::Instant>,
+    /// An entry to show from its top once it is laid out (a briefing's
+    /// card, taller than what is left of the screen under the question).
+    land: Option<usize>,
 }
 
 /// A question offered offline, before anything is asked.
@@ -1999,6 +1944,9 @@ impl Assistant {
             h24: true,
             saver: false,
             light: false,
+            by_rules: false,
+            began: None,
+            land: None,
             prefs,
             service,
             entries: Vec::new(),
@@ -2152,6 +2100,8 @@ impl Assistant {
         self.busy = Busy::Idle;
         self.activity = None;
         self.open = None;
+        self.by_rules = false;
+        self.land = None;
         self.chat_id = None;
         self.countdown = None;
         self.offline = crate::offline::Context::default();
@@ -2213,15 +2163,22 @@ impl Assistant {
         self.steps = 0;
         self.batch = (0, 0);
         self.open = None;
+        self.by_rules = false;
+        self.began = Some(std::time::Instant::now());
         self.actions = self.actions_given.clone().unwrap_or_else(crate::commands::all);
         self.push(Entry::You(text.clone()));
         if self.offline_mode() {
-            // Offline, with no tools: memory and briefings by rules.
-            if let Some(cmd) = memory::command(&text) {
-                return self.remember_offline(&cmd, true);
+            // Offline, with no model to call the tools: what it remembers,
+            // briefings and requests to the handheld by rules; the rest
+            // from the logs.
+            if memory::command(&text) == Some(memory::Command::List) {
+                return self.list_memory(true);
             }
             if let Some(kind) = briefing::asked(&text) {
                 return self.brief_offline(kind, robot);
+            }
+            if let Some(calls) = device::rules(&text) {
+                return self.run_rules(calls, robot);
             }
             return self.ask_offline(Some(text), robot);
         }
@@ -2231,17 +2188,62 @@ impl Assistant {
         self.ask();
     }
 
-    /// Asked of memory offline: done there and then, by rules (kept in the
-    /// on-device conversation, `into_chat`; a service's stays as it was).
-    fn remember_offline(&mut self, cmd: &memory::Command, into_chat: bool) {
-        let said = memory::answer(&self.memory_file, cmd);
+    /// What it remembers, said offline (kept in the on-device conversation,
+    /// `into_chat`; a service's stays as it was).
+    fn list_memory(&mut self, into_chat: bool) {
+        let said = memory::listed(&self.memory_file);
         self.push(Entry::Said(said.clone()));
-        self.push(Entry::Basis { words: "from what it remembers · memory.md on this handheld".into(), checked: false });
+        self.push(Entry::Basis { words: "from memory.md on this handheld".into(), checked: false });
         if let Some(chat) = self.chat.as_mut().filter(|_| into_chat) {
             chat.said(&said);
         }
         self.keep();
         crate::voice::answer(&said, self.aloud);
+    }
+
+    /// Requests to the handheld read by rules (offline, or with no
+    /// internet): the tools a model would call, in turn, each a row as it
+    /// is done and a change asked about first, as online; no model is
+    /// asked to word what was done.
+    fn run_rules(&mut self, calls: Vec<(&'static str, Value)>, robot: &Robot) {
+        self.by_rules = true;
+        self.calls = calls.into_iter().enumerate().map(|(k, (name, input))| Call { id: format!("rule-{k}"), name: name.to_owned(), input }).collect();
+        self.batch = (self.steps, self.calls.len());
+        self.activity = Some(crate::liveactivity::task(crate::liveactivity::Kind::Assistant, "Assistant", "working"));
+        self.scroll.set(0.0);
+        self.next_call(robot);
+    }
+
+    /// The requests read by rules, done: what each did is in its row; under
+    /// them, that no model was needed. Said aloud when answers are.
+    fn rules_done(&mut self, outcomes: &[Outcome]) {
+        self.by_rules = false;
+        self.busy = Busy::Idle;
+        self.push(Entry::Basis { words: "done on this handheld · no model needed".into(), checked: false });
+        let said = said_from(&outcomes.iter().map(|o| o.text.clone()).collect::<Vec<_>>());
+        // Kept in the on-device conversation (a service's stays as it was).
+        if let Some(chat) = self.chat.as_mut().filter(|c| c.service() == Service::Local) {
+            if chat.len() == self.mark {
+                chat.ask(&self.question);
+            }
+            chat.said(&said);
+        }
+        self.finished();
+        self.keep();
+        crate::voice::answer(&said, self.aloud);
+    }
+
+    /// A question's work done: its live activity says so, an app asked for
+    /// opens a moment later, and a briefing in the answer shows from its top.
+    fn finished(&mut self) {
+        if let Some(a) = self.activity.take() {
+            a.done(if self.steps == 0 { "answer ready".to_owned() } else { format!("{} done", count_words(self.steps, "step")) });
+        }
+        if let Some((_, at @ None)) = &mut self.open {
+            *at = Some(self.clock + OPEN_AFTER);
+        }
+        let asked = self.entries.iter().rposition(|(e, _)| matches!(e, Entry::You(_))).unwrap_or(0);
+        self.land = self.entries.iter().skip(asked).position(|(e, _)| matches!(e, Entry::Briefing { .. })).map(|k| asked + k);
     }
 
     /// A briefing made here, with no model: the template, on a thread (it
@@ -2265,7 +2267,7 @@ impl Assistant {
     fn brief_done(&mut self, b: briefing::Brief) {
         self.busy = Busy::Idle;
         self.push(Entry::briefing(&b));
-        self.push(Entry::Basis { words: "from the schedule, forecast, battery and logs · no model".into(), checked: false });
+        self.push(Entry::Basis { words: "from the schedule, robot, forecast, battery and logs · no model".into(), checked: false });
         // Kept in the on-device conversation (a service's stays as it was).
         if let Some(chat) = self.chat.as_mut().filter(|c| c.service() == Service::Local) {
             if chat.len() == self.mark {
@@ -2273,6 +2275,7 @@ impl Assistant {
             }
             chat.said(&b.said);
         }
+        self.finished();
         self.keep();
         crate::voice::answer(&b.said, self.aloud);
     }
@@ -2292,14 +2295,18 @@ impl Assistant {
         if let Some(a) = &self.activity {
             a.detail(if self.steps == 0 { "thinking".to_owned() } else { format!("thinking · {} done", count_words(self.steps, "step")) });
         }
+        let (began, steps, question) = (self.began, self.steps, self.question.clone());
         let (tx, rx) = mpsc::channel();
         let started = std::thread::Builder::new().name("assistant".into()).stack_size(512 * 1024).spawn(move || {
-            // A long one, a notification once it is (unsaid if the
-            // Assistant is still in front); its live activity is the page's.
-            let began = std::time::Instant::now();
             let answer = request(service, &key, &body);
-            if answer.is_ok() && began.elapsed() >= LONG_ANSWER {
-                crate::notify::post(crate::notify::Notification::new("Assistant", "auto_awesome", "your answer is written").tag("assistant:answer").action("builtin:Assistant"));
+            // A long one, a notification once it is the answer, posted from
+            // here: the Assistant may have been left while it thought, and
+            // it is only brought up to date in front (unsaid if it is,
+            // `Shell::notify`).
+            if let (Ok(reply), Some(began)) = (&answer, began) {
+                if let Some(n) = answered_notice(service, reply, began.elapsed(), steps, &question) {
+                    crate::notify::post(n);
+                }
             }
             tx.send(answer).ok();
         });
@@ -2321,6 +2328,7 @@ impl Assistant {
         self.outcomes.clear();
         self.busy = Busy::Idle;
         self.activity = None;
+        self.by_rules = false;
         if self.input.is_empty() {
             self.input = std::mem::take(&mut self.question);
         }
@@ -2338,9 +2346,10 @@ impl Assistant {
         };
         let reply = match reply {
             Ok(reply) => reply,
-            // No internet, and a briefing or memory asked for: made here,
-            // by the template or the rules, saying so.
-            Err(why) if no_internet(&why) && self.rounds == 0 && (briefing::asked(&self.question).is_some() || memory::command(&self.question).is_some()) => {
+            // No internet, and a briefing, what it remembers or a request to
+            // the handheld: made or done here, by the template or the
+            // rules, saying so (the service's conversation stays as it was).
+            Err(why) if no_internet(&why) && self.rounds == 0 && (briefing::asked(&self.question).is_some() || memory::command(&self.question).is_some() || device::rules(&self.question).is_some()) => {
                 if let Some(chat) = &mut self.chat {
                     chat.rewind(self.mark);
                 }
@@ -2348,17 +2357,16 @@ impl Assistant {
                 self.outcomes.clear();
                 self.activity = None;
                 let question = self.question.clone();
-                return match memory::command(&question) {
-                    Some(cmd) => {
-                        self.push(Entry::Note(format!("{why} · done on this handheld")));
-                        // The service's conversation stays as it was.
-                        self.remember_offline(&cmd, false);
-                    }
-                    None => {
-                        self.push(Entry::Note(format!("{why} · made offline, with no model")));
-                        self.brief_offline(briefing::asked(&question).flatten(), robot);
-                    }
-                };
+                if memory::command(&question) == Some(memory::Command::List) {
+                    self.push(Entry::Note(format!("{why} · read on this handheld")));
+                    return self.list_memory(false);
+                }
+                if let Some(kind) = briefing::asked(&question) {
+                    self.push(Entry::Note(format!("{why} · made offline, with no model")));
+                    return self.brief_offline(kind, robot);
+                }
+                self.push(Entry::Note(format!("{why} · done on this handheld")));
+                return self.run_rules(device::rules(&question).unwrap_or_default(), robot);
             }
             // No internet: a question the logs can answer, or any question
             // when a model is on this handheld, is answered offline, on this
@@ -2390,13 +2398,7 @@ impl Assistant {
         match reply.stop {
             Stop::Answered => {
                 self.keep();
-                if let Some(a) = self.activity.take() {
-                    a.done(if self.steps == 0 { "answer ready".to_owned() } else { format!("{} done", count_words(self.steps, "step")) });
-                }
-                // An app asked for opens a moment after the answer appears.
-                if let Some((_, at @ None)) = &mut self.open {
-                    *at = Some(self.clock + OPEN_AFTER);
-                }
+                self.finished();
                 // Said aloud too, when answers are (Assistant › choices).
                 if !reply.text.trim().is_empty() {
                     crate::voice::answer(&plain(&reply.text), self.aloud);
@@ -2480,6 +2482,9 @@ impl Assistant {
             }
         }
         let outcomes = std::mem::take(&mut self.outcomes);
+        if self.by_rules {
+            return self.rules_done(&outcomes);
+        }
         if let Some(chat) = &mut self.chat {
             chat.answer(&outcomes);
         }
@@ -2665,6 +2670,7 @@ impl Assistant {
         self.busy = Busy::Idle;
         self.activity = None;
         self.open = None;
+        self.by_rules = false;
         if let Some(chat) = &mut self.chat {
             chat.rewind(self.mark);
         }
@@ -2704,7 +2710,7 @@ impl Assistant {
                 }
                 Entry::Step { .. } => Laid { lines: Vec::new(), h: cap_lh, levels: Vec::new() },
                 Entry::Asks { reason, command, .. } => {
-                    let mut lines = crate::help::wrap(g, reason, ty.caption, W - 2.0 * PAD - 24.0);
+                    let mut lines = crate::help::wrap(g, &units_together(reason), ty.caption, W - 2.0 * PAD - 24.0);
                     // An Action's reason, its command under it; a change's
                     // words in full (they say what it does).
                     lines.truncate(if command.is_empty() { 6 } else { 3 });
@@ -2913,6 +2919,15 @@ fn step_words(call: &Call) -> StepWords {
         "timer" => StepWords { working: "starting a timer".into(), done: "no timer started".into() },
         "note_add" => StepWords { working: "writing a note".into(), done: "the note not written".into() },
         "music_play" => StepWords { working: "finding music".into(), done: "nothing played".into() },
+        "music_control" => {
+            let working = match call.input["action"].as_str().unwrap_or_default() {
+                "pause" => "pausing the music",
+                "next" => "skipping a song",
+                "previous" => "going back a song",
+                _ => "playing again",
+            };
+            StepWords { working: working.into(), done: "the music not changed".into() }
+        }
         "music_download" => StepWords { working: "finding the music".into(), done: "nothing downloaded".into() },
         "open_app" => {
             let app = call.input["app"].as_str().unwrap_or("the app").trim();
@@ -2929,6 +2944,25 @@ fn step_words(call: &Call) -> StepWords {
         "memory_forget" => StepWords { working: "forgetting".into(), done: "nothing forgotten".into() },
         other => same(&other.replace('_', " ")),
     }
+}
+
+/// The notification for a question answered, if it took `LONG_ANSWER` or
+/// more and `reply` is the answer (a reply that calls tools is a step on the
+/// way): that it is written, or, after steps, that they are done.
+fn answered_notice(service: Service, reply: &Value, took: std::time::Duration, steps: usize, question: &str) -> Option<crate::notify::Notification> {
+    let answer = match service {
+        Service::Claude => reply["stop_reason"] == "end_turn",
+        Service::OpenAi => reply["status"] == "completed" && !reply["output"].as_array().is_some_and(|o| o.iter().any(|i| i["type"] == "function_call")),
+        Service::Local => true,
+    };
+    if took < LONG_ANSWER || !answer {
+        return None;
+    }
+    let n = match steps {
+        0 => crate::notify::Notification::new("Assistant", "auto_awesome", "your answer is written"),
+        k => crate::notify::Notification::new("Assistant", "auto_awesome", format!("{} done", count_words(k, "step"))).body(short(question, 60)),
+    };
+    Some(n.tag("assistant:answer").action("builtin:Assistant"))
 }
 
 /// "1 step", "3 steps".
@@ -2950,8 +2984,8 @@ pub(crate) fn chat_line(g: &Gfx) -> f32 {
     g.ty.caption.size + 3.5
 }
 
-/// A number kept on the line with its unit ("6.3 V", "4 s", "72%"): the
-/// space between them one that does not break.
+/// A number kept on the line with its unit ("6.3 V", "4 s", "8 min", "+1
+/// more"): the space between them one that does not break.
 fn units_together(text: &str) -> String {
     let words: Vec<&str> = text.split(' ').collect();
     let mut out = String::with_capacity(text.len());
@@ -2959,7 +2993,7 @@ fn units_together(text: &str) -> String {
         if i > 0 {
             let unit = word.trim_end_matches([',', '.', ';', ')', ':']);
             let number = words[i - 1].chars().last().is_some_and(|c| c.is_ascii_digit());
-            let held = number && matches!(unit, "V" | "A" | "s" | "ms" | "°C" | "m" | "%" | "rps" | "°" | "times" | "vs");
+            let held = number && matches!(unit, "V" | "A" | "s" | "ms" | "°C" | "m" | "h" | "min" | "%" | "rps" | "°" | "times" | "vs" | "MB" | "GB" | "more" | "left");
             out.push(if held { '\u{a0}' } else { ' ' });
         }
         out.push_str(word);
@@ -3207,7 +3241,6 @@ impl Screen for Assistant {
             }
             Busy::Tool { rx, .. } => match rx.try_recv() {
                 Ok(result) => {
-                    eprintln!("DBG tool result {:?}", std::time::Instant::now());
                     let Busy::Tool { id, row, done, .. } = std::mem::replace(&mut self.busy, Busy::Idle) else { return Nav::Stay };
                     let doing = matches!(self.entries.get(row), Some((Entry::Did { .. }, _)));
                     match result {
@@ -3354,6 +3387,12 @@ impl Screen for Assistant {
         let Some((_, _, laid)) = self.laid.clone() else { return };
         let total: f32 = laid.iter().map(|l| l.h + GAP).sum::<f32>() + if self.idle() || approving { 0.0 } else { ty.caption.size + 10.0 };
         let max = (total - area.h).max(0.0);
+        // A card taller than the room left (a briefing's): shown from its
+        // top, the rest a scroll down, rather than from its foot.
+        if let Some(i) = self.land.take().filter(|i| *i < laid.len()) {
+            let from_top: f32 = laid[i..].iter().map(|l| l.h + GAP).sum::<f32>() - GAP;
+            self.scroll.set((from_top - area.h + 2.0).clamp(0.0, max));
+        }
         if self.scroll.target() > max {
             self.scroll.set(max);
         }
@@ -3841,7 +3880,7 @@ impl Confirm {
         let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         let title_y = top + 1.0 + ty.name.size * 0.5;
         let y = top + 1.0 + ty.name.size + 6.0;
-        let lines = crate::help::wrap(g, &self.command, chat_style(g), W - 2.0 * PAD - 16.0);
+        let lines = crate::help::wrap(g, &units_together(&self.command), chat_style(g), W - 2.0 * PAD - 16.0);
         let words = Rect::new(PAD, y, W - 2.0 * PAD, lines.len() as f32 * chat_line(g) + 8.0);
         // The answers side by side, resting on the hint with room for the ring.
         let answers = Rect::new(PAD, bottom - row_h - 3.0, W - 2.0 * PAD, row_h);
@@ -4047,7 +4086,7 @@ impl Screen for Choices {
             5 => "hold alt anywhere to ask aloud",
             6 => self.voice.voice.about(),
             // Longest first, whole: the first that fits.
-            7 => return g.hint_any(&["what you told it to remember · never keys", "what you told it to remember", "never keys or passwords"]),
+            7 => return g.hint_any(&["kept on this handheld · never keys or passwords", "kept on this handheld · never keys", "kept on this handheld"]),
             8 => return g.hint_any(&["enter: a time, or off · reminders brings it", "enter: a time, or off"]),
             _ => return g.hint_any(&["30 min before each match, 10 before queueing", "30 min before each match"]),
         });
@@ -4142,12 +4181,16 @@ impl Screen for Conversations {
 
 // ---------------------------------------------------------------- memory ---
 
-/// What the assistant remembers, a thing to a row, each whole however long:
-/// `d` twice forgets one, Enter opens the file itself to change, and the
-/// last row forgets all of it (Enter twice).
+/// What the assistant remembers, a thing to a row, each whole however long,
+/// under where it is kept and where it goes: `d` twice forgets one, Enter
+/// opens the file itself to change, and the last row forgets all of it
+/// (Enter twice).
 pub struct MemoryPage {
     file: PathBuf,
     facts: Vec<String>,
+    /// The company it goes to with each question, while OpenAI or Claude
+    /// answers; `None` offline, where it never leaves the handheld.
+    sent_to: Option<&'static str>,
     focus: usize,
     /// Down from the top, in pixels: it glides to keep the focused row whole.
     scroll: Animated,
@@ -4157,12 +4200,47 @@ pub struct MemoryPage {
 
 impl MemoryPage {
     pub fn new(file: PathBuf) -> Self {
-        MemoryPage { facts: memory::load(&file), file, focus: 0, scroll: Animated::new(0.0, role::settle()).with_rest(0.3), deleting: None }
+        MemoryPage { facts: memory::load(&file), file, sent_to: Self::sent_to(), focus: 0, scroll: Animated::new(0.0, role::settle()).with_rest(0.3), deleting: None }
+    }
+
+    fn sent_to() -> Option<&'static str> {
+        answering(&Prefs::load(), &Keys::load()).map(|(s, _)| s).filter(|s| s.online()).map(Service::company)
+    }
+
+    /// Where it is kept, and whether anything of it leaves the handheld:
+    /// a line each.
+    fn where_kept(&self) -> [String; 2] {
+        let goes = match self.sent_to {
+            Some(company) => format!("sent to {} only with your questions", company.to_lowercase()),
+            None => "offline: it never leaves the handheld".into(),
+        };
+        ["kept on this handheld, in memory.md".into(), goes]
     }
 
     /// Rows: each thing remembered, then forgetting everything.
     fn rows(&self) -> usize {
         self.facts.len() + 1
+    }
+
+    /// Where it is kept, as its lines at the top of the page, and their height.
+    fn kept_lines(&self, g: &mut Gfx) -> (Vec<String>, f32) {
+        let cap = g.ty.caption;
+        let lines: Vec<String> = self.where_kept().iter().flat_map(|said| crate::help::wrap(g, said, cap, W - 2.0 * PAD - 22.0)).collect();
+        let h = lines.len() as f32 * (cap.size + 4.0);
+        (lines, h)
+    }
+
+    /// Where it is kept, drawn from `y` (faded by `fade`).
+    fn draw_kept(&self, g: &mut Gfx, lines: &[String], y: f32, fade: &dyn Fn(f32) -> f32) {
+        let t = g.tokens;
+        let cap = g.ty.caption;
+        let lh = cap.size + 4.0;
+        let icon = if self.sent_to.is_some() { "cloud" } else { "lock" };
+        g.icon_alpha(icon, false, PAD + 8.0, y + lh * 0.5, 13.0, t.dim, fade(y + lh * 0.5));
+        for (k, line) in lines.iter().enumerate() {
+            let cy = y + (k as f32 + 0.5) * lh;
+            g.text_alpha(PAD + 20.0, cy, line, cap, t.dim, fade(cy));
+        }
     }
 }
 
@@ -4174,6 +4252,7 @@ impl Screen for MemoryPage {
     fn resume(&mut self) {
         // Back from the file, changed by hand perhaps.
         self.facts = memory::load(&self.file);
+        self.sent_to = Self::sent_to();
         self.focus = self.focus.min(self.rows() - 1);
     }
 
@@ -4226,18 +4305,27 @@ impl Screen for MemoryPage {
     fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
         let t = g.tokens;
         let ty = g.ty;
+        let (top, bottom) = (g.top(), g.above_hint());
+        let (kept, kept_h) = self.kept_lines(g);
         if self.facts.is_empty() {
-            g.empty("push_pin", "nothing remembered yet · tell the assistant “remember …”");
+            // Where it would be kept, then that nothing is, in the room left.
+            self.draw_kept(g, &kept, top, &|_| 1.0);
+            let cy = (top + kept_h + bottom) * 0.5;
+            g.icon("push_pin", false, W * 0.5, cy - 12.0, 24.0, t.faint);
+            let lines = crate::help::wrap(g, "nothing remembered yet · tell the assistant “remember …”", ty.caption, W - 2.0 * PAD);
+            for (k, words) in lines.iter().enumerate() {
+                g.text_at(W * 0.5, cy + 12.0 + k as f32 * (ty.caption.size + 4.0), Align::Center, words, ty.caption, t.dim);
+            }
             g.hint_any(&["it never keeps passwords or keys", "never passwords or keys"]);
             return;
         }
-        let (top, bottom) = (g.top(), g.above_hint());
         let (chat, lh) = (chat_style(g), chat_line(g));
         let bezel = g.theme == crate::look::Theme::Bezel;
         let width = W - 2.0 * PAD;
-        // Each row's place, from the top of the list: a thing whole, or the last row.
+        // Each row's place, from the top of the list (under where it is
+        // kept): a thing whole, or the last row.
         let mut rows: Vec<(f32, f32, Vec<String>)> = Vec::with_capacity(self.rows());
-        let mut y = 0.0;
+        let mut y = kept_h + 6.0;
         for fact in &self.facts {
             let lines = crate::help::wrap(g, &units_together(fact), chat, width - 34.0);
             let h = lines.len() as f32 * lh + 10.0;
@@ -4245,12 +4333,14 @@ impl Screen for MemoryPage {
             y += h + 4.0;
         }
         rows.push((y, g.row_h(), Vec::new()));
-        // The focused row whole in view, with room for its ring.
+        // The focused row whole in view, with room for its ring; the first
+        // with where it is kept above it.
         let view = bottom - top - crate::gfx::RING_ROOM;
         let (fy, fh, _) = &rows[self.focus.min(rows.len() - 1)];
+        let (fy, fh) = if self.focus == 0 { (0.0, fy + fh) } else { (*fy, *fh) };
         let mut target = self.scroll.target();
         if fy - target < 0.0 {
-            target = *fy;
+            target = fy;
         } else if fy + fh - target > view {
             target = fy + fh - view;
         }
@@ -4263,6 +4353,7 @@ impl Screen for MemoryPage {
         let scroll = self.scroll.value();
         g.canvas.set_clip(Rect::new(0.0, top - 3.0, W, bottom - top + 3.0 + crate::gfx::FOOT_AIR));
         let fade = |cy: f32| ((bottom - cy) / EDGE).clamp(0.0, 1.0).min(((cy - top + 6.0) / EDGE).clamp(0.0, 1.0));
+        self.draw_kept(g, &kept, top - scroll, &fade);
         let mut ring = None;
         for (i, (ry, h, lines)) in rows.iter().enumerate() {
             let r = Rect::new(PAD, top + ry - scroll, width, *h);
@@ -4270,19 +4361,22 @@ impl Screen for MemoryPage {
                 continue;
             }
             let focused = i == self.focus;
+            let armed = self.deleting == Some(i);
             let radius = if bezel { g.radius(7.0) } else { 12.0_f32.min(r.h * 0.5) };
             let fill = if focused { t.surface2 } else { t.surface1 };
             g.canvas.rrect(r.offset(g.ox, 0.0), radius, fill, fade(r.y + 8.0).min(fade(r.bottom() - 8.0)).max(if focused { 1.0 } else { 0.0 }));
             if i < self.facts.len() {
+                // A thing remembered: its pin, or, asked once to forget it,
+                // the bin in the fault's colour.
                 let first = r.y + 5.0 + lh * 0.5;
-                g.icon_alpha("push_pin", focused, r.x + 13.0, first, 12.0, if focused { t.signal } else { t.dim }, fade(first));
+                let (icon, color) = if armed { ("delete", g.fault()) } else if focused { ("push_pin", t.signal) } else { ("push_pin", t.dim) };
+                g.icon_alpha(icon, focused && !armed, r.x + 13.0, first, 12.0, color, fade(first));
                 for (k, line) in lines.iter().enumerate() {
                     let cy = first + k as f32 * lh;
                     g.text_alpha(r.x + 26.0, cy, line, chat, t.ink, fade(cy));
                 }
             } else {
                 // Forgetting everything: a row of its own, at the end.
-                let armed = self.deleting == Some(i);
                 let (name, value) = if armed { ("Enter again to forget", String::new()) } else { ("Forget everything", count_words(self.facts.len(), "thing")) };
                 let style = if bezel { ty.label } else { ty.body };
                 let name = if bezel { name.to_lowercase() } else { name.to_owned() };
@@ -4592,7 +4686,7 @@ mod tests {
             [
                 "robot_status", "robot_values", "robot_agent", "match_logs", "match_facts", "event_schedule", "graph_values", "read_file", "handheld_status", "list_actions", "run_action",
                 // Those that act on the handheld, brief and remember.
-                "reminder_add", "timer", "note_add", "music_play", "music_download", "open_app", "setting_set", "next_match", "start_download", "briefing", "memory_save", "memory_forget",
+                "reminder_add", "timer", "note_add", "music_play", "music_control", "music_download", "open_app", "setting_set", "next_match", "start_download", "briefing", "memory_save", "memory_forget",
             ]
         );
         // The on-device model: OpenAI-style chat completions, its own short
@@ -4698,16 +4792,18 @@ mod tests {
     fn secrets_under_data_are_never_given_out() {
         crate::shell::tests::sandbox();
         let root = data_root();
+        // A file of its own in the notes folder, which other tests write in
+        // at the same time (so only it is taken away after).
         std::fs::create_dir_all(root.join("notes")).unwrap();
-        std::fs::write(root.join("notes/pit.txt"), "swap battery 3").unwrap();
-        let read = read_file("/data/notes/pit.txt").unwrap();
+        std::fs::write(root.join("notes/ai-test-pit.txt"), "swap battery 3").unwrap();
+        let read = read_file("/data/notes/ai-test-pit.txt").unwrap();
         assert!(read.contains("swap battery 3"), "{read}");
-        assert!(read_file("/data/notes").unwrap().contains("pit.txt"), "a folder lists its files");
+        assert!(read_file("/data/notes").unwrap().contains("ai-test-pit.txt"), "a folder lists its files");
         for secret_path in ["/data/catalyst/keys", "/data/wifi/wpa_supplicant.conf", "/data/ssh/id_ed25519", "/data/tailscale/state", "/data/x/api.token"] {
             assert!(secret(std::path::Path::new(secret_path)), "{secret_path}");
         }
         assert!(read_file("/data/../../etc/passwd").is_err(), "nothing above /data");
-        std::fs::remove_dir_all(root.join("notes")).ok();
+        std::fs::remove_file(root.join("notes/ai-test-pit.txt")).ok();
     }
 
     #[test]
@@ -4868,16 +4964,21 @@ mod tests {
         assert_eq!(value_json(&nt4::Value::Double(1.234567)), json!(1.2346));
     }
 
-    /// Drive the page until it has nothing under way (or `limit` frames).
+    /// Drive the page until it has nothing under way (or `limit` frames; and
+    /// past them while a thread is still at work, for up to half a minute:
+    /// reading the logs takes longer in the handheld's build under emulation).
     fn run(page: &mut Assistant, robot: &mut Robot, settings: &mut crate::shell::Settings, say: &mut Option<String>, limit: usize) {
-        for _ in 0..limit {
+        let began = std::time::Instant::now();
+        for frame in 0.. {
             page.tick(0.1);
             let mut cx = Cx { robot, settings, say, at_rest: true };
             page.update(&mut cx);
-            if page.idle() || matches!(page.busy, Busy::Approving { .. }) {
-                if page.waited > DEMO_PAUSE + 0.2 || page.idle() && !page.entries.is_empty() {
-                    break;
-                }
+            let waiting = page.idle() || matches!(page.busy, Busy::Approving { .. });
+            if waiting && (page.waited > DEMO_PAUSE + 0.2 || page.idle() && !page.entries.is_empty()) {
+                break;
+            }
+            if frame >= limit && (waiting || began.elapsed() > Duration::from_secs(30)) {
+                break;
             }
             std::thread::sleep(Duration::from_millis(3));
         }
@@ -4896,12 +4997,20 @@ mod tests {
         let mut page = Assistant::with(Prefs::default(), Some((service, "sk-test".into())));
         let saved = |name: &str, command: &str| Saved { name: name.into(), command: command.into(), ask: crate::commands::Ask::Auto };
         page.actions_given = Some(vec![saved("Ping the robot", "ping -c 4 {robot}"), saved("Deploy robot code", "cd /data/code/robot && ./gradlew deploy")]);
-        // Each page keeps its conversations and memory apart from every other test's.
+        // Each page keeps its conversations and memory apart from every
+        // other test's, in a folder of this run's emptied when the run
+        // begins: Windows gives a new process the id of an old one, and a
+        // folder named by it alone held that run's conversations too (one
+        // more than a test expected, now and then).
         static PAGES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        static FRESH: std::sync::Once = std::sync::Once::new();
+        let run = std::env::temp_dir().join(format!("catalyst-pages-{}", std::process::id()));
+        FRESH.call_once(|| {
+            std::fs::remove_dir_all(&run).ok();
+        });
         let n = PAGES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        page.chats = std::env::temp_dir().join(format!("catalyst-page-chats-{}-{n}", std::process::id()));
-        page.memory_file = std::env::temp_dir().join(format!("catalyst-page-memory-{}-{n}.md", std::process::id()));
-        std::fs::remove_file(&page.memory_file).ok();
+        page.chats = run.join(format!("chats-{n}"));
+        page.memory_file = run.join(format!("memory-{n}.md"));
         page.chat = Some(Chat::with_memory(service, Mode::Assistant, &[]));
         page
     }
@@ -4931,6 +5040,9 @@ mod tests {
         crate::liveactivity::gather(&src, None).into_iter().filter(|a| a.kind == crate::liveactivity::Kind::Assistant).last()
     }
 
+    // Found in the simulator's own music catalogue: the handheld's build
+    // searches YouTube Music itself.
+    #[cfg(not(target_arch = "aarch64"))]
     #[test]
     fn a_task_of_several_steps_is_done_in_one_turn_each_step_shown_as_it_is_done() {
         crate::shell::tests::sandbox();
@@ -4947,8 +5059,9 @@ mod tests {
             run(&mut page, &mut robot, &mut settings, &mut say, 1500);
             let all = entries(&page);
             assert_eq!(all[0], Entry::You("download my Pit Mix playlist and remind me to swap the battery at queueing for Q42".into()));
-            // (The second service finds the songs asked for by the first still queued.)
-            assert!(matches!(&all[1], Entry::Did { words, detail, state: StepState::Done, icon } if words == "downloading Pit Crew Mix" && (detail.starts_with("10 songs · about 35 MB") || detail.starts_with("10 songs downloading already")) && icon == "downloading"), "{service:?}: {all:?}");
+            // (The second service finds the songs asked for by the first still
+            // queued, some of them saved by now perhaps.)
+            assert!(matches!(&all[1], Entry::Did { words, detail, state: StepState::Done, icon } if words == "downloading Pit Crew Mix" && device::queued_words(detail) && icon == "downloading"), "{service:?}: {all:?}");
             assert_eq!(all[2], Entry::Did { icon: "notification_add".into(), words: "reminder set · swap the battery".into(), detail: "at queueing for Q42 · waits for the schedule".into(), state: StepState::Done });
             assert!(matches!(&all[3], Entry::Said(s) if s.contains("Pit Crew Mix") && s.contains("Reminder set: swap the battery, at queueing for Q42 (Q42 is not on the schedule yet")), "{all:?}");
             assert_eq!(all.len(), 4);
@@ -5054,16 +5167,27 @@ mod tests {
             assert!(entries(&page).contains(&Entry::Did { icon: "delete".into(), words: "forgotten".into(), detail: "The robot is called Numbers".into(), state: StepState::Done }));
             assert!(memory::load(&page.memory_file).is_empty());
         }
-        // Offline: the same, by rules; the on-device model sees a tiny version.
+        // Offline: the same tools, by rules; the on-device model sees a tiny
+        // version; forgetting everything still asks first.
         let (mut robot, mut settings, mut say) = cx_parts();
         let mut page = page_for(Service::Local);
         type_and_send(&mut page, "I like short answers", &mut robot, &mut settings, &mut say);
         run(&mut page, &mut robot, &mut settings, &mut say, 400);
-        assert!(matches!(&entries(&page)[1], Entry::Said(s) if s == "I'll remember that: Likes short answers."), "{:?}", entries(&page));
+        assert_eq!(entries(&page)[1..], [Entry::Did { icon: "push_pin".into(), words: "remembered".into(), detail: "Likes short answers".into(), state: StepState::Done }, Entry::Basis { words: "done on this handheld · no model needed".into(), checked: false }], "{:?}", entries(&page));
         assert_eq!(Chat::with_memory(Service::Local, Mode::Assistant, &memory::load(&page.memory_file)).body(Effort::Medium)["messages"][0]["content"], format!("{LOCAL_SYSTEM} Remember: Likes short answers."));
         type_and_send(&mut page, "what do you remember", &mut robot, &mut settings, &mut say);
         run(&mut page, &mut robot, &mut settings, &mut say, 400);
         assert!(page.entries.iter().any(|(e, _)| matches!(e, Entry::Said(s) if s == "I remember one thing:\n· Likes short answers")));
+        type_and_send(&mut page, "forget everything", &mut robot, &mut settings, &mut say);
+        run(&mut page, &mut robot, &mut settings, &mut say, 400);
+        assert!(matches!(page.busy, Busy::Approving { pending: Pending::Device(_), .. }), "it asks first, offline too");
+        {
+            let mut cx = Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true };
+            page.key(Key::Back, &mut cx);
+        }
+        run(&mut page, &mut robot, &mut settings, &mut say, 400);
+        assert_eq!(memory::load(&page.memory_file), ["Likes short answers"], "a no keeps it");
+        assert!(page.idle());
     }
 
     #[test]
@@ -5086,8 +5210,14 @@ mod tests {
         run(&mut page, &mut robot, &mut settings, &mut say, 800);
         let all = entries(&page);
         assert!(matches!(&all[1], Entry::Briefing { title, .. } if title == "Pit briefing · Q31"), "{all:?}");
-        assert_eq!(all[2], Entry::Basis { words: "from the schedule, forecast, battery and logs · no model".into(), checked: false });
+        assert_eq!(all[2], Entry::Basis { words: "from the schedule, robot, forecast, battery and logs · no model".into(), checked: false });
         assert_eq!(page.chat.as_ref().unwrap().len(), 2, "kept in the on-device conversation, to carry on");
+        // Taller than the room under the question: shown from its top, the
+        // rest a scroll down.
+        let mut g = Gfx::new(bezel::Tokens::dark());
+        assert!(page.land.is_some());
+        page.draw(&mut g, &robot);
+        assert!(page.land.is_none() && page.scroll.target() > 0.0, "scrolled to the card's top: {}", page.scroll.target());
         // Online with no internet: made offline, saying so.
         let mut page = page_for(Service::Claude);
         page.input = "morning briefing".into();
@@ -5098,6 +5228,70 @@ mod tests {
         run(&mut page, &mut robot, &mut settings, &mut say, 800);
         assert!(entries(&page).iter().any(|e| matches!(e, Entry::Briefing { title, .. } if title.ends_with("riefing"))));
         assert_eq!(page.chat.as_ref().unwrap().len(), 0, "the service's conversation as it was");
+    }
+
+    #[test]
+    fn offline_and_with_no_internet_requests_are_still_done_by_rules() {
+        crate::shell::tests::sandbox();
+        let (mut robot, mut settings, mut say) = cx_parts();
+        // Offline: a timer and a reminder in one, each a row, then that no
+        // model was needed; the live activity counts the steps.
+        let mut page = page_for(Service::Local);
+        type_and_send(&mut page, "start a 10 minute timer and remind me to check the bumpers at queueing for Q42", &mut robot, &mut settings, &mut say);
+        assert_eq!(page.batch, (0, 2));
+        run(&mut page, &mut robot, &mut settings, &mut say, 400);
+        let all = entries(&page);
+        assert_eq!(all[1], Entry::Did { icon: "timer".into(), words: "timer started · 10:00".into(), detail: "clock counts it down".into(), state: StepState::Done }, "{all:?}");
+        assert!(matches!(&all[2], Entry::Did { words, state: StepState::Done, .. } if words == "reminder set · check the bumpers"), "{all:?}");
+        assert_eq!(all[3], Entry::Basis { words: "done on this handheld · no model needed".into(), checked: false });
+        assert_eq!(all.len(), 4);
+        assert_eq!(crate::clock::running_timers().len(), 1);
+        assert_eq!(activity(&robot).map(|a| (a.detail, a.state)), Some(("2 steps done".into(), "done".into())));
+        assert_eq!(page.chat.as_ref().unwrap().len(), 2, "kept in the on-device conversation");
+        crate::reminders::with(|s| s.book.reminders.retain(|r| r.text != "check the bumpers"));
+        // Stopping several timers asks first; a yes stops them.
+        type_and_send(&mut page, "start a 5 min timer", &mut robot, &mut settings, &mut say);
+        run(&mut page, &mut robot, &mut settings, &mut say, 400);
+        type_and_send(&mut page, "stop the timers", &mut robot, &mut settings, &mut say);
+        run(&mut page, &mut robot, &mut settings, &mut say, 400);
+        assert!(matches!(page.entries.last(), Some((Entry::Asks { name, state: AskState::Waiting, .. }, _)) if name == "Stop 2 timers"));
+        page.approve(true, &robot);
+        run(&mut page, &mut robot, &mut settings, &mut say, 400);
+        assert!(crate::clock::running_timers().is_empty());
+        assert!(entries(&page).iter().any(|e| matches!(e, Entry::Did { words, .. } if words == "2 timers stopped")));
+        // Not a request: on to the logs, as before.
+        assert!(device::rules("why did we brown out in Q14?").is_none());
+        // With no internet, a service's request is done the same way, saying
+        // so, and its conversation is left as it was.
+        let mut page = page_for(Service::Claude);
+        settings.battery.saver = false;
+        page.input = "turn battery saver on".into();
+        page.send(&robot);
+        page.busy = Busy::Idle;
+        page.took(Err("no internet: the service's name did not resolve".into()), &robot);
+        run(&mut page, &mut robot, &mut settings, &mut say, 400);
+        let all = entries(&page);
+        assert_eq!(all[1], Entry::Note("no internet: the service's name did not resolve · done on this handheld".into()));
+        assert!(matches!(&all[2], Entry::Did { words, .. } if words == "battery saver on"), "{all:?}");
+        assert!(settings.battery.saver);
+        assert_eq!(page.chat.as_ref().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_long_answer_or_task_is_a_notification_once_it_is_the_answer() {
+        let long = LONG_ANSWER + Duration::from_secs(1);
+        let claude = |stop: &str| json!({"content": [{"type": "text", "text": "Done."}], "stop_reason": stop});
+        let openai = |kind: &str| json!({"status": "completed", "output": [{"type": kind, "id": "x"}]});
+        // Quick, or a step on the way (tools still to call): none.
+        assert!(answered_notice(Service::Claude, &claude("end_turn"), Duration::from_secs(3), 0, "q").is_none());
+        assert!(answered_notice(Service::Claude, &claude("tool_use"), long, 0, "q").is_none());
+        assert!(answered_notice(Service::OpenAi, &openai("function_call"), long, 1, "q").is_none());
+        // The answer, after a while: written, or the steps done.
+        let n = answered_notice(Service::Claude, &claude("end_turn"), long, 0, "how is the robot?").unwrap();
+        assert_eq!((n.title.as_str(), n.body.as_str(), n.leads_to().as_deref()), ("your answer is written", "", Some("builtin:Assistant")));
+        let n = answered_notice(Service::OpenAi, &openai("message"), long, 2, "turn light mode off and start a 3 min timer").unwrap();
+        assert_eq!((n.title.as_str(), n.body.as_str()), ("2 steps done", "turn light mode off and start a 3 min timer"));
+        assert_eq!(n.tag.as_deref(), Some("assistant:answer"), "a newer one takes its place");
     }
 
     #[test]

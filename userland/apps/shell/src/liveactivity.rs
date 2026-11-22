@@ -667,7 +667,7 @@ impl Activities {
     }
 
     /// For the tests and the galleries: these, as if just gathered.
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub fn set(&mut self, mut list: Vec<Activity>, calm: bool) {
         rank(&mut list);
         self.take(list, calm);

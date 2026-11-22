@@ -10,9 +10,11 @@
 //! | tool | | why |
 //! |---|---|---|
 //! | `reminder_add` | at once | it only adds; Reminders ticks it off or deletes it |
-//! | `timer` | at once | a timer is not kept data, and starting or stopping one is the whole of the ask |
+//! | `timer` start, or stop one | at once | a timer is not kept data, and starting or stopping one is the whole of the ask |
+//! | `timer` stop several | asks | each one's time left is lost, and "stop the timer" may have meant one |
 //! | `note_add` | at once | a new note, or lines added at a note's end: nothing written over |
 //! | `music_play` | at once | Esc or the play key stops it |
+//! | `music_control` | at once | pause, carry on, next, back: each is one key back |
 //! | `music_download` | at once, up to `BIG_SONGS` songs or `BIG_BYTES` | Music › Downloads cancels it, and it waits politely (Wi-Fi, battery); more than that asks, for the card's room |
 //! | `open_app` | at once | it only goes somewhere; Esc comes back |
 //! | `setting_set` battery saver, brightness, light | at once | each is one switch back, in the control centre |
@@ -25,6 +27,11 @@
 //! | `memory_forget` everything | asks | it deletes the whole memory |
 //!
 //! (There is no Do Not Disturb on the handheld; the setting tool says so.)
+//!
+//! **Offline**, with no model to choose the tools, [`rules`] reads plain
+//! requests ("start a 10 min timer and remind me to check the bumpers at
+//! queueing") into the same calls, so they are done, shown and asked about
+//! just as they are online.
 
 use std::path::Path;
 
@@ -56,7 +63,7 @@ pub fn specs() -> Vec<(&'static str, &'static str, Value)> {
         ),
         (
             "timer",
-            "Start a countdown timer in Clock, or stop timers running. Runs at once. The island says when one is done.",
+            "Start a countdown timer in Clock, or stop timers running. Runs at once, except stopping several, which asks first. The island says when one is done.",
             schema(json!({"action": pick(&["start", "stop"], "Start one, or stop."), "length": text("How long: \"10 min\", \"2:30\", \"90 s\", \"1 h 20 min\". To stop: the length of the one to stop, or empty for every timer.")}), &["action", "length"]),
         ),
         (
@@ -75,6 +82,11 @@ pub fn specs() -> Vec<(&'static str, &'static str, Value)> {
             "music_play",
             "Search YouTube Music for songs and play them, the first now and the rest after it, behind whatever else is open. Runs at once.",
             schema(json!({"query": text("What to play: a song, an artist, a mood.")}), &["query"]),
+        ),
+        (
+            "music_control",
+            "Pause the music, carry on playing, skip to the next song or go back one. Runs at once.",
+            schema(json!({"action": pick(&["pause", "resume", "next", "previous"], "Which.")}), &["action"]),
         ),
         (
             "music_download",
@@ -200,6 +212,8 @@ pub enum ActKind {
     Update(String),
     ForgetAll,
     Download { title: String, opened: crate::music::Opened },
+    /// The timers to stop: each one's id and length.
+    StopTimers(Vec<(u32, f64)>),
 }
 
 impl Act {
@@ -227,6 +241,15 @@ impl Act {
                 Plan::Now(Ok(Done::new("forgot everything", format!("{} gone", count(n, "thing")), "delete", json!({"done": format!("Forgot all {n} remembered things.")}))))
             }
             ActKind::Download { title, opened } => Plan::Now(Ok(save(&title, &opened))),
+            ActKind::StopTimers(timers) => {
+                // Those that ran out meanwhile are gone already: the rest.
+                let stopped = timers.iter().filter(|(id, _)| crate::clock::remove_timer(*id)).count();
+                if stopped == 0 {
+                    return Plan::Now(Err("they had run out already".into()));
+                }
+                let lengths = timers.iter().map(|(_, total)| crate::clock::length(*total)).collect::<Vec<_>>().join(", ");
+                Plan::Now(Ok(Done::new(format!("{} stopped", count(stopped, "timer")), lengths, "timer", json!({"done": format!("Stopped {}.", count(stopped, "timer"))}))))
+            }
         }
     }
 }
@@ -246,8 +269,17 @@ pub fn plan(call: &Call, cx: &Ctx) -> Option<Plan> {
     let s = |key: &str| call.input[key].as_str().unwrap_or_default().trim().to_owned();
     Some(match call.name.as_str() {
         "reminder_add" => Plan::Now(reminder_add(&s("text"), cx)),
-        "timer" => Plan::Now(timer(&s("action"), &s("length"))),
+        "timer" => timer(&s("action"), &s("length")),
         "note_add" => Plan::Now(note_add(&s("title"), &s("text"), &s("append_to"), cx)),
+        "music_control" => Plan::Now(crate::music::control(&s("action")).map(|(words, song)| {
+            let icon = match s("action").as_str() {
+                "pause" => "pause",
+                "next" => "skip_next",
+                "previous" => "skip_previous",
+                _ => "play_arrow",
+            };
+            Done::new(words.clone(), song.clone(), icon, json!({"done": format!("Music: {words}."), "song": song}))
+        })),
         "music_play" => {
             let query = s("query");
             Plan::Work { working: format!("finding {}", super::short(&query, 40)), icon: "music_note", job: Box::new(move || play(&query).map(Step::Done)) }
@@ -376,28 +408,48 @@ fn length_of(said: &str) -> Option<f64> {
     crate::clock::parse_length(t.trim())
 }
 
-fn timer(action: &str, length: &str) -> Result<Done, String> {
-    if action == "stop" {
-        let running = crate::clock::running_timers();
-        if running.is_empty() {
-            return Err("no timer is running".into());
-        }
-        let wanted = length_of(length);
-        let stop: Vec<(u32, f64, f64)> = running.into_iter().filter(|(_, total, _)| wanted.is_none_or(|w| (w - total).abs() < 1.0)).collect();
-        if stop.is_empty() {
-            return Err(format!("no {} timer is running", crate::clock::length(wanted.unwrap_or(0.0))));
-        }
-        for (id, ..) in &stop {
+/// A timer started, or those running stopped: one at once, several only
+/// after a yes.
+fn timer(action: &str, length: &str) -> Plan {
+    if action != "stop" {
+        return Plan::Now(start_timer(length));
+    }
+    let running = crate::clock::running_timers();
+    if running.is_empty() {
+        return Plan::Now(Err("no timer is running".into()));
+    }
+    let wanted = length_of(length);
+    let stop: Vec<(u32, f64, f64)> = running.into_iter().filter(|(_, total, _)| wanted.is_none_or(|w| (w - total).abs() < 1.0)).collect();
+    match stop.as_slice() {
+        [] => Plan::Now(Err(format!("no {} timer is running", crate::clock::length(wanted.unwrap_or(0.0))))),
+        [(id, total, left)] => {
             crate::clock::remove_timer(*id);
+            let shown = crate::clock::length(*total);
+            Plan::Now(Ok(Done::new(format!("timer stopped · {shown}"), format!("{} was left", crate::clock::length(left.ceil())), "timer", json!({"done": format!("Stopped the {shown} timer.")}))))
         }
-        let (_, total, left) = stop[0];
-        let words = if stop.len() == 1 { format!("timer stopped · {}", crate::clock::length(total)) } else { format!("{} timers stopped", stop.len()) };
-        return Ok(Done::new(words, format!("{} was left", crate::clock::length(left.ceil())), "timer", json!({"done": format!("Stopped {}.", count(stop.len(), "timer"))})));
+        several => {
+            let each: Vec<String> = several.iter().map(|(_, total, left)| format!("{} ({} left)", crate::clock::length(*total), crate::clock::length(left.ceil()))).collect();
+            let (rest, last) = each.split_at(each.len() - 1);
+            let which = if several.len() == 2 { "Both timers".to_owned() } else { format!("All {} timers", several.len()) };
+            Plan::Ask(Act {
+                title: format!("Stop {} timers", several.len()),
+                what: format!("{which} in Clock stop and are taken away: {} and {}.", rest.join(", "), last[0]),
+                yes: "Stop them".into(),
+                no: "Keep them".into(),
+                kind: ActKind::StopTimers(several.iter().map(|(id, total, _)| (*id, *total)).collect()),
+            })
+        }
+    }
+}
+
+fn start_timer(length: &str) -> Result<Done, String> {
+    if length.trim().is_empty() {
+        return Err("say how long: “10 min” or “2:30”".into());
     }
     let seconds = length_of(length).ok_or_else(|| format!("“{length}” is not a length Clock reads: say “10 min” or “2:30”"))?;
     crate::clock::add_timer(seconds);
     let shown = crate::clock::length(seconds);
-    Ok(Done::new(format!("timer started · {shown}"), "clock counts it down · the island says when it is done", "timer", json!({"done": format!("A {shown} timer is running in Clock."), "seconds": seconds})))
+    Ok(Done::new(format!("timer started · {shown}"), "clock counts it down", "timer", json!({"done": format!("A {shown} timer is running in Clock."), "seconds": seconds})))
 }
 
 // ---------------------------------------------------------------- notes ---
@@ -434,11 +486,18 @@ fn note_add(title: &str, text: &str, append_to: &str, cx: &Ctx) -> Result<Done, 
     let now = chrono::Local::now();
     let label = cx.robot.schedule.view().and_then(|v| v.next(chrono::Utc::now().timestamp()).map(|m| m.label.clone()));
     let body = format!("{title}\n{text}\n\n{}\n", crate::notes::stamp(label.as_deref(), now));
+    // Named by the time, as Notes names one; the name is claimed before it
+    // is written, so two notes made in the same second never share it.
     let mut name = now.format("%Y-%m-%d-%H%M%S").to_string();
-    while dir.join(format!("{name}.txt")).exists() {
-        name.push('b');
-    }
-    crate::sys::write_atomic(&dir.join(format!("{name}.txt")), body.as_bytes()).map_err(|_| "the note could not be written".to_owned())?;
+    let path = loop {
+        let path = dir.join(format!("{name}.txt"));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => break path,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => name.push('b'),
+            Err(_) => return Err("the note could not be written".into()),
+        }
+    };
+    crate::sys::write_atomic(&path, body.as_bytes()).map_err(|_| "the note could not be written".to_owned())?;
     Ok(Done::new(format!("note made · {title}"), super::short(text, 90), "sticky_note_2", json!({"done": format!("A note “{title}” is in Notes."), "note": title})))
 }
 
@@ -478,12 +537,9 @@ fn download(query: &str, kind: &str) -> Result<Step, String> {
         "artist" => crate::music::Kind::Artist,
         _ => crate::music::Kind::Playlist,
     };
-    eprintln!("DBG search {:?}", std::time::Instant::now());
     let found = crate::music::search_collections(query, kind)?;
-    eprintln!("DBG found {:?}", std::time::Instant::now());
     let c = best(&found, query).cloned().ok_or_else(|| format!("nothing on YouTube Music is called “{query}”"))?;
     let opened = crate::music::open_collection(&c)?;
-    eprintln!("DBG opened {:?}", std::time::Instant::now());
     if opened.tracks.is_empty() {
         return Err(format!("{} has no songs to save", c.title));
     }
@@ -503,11 +559,9 @@ fn download(query: &str, kind: &str) -> Result<Step, String> {
 /// An album's, playlist's or artist's songs put in the download queue.
 fn save(title: &str, opened: &crate::music::Opened) -> Done {
     let added = crate::music::save_opened(opened, title);
-    eprintln!("DBG added {added} {:?}", std::time::Instant::now());
     let bytes = crate::music::estimate(&opened.tracks);
     let shown = size(bytes);
     let wait = crate::music::download_wait();
-    eprintln!("DBG wait {wait:?}");
     if added == 0 {
         let (on_card, waiting) = crate::music::saved_or_waiting(&opened.tracks);
         if waiting == 0 {
@@ -683,6 +737,277 @@ fn start_download(what: &str) -> Plan {
     }
 }
 
+// ----------------------------------------------------------------- rules ---
+
+/// How a request begins: the words a clause after "and" or "then" must
+/// start with to be a request of its own (else it belongs to the one before:
+/// "remind me to grab the cart and the spare").
+const STARTS: [&str; 39] = [
+    "remind ", "remember to ", "don't forget to ", "do not forget to ", "set ", "add ", "start ", "stop ", "cancel ", "pause", "resume", "unpause", "skip", "next song",
+    "previous song", "go back a song", "keep playing", "carry on playing", "play ", "open ", "go to ", "turn ", "switch ", "enable ", "disable ", "change ", "use ", "dim ",
+    "brighten ", "brightness", "download ", "install ", "retry ", "note", "make ", "take a note", "write ", "jot down", "when",
+];
+
+/// Words before a request that are only polite.
+const POLITE: [&str; 16] = [
+    "please ", "can you ", "could you ", "would you ", "will you ", "hey ", "ok ", "okay ", "also ", "now ", "then ", "and ", "i want you to ", "i'd like you to ", "go ahead and ", "just ",
+];
+
+/// The tools a request calls, read by rules rather than a model: offline (or
+/// with no internet), so what can be done on the handheld still is. Plain
+/// requests only, one or several joined by "and", "then" or a comma ("start
+/// a 10 min timer and remind me to check the bumpers at queueing"); `None`
+/// if it is not one, so the question goes on to the logs or the model.
+/// "What do you remember" and briefings are the caller's.
+pub fn rules(question: &str) -> Option<Vec<(&'static str, Value)>> {
+    let q = question.trim().trim_end_matches(['.', '!', '?']).trim();
+    let q = polite(q);
+    // Memory, whole: "remember our robot is called Numbers", "forget that".
+    match memory::command(&q) {
+        Some(memory::Command::Remember(fact)) => return Some(vec![("memory_save", json!({"fact": memory::as_kept(&fact), "replaces": ""}))]),
+        Some(memory::Command::Forget(what)) => {
+            let all = what == "everything";
+            return Some(vec![("memory_forget", json!({"fact": if all { String::new() } else { what }, "everything": all}))]);
+        }
+        Some(memory::Command::List) | None => {}
+    }
+    // Each part that reads as a request of its own; one that does not is
+    // given back to the part before it, as words of that one.
+    let mut parts: Vec<String> = Vec::new();
+    for (joint, part) in clauses(&q) {
+        match parts.last_mut() {
+            Some(last) if rule(&polite(&part)).is_none() => {
+                last.push_str(&joint);
+                last.push_str(&part);
+            }
+            _ => parts.push(part),
+        }
+    }
+    let calls: Option<Vec<(&'static str, Value)>> = parts.iter().map(|p| rule(&polite(p))).collect();
+    calls.filter(|c| !c.is_empty())
+}
+
+/// `text` without the polite words before it, or a "please" after.
+fn polite(text: &str) -> String {
+    let mut t = text.trim();
+    loop {
+        let before = t;
+        for lead in POLITE {
+            if t.get(..lead.len()).is_some_and(|h| h.eq_ignore_ascii_case(lead)) {
+                t = t[lead.len()..].trim_start();
+            }
+        }
+        for tail in [" please", ", please"] {
+            if t.len() > tail.len() && t.get(t.len() - tail.len()..).is_some_and(|h| h.eq_ignore_ascii_case(tail)) {
+                t = t[..t.len() - tail.len()].trim_end();
+            }
+        }
+        if t == before {
+            return t.to_owned();
+        }
+    }
+}
+
+/// A request cut where another begins: at "and", "then", a comma or a
+/// semicolon followed by words that start one. Each part with the joint
+/// before it (to give it back whole if it is not one after all).
+fn clauses(q: &str) -> Vec<(String, String)> {
+    const JOINTS: [&str; 8] = [", and then ", ", and ", ", then ", " and then ", " and ", " then ", "; ", ", "];
+    let lower = q.to_lowercase();
+    // The words as typed, unless lower case changed their lengths.
+    let text = if lower.len() == q.len() { q } else { lower.as_str() };
+    let mut out = Vec::new();
+    let (mut start, mut joint, mut at) = (0, String::new(), 0);
+    while at < lower.len() {
+        let next = JOINTS.iter().find(|j| lower[at..].starts_with(*j)).filter(|j| {
+            let after = polite(&lower[at + j.len()..]);
+            STARTS.iter().any(|s| after.starts_with(s))
+        });
+        if let Some(j) = next {
+            out.push((std::mem::take(&mut joint), text[start..at].to_owned()));
+            joint = text[at..at + j.len()].to_owned();
+            start = at + j.len();
+            at = start;
+            continue;
+        }
+        at += lower[at..].chars().next().map_or(1, char::len_utf8);
+    }
+    out.push((joint, text[start..].to_owned()));
+    out
+}
+
+/// The call one request makes, if it is one the rules read.
+fn rule(part: &str) -> Option<(&'static str, Value)> {
+    let part = part.trim().trim_end_matches(['.', '!', '?', ',']).trim();
+    let lower = part.to_lowercase();
+    let same = lower.len() == part.len();
+    // What follows a beginning, as typed.
+    let after = |lead: &str| -> Option<String> {
+        lower.starts_with(lead).then(|| if same { &part[lead.len()..] } else { &lower[lead.len()..] }).map(|r| r.trim().to_owned()).filter(|r| !r.is_empty())
+    };
+    let first = |leads: &[&str]| leads.iter().find_map(|l| after(l));
+    // Reminders: "remind me to …", "remember to …", "set a reminder: …".
+    let remind = [
+        "remind me to ", "remind us to ", "remind me ", "remind us ", "set a reminder to ", "set a reminder for ", "set a reminder: ", "set a reminder ", "add a reminder to ", "add a reminder: ",
+        "add a reminder ", "remember to ", "don't forget to ", "do not forget to ",
+    ];
+    if let Some(text) = first(&remind) {
+        // "in 10 min to swap the battery": the words first, as Reminders reads them.
+        let text = match text.split_once(" to ") {
+            Some((when, what)) if ["in ", "at ", "tomorrow", "tonight", "before ", "after ", "on "].iter().any(|w| when.to_lowercase().starts_with(w)) => format!("{what} {when}"),
+            _ => text,
+        };
+        return Some(("reminder_add", json!({"text": text})));
+    }
+    // Apps and Settings pages, by name ("open music", "open battery
+    // settings"); only what is there ("open the toolbox" is no app).
+    if let Some(rest) = first(&["open the ", "open ", "go to the ", "go to "]) {
+        let rest = rest.trim_end_matches(" app").to_owned();
+        let (app, page) = match rest.to_lowercase().strip_suffix(" settings") {
+            Some(page) => ("Settings".to_owned(), page.trim().to_owned()),
+            None => (rest, String::new()),
+        };
+        if open_app(&app, &page).is_ok() {
+            return Some(("open_app", json!({"app": app, "page": page})));
+        }
+    }
+    // Downloads: the update, music waiting, or a playlist, album or artist.
+    let downloads = ["download ", "install ", "retry ", "resume download", "restart download", "start the download", "start download"];
+    if downloads.iter().any(|d| lower.starts_with(d)) {
+        if lower.contains("update") {
+            return Some(("start_download", json!({"what": "update"})));
+        }
+        if !lower.starts_with("download ") && !lower.starts_with("install ") {
+            return Some(("start_download", json!({"what": "music"})));
+        }
+        let (kind, name) = match first(&["download songs by ", "download music by ", "download the songs by "]) {
+            Some(artist) => ("artist", artist),
+            None => {
+                let rest = after("download ")?;
+                let l = rest.to_lowercase();
+                (if l.ends_with(" album") { "album" } else if l.ends_with(" artist") { "artist" } else { "playlist" }, rest)
+            }
+        };
+        let mut query = name;
+        for cut in ["my ", "our ", "the "] {
+            if query.to_lowercase().starts_with(cut) {
+                query = query[cut.len()..].to_owned();
+            }
+        }
+        for cut in [" playlist", " album", " artist"] {
+            if query.to_lowercase().ends_with(cut) {
+                query.truncate(query.len() - cut.len());
+            }
+        }
+        return Some(("music_download", json!({"query": query.trim(), "kind": kind})));
+    }
+    // Timers.
+    if lower.contains("timer") {
+        let stop = ["stop", "cancel", "end ", "clear", "turn off", "kill"].iter().any(|w| lower.starts_with(w));
+        return Some(("timer", json!({"action": if stop { "stop" } else { "start" }, "length": length_said(&lower)})));
+    }
+    // Music: pause, carry on, skip, back; or something to play.
+    let control = match lower.as_str() {
+        l if l.starts_with("pause") || ["stop the music", "stop music", "stop playing", "stop the song"].contains(&l) => Some("pause"),
+        l if ["resume", "unpause", "keep playing", "carry on playing", "continue playing"].iter().any(|w| l.starts_with(w)) => Some("resume"),
+        l if l.starts_with("skip") || ["next song", "next track", "play the next song"].iter().any(|w| l.starts_with(w)) => Some("next"),
+        l if ["previous song", "previous track", "go back a song", "play the previous song", "last song"].iter().any(|w| l.starts_with(w)) => Some("previous"),
+        _ => None,
+    };
+    if let Some(action) = control {
+        return Some(("music_control", json!({"action": action})));
+    }
+    if let Some(query) = first(&["play me some ", "play some ", "play me ", "play "]) {
+        return Some(("music_play", json!({"query": query})));
+    }
+    // Settings: the screen's brightness, then a switch named and turned.
+    if lower.contains("brightness") || lower.starts_with("dim ") || lower.starts_with("brighten ") || lower.contains("screen brighter") || lower.contains("screen dimmer") {
+        let number = lower.split(|c: char| !c.is_ascii_digit()).find(|w| !w.is_empty());
+        let value = match number {
+            Some(n) => Some(n.to_owned()),
+            None if lower.contains("max") || lower.contains("full") => Some("max".into()),
+            None if lower.contains("up") || lower.contains("bright") => Some("up".into()),
+            None if lower.contains("down") || lower.contains("dim") || lower.contains("low") => Some("down".into()),
+            None => None,
+        };
+        if let Some(value) = value {
+            return Some(("setting_set", json!({"setting": "brightness", "value": value})));
+        }
+    }
+    let switch = [
+        ("battery saver", "battery_saver", false), ("low power", "battery_saver", false), ("wi-fi", "wifi", false), ("wifi", "wifi", false), ("bluetooth", "bluetooth", false),
+        ("light mode", "light_mode", false), ("dark mode", "light_mode", true), ("do not disturb", "do_not_disturb", false),
+    ];
+    if let Some((_, setting, inverted)) = switch.iter().find(|(words, ..)| lower.contains(words)) {
+        let words: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).collect();
+        // "switch to dark mode", "use light mode": on.
+        let to = ["switch to ", "change to ", "use ", "go "].iter().any(|w| lower.starts_with(w));
+        let on = to || words.iter().any(|w| matches!(*w, "on" | "enable"));
+        let off = words.iter().any(|w| matches!(*w, "off" | "disable"));
+        if on != off {
+            return Some(("setting_set", json!({"setting": setting, "value": if on != *inverted { "on" } else { "off" }})));
+        }
+    }
+    // Notes: a new one, or lines added to one by name ("add to the pit
+    // note: chain retensioned").
+    if let Some(rest) = first(&["add to my ", "add to the ", "add to "]) {
+        let (title, text) = rest.split_once(':')?;
+        let title = title.trim().trim_end_matches(" note").trim();
+        return Some(("note_add", json!({"title": "", "text": text.trim(), "append_to": title})));
+    }
+    let note = [
+        "note that ", "note: ", "make a note that ", "make a note: ", "make a note ", "take a note that ", "take a note: ", "take a note ", "write a note that ", "write a note: ", "write a note ",
+        "write down that ", "write down ", "jot down ",
+    ];
+    if let Some(text) = first(&note) {
+        return Some(("note_add", json!({"title": "", "text": text, "append_to": ""})));
+    }
+    // The schedule, asked plainly ("when is our next match").
+    let schedule = ["when", "what", "next match", "our next match"].iter().any(|w| lower.starts_with(w)) && lower.contains("next match");
+    if schedule && lower.split_whitespace().count() <= 7 || lower.starts_with("when do we queue") {
+        return Some(("next_match", json!({})));
+    }
+    None
+}
+
+/// The length said for a timer, as Clock reads it: "10 min", "1 hour 30
+/// minutes", "2:30"; empty if none was said.
+fn length_said(lower: &str) -> String {
+    let text = lower.replace('-', " ");
+    if text.contains("half an hour") {
+        return "30 min".into();
+    }
+    const UNITS: [&str; 15] = ["h", "hr", "hrs", "hour", "hours", "m", "min", "mins", "minute", "minutes", "s", "sec", "secs", "second", "seconds"];
+    let words: Vec<&str> = text.split_whitespace().map(|w| w.trim_matches([',', '.'])).collect();
+    let mut said: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        let w = words[i];
+        let number = !w.is_empty() && w.chars().all(|c| c.is_ascii_digit() || c == '.') || w == "a" || w == "an";
+        if number && words.get(i + 1).is_some_and(|u| UNITS.contains(u)) {
+            said.push(format!("{} {}", if w == "a" || w == "an" { "1" } else { w }, words[i + 1]));
+            i += 2;
+            continue;
+        }
+        match () {
+            // "10min", "2:30", standing alone.
+            _ if said.is_empty() && w.starts_with(|c: char| c.is_ascii_digit()) && length_of(w).is_some() => return w.to_owned(),
+            _ if !said.is_empty() && w != "and" => break,
+            _ => i += 1,
+        }
+    }
+    said.join(" ")
+}
+
+/// The Pit Mix download's detail as a test may find it: asked for now ("10
+/// songs · about 35 MB"), or by another test first, still on its way ("9
+/// songs downloading already": the queue is shared, and saves as it goes).
+#[cfg(test)]
+pub fn queued_words(detail: &str) -> bool {
+    let waiting = detail.split_once(" downloading already").and_then(|(songs, _)| songs.split_whitespace().next()?.parse::<u32>().ok());
+    detail.starts_with("10 songs · about 35 MB") || waiting.is_some_and(|n| (1..=10).contains(&n))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -747,12 +1072,23 @@ mod tests {
         assert_eq!(length_of("90 seconds"), Some(90.0));
         assert_eq!(length_of("2:30"), Some(150.0));
         assert_eq!(length_of("half an hour"), Some(1800.0));
-        let started = timer("start", "7 min").unwrap();
+        let started = now_done(Some(timer("start", "7 min"))).unwrap();
         assert_eq!(started.words, "timer started · 7:00");
-        let stopped = timer("stop", "7 min").unwrap();
+        let stopped = now_done(Some(timer("stop", "7 min"))).unwrap();
         assert_eq!(stopped.words, "timer stopped · 7:00");
-        assert!(timer("stop", "").is_err(), "none left");
-        assert!(timer("start", "soonish").is_err());
+        assert!(now_done(Some(timer("stop", ""))).is_err(), "none left");
+        assert!(now_done(Some(timer("start", "soonish"))).is_err());
+        assert_eq!(now_done(Some(timer("start", ""))).unwrap_err(), "say how long: “10 min” or “2:30”");
+        // Several running: stopping them all asks first, and a yes stops them.
+        now_done(Some(timer("start", "10 min"))).unwrap();
+        now_done(Some(timer("start", "5 min"))).unwrap();
+        let Plan::Ask(act) = timer("stop", "") else { panic!("several ask first") };
+        assert_eq!((act.title.as_str(), act.yes.as_str(), act.no.as_str()), ("Stop 2 timers", "Stop them", "Keep them"));
+        assert!(act.what.starts_with("Both timers in Clock stop and are taken away: 10:00 (") && act.what.contains(" and 5:00 ("), "{}", act.what);
+        assert_eq!(crate::clock::running_timers().len(), 2, "nothing stopped before the yes");
+        let Plan::Now(Ok(done)) = act.run(Path::new("unused")) else { panic!("stopped") };
+        assert_eq!((done.words.as_str(), done.detail.as_str()), ("2 timers stopped", "10:00, 5:00"));
+        assert!(crate::clock::running_timers().is_empty());
     }
 
     #[test]
@@ -784,6 +1120,9 @@ mod tests {
         assert!(open_app("Assistant", "").is_err());
     }
 
+    // Found in the simulator's own music catalogue: the handheld's build
+    // searches YouTube Music itself.
+    #[cfg(not(target_arch = "aarch64"))]
     #[test]
     fn a_playlist_is_found_by_most_of_its_words_and_downloaded() {
         let c = |t: &str| crate::music::Collection { kind: crate::music::Kind::Playlist, id: t.into(), title: t.into(), byline: String::new(), art: String::new(), year: 0 };
@@ -794,8 +1133,7 @@ mod tests {
         match download("Pit Mix", "playlist").unwrap() {
             Step::Done(d) => {
                 assert_eq!(d.words, "downloading Pit Crew Mix");
-                // (Asked for already, by another test sharing the queue: "10 songs downloading already".)
-                assert!(d.detail.starts_with("10 songs · about 35 MB") || d.detail.starts_with("10 songs downloading already"), "{}", d.detail);
+                assert!(queued_words(&d.detail), "{}", d.detail);
             }
             Step::Ask(_) => panic!("ten songs do not ask"),
         }
@@ -817,6 +1155,42 @@ mod tests {
         assert!(lines.last().unwrap().starts_with("— "), "the foot stays last");
         std::fs::remove_file(crate::notes::dir().join(&note.file)).ok();
         assert!(note_add("", "x", "no such note at all", &c).is_err());
+    }
+
+    #[test]
+    fn plain_requests_are_read_into_the_same_calls_offline() {
+        let one = |q: &str| rules(q).map(|c| c.into_iter().map(|(n, v)| format!("{n} {v}")).collect::<Vec<_>>().join(" | "));
+        let cases = [
+            ("download my Pit Mix playlist and remind me to swap the battery at queueing for Q42", r#"music_download {"kind":"playlist","query":"Pit Mix"} | reminder_add {"text":"swap the battery at queueing for Q42"}"#),
+            ("Start a 10 minute timer", r#"timer {"action":"start","length":"10 minute"}"#),
+            ("set a timer for 1 hour and 20 minutes please", r#"timer {"action":"start","length":"1 hour 20 minutes"}"#),
+            ("stop the timer", r#"timer {"action":"stop","length":""}"#),
+            ("remind me in 10 min to swap the battery", r#"reminder_add {"text":"swap the battery in 10 min"}"#),
+            ("remember to charge the spare before Q40", r#"reminder_add {"text":"charge the spare before Q40"}"#),
+            // "and" inside a reminder stays in it; "open the toolbox" is no app.
+            ("remind me to check the bumpers and the chain", r#"reminder_add {"text":"check the bumpers and the chain"}"#),
+            ("remind me to stop by the pit and open the toolbox", r#"reminder_add {"text":"stop by the pit and open the toolbox"}"#),
+            ("can you pause the music", r#"music_control {"action":"pause"}"#),
+            ("skip this song", r#"music_control {"action":"next"}"#),
+            ("play some Daft Punk", r#"music_play {"query":"Daft Punk"}"#),
+            ("turn wi-fi off", r#"setting_set {"setting":"wifi","value":"off"}"#),
+            ("switch to dark mode", r#"setting_set {"setting":"light_mode","value":"off"}"#),
+            ("turn on battery saver, then set brightness to 40", r#"setting_set {"setting":"battery_saver","value":"on"} | setting_set {"setting":"brightness","value":"40"}"#),
+            ("open battery settings", r#"open_app {"app":"Settings","page":"battery"}"#),
+            ("open music and play lofi", r#"open_app {"app":"music","page":""} | music_play {"query":"lofi"}"#),
+            ("note that the chain slipped in Q14", r#"note_add {"append_to":"","text":"the chain slipped in Q14","title":""}"#),
+            ("when is our next match?", "next_match {}"),
+            ("download the update", r#"start_download {"what":"update"}"#),
+            ("resume downloads", r#"start_download {"what":"music"}"#),
+            ("remember our robot is called Numbers", r#"memory_save {"fact":"The robot is called Numbers","replaces":""}"#),
+            ("forget everything", r#"memory_forget {"everything":true,"fact":""}"#),
+        ];
+        for (asked, calls) in cases {
+            assert_eq!(one(asked).as_deref(), Some(calls), "{asked}");
+        }
+        for not in ["why did we brown out in Q14?", "what went wrong last match", "open the toolbox", "how is the robot doing?", "what do you remember?", "turn the robot", "play"] {
+            assert_eq!(one(not), None, "{not}");
+        }
     }
 
     #[test]

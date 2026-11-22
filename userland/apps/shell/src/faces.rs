@@ -1327,6 +1327,8 @@ mod tests {
         assert_eq!(day[0], 0x2080ff);
     }
 
+    // The galleries' own helpers: not in the handheld's build.
+    #[cfg(not(target_arch = "aarch64"))]
     #[test]
     fn every_face_draws_at_every_text_size_by_day_and_night_with_its_icons() {
         crate::shell::tests::sandbox();

@@ -1,3 +1,4 @@
+
 //! Briefings: the day, or the next match, at a glance. "Brief me" asks for
 //! one, and Assistant › choices can have one come by itself each morning or
 //! before each match (a reminder that opens it, so Reminders' own timing,
@@ -7,9 +8,11 @@
 //!
 //! - **the next match:** when to queue, the alliance and partners (a pit
 //!   briefing); or the day's matches and the first of them (a morning one);
+//! - **the robot now:** linked or not, its battery, the worst health check
+//!   firing (under the match before one; later on a morning);
 //! - **the weather** where the handheld is, from the forecast kept;
 //! - **the battery** and the plan for it: whether it lasts the day's
-//!   matches, or the match to charge before (and the robot's, if linked);
+//!   matches, or the match to charge before;
 //! - **reminders** due today;
 //! - **the robot's last match:** what stood out in its log (the offline
 //!   facts, `crate::offline`);
@@ -17,8 +20,9 @@
 //!
 //! With OpenAI or Claude the `briefing` tool returns these as data and the
 //! model says the one to three sentences that matter most. Offline (or with
-//! no internet) a template says them, with no model. Either is said aloud
-//! when spoken answers are on.
+//! no internet) a template says them, with no model: the match, then what
+//! wants doing soon, three things at most. Either is said aloud when spoken
+//! answers are on; the card is shown from its top.
 
 use serde_json::{json, Value};
 
@@ -127,8 +131,37 @@ pub struct Inputs {
     /// Today's reminders not done: words, when, and whether due.
     pub reminders: Vec<(String, String, bool)>,
     pub source: Source,
-    /// The robot's battery, while it is linked.
-    pub robot_volts: Option<f64>,
+    pub robot: RobotNow,
+}
+
+/// The robot as it is now: linked or not, its battery, and the health
+/// checks firing, worst first.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RobotNow {
+    pub linked: bool,
+    pub volts: Option<f64>,
+    /// Each check firing: its severity ("ERROR", "WARN") and what it says
+    /// ("Hood: 78 °C, limit 70").
+    pub alerts: Vec<(String, String)>,
+}
+
+impl RobotNow {
+    pub fn of(robot: &crate::robot::Robot) -> RobotNow {
+        let linked = robot.linked();
+        let alerts = if linked {
+            robot
+                .firing()
+                .into_iter()
+                .map(|(severity, subsystem, check, detail)| {
+                    let what = if detail.is_empty() { check.replace(['/', '_'], " ") } else { detail };
+                    (severity, format!("{subsystem}: {what}"))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        RobotNow { linked, volts: linked.then(|| robot.f64("Systemcore/BatteryVolts")).flatten(), alerts }
+    }
 }
 
 impl Inputs {
@@ -157,7 +190,7 @@ impl Inputs {
             let n = crate::reminders::plan::Now { at: now, zone: &crate::reminders::plan::Here, view: view.as_ref() };
             s.book.rows(crate::reminders::Page::Today, None, &n, h24).into_iter().filter(|r| !r.done).map(|r| (r.text, r.when, r.due)).collect()
         });
-        Inputs { wanted, now, h24, next, no_next, today, event, reminders, source: Source::of(robot), robot_volts: robot.linked().then(|| robot.f64("Systemcore/BatteryVolts")).flatten() }
+        Inputs { wanted, now, h24, next, no_next, today, event, reminders, source: Source::of(robot), robot: RobotNow::of(robot) }
     }
 }
 
@@ -193,9 +226,10 @@ fn teams_said(list: &[u32]) -> String {
     }
 }
 
-/// The handheld's battery, now (the simulator's made-up one on a computer).
+/// The handheld's battery, now (the simulator's made-up one on a computer,
+/// and in the tests).
 fn battery() -> Option<crate::power::Reading> {
-    crate::power::Reading::read().or_else(|| (!cfg!(target_arch = "aarch64")).then(crate::power::Reading::demo))
+    crate::power::Reading::read().or_else(|| (cfg!(test) || !cfg!(target_arch = "aarch64")).then(crate::power::Reading::demo))
 }
 
 /// The battery's plan: whether it lasts the day's matches, or which to charge before.
@@ -222,6 +256,10 @@ pub fn charge_plan(r: &crate::power::Reading, today: &[(String, i64)], now: i64)
     }
 }
 
+/// Things said of a briefing at most (a morning's greeting aside): the
+/// match, then what wants doing soon, then the rest. The card shows it all.
+const SAID_AT_MOST: usize = 3;
+
 /// The briefing, from what was gathered: the logs read here (so on a thread).
 pub fn build(i: &Inputs) -> Brief {
     let now = i.now;
@@ -237,10 +275,10 @@ pub fn build(i: &Inputs) -> Brief {
         (Kind::Morning, _) => "Briefing".to_owned(),
     };
     let mut rows = Vec::new();
-    let mut said: Vec<String> = Vec::new();
-    if kind == Kind::Morning && hour < 12 {
-        said.push("Good morning.".into());
-    }
+    // What is said: the match first, then each other thing, and whether it
+    // wants doing soon (those go before the rest).
+    let mut first: Option<String> = None;
+    let mut said: Vec<(bool, String)> = Vec::new();
     // The match.
     let mut data = json!({"kind": kind.name(), "time": clock(now, i.h24), "event": i.event});
     match &i.next {
@@ -257,7 +295,7 @@ pub fn build(i: &Inputs) -> Brief {
                 (Kind::Morning, _) => format!("{} on {side}{with} · {}", n.label, starts.clone().unwrap_or_else(|| "time not set".into())),
             };
             rows.push(Row { icon: "event".into(), text: tidy(&text), urgent: kind == Kind::Pit && queue_now });
-            said.push(match kind {
+            first = Some(match kind {
                 Kind::Pit => {
                     let with = if n.partners.is_empty() { String::new() } else { format!(" with {}", teams_said(&n.partners)) };
                     let q = queue.as_ref().map(|(q, _)| format!(" Queue {q}.")).unwrap_or_default();
@@ -280,6 +318,14 @@ pub fn build(i: &Inputs) -> Brief {
         }
     }
     data["matchesToday"] = json!(i.today.iter().map(|(l, t)| json!({"match": l, "at": clock(*t, i.h24)})).collect::<Vec<_>>());
+    // The robot as it is now: before a match, straight under it.
+    let robot_row = robot_row(&i.robot);
+    if kind == Kind::Pit {
+        let (row, words) = robot_row.clone();
+        rows.push(row);
+        said.extend(words);
+    }
+    data["robot"] = json!({"linked": i.robot.linked, "batteryVolts": i.robot.volts, "alertsFiring": i.robot.alerts.iter().map(|(s, w)| json!({"severity": s, "what": w})).collect::<Vec<_>>()});
     // The weather (where it is worth a row: a morning, or rain on the way).
     if let Some(w) = crate::weather::glance(i.h24) {
         let mut text = format!("{} · {}", w.temp, w.condition.to_lowercase());
@@ -291,19 +337,18 @@ pub fn build(i: &Inputs) -> Brief {
         }
         if kind == Kind::Morning || w.rain.is_some() {
             rows.push(Row { icon: w.icon.into(), text: tidy(&text), urgent: false });
-            said.push(format!("{} and {}.", w.temp, w.condition.to_lowercase()));
+            said.push((false, format!("{} and {}.", w.temp, w.condition.to_lowercase())));
         }
         data["weather"] = json!({"place": w.place, "now": w.temp, "condition": w.condition, "range": w.range, "rainChance": w.rain});
     }
     // The battery, and its plan.
     if let Some(b) = battery() {
         let (plan, urgent) = charge_plan(&b, &i.today, now);
-        let robot = i.robot_volts.map(|v| format!(" · robot {v:.1} V")).unwrap_or_default();
         let charging = matches!(b.flow, crate::power::Flow::Charging);
         let icon = if charging { "battery_charging_full" } else if urgent || b.percent < 25 { "battery_alert" } else { "battery_full" };
-        rows.push(Row { icon: icon.into(), text: tidy(&format!("{}% · {plan}{robot}", b.percent)), urgent });
-        said.push(format!("Battery {}%, {}.", b.percent, plan.split(" · ").last().unwrap_or(&plan)));
-        data["battery"] = json!({"percent": b.percent, "status": b.status(), "plan": plan, "robotVolts": i.robot_volts});
+        rows.push(Row { icon: icon.into(), text: tidy(&format!("{}% · {plan}", b.percent)), urgent });
+        said.push((urgent, format!("Battery {}%, {}.", b.percent, plan.split(" · ").last().unwrap_or(&plan))));
+        data["battery"] = json!({"percent": b.percent, "status": b.status(), "plan": plan});
     }
     // Today's reminders.
     let due = i.reminders.iter().filter(|r| r.2).count();
@@ -317,19 +362,25 @@ pub fn build(i: &Inputs) -> Brief {
     };
     rows.push(Row { icon: "notifications".into(), text: tidy(&text), urgent: due > 0 });
     if !i.reminders.is_empty() {
-        let first = i.reminders.iter().take(2).map(|r| r.0.clone()).collect::<Vec<_>>().join(", and ");
-        said.push(format!("{} today: {first}.", capital(&count(i.reminders.len(), "reminder"))));
+        let names = i.reminders.iter().take(2).map(|r| r.0.clone()).collect::<Vec<_>>().join(", and ");
+        said.push((due > 0, format!("{} today: {names}.", capital(&count(i.reminders.len(), "reminder")))));
     }
     data["remindersToday"] = json!(i.reminders.iter().map(|(t, w, d)| json!({"text": t, "when": w, "due": d})).collect::<Vec<_>>());
+    // The robot, on a morning: after the day's own things.
+    if kind == Kind::Morning {
+        let (row, words) = robot_row;
+        rows.push(row);
+        said.extend(words);
+    }
     // The robot's last match, from its log.
     let lib = crate::offline::load(&i.source, &mut |_| {});
     if !lib.matches.is_empty() {
         let label = lib.matches[0].label.clone();
         let lines = lib.wrong(0, 2);
         let fault = lib.matches[0].facts.iter().any(|f| f.level == crate::wpilog::Level::Fault);
-        let first = lines.first().map(|l| l.body.clone()).unwrap_or_else(|| "nothing stood out".into());
-        rows.push(Row { icon: if fault { "warning".into() } else { "insights".into() }, text: tidy(&format!("{label} · {first}")), urgent: fault });
-        said.push(format!("Last match, {label}: {}.", first.trim_end_matches('.')));
+        let worst = lines.first().map(|l| l.body.clone()).unwrap_or_else(|| "nothing stood out".into());
+        rows.push(Row { icon: if fault { "warning".into() } else { "insights".into() }, text: tidy(&format!("{label} · {worst}")), urgent: fault });
+        said.push((fault, format!("Last match, {label}: {}.", worst.trim_end_matches('.'))));
         data["lastMatch"] = json!({"match": label, "stoodOut": lines.iter().map(|l| l.body.clone()).collect::<Vec<_>>(), "outcome": lib.outcomes.get(&label)});
     }
     // Anything waiting.
@@ -350,13 +401,34 @@ pub fn build(i: &Inputs) -> Brief {
     }
     if !waiting.is_empty() {
         rows.push(Row { icon: "download".into(), text: tidy(&waiting.join(" · ")), urgent: false });
-        said.push(format!("Waiting: {}.", waiting.join(", ")));
+        said.push((false, format!("Waiting: {}.", waiting.join(", "))));
     }
     data["waiting"] = json!(waiting);
-    let said = said.join(" ");
+    // Said: the match, what wants doing soon, then the rest, a few at most.
+    said.sort_by_key(|(urgent, _)| !urgent);
+    let greeting = (kind == Kind::Morning && hour < 12).then(|| "Good morning.".to_owned());
+    let things: Vec<String> = first.into_iter().chain(said.into_iter().map(|(_, s)| s)).take(SAID_AT_MOST).collect();
+    let said = greeting.into_iter().chain(things).collect::<Vec<_>>().join(" ");
     data["summary"] = json!(said);
     data["shown"] = json!("the handheld shows all of this as a card above your answer");
     Brief { kind, title, when: clock(now, i.h24), rows, said, data }
+}
+
+/// The robot's row: linked or not, its battery, and the worst check firing;
+/// and what is said of it, if anything wants saying (an alert, or no link).
+fn robot_row(r: &RobotNow) -> (Row, Option<(bool, String)>) {
+    if !r.linked {
+        return (Row { icon: "link_off".into(), text: "robot not linked".into(), urgent: false }, Some((false, "The robot is not linked.".into())));
+    }
+    let volts = r.volts.map(|v| format!(" {v:.1} V")).unwrap_or_default();
+    let error = r.alerts.iter().any(|(s, _)| s == "ERROR");
+    let (text, said) = match r.alerts.as_slice() {
+        [] => (format!("robot linked{} · no alerts", volts.replacen(' ', " · ", 1)), None),
+        [(_, what)] => (format!("robot{volts} · {what}"), Some((error, format!("The robot has an alert: {}.", what.replace(": ", ", "))))),
+        [(_, what), rest @ ..] => (format!("robot{volts} · {what} · +{} more", rest.len()), Some((error, format!("The robot has {} alerts; the worst is {}.", rest.len() + 1, what.replace(": ", ", "))))),
+    };
+    let icon = if r.alerts.is_empty() { "smart_toy" } else { "warning" };
+    (Row { icon: icon.into(), text: tidy(&text), urgent: error }, said)
 }
 
 fn starts_in(t: Option<i64>, now: i64) -> Option<String> {
@@ -459,6 +531,19 @@ mod tests {
     }
 
     #[test]
+    fn the_robot_row_says_its_link_its_battery_and_its_worst_alert() {
+        let r = |linked, volts, alerts: &[(&str, &str)]| robot_row(&RobotNow { linked, volts, alerts: alerts.iter().map(|(s, w)| (s.to_string(), w.to_string())).collect() });
+        assert_eq!(r(false, None, &[]).0.text, "robot not linked");
+        let (row, said) = r(true, Some(12.43), &[]);
+        assert_eq!((row.text.as_str(), row.urgent, said), ("robot linked · 12.4 V · no alerts", false, None));
+        assert_eq!(r(true, None, &[]).0.text, "robot linked · no alerts");
+        let (row, said) = r(true, Some(11.9), &[("ERROR", "Drive: left front stalled"), ("WARN", "CAN: 71% for 4 s")]);
+        assert_eq!(row.text, "robot 11.9 V · Drive: left front stalled · +1 more");
+        assert!(row.urgent, "an error wants seeing to");
+        assert_eq!(said, Some((true, "The robot has 2 alerts; the worst is Drive, left front stalled.".into())));
+    }
+
+    #[test]
     fn the_battery_plan_says_whether_it_lasts_the_matches_left() {
         let now = 1_000_000;
         let today = vec![("Q31".to_owned(), now + 1380), ("Q40".to_owned(), now + 5100), ("Q52".to_owned(), now + 4 * 3600)];
@@ -495,8 +580,11 @@ mod tests {
         if inputs.today.len() > 1 {
             assert!(m.rows[0].text.starts_with(&format!("{} matches today · first Q31 at ", inputs.today.len())), "{:?}", m.rows[0]);
         }
-        assert!(m.data["weather"]["now"].is_string());
-        assert!(m.rows.iter().any(|r| r.text.contains('°')), "the weather has a row in the morning: {:?}", m.rows);
+        // (The simulator's forecast: the handheld's build has only what it fetched.)
+        if cfg!(not(target_arch = "aarch64")) {
+            assert!(m.data["weather"]["now"].is_string());
+            assert!(m.rows.iter().any(|r| r.text.contains('°')), "the weather has a row in the morning: {:?}", m.rows);
+        }
         // Kept as reminders that open a briefing: each morning, and before each match.
         set_morning(Some("07:30"), &robot);
         set_pit(true, &robot);

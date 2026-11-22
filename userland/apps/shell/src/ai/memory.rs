@@ -11,6 +11,10 @@
 //!   conversation keeps the copy it began with, so its prompt stays cached,
 //!   and a change made during it reaches the model as its tool's answer.
 //!   The on-device model is given a tiny version (`TINY_CAP`).
+//! - **Leaves the handheld only with a question to OpenAI or Claude,** in
+//!   that question's system prompt, while one of them answers. Offline
+//!   nothing of it goes anywhere: the on-device model runs here. The
+//!   Memory page says which is the case.
 //! - **Never a secret.** A password, passcode, PIN, key, token or card
 //!   number is refused when it is asked to be kept (by its words, and by
 //!   anything shaped like a key), and a line like one typed into the file by
@@ -297,7 +301,8 @@ pub fn command(question: &str) -> Option<Command> {
         return Some(Command::Forget(what));
     }
     for prefix in ["remember ", "don't forget ", "do not forget "] {
-        if lower.starts_with(prefix) && !lower.starts_with("remember when") {
+        // "remember to swap the battery" is a reminder, not a fact.
+        if lower.starts_with(prefix) && !lower.starts_with("remember when") && !lower[prefix.len()..].starts_with("to ") {
             return rest(prefix.trim_end()).filter(|r| !r.is_empty()).map(Command::Remember);
         }
     }
@@ -309,29 +314,14 @@ pub fn command(question: &str) -> Option<Command> {
     None
 }
 
-/// What an offline answer to a memory command says: done there and then.
-pub fn answer(file: &Path, cmd: &Command) -> String {
-    match cmd {
-        Command::List => {
-            let all = load(file);
-            match all.len() {
-                0 => "Nothing yet. Tell me to remember something, like “remember our robot is called Numbers”.".into(),
-                n => format!("I remember {}:\n{}", if n == 1 { "one thing".to_owned() } else { format!("{n} things") }, all.iter().map(|f| format!("· {f}")).collect::<Vec<_>>().join("\n")),
-            }
-        }
-        Command::Remember(fact) => match save(file, &as_kept(fact), "") {
-            Ok(Kept::Added(f)) | Ok(Kept::Replaced { new: f, .. }) => format!("I'll remember that: {f}."),
-            Ok(Kept::Already(f)) => format!("I remember that already: {f}."),
-            Err(why) => format!("I didn't keep it: {why}."),
-        },
-        Command::Forget(what) if what == "everything" => match forget_all(file) {
-            0 => "There was nothing to forget.".into(),
-            n => format!("Forgotten: all {n} things."),
-        },
-        Command::Forget(what) => match forget(file, what) {
-            Ok(gone) => format!("Forgotten: {gone}."),
-            Err(why) => format!("Nothing forgotten: {why}."),
-        },
+/// What it remembers, said offline ("what do you remember"). Keeping and
+/// forgetting offline go through the same tools as online
+/// (`super::device::rules`), so forgetting everything still asks first.
+pub fn listed(file: &Path) -> String {
+    let all = load(file);
+    match all.len() {
+        0 => "Nothing yet. Tell me to remember something, like “remember our robot is called Numbers”.".into(),
+        n => format!("I remember {}:\n{}", if n == 1 { "one thing".to_owned() } else { format!("{n} things") }, all.iter().map(|f| format!("· {f}")).collect::<Vec<_>>().join("\n")),
     }
 }
 
@@ -439,15 +429,16 @@ mod tests {
         assert_eq!(command("Forget the robot's name"), Some(Command::Forget("the robot's name".into())));
         assert_eq!(command("What do you remember?"), Some(Command::List));
         assert_eq!(command("do you remember Q14?"), None);
+        assert_eq!(command("remember to swap the battery at 3pm"), None, "a reminder");
+        assert_eq!(command("don't forget to charge the spare"), None);
         assert_eq!(command("why did we brown out in Q14?"), None);
         assert_eq!(as_kept("I like short answers"), "Likes short answers");
         assert_eq!(as_kept("my team is 5805"), "The team is 5805");
         assert_eq!(as_kept("our robot is called Numbers"), "The robot is called Numbers");
         let f = file("rules");
-        assert_eq!(answer(&f, &Command::Remember(as_kept("our robot is called Numbers"))), "I'll remember that: The robot is called Numbers.");
-        assert!(answer(&f, &Command::List).contains("· The robot is called Numbers"));
-        assert_eq!(answer(&f, &Command::Forget(String::new())), "Forgotten: The robot is called Numbers.");
-        assert!(answer(&f, &Command::Remember("the door code is 4821".into())).starts_with("I didn't keep it"));
+        assert!(listed(&f).starts_with("Nothing yet."));
+        save(&f, &as_kept("our robot is called Numbers"), "").unwrap();
+        assert_eq!(listed(&f), "I remember one thing:\n· The robot is called Numbers");
         std::fs::remove_file(&f).ok();
     }
 }
