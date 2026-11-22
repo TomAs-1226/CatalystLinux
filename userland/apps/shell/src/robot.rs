@@ -130,6 +130,13 @@ impl Robot {
         }
     }
 
+    /// What [`Robot::refresh`] last saw, as one number that moves whenever
+    /// its values, its logs or its schedule change: a widget looks again
+    /// only when it has moved.
+    pub fn seen(&self) -> u64 {
+        self.last_generation
+    }
+
     /// Advance the demo and sample histories. Returns whether anything
     /// changed since the last call, i.e. whether to redraw.
     pub fn refresh(&mut self, dt: f32) -> bool {
@@ -184,7 +191,7 @@ impl Robot {
 
     /// The demo robot told to say something of its own (a hot motor, low
     /// volts, a mode), whatever its script says: for the galleries and tests.
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub fn demo_say(&mut self, key: &str, value: Value) {
         if let Source::Demo { overrides, table, .. } = &mut self.source {
             overrides.insert(key.to_owned(), value.clone());

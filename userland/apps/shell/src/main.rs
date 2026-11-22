@@ -207,8 +207,50 @@ fn settings_path() -> std::path::PathBuf {
     config_path().with_file_name("settings")
 }
 
+/// Saves of the settings so far, counted: a save on the saving thread that
+/// a later one has overtaken is not written. And held while the file is
+/// written, by whichever thread writes it.
+static SAVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn save_settings(settings: &shell::Settings) {
+    let _writing = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    SAVES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     sys::write_atomic(&settings_path(), settings_text(settings).as_bytes()).ok();
+}
+
+/// The settings saved on a thread of their own: for changes made a key at
+/// a time while things move (Home's widgets being arranged), so the card's
+/// write, and its wait for the card, never hold a frame up. Saves made in
+/// quick succession are written once, the last; a save made after this one,
+/// either way, is the one kept.
+pub fn save_settings_soon(settings: &shell::Settings) {
+    // The tests read what was saved at once.
+    if cfg!(test) {
+        return save_settings(settings);
+    }
+    static SAVER: std::sync::OnceLock<Option<std::sync::Mutex<std::sync::mpsc::Sender<(u64, String)>>>> = std::sync::OnceLock::new();
+    let saver = SAVER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<(u64, String)>();
+        let started = std::thread::Builder::new().name("settings-save".into()).stack_size(64 * 1024).spawn(move || {
+            while let Ok(mut save) = rx.recv() {
+                while let Ok(later) = rx.try_recv() {
+                    save = later;
+                }
+                let _writing = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+                if SAVES.load(std::sync::atomic::Ordering::SeqCst) == save.0 {
+                    sys::write_atomic(&settings_path(), save.1.as_bytes()).ok();
+                }
+            }
+        });
+        started.ok().map(|_| std::sync::Mutex::new(tx))
+    });
+    let numbered = SAVES.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    let text = settings_text(settings);
+    let sent = saver.as_ref().is_some_and(|tx| tx.lock().unwrap_or_else(|e| e.into_inner()).send((numbered, text)).is_ok());
+    if !sent {
+        save_settings(settings);
+    }
 }
 
 /// The settings as the file keeps them: one `name=value` a line.
@@ -513,6 +555,11 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--widget-shots") {
         tour_fixtures();
+        // Edit mode saves as it goes: into a folder of its own, so a tour
+        // run at the same time keeps its state.
+        let own = std::env::temp_dir().join(format!("catalyst-widget-shots-{}", std::process::id()));
+        std::fs::create_dir_all(&own).ok();
+        std::env::set_var("CATALYST_CONF", own.join("robot"));
         return widgets::gallery::shots(std::path::Path::new(&dir));
     }
     #[cfg(not(target_arch = "aarch64"))]
@@ -4487,6 +4534,7 @@ mod tests {
     /// reminders_gallery -- --ignored`.
     #[test]
     #[ignore]
+    #[cfg(not(target_arch = "aarch64"))]
     fn reminders_gallery() {
         shell::tests::sandbox();
         let dir = std::env::var_os("CATALYST_SHOTS").map(std::path::PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("catalyst-reminder-shots"));
@@ -4543,7 +4591,7 @@ mod tests {
         // Never chosen (the cards it came with): the new start.
         let mut untouched = shell::Settings::default();
         parse_settings("glance=device,robot,next_match,last_match\n", &mut untouched);
-        assert_eq!(untouched.widgets.glance.iter().map(|w| w.kind).collect::<Vec<_>>(), [Kind::NextMatch, Kind::Battery, Kind::Music]);
+        assert_eq!(untouched.widgets.glance.iter().map(|w| w.kind).collect::<Vec<_>>(), Layout::starting().glance.iter().map(|w| w.kind).collect::<Vec<_>>());
         // Widgets saved since: the old line counts for nothing.
         let mut both = shell::Settings::default();
         parse_settings("glance=robot\nwidgets=clock:small\n", &mut both);

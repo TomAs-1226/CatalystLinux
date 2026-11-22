@@ -12,19 +12,22 @@
 //!
 //! While editing, one widget is chosen (ringed, lifted a little):
 //! - **← → ↑ ↓** move it: it takes the next place that way where it lands
-//!   somewhere new, and everything else glides round it to make room.
+//!   somewhere new, and everything else glides round it to make room (up
+//!   or down past a wide one, the wide one changes rows with it).
 //! - **r** gives it the next size round (small, wide, large).
 //! - **a** adds one: the picker opens in place, a live widget where the new
-//!   one will go; ← → turn through the kinds, ↑ ↓ (or r) change its size,
-//!   Enter keeps it, Esc goes back.
+//!   one will go; ← → turn through the kinds not on the board yet, ↑ ↓ (or
+//!   r) change its size, Enter keeps it, Esc goes back.
 //! - **d** twice takes it off; any other key in between keeps it.
 //! - **Tab** chooses the next one.
 //! - **Enter**, **Esc** or **e** again: done.
 //!
-//! Every change is saved as it is made. The tiles glide on Material's
-//! spatial spring and settle with a little give; entering edit mode they
-//! jiggle once, one after another, to say they can be moved. Nothing moves
-//! continuously: once a change has settled the board holds still.
+//! Every change is saved as it is made, on a thread of its own (the card's
+//! write never holds a move up). The tiles glide on Material's spatial
+//! spring and settle with a little give; entering edit mode they jiggle
+//! once, one after another, to say they can be moved. The one chosen is
+//! drawn over the rest, its ring part of it. Nothing moves continuously:
+//! once a change has settled the board holds still.
 
 use std::collections::HashMap;
 
@@ -63,58 +66,94 @@ fn rebuild(widgets: &[Placed], seq: &[Slot], j: usize) -> (Vec<Placed>, usize) {
 }
 
 /// Widget `j` moved one step `dir` on a board of `apps` apps, `columns`
-/// across: the widgets as they then are, and where `j` is among them. It
-/// goes to the nearest place in its order that puts it somewhere new that
-/// way; up and down, to the row above or below (on to the next page, or
-/// back to the one before), as near its column as it can. None: no further.
+/// across: the widgets as they then are, and where `j` is among them. Left
+/// and right, it goes to the nearest place in its order that puts it
+/// somewhere new that way. Up and down, to the row above or below (on to the
+/// next page, or back to the one before), as near its column as it can; if
+/// it cannot get there alone (a wide widget fills that row), the one in the
+/// way changes places with it. None: no further.
 pub fn step(apps: usize, widgets: &[Placed], j: usize, dir: Dir, columns: usize) -> Option<(Vec<Placed>, usize)> {
     let seq = sequence(apps, widgets);
     let from = seq.iter().position(|s| *s == Slot::Widget(j))?;
-    let now = Packed::of(apps, widgets, columns).cell(Slot::Widget(j))?;
+    let before = Packed::of(apps, widgets, columns);
+    let now = before.cell(Slot::Widget(j))?;
     let mut rest = seq.clone();
     rest.remove(from);
-    let candidates: Vec<usize> = match dir {
-        Dir::Right | Dir::Down => (from + 1..=rest.len()).collect(),
-        Dir::Left | Dir::Up => (0..from).rev().collect(),
-    };
-    // Up and down aim for a row: the one above or below on this page, else
-    // the next page's top or the last one's foot.
-    let target = match dir {
-        Dir::Down if now.row + now.h < ROWS => Some((now.page, now.row + 1)),
-        Dir::Down => Some((now.page + 1, 0)),
-        Dir::Up if now.row > 0 => Some((now.page, now.row - 1)),
-        Dir::Up if now.page > 0 => Some((now.page - 1, ROWS - now.h)),
-        Dir::Up => None,
-        _ => None,
-    };
-    if matches!(dir, Dir::Up | Dir::Down) && target.is_none() {
+    if matches!(dir, Dir::Left | Dir::Right) {
+        let candidates: Vec<usize> = if dir == Dir::Right { (from + 1..=rest.len()).collect() } else { (0..from).rev().collect() };
+        for q in candidates {
+            let mut s = rest.clone();
+            s.insert(q, Slot::Widget(j));
+            let (list, k) = rebuild(widgets, &s, j);
+            let Some(cell) = Packed::of(apps, &list, columns).cell(Slot::Widget(k)) else { continue };
+            if cell.order() != now.order() && (cell.order() > now.order()) == (dir == Dir::Right) {
+                return Some((list, k));
+            }
+        }
         return None;
     }
-    let mut best: Option<(usize, Vec<Placed>, usize)> = None;
-    for q in candidates {
+    // Up and down aim for a row: the one above or below on this page, else
+    // the next page's top or the one before's foot.
+    let (page, row) = match dir {
+        Dir::Down if now.row + now.h < ROWS => (now.page, now.row + now.h),
+        Dir::Down => (now.page + 1, 0),
+        Dir::Up if now.row > 0 => (now.page, now.row - 1),
+        Dir::Up if now.page > 0 => (now.page - 1, ROWS - now.h),
+        _ => return None,
+    };
+    // Where everything was, to count what else a move disturbs.
+    let key = |list: &[Placed], s: &Slot| match s {
+        Slot::App(i) => *i as u64,
+        Slot::Widget(k) => widget_key(list[*k].id),
+    };
+    let was: HashMap<u64, super::Cell> = before.slots.iter().map(|(s, c)| (key(widgets, s), *c)).collect();
+    // Each candidate scored: it alone moving first, then how near its
+    // column it lands, then how little else moves.
+    type Scored = ((u8, usize, usize), Vec<Placed>, usize);
+    let scored = |s: &[Slot], family: u8| -> Option<Scored> {
+        let (list, k) = rebuild(widgets, s, j);
+        let packed = Packed::of(apps, &list, columns);
+        let cell = packed.cell(Slot::Widget(k))?;
+        if cell.page != page || cell.row != row {
+            return None;
+        }
+        let off = (cell.col as i32 - now.col as i32).unsigned_abs() as usize;
+        let moved = packed.slots.iter().filter(|(s, c)| *s != Slot::Widget(k) && was.get(&key(&list, s)) != Some(c)).count();
+        Some(((family, off, moved), list, k))
+    };
+    let mut best: Option<Scored> = None;
+    let mut consider = |found: Option<Scored>| {
+        if let Some(found) = found {
+            if best.as_ref().is_none_or(|b| found.0 < b.0) {
+                best = Some(found);
+            }
+        }
+    };
+    let mut alone = false;
+    for q in 0..=rest.len() {
         let mut s = rest.clone();
         s.insert(q, Slot::Widget(j));
-        let (list, k) = rebuild(widgets, &s, j);
-        let Some(cell) = Packed::of(apps, &list, columns).cell(Slot::Widget(k)) else { continue };
-        match (dir, target) {
-            (Dir::Left | Dir::Right, _) => {
-                let later = cell.order() > now.order();
-                if cell.order() != now.order() && later == (dir == Dir::Right) {
-                    return Some((list, k));
-                }
+        let found = scored(&s, 0);
+        alone |= found.is_some();
+        consider(found);
+    }
+    if !alone {
+        // Another widget makes room: taken out and put back anywhere else.
+        for (at, other) in seq.iter().enumerate() {
+            let Slot::Widget(o) = other else { continue };
+            if *o == j {
+                continue;
             }
-            (_, Some((page, row))) => {
-                if cell.page == page && cell.row == row {
-                    let off = (cell.col as i32 - now.col as i32).unsigned_abs() as usize;
-                    if best.as_ref().is_none_or(|(b, ..)| off < *b) {
-                        best = Some((off, list, k));
-                    }
-                    if off == 0 {
-                        break;
-                    }
+            let mut without = seq.clone();
+            without.remove(at);
+            for q in 0..=without.len() {
+                if q == at {
+                    continue;
                 }
+                let mut s = without.clone();
+                s.insert(q, *other);
+                consider(scored(&s, 1));
             }
-            _ => {}
         }
     }
     best.map(|(_, list, k)| (list, k))
@@ -168,12 +207,15 @@ impl Picker {
         Kind::ALL[self.at]
     }
 
-    /// Turn to the next kind (`by` −1 the one before), sliding. Turned again
-    /// mid-slide, it carries on from where the content is, at its speed.
-    pub fn turn(&mut self, by: i32, calm: bool) {
-        self.from = self.kind();
+    /// Turn to the next kind (`by` −1 the one before) not in `taken` (those
+    /// on the board already), sliding. Turned again mid-slide, it carries on
+    /// from where the content is, at its speed. With every other kind taken
+    /// it stays.
+    pub fn turn(&mut self, by: i32, calm: bool, taken: &[Kind]) {
         let n = Kind::ALL.len() as i32;
-        self.at = (self.at as i32 + by).rem_euclid(n) as usize;
+        let Some(to) = (1..n).map(|i| (self.at as i32 + by.signum() * i).rem_euclid(n) as usize).find(|i| !taken.contains(&Kind::ALL[*i])) else { return };
+        self.from = self.kind();
+        self.at = to;
         self.dir = by.signum() as f32;
         if calm {
             self.slide.jump(0.0);

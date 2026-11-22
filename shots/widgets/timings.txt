@@ -1,0 +1,52 @@
+widgets drawn, 20 times longer on the handheld (µs: median, slowest of 200)
+
+next_match small           10     22   handheld  0.20 ms
+next_match wide            16     35   handheld  0.32 ms
+next_match large           23     48   handheld  0.48 ms
+battery small               8     29   handheld  0.16 ms
+battery wide               15     29   handheld  0.31 ms
+battery large              38     61   handheld  0.76 ms
+music small                11     15   handheld  0.23 ms
+music wide                 16     20   handheld  0.33 ms
+music large                23     79   handheld  0.46 ms
+weather small               8     32   handheld  0.16 ms
+weather wide               13     42   handheld  0.27 ms
+weather large              18     23   handheld  0.37 ms
+robot small                 8     11   handheld  0.17 ms
+robot wide                 12     16   handheld  0.26 ms
+robot large                22     35   handheld  0.44 ms
+reminders small             9     32   handheld  0.19 ms
+reminders wide             18     26   handheld  0.36 ms
+reminders large            22     26   handheld  0.45 ms
+clock small                10     44   handheld  0.22 ms
+clock wide                 16     31   handheld  0.33 ms
+clock large                23     61   handheld  0.46 ms
+world_clock small          10     23   handheld  0.21 ms
+world_clock wide           16     32   handheld  0.33 ms
+world_clock large          24     28   handheld  0.48 ms
+timers small               13     48   handheld  0.28 ms
+timers wide                18     34   handheld  0.37 ms
+timers large               21     24   handheld  0.43 ms
+note small                 14     25   handheld  0.29 ms
+note wide                  23     52   handheld  0.46 ms
+note large                 27     60   handheld  0.54 ms
+system small                9     34   handheld  0.19 ms
+system wide                14     29   handheld  0.29 ms
+system large               26     31   handheld  0.53 ms
+photos small               11     45   handheld  0.22 ms
+photos wide                20     49   handheld  0.41 ms
+photos large               29     56   handheld  0.59 ms
+quick_actions small        12     27   handheld  0.25 ms
+quick_actions wide         22     34   handheld  0.46 ms
+quick_actions large        21     76   handheld  0.43 ms
+last_match small            9     23   handheld  0.19 ms
+last_match wide            17     38   handheld  0.35 ms
+last_match large           24     36   handheld  0.50 ms
+pinned small                8     76   handheld  0.17 ms
+pinned wide                12     21   handheld  0.25 ms
+pinned large               13     20   handheld  0.27 ms
+
+slowest: battery large at 0.76 ms on the handheld
+glance page turning in                  252 µs a frame over 90 frames   handheld  5.05 ms
+grid, no widgets, the focus moving      197 µs a frame over 90 frames   handheld  3.95 ms
+grid with widgets, the focus moving     215 µs a frame over 90 frames   handheld  4.31 ms

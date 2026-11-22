@@ -18,6 +18,16 @@ fn kinds(list: &[Placed]) -> Vec<Kind> {
     list.iter().map(|p| p.kind).collect()
 }
 
+/// `frames` of a sixtieth of a second, each drawn if anything moved (as
+/// fullheight.rs's, which the device's own build has not).
+fn settle(shell: &mut Shell, frames: usize) {
+    for _ in 0..frames {
+        if shell.tick(1.0 / 60.0) {
+            shell.draw();
+        }
+    }
+}
+
 #[test]
 fn a_layout_comes_back_from_its_lines_and_the_old_cards_become_widgets() {
     let layout = Layout { glance: vec![w(Kind::NextMatch, Size::Small), w(Kind::Photos, Size::Large)], home: vec![Placed::new(Kind::Clock, Size::Wide, 4), Placed::new(Kind::System, Size::Small, 9)] };
@@ -32,9 +42,16 @@ fn a_layout_comes_back_from_its_lines_and_the_old_cards_become_widgets() {
     // Anything not understood is passed over.
     assert_eq!(kinds(&Layout::parse_glance("battery:small,nonsense,clock:huge,,music:wide")), [Kind::Battery, Kind::Music]);
     assert!(Layout::parse_home("x:clock:wide,3:clock").is_empty());
-    // A new handheld: the next match and the battery, music under them.
+    // A new handheld: the next match over the battery and the robot; music
+    // over reminders and the timers, a page further left.
     let start = Layout::starting();
-    assert_eq!(start.glance.iter().map(|p| (p.kind, p.size)).collect::<Vec<_>>(), [(Kind::NextMatch, Size::Small), (Kind::Battery, Size::Small), (Kind::Music, Size::Wide)]);
+    assert_eq!(
+        start.glance.iter().map(|p| (p.kind, p.size)).collect::<Vec<_>>(),
+        [(Kind::NextMatch, Size::Wide), (Kind::Battery, Size::Small), (Kind::Robot, Size::Small), (Kind::Music, Size::Wide), (Kind::Reminders, Size::Small), (Kind::Timers, Size::Small)]
+    );
+    let packed = Packed::of(0, &start.glance, 2);
+    assert_eq!(packed.pages, 2, "two whole pages");
+    assert_eq!(packed.cell(Slot::Widget(2)).map(|c| (c.page, c.row, c.col)), Some((0, 1, 1)), "the robot at the first page's foot, on the right");
     assert!(start.home.is_empty(), "Home's grid as it was");
     // The cards a handheld came with, never changed: the new start.
     assert_eq!(kinds(&Layout::from_cards("device,robot,next_match,last_match")), kinds(&start.glance));
@@ -72,7 +89,7 @@ fn packing_takes_the_first_place_that_fits_and_later_tiles_fill_the_holes() {
     let list = [Placed::new(Kind::Clock, Size::Small, 2), Placed::new(Kind::Music, Size::Wide, 0), Placed::new(Kind::Photos, Size::Small, 99)];
     assert_eq!(sequence(3, &list), [Slot::Widget(1), Slot::App(0), Slot::App(1), Slot::Widget(0), Slot::App(2), Slot::Widget(2)]);
     let packed = Packed::of(3, &list, 3);
-    assert_eq!(packed.pages, 1);
+    assert_eq!(packed.pages, 2, "seven cells: the last on a page of its own");
     assert_eq!(packed.reading().first().map(|(s, _)| *s), Some(Slot::Widget(1)));
     // Up and down by column; down onto a short row lands on what is there.
     let packed = Packed::of(5, &[], 3);
@@ -142,7 +159,7 @@ fn cuts(theme: Theme, text: TextSize, columns: usize, light: bool, facts: &mut F
             draw::CUTS.with(|c| c.borrow_mut().clear());
             let r = Rect::new(8.0, 28.0, w, h);
             for focused in [false, true] {
-                let ctx = Ctx { facts, robot, pinned: Some("Loop/Robot/LastMs"), now: chrono::Local::now(), focused, radius: g.tile_radius() };
+                let ctx = Ctx { facts, robot, pinned: Some("Loop/Robot/LastMs"), now: chrono::Local::now(), focused, radius: g.tile_radius(), laid: (w, h) };
                 content(&mut g, r, kind, size, &ctx);
             }
             let cut: Vec<String> = draw::CUTS.with(|c| c.borrow().clone());
@@ -203,25 +220,34 @@ fn what_is_read_is_read_again_only_when_due() {
     crate::shell::tests::sandbox();
     let robot = Robot::demo();
     let mut facts = Facts::default();
-    // Read on a timestamp: the battery once in its period, and when it is next due.
-    facts.prepare(Kind::Battery, &robot, true, (0, 0), false);
-    assert!(facts.battery.is_some(), "the demo battery");
-    facts.battery = None;
-    facts.prepare(Kind::Battery, &robot, true, (0, 0), false);
-    assert!(facts.battery.is_none(), "not read again within its period");
-    let due = facts.due(Kind::Battery).expect("a time to read it again");
+    // Read on a timestamp, on the reading thread: nothing to show until it
+    // answers (and a frame drawn soon to look for the answer), then kept.
+    assert!(!facts.known(Kind::System));
+    facts.prepare(Kind::System, &robot, true, (0, 0), false);
+    assert!(facts.due(Kind::System).is_some_and(|at| at <= std::time::Instant::now() + std::time::Duration::from_millis(200)), "looked for soon");
+    facts.ready(Kind::System, &robot, true, (0, 0));
+    assert!(facts.known(Kind::System) && facts.system.memory.is_some(), "the handheld's figures");
+    facts.system = super::facts::System::default();
+    facts.prepare(Kind::System, &robot, true, (0, 0), false);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    facts.prepare(Kind::System, &robot, true, (0, 0), false);
+    assert!(facts.system.memory.is_none(), "not read again within its period");
+    let due = facts.due(Kind::System).expect("a time to read it again");
     let left = due.saturating_duration_since(std::time::Instant::now()).as_secs_f32();
-    assert!((25.0..=30.0).contains(&left), "{left} s");
+    assert!((4.0..=5.0).contains(&left), "{left} s");
     // Asked to (Enter on it, or back from an app): at once.
-    facts.changed(Kind::Battery);
+    facts.changed(Kind::System);
+    facts.ready(Kind::System, &robot, true, (0, 0));
+    assert!(facts.system.memory.is_some());
+    // The battery is the shell's own reading: never read here.
     facts.prepare(Kind::Battery, &robot, true, (0, 0), false);
-    assert!(facts.battery.is_some());
+    assert!(facts.battery.is_none());
     // On events: the schedule's generation; what is in memory has no time of its own.
     facts.prepare(Kind::NextMatch, &robot, true, (0, 0), false);
     assert!(facts.view.is_some());
     assert!(facts.due(Kind::NextMatch).is_none() && facts.due(Kind::Robot).is_none() && facts.due(Kind::Music).is_none());
     // What an app may change is read afresh once Home is back in front.
-    facts.prepare(Kind::Note, &robot, true, (0, 0), false);
+    facts.ready(Kind::Note, &robot, true, (0, 0));
     assert!(facts.due(Kind::Note).is_some());
     facts.invalidate();
     assert!(facts.due(Kind::Note).is_none(), "due now");
@@ -234,7 +260,7 @@ fn shell_with(glance: Vec<Placed>, home: Vec<Placed>) -> Shell {
     let mut shell = Shell::new(Robot::demo());
     shell.settings.widgets = Layout { glance, home };
     shell.apply_settings();
-    crate::fullheight::settle(&mut shell, 120);
+    settle(&mut shell, 120);
     shell
 }
 
@@ -244,9 +270,10 @@ fn title(shell: &Shell) -> String {
 
 #[test]
 fn e_edits_the_glance_page_and_every_change_is_kept() {
-    let mut shell = shell_with(Layout::starting().glance, Vec::new());
+    // The next match and the battery side by side, music under them.
+    let mut shell = shell_with(vec![w(Kind::NextMatch, Size::Small), w(Kind::Battery, Size::Small), w(Kind::Music, Size::Wide)], Vec::new());
     shell.key(Key::Left);
-    crate::fullheight::settle(&mut shell, 60);
+    settle(&mut shell, 60);
     assert_eq!(title(&shell), "Glance");
     // e: editing, the widget in focus (the battery, nearest Home) chosen.
     shell.key(Key::Char('e'));
@@ -260,13 +287,13 @@ fn e_edits_the_glance_page_and_every_change_is_kept() {
     // d once asks; any other key keeps it; d twice takes it off.
     shell.key(Key::Char('d'));
     assert_eq!(shell.settings.widgets.glance.len(), 3);
-    shell.key(Key::Char('x'));
+    shell.key(Key::Char('k'));
     shell.key(Key::Char('d'));
     shell.key(Key::Char('d'));
     assert_eq!(kinds(&shell.settings.widgets.glance), [Kind::NextMatch, Kind::Music]);
     // a: the picker, in place; Right turns it; Enter keeps it.
     shell.key(Key::Char('a'));
-    assert_eq!(title(&shell), "Add widget");
+    assert_eq!(title(&shell), "Add");
     assert_eq!(shell.settings.widgets.glance.len(), 2, "not kept until chosen");
     shell.key(Key::Right);
     shell.key(Key::Up);
@@ -280,7 +307,7 @@ fn e_edits_the_glance_page_and_every_change_is_kept() {
     assert_eq!(shell.settings.widgets.glance.len(), 3);
     assert_eq!(title(&shell), "Widgets");
     // Enter: done. It was all kept in the settings file as it was made.
-    crate::fullheight::settle(&mut shell, 60);
+    settle(&mut shell, 60);
     shell.key(Key::Enter);
     assert_eq!(title(&shell), "Glance");
     let saved = std::fs::read_to_string(crate::config_dir().join("settings")).unwrap_or_default();
@@ -298,12 +325,12 @@ fn widgets_sit_among_the_apps_and_enter_acts_on_them() {
     crate::nowplaying::on_control(|c| PAUSED.store(c == crate::nowplaying::Control::PlayPause, Ordering::Relaxed));
     // Right from the first app: the music widget, then the next app.
     shell.key(Key::Right);
-    crate::fullheight::settle(&mut shell, 30);
+    settle(&mut shell, 30);
     let spot = shell.stack_spot().expect("the widget has the focus");
     assert!(spot.w > 150.0, "two tiles wide: {spot:?}");
     // Enter on it plays or pauses, in place.
     shell.key(Key::Enter);
-    crate::fullheight::settle(&mut shell, 30);
+    settle(&mut shell, 30);
     assert!(PAUSED.load(Ordering::Relaxed), "asked the player");
     assert_eq!(shell.stack_depth(), 1, "nothing opened");
     // e on Home's grid edits the grid; Right moves the widget one app on.
@@ -316,10 +343,10 @@ fn widgets_sit_among_the_apps_and_enter_acts_on_them() {
     // Carousel: no widgets among the apps; e edits the glance page instead.
     shell.settings.home = HomeStyle::Carousel;
     shell.apply_settings();
-    crate::fullheight::settle(&mut shell, 60);
+    settle(&mut shell, 60);
     shell.key(Key::Char('e'));
-    crate::fullheight::settle(&mut shell, 30);
-    assert_eq!(title(&shell), "Add widget", "the glance page is empty: the picker opens");
+    settle(&mut shell, 30);
+    assert_eq!(title(&shell), "Add", "the glance page is empty: the picker opens");
 }
 
 #[test]
@@ -327,10 +354,10 @@ fn settings_sends_home_into_edit_mode() {
     let mut shell = shell_with(Layout::starting().glance, Vec::new());
     let (index, ..) = crate::screens::setting_sections().into_iter().find(|(_, n, _)| *n == "Widgets").expect("in search");
     shell.show(crate::screens::open_setting(index));
-    crate::fullheight::settle(&mut shell, 60);
+    settle(&mut shell, 60);
     assert_eq!(title(&shell), "Widgets");
     shell.key(Key::Enter);
-    crate::fullheight::settle(&mut shell, 60);
+    settle(&mut shell, 60);
     assert_eq!(shell.stack_depth(), 1, "back on Home");
     assert_eq!(title(&shell), "Widgets", "editing the glance page");
     shell.key(Key::Enter);
@@ -349,10 +376,11 @@ fn home_asks_for_a_frame_only_when_a_widget_changes_by_itself() {
     settings.widgets = g.widgets.clone();
     let mut robot_mut = Robot::demo();
     home.key(Key::Left, &mut Cx { robot: &mut robot_mut, settings: &mut settings, say: &mut say, at_rest: true });
+    // The page turns in and the widget in focus lifts; then all is still.
     for _ in 0..180 {
         home.tick(1.0 / 60.0);
+        home.draw(&mut g, &robot);
     }
-    home.draw(&mut g, &robot);
     // At rest: nothing to draw until the minute turns.
     assert!(!home.tick(0.0), "nothing moves at rest");
     let next = home.next_change_for_tests().expect("the minute's turn");

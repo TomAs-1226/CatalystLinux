@@ -34,6 +34,7 @@ mod facts;
 #[cfg(not(target_arch = "aarch64"))]
 pub mod gallery;
 mod page;
+mod pictures;
 #[cfg(test)]
 mod tests;
 
@@ -270,10 +271,23 @@ impl Default for Layout {
 }
 
 impl Layout {
-    /// A new handheld's: the next match and the battery side by side, and
-    /// what is playing under them, on the glance page; Home's grid as it was.
+    /// A new handheld's: on the glance page's first page, the next match
+    /// across the top and this battery and the robot under it, what a team
+    /// looks at between matches; on the next, what is playing over
+    /// reminders and the timers. Home's grid as it was.
     pub fn starting() -> Layout {
-        Layout { glance: vec![Placed::new(Kind::NextMatch, Size::Small, 0), Placed::new(Kind::Battery, Size::Small, 0), Placed::new(Kind::Music, Size::Wide, 0)], home: Vec::new() }
+        let w = |kind, size| Placed::new(kind, size, 0);
+        Layout {
+            glance: vec![
+                w(Kind::NextMatch, Size::Wide),
+                w(Kind::Battery, Size::Small),
+                w(Kind::Robot, Size::Small),
+                w(Kind::Music, Size::Wide),
+                w(Kind::Reminders, Size::Small),
+                w(Kind::Timers, Size::Small),
+            ],
+            home: Vec::new(),
+        }
     }
 
     pub fn board(&self, board: Board) -> &Vec<Placed> {

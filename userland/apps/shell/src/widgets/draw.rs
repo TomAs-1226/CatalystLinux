@@ -28,6 +28,10 @@ pub struct Ctx<'a> {
     pub focused: bool,
     /// The tile's corners, for a picture that fills it.
     pub radius: f32,
+    /// The size it is laid out for on its board: a picture that fills the
+    /// tile is kept for that size, and drawn afresh only while the tile
+    /// grows or shrinks to another.
+    pub laid: (f32, f32),
 }
 
 /// When a drawing next changes by itself.
@@ -43,6 +47,12 @@ const READING_LARGE: f32 = 34.0;
 /// Draw `kind` at `size` on `r`. `r` is the size the widget is laid out
 /// for; while it grows or shrinks to it, Home clips it to where it is.
 pub fn content(g: &mut Gfx, r: Rect, kind: Kind, size: Size, cx: &Ctx) -> Next {
+    // Nothing read yet (the first answer is a moment away): its name alone,
+    // rather than an empty state that would be wrong a frame later.
+    if !cx.facts.known(kind) {
+        head(g, r, &kind.name().to_lowercase(), Some((kind.icon(), quiet(g, cx.focused))), cx.focused);
+        return None;
+    }
     match kind {
         Kind::NextMatch => next_match(g, r, size, cx),
         Kind::Battery => battery(g, r, size, cx),
@@ -115,16 +125,31 @@ fn head(g: &mut Gfx, r: Rect, label: &str, icon: Option<(&str, Color)>, focused:
     head_any(g, r, &[label.to_owned()], icon, focused);
 }
 
-/// The label: the first of `labels` that fits whole (longest first).
+/// The label: the first of `labels` (longest first) that fits whole beside
+/// the symbol, or, failing that, across the symbol's corner, which it then
+/// takes: the words say more than the symbol does. A symbol named "" keeps
+/// its corner for what the widget draws there itself (a timer's ring).
 fn head_any(g: &mut Gfx, r: Rect, labels: &[String], icon: Option<(&str, Color)>, focused: bool) {
     let ty = g.ty;
     let cy = label_cy(g, r);
-    let room = r.w - IN - if icon.is_some() { 26.0 } else { IN };
-    let labels: Vec<String> = labels.iter().map(|l| l.to_lowercase()).collect();
-    let label = first_fit(g, &labels, ty.caption, room);
+    let beside = r.w - IN - if icon.is_some() { 26.0 } else { IN };
+    let across = if icon.is_some_and(|(name, _)| name.is_empty()) { beside } else { r.w - 2.0 * IN };
+    let mut chosen = None;
+    for label in labels.iter().map(|l| l.to_lowercase()) {
+        let w = g.measure(&label, ty.caption);
+        if w <= beside + 0.5 {
+            chosen = Some((label, icon));
+            break;
+        }
+        if w <= across + 0.5 {
+            chosen = Some((label, None));
+            break;
+        }
+    }
+    let (label, icon) = chosen.unwrap_or_else(|| (fit(g, &labels.last().map_or(String::new(), |l| l.to_lowercase()), &ty.caption, beside), icon));
     let color = quiet(g, focused);
     g.text_at(r.x + IN, cy, Align::Left, &label, ty.caption, color);
-    if let Some((name, tint)) = icon {
+    if let Some((name, tint)) = icon.filter(|(name, _)| !name.is_empty()) {
         g.icon(name, focused, r.right() - 13.0, cy, 14.0, tint);
     }
 }
@@ -235,34 +260,40 @@ fn rows(g: &mut Gfx, r: Rect, top: f32, rows: &[(String, String, Color)]) {
     }
 }
 
+/// How many lines of `style` stand between the label and the foot, the last
+/// on the foot's baseline (at most `most`).
+fn foot_lines(g: &Gfx, r: Rect, style: TextStyle, most: usize) -> usize {
+    let free = r.bottom() - 8.0 - style.size * 0.75 - label_bottom(g, r) - 3.0;
+    ((1.0 + free / (style.size + 3.0)).floor().max(1.0) as usize).min(most)
+}
+
+/// `text` as whole lines at the tile's foot: in the body voice on up to two
+/// lines, else the caption's on up to three. None if neither holds it.
+fn whole_words(g: &mut Gfx, r: Rect, text: &str) -> Option<(Vec<String>, TextStyle)> {
+    let ty = g.ty;
+    let room = r.w - 2.0 * IN;
+    [(ty.body, 2), (ty.caption, 3)].into_iter().find_map(|(style, most)| {
+        let lines = g.text.wrap(text, &style, room, false);
+        (lines.len() <= foot_lines(g, r, style, most) && lines.iter().all(|l| g.measure(l, style) <= room + 0.5)).then_some((lines, style))
+    })
+}
+
 /// A few words where a reading would be: in the body voice on one or two
 /// lines at the foot, or the caption's if they need it to fit whole.
 fn words(g: &mut Gfx, r: Rect, text: &str, color: Color) {
-    let ty = g.ty;
-    let room = r.w - 2.0 * IN;
-    let lines_room = ((r.bottom() - 8.0 - label_bottom(g, r) - 4.0) / (ty.body.size + 3.0)).floor().clamp(1.0, 4.0) as usize;
-    for style in [ty.body, ty.caption] {
-        let lines = g.text.wrap(text, &style, room, false);
-        if lines.len() <= lines_room.min(if style.size == ty.body.size { 2 } else { 3 }) && lines.iter().all(|l| g.measure(l, style) <= room + 0.5) {
-            return lines_at_foot(g, r, &lines, style, color);
+    match whole_words(g, r, text) {
+        Some((lines, style)) => lines_at_foot(g, r, &lines, style, color),
+        None => {
+            let ty = g.ty;
+            let one = fit(g, text, &ty.caption, r.w - 2.0 * IN);
+            lines_at_foot(g, r, &[one], ty.caption, color);
         }
     }
-    let one = fit(g, text, &ty.caption, room);
-    lines_at_foot(g, r, &[one], ty.caption, color);
 }
 
 /// The first of `choices` that fits as [`words`] does.
 fn words_any(g: &mut Gfx, r: Rect, choices: &[&str], color: Color) {
-    let ty = g.ty;
-    let room = r.w - 2.0 * IN;
-    let lines_room = ((r.bottom() - 8.0 - label_bottom(g, r) - 4.0) / (ty.body.size + 3.0)).floor().clamp(1.0, 4.0) as usize;
-    let whole = |g: &mut Gfx, text: &str| {
-        [ty.body, ty.caption].iter().any(|style| {
-            let lines = g.text.wrap(text, style, room, false);
-            lines.len() <= lines_room.min(if style.size == ty.body.size { 2 } else { 3 }) && lines.iter().all(|l| g.measure(l, *style) <= room + 0.5)
-        })
-    };
-    let pick = choices.iter().copied().find(|c| whole(g, c)).or(choices.last().copied()).unwrap_or("");
+    let pick = choices.iter().copied().find(|c| whole_words(g, r, c).is_some()).or(choices.last().copied()).unwrap_or("");
     words(g, r, pick, color);
 }
 
@@ -285,13 +316,45 @@ fn wrapped(g: &mut Gfx, text: &str, style: TextStyle, room: f32, most: usize) ->
     lines
 }
 
-/// A ring meter round a point (a timer's, where the symbol would be).
-fn ring(g: &mut Gfx, cx: f32, cy: f32, radius: f32, fraction: f32, color: Color) {
+/// A ring meter round a point (a timer's, where the symbol would be, or a
+/// large one of its own), `width` thick, filling clockwise from the top.
+fn ring(g: &mut Gfx, cx: f32, cy: f32, radius: f32, width: f32, fraction: f32, color: Color) {
     let t = g.tokens;
     let x = cx + g.ox;
-    g.canvas.arc(x, cy, radius, 2.0, 0.0, std::f32::consts::TAU, t.meter, 1.0);
+    g.canvas.arc(x, cy, radius, width, 0.0, std::f32::consts::TAU, t.meter, 1.0);
     if fraction > 0.005 {
-        g.canvas.arc(x, cy, radius, 2.0, -std::f32::consts::FRAC_PI_2, std::f32::consts::TAU * fraction.min(1.0), color, 1.0);
+        g.canvas.arc(x, cy, radius, width, 0.0, std::f32::consts::TAU * fraction.min(1.0), color, 1.0);
+    }
+}
+
+/// An offset from UTC as it is written: "utc", "utc+1", "utc−8", "utc+5:30".
+fn utc_offset(seconds: i64) -> String {
+    let minutes = seconds / 60;
+    if minutes == 0 {
+        return "utc".into();
+    }
+    let sign = if minutes < 0 { '−' } else { '+' };
+    let (h, m) = (minutes.abs() / 60, minutes.abs() % 60);
+    if m == 0 {
+        format!("utc{sign}{h}")
+    } else {
+        format!("utc{sign}{h}:{m:02}")
+    }
+}
+
+/// A large ring meter, 4 px thick: its track and its fill each kept as a
+/// mask (the fill to half a degree), so a turning page lays them down
+/// rather than working out every pixel's distance again.
+fn big_ring(g: &mut Gfx, cx: &Ctx, x: f32, y: f32, radius: f32, fraction: f32, color: Color) {
+    let t = g.tokens;
+    let (width, side) = (4.0, (radius * 2.0 + 8.0).ceil());
+    let area = Rect::new((x - side * 0.5).round(), (y - side * 0.5).round(), side, side);
+    let (mx, my) = (x - area.x, y - area.y);
+    cx.facts.pictures.mask(g, &("ring", radius.to_bits()), area, t.meter, 1.0, |c| c.arc(mx, my, radius, width, 0.0, std::f32::consts::TAU, Color(255, 255, 255), 1.0));
+    let steps = (fraction.clamp(0.0, 1.0) * 720.0).round() as u32;
+    if steps > 0 {
+        let sweep = std::f32::consts::TAU * steps as f32 / 720.0;
+        cx.facts.pictures.mask(g, &("ring fill", radius.to_bits(), steps), area, color, 1.0, |c| c.arc(mx, my, radius, width, 0.0, sweep, Color(255, 255, 255), 1.0));
     }
 }
 
@@ -328,7 +391,7 @@ fn next_match(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
     let urgent = matches!(&m.queue, Some(("now", s)) if !s.contains("soon"));
     // When, said as long as there is room for: "queue in 8 min", "queue 8 min", "8 min".
     let when: Vec<String> = match &m.queue {
-        Some(("now", status)) => vec![status.clone()],
+        Some(("now", status)) => vec![status.clone(), status.replace("queuing soon", "queue soon").replace("now queuing", "queue now")],
         Some((_, at)) => vec![format!("queue {at}"), format!("queue {}", short_when(at)), short_when(at)],
         None => vec![m.when.clone(), short_when(&m.when)],
     };
@@ -391,7 +454,7 @@ fn battery(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
     let t = g.tokens;
     let Some(b) = cx.facts.battery.clone() else {
         head(g, r, "battery", Some(("battery_full", quiet(g, cx.focused))), cx.focused);
-        words(g, r, "no battery reading here", t.dim);
+        words_any(g, r, &["no battery reading here", "no reading"], t.dim);
         return None;
     };
     let charging = b.flow == Flow::Charging;
@@ -444,16 +507,19 @@ fn battery(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
             }
             line(g, r.x + IN, under, &b.status(), g.ty.caption, t.dim, room);
             let top = rows_top(g, r);
-            day_chart(g, Rect::new(r.x + IN, top + 2.0, room, r.bottom() - 9.0 - top - 2.0), &cx.facts.history, cx.now.timestamp());
+            day_chart(g, Rect::new(r.x + IN, top + 2.0, room, r.bottom() - 9.0 - top - 2.0), cx);
         }
     }
     None
 }
 
 /// The charge over the last day: a line from a day ago to now, the hours on
-/// the charger in ice, with faint rules at full and empty.
-fn day_chart(g: &mut Gfx, area: Rect, points: &[crate::power::Point], now: i64) {
+/// the charger in ice, with faint rules at full and empty. The line is made
+/// once for each new reading of the history (every five minutes) and laid
+/// down as a mask after that.
+fn day_chart(g: &mut Gfx, area: Rect, cx: &Ctx) {
     let (t, ty) = (g.tokens, g.ty);
+    let points = &cx.facts.history;
     if area.h < 14.0 || points.len() < 2 {
         return;
     }
@@ -465,31 +531,38 @@ fn day_chart(g: &mut Gfx, area: Rect, points: &[crate::power::Point], now: i64) 
     for y in [chart.y, chart.bottom()] {
         g.canvas.fill_rect(Rect::new(chart.x + ox, y.round() - 0.5, chart.w, 1.0), t.meter, 1.0);
     }
+    // Now, to the history's own step: the line moves on with each reading.
+    let now = cx.now.timestamp() / 300 * 300;
     let from = now - 24 * 3600;
-    let at = |p: &crate::power::Point| (chart.x + ox + ((p.0 - from) as f32 / (24.0 * 3600.0)).clamp(0.0, 1.0) * chart.w, chart.bottom() - p.1 as f32 / 100.0 * chart.h);
-    let (on_charger, on_battery) = (g.good(), t.ink);
+    let (x0, y0) = (chart.x.round(), chart.y.round());
+    let at = |p: &crate::power::Point| (chart.x - x0 + ((p.0 - from) as f32 / (24.0 * 3600.0)).clamp(0.0, 1.0) * chart.w, chart.bottom() - y0 - p.1 as f32 / 100.0 * chart.h);
+    // Runs on the charger (0) and on battery (1), each joined to the last.
+    let mut runs: Vec<(usize, Vec<(f32, f32)>)> = Vec::new();
     let mut run: Vec<(f32, f32)> = Vec::new();
     let mut charging = points[0].2;
     for p in points {
         if p.2 != charging && !run.is_empty() {
             let last = *run.last().unwrap_or(&at(p));
-            g.canvas.polyline(&run, 1.6, if charging { on_charger } else { on_battery }, 0.9);
-            run.clear();
+            runs.push((if charging { 0 } else { 1 }, std::mem::take(&mut run)));
             run.push(last);
             charging = p.2;
         }
         run.push(at(p));
     }
     if run.len() > 1 {
-        g.canvas.polyline(&run, 1.6, if charging { on_charger } else { on_battery }, 0.9);
+        runs.push((if charging { 0 } else { 1 }, run));
     }
+    let first = points.first().copied();
+    let last = points.last().copied();
+    let source = ("battery day", now, points.len(), first, last);
+    cx.facts.pictures.lines(g, &source, Rect::new(x0, y0, chart.w, chart.h), &runs, 1.6, &[g.good(), t.ink], 0.9);
 }
 
 fn music(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
     let (t, ty) = (g.tokens, g.ty);
     let Some(np) = crate::nowplaying::get() else {
         head(g, r, "music", Some(("music_note", quiet(g, cx.focused))), cx.focused);
-        words(g, r, if size == Size::Small { "nothing on" } else { "nothing playing · enter opens music" }, t.dim);
+        words_any(g, r, &["nothing playing · enter opens music", "nothing playing", "nothing on"], t.dim);
         return None;
     };
     let progress = if np.duration > 0.0 { (np.position_now() / np.duration).clamp(0.0, 1.0) } else { 0.0 };
@@ -504,7 +577,7 @@ fn music(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
         Size::Small | Size::Wide => {
             let side_ = (r.h - 16.0).round();
             let cover = Rect::new(r.x + 8.0, r.y + 8.0, side_, side_);
-            draw_cover(g, cover, &mark, cx.radius);
+            draw_cover(g, cover, &mark, cx.radius, &cx.facts.pictures);
             let x = cover.right() + 8.0;
             let glyph = if np.playing { "pause" } else { "play_arrow" };
             let roomy = size == Size::Wide || r.w >= 140.0;
@@ -527,23 +600,29 @@ fn music(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
         Size::Large => {
             let side_ = (r.h - 62.0).clamp(40.0, 72.0).round();
             let cover = Rect::new(r.x + IN, r.y + IN, side_, side_);
-            draw_cover(g, cover, &mark, cx.radius);
+            draw_cover(g, cover, &mark, cx.radius, &cx.facts.pictures);
             let x = cover.right() + 10.0;
             let room = r.right() - IN - x;
             let title_cy = cover.y + ty.name.size * 0.5 + 1.0;
             g.text_fit(x, title_cy, &np.title, ty.name, t.ink, room);
             let detail_cy = title_cy + ty.name.size * 0.5 + 3.0 + ty.caption.size * 0.5;
             g.text_fit(x, detail_cy, &detail, ty.caption, t.dim, room);
-            if !np.album.is_empty() && np.album != detail {
-                g.text_fit(x, detail_cy + ty.caption.size + 4.0, &np.album, ty.caption, t.faint.mix(t.dim, 0.5), room);
-            }
-            // Music's keys, Fn + W, Q, E, under the words.
+            // Music's keys, Fn + W, Q, E, under the words: the album gives
+            // way to them where both would not fit (a large text size), and
+            // they to the words where even then they would not.
             let bar_y = (r.bottom() - 12.0 - ty.caption.size - 6.0).round();
             let keys_cy = (cover.bottom() - 7.0).min(bar_y - ty.caption.size - 16.0).round();
+            let keys_top = keys_cy - 14.0 * 1.25 * 0.5;
+            let album_cy = detail_cy + ty.caption.size + 4.0;
             let fw = g.measure("fn", ty.caption) + 8.0;
             let step = 26.0;
             let first = x + fw + 7.0;
-            if first + 2.0 * step + 8.0 <= r.right() - IN {
+            let keys = first + 2.0 * step + 8.0 <= r.right() - IN && keys_top >= detail_cy + ty.caption.size * 0.5 + 3.0;
+            let album = !np.album.is_empty() && np.album != detail && (!keys || keys_top >= album_cy + ty.caption.size * 0.5 + 3.0);
+            if album {
+                g.text_fit(x, album_cy, &np.album, ty.caption, t.faint.mix(t.dim, 0.5), room);
+            }
+            if keys {
                 music_keys(g, [first, first + step, first + 2.0 * step], keys_cy, np.playing, 14.0);
             }
             let bar = Rect::new(r.x + IN, bar_y, r.w - 2.0 * IN, 3.0);
@@ -587,11 +666,11 @@ fn music_keys(g: &mut Gfx, xs: [f32; 3], cy: f32, playing: bool, size: f32) {
 }
 
 /// A cover, or its stand-in while it decodes.
-fn draw_cover(g: &mut Gfx, r: Rect, mark: &crate::liveactivity::Mark, radius: f32) {
+fn draw_cover(g: &mut Gfx, r: Rect, mark: &crate::liveactivity::Mark, radius: f32, pictures: &super::pictures::Pictures) {
     let t = g.tokens;
     match mark {
         crate::liveactivity::Mark::Cover(path, _) => match crate::liveactivity::cover(path) {
-            Some(pic) => crate::photos::draw_picture(g, r, &pic, crate::photos::whole(&pic), (radius * 0.6).clamp(3.0, 10.0), 1.0),
+            Some(pic) => pictures.picture(g, path, &pic, crate::photos::whole(&pic), r, (radius * 0.6).clamp(3.0, 10.0), 1.0, false, None),
             None => {
                 g.surface(r, (radius * 0.6).clamp(3.0, 10.0), t.surface3);
                 g.icon("music_note", true, r.cx(), r.cy(), (r.w * 0.45).min(22.0), t.signal);
@@ -640,10 +719,27 @@ fn weather(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
             }
             let under_line = first_fit(g, &[with_rain, full, w.condition.to_owned()], ty.caption, room);
             g.text_at(r.x + IN, under, Align::Left, &under_line, ty.caption, t.dim);
-            // The next hours across the foot: the hour, its weather, its temperature.
+            // The next hours across the foot: the hour, its weather, its
+            // temperature; on one line where there is not room for three.
             let top = rows_top(g, r);
             let hours: Vec<_> = w.hours.iter().take(if r.w > 250.0 { 6 } else { 4 }).collect();
-            if !hours.is_empty() && r.bottom() - 8.0 - top >= ty.caption.size * 2.0 + 16.0 {
+            let free = r.bottom() - 8.0 - top;
+            if !hours.is_empty() && free < ty.caption.size * 2.0 + 16.0 && free >= ty.caption.size + 2.0 {
+                // As many hours as stand apart, each the hour, its symbol
+                // and its temperature.
+                let widths: Vec<(f32, f32)> = hours.iter().map(|(hour, _, temp)| (g.measure(hour, ty.caption), g.measure(temp, ty.caption))).collect();
+                let group = |(hour_w, temp_w): (f32, f32)| hour_w + temp_w + 26.0;
+                let n = (1..=hours.len()).rev().find(|k| widths[..*k].iter().map(|w| group(*w)).sum::<f32>() + 18.0 * (*k - 1) as f32 <= room).unwrap_or(1);
+                let col = room / n as f32;
+                let cy = r.bottom() - 8.0 - ty.caption.size * 0.5;
+                for (i, ((hour, icon, temp), (hour_w, temp_w))) in hours.iter().zip(&widths).take(n).enumerate() {
+                    let w = group((*hour_w, *temp_w));
+                    let x = r.x + IN + (i as f32 + 0.5) * col - w * 0.5;
+                    g.text_at(x, cy, Align::Left, hour, ty.caption, t.dim);
+                    g.icon(icon, false, x + hour_w + 13.0, cy, 14.0, t.ink);
+                    g.text_at(x + w, cy, Align::Right, temp, ty.caption, t.ink);
+                }
+            } else if !hours.is_empty() && free >= ty.caption.size * 2.0 + 16.0 {
                 let col = room / hours.len() as f32;
                 let (hour_cy, temp_cy) = (top + ty.caption.size * 0.5 + 1.0, r.bottom() - 8.0 - ty.caption.size * 0.5);
                 let icon_cy = (hour_cy + temp_cy) * 0.5;
@@ -740,7 +836,7 @@ fn reminders(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
     let list = &cx.facts.reminders;
     let Some(first) = list.first() else {
         head(g, r, "reminders", Some(("checklist", quiet(g, cx.focused))), cx.focused);
-        words(g, r, "nothing coming", t.dim);
+        words_any(g, r, &["nothing coming", "none"], t.dim);
         return None;
     };
     let due_tint = |due: bool| if due { t.amber_ink } else { t.dim };
@@ -748,7 +844,7 @@ fn reminders(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
         let label = if first.due { vec!["due now".to_owned(), "now".to_owned()] } else { vec![first.when.clone(), short_when(&first.when)] };
         head_any(g, r, &label, Some(("checklist", if first.due { t.amber_ink } else { quiet(g, cx.focused) })), cx.focused);
         let room = r.w - 2.0 * IN;
-        let lines = wrapped(g, &first.text, ty.body, room, 2);
+        let lines = wrapped(g, &first.text, ty.body, room, foot_lines(g, r, ty.body, 2));
         lines_at_foot(g, r, &lines, ty.body, t.ink);
         return Some(Instant::now() + Duration::from_secs(30));
     }
@@ -757,9 +853,9 @@ fn reminders(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
     // One row each: a ring to tick off (the first's, Enter's), the words,
     // when at the right.
     let style = ty.body;
-    let line = style.size + 5.0;
+    let line = style.size + 4.0;
     let top = label_bottom(g, r) + 3.0;
-    let n = (((r.bottom() - 5.0 - top) / line).floor().max(1.0) as usize).min(list.len());
+    let n = (((r.bottom() - 5.0 - top) / line + 0.05).floor().max(1.0) as usize).min(list.len());
     for (i, item) in list.iter().take(n).enumerate() {
         let cy = top + (i as f32 + 0.5) * line;
         let ring_x = r.x + IN + 4.0;
@@ -835,22 +931,39 @@ fn clock(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
         }
         Size::Wide => {
             let used = reading(g, r.x + IN - 1.0, r.bottom() - 8.0, &time, &ampm, READING + 4.0, room * 0.55, t.ink);
-            // Each place as long as there is room: "new york 9:41", "york 9:41", "9:41".
-            let lines: Vec<(Vec<String>, Color)> = elsewhere
+            // Each place as long as there is room, "new york 9:41" or "york
+            // 9:41"; one with no room for its name is left out (a time alone
+            // says nothing).
+            let side_room = room - used - 12.0;
+            let lines: Vec<(String, Color)> = elsewhere
                 .iter()
-                .take(2)
-                .map(|(name, time, ampm, _)| {
+                .filter_map(|(name, time, ampm, _)| {
                     let last = name.rsplit(' ').next().unwrap_or(name);
-                    (vec![format!("{name} {time}{ampm}"), format!("{last} {time}{ampm}"), format!("{time}{ampm}")], t.dim)
+                    [format!("{name} {time}{ampm}"), format!("{last} {time}{ampm}")].into_iter().find(|l| g.measure(l, ty.caption) <= side_room + 0.5)
                 })
+                .take(2)
+                .map(|l| (l, t.dim))
                 .collect();
-            side_any(g, r, &lines, room - used - 12.0);
+            side(g, r, &lines, side_room);
         }
         Size::Large => {
             let (baseline, under) = large_lines(g, r);
             reading(g, r.x + IN - 1.0, baseline, &time, &ampm, READING_LARGE + 6.0, room, t.ink);
-            let zone = crate::device::zone();
-            let zone_line = first_fit(g, &[crate::device::zone_label(&zone).to_lowercase(), crate::clock::place_name(&zone).to_lowercase()], ty.caption, room);
+            // Where here is: the handheld's zone (read on the widgets' thread)
+            // and its offset; the offset alone where the zone kept is not the
+            // one this clock keeps (a computer's own).
+            let local = cx.now.offset().local_minus_utc() as i64;
+            let offset = utc_offset(local);
+            let mut zone_lines = Vec::new();
+            if let Some((zone, Some(at))) = &cx.facts.here {
+                if *at == local {
+                    let city = crate::device::zone_city(zone).to_lowercase();
+                    let city = city.split(" · ").next().unwrap_or(&city).to_owned();
+                    zone_lines.push(format!("{city} · {offset}"));
+                }
+            }
+            zone_lines.push(offset);
+            let zone_line = first_fit(g, &zone_lines, ty.caption, room);
             g.text_at(r.x + IN, under, Align::Left, &zone_line, ty.caption, t.dim);
             let list: Vec<(String, String, Color)> = elsewhere.iter().map(|(name, time, ampm, rel)| (name.clone(), format!("{time}{ampm} · {rel}"), t.ink)).collect();
             let top = rows_top(g, r);
@@ -866,7 +979,7 @@ fn world(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
     let places = place_times(cx, h24);
     if places.is_empty() {
         head(g, r, "world", Some(("language", quiet(g, cx.focused))), cx.focused);
-        words(g, r, "add places in clock", t.dim);
+        words_any(g, r, &["add places in clock", "none yet"], t.dim);
         return None;
     }
     let cells: Vec<Rect> = match size {
@@ -877,22 +990,31 @@ fn world(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
             vec![Rect::new(r.x, r.y, w, h), Rect::new(r.x + w, r.y, w, h), Rect::new(r.x, r.y + h, w, h), Rect::new(r.x + w, r.y + h, w, h)]
         }
     };
-    // The symbol once, at the tile's top right: the place there leaves it room.
-    g.icon("language", cx.focused, r.right() - 13.0, label_cy(g, r), 14.0, quiet(g, cx.focused));
+    // The symbol once, at the tile's top right, where the place there leaves
+    // it room; its whole name comes first ("los angeles", not "angeles").
+    let mut symbol = true;
     for (i, (cell, (name, time, ampm, rel))) in cells.iter().zip(places.iter()).enumerate() {
         let top_right = cell.right() >= r.right() - 1.0 && cell.y <= r.y + 1.0;
-        let label_room = if top_right { cell.w - IN - 26.0 } else { cell.w - 2.0 * IN };
+        let whole = cell.w - 2.0 * IN;
+        let label_room = if top_right { cell.w - IN - 26.0 } else { whole };
         let last = name.rsplit(' ').next().unwrap_or(name).to_owned();
-        let label = first_fit(g, &[name.clone(), last], ty.caption, label_room);
+        let label = if top_right && g.measure(name, ty.caption) > label_room + 0.5 && g.measure(name, ty.caption) <= whole + 0.5 {
+            symbol = false;
+            name.clone()
+        } else {
+            first_fit(g, &[name.clone(), last], ty.caption, label_room)
+        };
         let color = quiet(g, cx.focused);
         g.text_at(cell.x + IN, label_cy(g, *cell), Align::Left, &label, ty.caption, color);
-        let _ = i;
         let unit = if ampm.is_empty() { rel.clone() } else { ampm.clone() };
         reading(g, cell.x + IN - 1.0, cell.bottom() - 8.0, time, &unit, if size == Size::Small { READING } else { READING - 2.0 }, cell.w - 2.0 * IN, t.ink);
         if i > 0 && cell.x > r.x + 1.0 {
             // A hairline between places side by side.
             g.canvas.fill_rect(Rect::new(cell.x + g.ox - 0.5, cell.y + 8.0, 1.0, cell.h - 16.0), t.meter, 1.0);
         }
+    }
+    if symbol {
+        g.icon("language", cx.focused, r.right() - 13.0, label_cy(g, r), 14.0, quiet(g, cx.focused));
     }
     next_minute(cx.now)
 }
@@ -922,8 +1044,12 @@ fn timers(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
                 _ if !running => t.dim,
                 _ => t.ink,
             };
-            let fraction = if total > 0.0 { (1.0 - left / total) as f32 } else { 0.0 };
-            ring(g, ring_at.0, ring_at.1, 6.0, if done { 1.0 } else { fraction }, if last_minute || done { t.signal } else { g.good() });
+            let fraction = if done { 1.0 } else if total > 0.0 { (1.0 - left / total) as f32 } else { 0.0 };
+            let ring_color = if last_minute || done { t.signal } else { g.good() };
+            // A large tile has a large ring of its own, at its right.
+            if size != Size::Large {
+                ring(g, ring_at.0, ring_at.1, 6.0, 2.0, fraction, ring_color);
+            }
             let value = crate::clock::length(left.ceil());
             match size {
                 Size::Small => {
@@ -940,9 +1066,16 @@ fn timers(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
                     side_any(g, r, &[(act.map(str::to_owned).to_vec(), t.dim), (second, t.ink)], room - used - 12.0);
                 }
                 Size::Large => {
+                    // The ring, with Enter's act in it: the time gone, round.
+                    let radius = ((r.h - 26.0) * 0.5).min(r.w * 0.22).max(14.0);
+                    let (rx, ry) = (r.right() - IN - radius, r.y + r.h * 0.5 + 5.0);
+                    big_ring(g, cx, rx, ry, radius, fraction, ring_color);
+                    let glyph = if done { "timer" } else if running { "pause" } else { "play_arrow" };
+                    g.icon(glyph, true, rx, ry, (radius * 0.55).min(24.0), if running || done { t.ink } else { t.dim });
+                    let left_room = rx - radius - 10.0 - (r.x + IN);
                     let (baseline, under) = large_lines(g, r);
-                    reading(g, r.x + IN - 1.0, baseline, &value, "", READING_LARGE, room, color);
-                    line(g, r.x + IN, under, &format!("of {}", crate::clock::length(total)), ty.caption, t.dim, room);
+                    reading(g, r.x + IN - 1.0, baseline, &value, "", READING_LARGE, left_room, color);
+                    line(g, r.x + IN, under, &format!("of {}", crate::clock::length(total)), ty.caption, t.dim, left_room);
                     let mut list: Vec<(String, String, Color)> = timers
                         .iter()
                         .skip(1)
@@ -955,7 +1088,7 @@ fn timers(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
                         list.push(("stopwatch".into(), crate::clock::length(sw.floor()), if sw_running { t.ink } else { t.dim }));
                     }
                     let top = rows_top(g, r);
-                    rows(g, r, top, &list);
+                    rows(g, Rect::new(r.x, r.y, left_room + 2.0 * IN, r.h), top, &list);
                 }
             }
         }
@@ -993,7 +1126,7 @@ fn note(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
     let (t, ty) = (g.tokens, g.ty);
     let Some(n) = cx.facts.note.clone() else {
         head(g, r, "note", Some(("sticky_note_2", quiet(g, cx.focused))), cx.focused);
-        words(g, r, "pin a note in notes", t.dim);
+        words_any(g, r, &["pin a note in notes", "pin one in notes", "none pinned"], t.dim);
         return None;
     };
     let icon = if n.pinned { "push_pin" } else { "sticky_note_2" };
@@ -1001,16 +1134,20 @@ fn note(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
     let room = r.w - 2.0 * IN;
     match size {
         Size::Small => {
-            let lines = wrapped(g, &n.title, ty.body, room, 2);
+            let lines = wrapped(g, &n.title, ty.body, room, foot_lines(g, r, ty.body, 2));
             lines_at_foot(g, r, &lines, ty.body, t.ink);
         }
         Size::Wide => {
+            // The title over the note's first line, where there is room for
+            // both under the label (not at the large text size); else the title.
+            let last = r.bottom() - 8.0;
+            let title_top = last - ty.caption.size - 5.0 - ty.body.size * 0.75;
+            let both = title_top >= label_bottom(g, r) + 4.0;
             let first = n.lines.first().cloned().unwrap_or_default();
-            let lines = if first.is_empty() { wrapped(g, &n.title, ty.body, room, 2) } else { vec![g.text.fit(&n.title, &ty.body, room)] };
-            if first.is_empty() {
+            let lines = if first.is_empty() || !both { wrapped(g, &n.title, ty.body, room, foot_lines(g, r, ty.body, 2)) } else { vec![g.text.fit(&n.title, &ty.body, room)] };
+            if first.is_empty() || !both {
                 lines_at_foot(g, r, &lines, ty.body, t.ink);
             } else {
-                let last = r.bottom() - 8.0;
                 let first = g.text.fit(&first, &ty.caption, room);
                 g.text(r.x + IN, last.round(), &first, ty.caption, t.dim);
                 g.text(r.x + IN, (last - ty.caption.size - 5.0).round(), &lines[0], ty.body, t.ink);
@@ -1057,14 +1194,16 @@ fn system(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
             foot_reading(g, r, &memory, &unit, room, t.ink);
         }
         Size::Wide => {
-            // Four readings side by side, each named above.
-            let columns = [("cpu", cpu, t.ink), ("memory", s.memory.map_or("–".into(), |(u, _)| format!("{u:.0} mb")), t.ink), ("temp", temp, s.celsius.map_or(t.ink, hot)), ("disk", storage, t.ink)];
-            let col = room / columns.len() as f32;
+            // Four readings side by side, each named above; three where the
+            // tile is too narrow for four (the disk, which changes least, left out).
+            let columns = [("cpu", cpu, "", t.ink), ("memory", memory, "mb", t.ink), ("temp", temp, "", s.celsius.map_or(t.ink, hot)), ("disk", storage, "", t.ink)];
+            let n = if room / 4.0 >= 58.0 { 4 } else { 3 };
+            let col = room / n as f32;
             let color = quiet(g, cx.focused);
-            for (i, (name, value, value_color)) in columns.iter().enumerate() {
+            for (i, (name, value, unit, value_color)) in columns.iter().take(n).enumerate() {
                 let x = r.x + IN + i as f32 * col;
                 line(g, x, label_cy(g, r), name, ty.caption, color, col - 4.0);
-                reading(g, x - 1.0, r.bottom() - 8.0, value, "", 20.0, col - 4.0, *value_color);
+                reading(g, x - 1.0, r.bottom() - 8.0, value, unit, 20.0, col - 4.0, *value_color);
             }
         }
         Size::Large => {
@@ -1097,7 +1236,7 @@ fn system(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
 fn photos(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
     let t = g.tokens;
     let p = &cx.facts.photo;
-    let Some((_, _, pic)) = &p.shown else {
+    let Some((shown_path, _, pic)) = &p.shown else {
         if p.list.is_empty() {
             head(g, r, "photos", Some(("photo_library", quiet(g, cx.focused))), cx.focused);
             words_any(g, r, &["no photos yet · take one with camera", "no photos yet", "none yet"], t.dim);
@@ -1115,19 +1254,31 @@ fn photos(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
         [(pw - vw) * 0.5, (ph - vh) * 0.5, vw, vh]
     };
     let fade = p.fade.value().clamp(0.0, 1.0);
-    if let Some(before) = p.before.as_ref().filter(|_| fade < 0.999) {
-        crate::photos::draw_picture(g, r, before, crop(before), radius, 1.0);
-    }
-    crate::photos::draw_picture(g, r, pic, crop(pic), radius, if p.before.is_some() { fade } else { 1.0 });
-    if size != Size::Small {
-        if let Some(photo) = p.list.get(p.index) {
-            // When it was taken, on a band of shade at its foot.
-            let ty = g.ty;
-            let band = Rect::new(r.x, r.bottom() - ty.caption.size - 12.0, r.w, ty.caption.size + 12.0).offset(g.ox, 0.0);
-            g.canvas.rrect_clipped(band, 0.0, r.offset(g.ox, 0.0), radius, Color::BLACK, 0.42);
-            let when = crate::photos::when(photo.taken, g.clock.0);
-            line(g, r.x + IN, band.cy(), &when, ty.caption, Color::hex(0xf2f3f5), r.w - 2.0 * IN);
+    // When it was taken, on a band of shade at its foot (not on a small tile).
+    let ty = g.ty;
+    let taken = p.list.get(p.index).filter(|_| size != Size::Small);
+    let band = Rect::new(r.x, r.bottom() - ty.caption.size - 12.0, r.w, ty.caption.size + 12.0);
+    let shade = taken.map(|_| band.y - r.y);
+    // Kept as a picture of the tile at rest, its shade in it; drawn afresh
+    // while it grows or shrinks (edit mode), every frame a new size.
+    let at_rest = (r.w - cx.laid.0).abs() < 0.5 && (r.h - cx.laid.1).abs() < 0.5;
+    let draw = |g: &mut Gfx, path: &std::path::PathBuf, pic: &crate::photos::Picture, alpha: f32| {
+        if at_rest {
+            cx.facts.pictures.picture(g, path, pic, crop(pic), r, radius, alpha, true, shade);
+        } else {
+            crate::photos::draw_picture(g, r, pic, crop(pic), radius, alpha);
         }
+    };
+    if let Some((path, before)) = p.before.as_ref().filter(|_| fade < 0.999) {
+        draw(g, path, before, 1.0);
+    }
+    draw(g, shown_path, pic, if p.before.is_some() { fade } else { 1.0 });
+    if let Some(photo) = taken {
+        if !at_rest {
+            g.canvas.rrect_clipped(band.offset(g.ox, 0.0), 0.0, r.offset(g.ox, 0.0), radius, Color::BLACK, super::pictures::SHADE);
+        }
+        let when = crate::photos::when(photo.taken, g.clock.0);
+        line(g, r.x + IN, band.cy(), &when, ty.caption, Color::hex(0xf2f3f5), r.w - 2.0 * IN);
     }
     None
 }
@@ -1152,8 +1303,17 @@ fn actions(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
     let picks = &cx.facts.actions;
     let below = bar.bottom() + 4.0;
     if picks.is_empty() {
-        let r2 = Rect::new(r.x, below, r.w, r.bottom() - below);
-        words_any(g, r2, &["what you pick in search comes back here", "your picks come back here", "picks come back here"], t.dim);
+        let say = ["what you pick in search comes back here", "your picks come back here", "picks come back here"];
+        if size == Size::Large {
+            // Just under the bar, where the picks will be.
+            let lines = wrapped(g, say[0], ty.body, room, 3);
+            for (i, l) in lines.iter().enumerate() {
+                let baseline = below + 6.0 + ty.body.size * 0.75 + i as f32 * (ty.body.size + 3.0);
+                g.text(r.x + IN, baseline.round(), l, ty.body, t.dim);
+            }
+        } else {
+            words_any(g, Rect::new(r.x, below, r.w, r.bottom() - below), &say, t.dim);
+        }
         return None;
     }
     match size {
@@ -1188,7 +1348,7 @@ fn last_match(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
     let t = g.tokens;
     let Some((title, digest)) = cx.facts.last_match.clone() else {
         head(g, r, "last match", Some(("emoji_events", quiet(g, cx.focused))), cx.focused);
-        words(g, r, "no match pulled yet", t.dim);
+        words_any(g, r, &["no match pulled yet", "none pulled yet", "none yet"], t.dim);
         return None;
     };
     let fault = g.fault();
@@ -1222,9 +1382,17 @@ fn last_match(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
             let unit = choose_unit(g, &value, &["v at its lowest".into(), "v low".into()], READING_LARGE, room);
             reading(g, r.x + IN - 1.0, baseline, &value, &unit, READING_LARGE, room, color);
             line(g, r.x + IN, under, &format!("{:.0} s logged", digest.seconds), ty.caption, t.dim, room);
-            let list: Vec<(String, String, Color)> = cut(g, &highlights, room - 24.0).into_iter().map(|(text, c)| ("·".to_owned(), text, c)).collect();
+            // What stood out, one to a line along the foot as rows are: a
+            // dot in its colour, its words after it.
             let top = rows_top(g, r);
-            rows(g, r, top, &list);
+            let step = ty.caption.size + 5.0;
+            let n = (((r.bottom() - 7.0 - top) / step).floor().max(0.0) as usize).min(highlights.len());
+            let y0 = r.bottom() - 7.0 - n as f32 * step;
+            for (i, (text, c)) in cut(g, &highlights, room - 11.0).into_iter().take(n).enumerate() {
+                let cy = y0 + (i as f32 + 0.5) * step;
+                g.dot(r.x + IN + 2.5, cy, 2.5, c);
+                g.text_at(r.x + IN + 11.0, cy, Align::Left, &text, ty.caption, c);
+            }
         }
     }
     None
@@ -1235,7 +1403,7 @@ fn pinned(g: &mut Gfx, r: Rect, size: Size, cx: &Ctx) -> Next {
     let room = r.w - 2.0 * IN;
     let Some(key) = cx.pinned else {
         head(g, r, "pinned", Some(("push_pin", quiet(g, cx.focused))), cx.focused);
-        words(g, r, "p in tables pins a value", t.dim);
+        words_any(g, r, &["p in tables pins a value", "p in tables pins one", "none pinned"], t.dim);
         return None;
     };
     let (table, name) = key.rsplit_once('/').unwrap_or(("", key));

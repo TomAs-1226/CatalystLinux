@@ -424,6 +424,7 @@ impl Home {
         self.tiles.len()
     }
 
+    #[cfg(test)]
     fn per_page(&self) -> usize {
         self.columns * 2
     }
@@ -922,6 +923,9 @@ impl Home {
         let current = self.slot();
         let mut focus_ring = None;
         let mut next = None;
+        // The widget chosen while editing is lifted over the rest: drawn last.
+        let lifted = self.editing.as_ref().filter(|e| e.board == Board::Home).and_then(|e| e.selected);
+        let mut held = None;
         for &(slot, cell) in &packed.slots {
             let along = grid.rect(&cell).offset(cell.page as f32 * W, 0.0);
             let key = match slot {
@@ -962,9 +966,9 @@ impl Home {
                         focus_ring = Some(ring);
                     }
                 }
+                Slot::Widget(j) if lifted == Some(j) => held = Some((j, at)),
                 Slot::Widget(j) => {
-                    let chosen = if editing { self.editing.as_ref().and_then(|e| e.selected) == Some(j) } else { focused };
-                    let (ring, when) = self.draw_widget(g, Board::Home, &widgets[j], at, grid.size_of(widgets[j].size), chosen, press, robot);
+                    let (ring, when) = self.draw_widget(g, Board::Home, &widgets[j], at, grid.size_of(widgets[j].size), focused && !editing, press, robot);
                     next = earlier(next, when);
                     if let Some(ring) = ring {
                         focus_ring = Some(ring);
@@ -973,8 +977,13 @@ impl Home {
             }
         }
         self.draw_leaving(g, Board::Home, strip);
+        if let Some((j, at)) = held {
+            let (ring, when) = self.draw_widget(g, Board::Home, &widgets[j], at, grid.size_of(widgets[j].size), true, press, robot);
+            next = earlier(next, when);
+            focus_ring = ring.or(focus_ring);
+        }
         if let Some(ring) = focus_ring {
-            g.focus_ring_on(ring, g.tile_radius() + 1.5, strip);
+            ring_on(g, ring, Some(strip), editing);
         }
         next
     }
@@ -1100,19 +1109,27 @@ impl Home {
             self.facts.prepare(from, robot, h24, want, false);
         }
         let pinned = g.pinned.clone();
-        let ctx = crate::widgets::Ctx { facts: &self.facts, robot, pinned: pinned.as_deref(), now: chrono::Local::now(), focused: chosen, radius };
+        let ctx = crate::widgets::Ctx { facts: &self.facts, robot, pinned: pinned.as_deref(), now: chrono::Local::now(), focused: chosen, radius, laid: size };
         // Laid out for its size, at its top left; clipped to where it is
-        // while it grows or shrinks to that (a photo fills where it is).
-        let frame = |x: f32| if kind == Kind::Photos { Rect::new(x, r.y, r.w, r.h) } else { Rect::new(x, r.y, size.0.max(r.w), size.1.max(r.h)) };
+        // while it grows or shrinks to that. A photo fills its tile as it
+        // glides, rising with the lift but not growing with it (the photo is
+        // kept as a picture of that size): the lifted tile shows round it.
+        let frame = |x: f32, kind: Kind| {
+            if kind == Kind::Photos {
+                Rect::new(x + at.x - r.x, at.y - lift, at.w, at.h)
+            } else {
+                Rect::new(x, r.y, size.0.max(r.w), size.1.max(r.h))
+            }
+        };
         g.canvas.set_clip(r.offset(g.ox, 0.0));
         let next = match picking {
             // The picker turning: the new kind slides in, the last one out.
             Some((from, dir, slide)) if slide.abs() > 0.002 => {
-                let old = crate::widgets::content(g, frame(r.x + (slide - dir) * r.w), from, w.size, &ctx);
-                let new = crate::widgets::content(g, frame(r.x + slide * r.w), kind, w.size, &ctx);
+                let old = crate::widgets::content(g, frame(r.x + (slide - dir) * r.w, from), from, w.size, &ctx);
+                let new = crate::widgets::content(g, frame(r.x + slide * r.w, kind), kind, w.size, &ctx);
                 earlier(old, new)
             }
-            _ => crate::widgets::content(g, frame(r.x), kind, w.size, &ctx),
+            _ => crate::widgets::content(g, frame(r.x, kind), kind, w.size, &ctx),
         };
         g.canvas.clear_clip();
         let next = earlier(next, self.facts.due(kind));
@@ -1202,6 +1219,9 @@ impl Home {
         let editing = self.editing.as_ref().is_some_and(|e| e.board == Board::Glance);
         let mut next = None;
         let mut ring = None;
+        // The widget chosen while editing is lifted over the rest: drawn last.
+        let lifted = self.editing.as_ref().filter(|e| e.board == Board::Glance).and_then(|e| e.selected);
+        let mut held = None;
         for &(slot, cell) in &packed.slots {
             let Slot::Widget(j) = slot else { continue };
             // Pages run leftward: the second is a panel's width left of the first.
@@ -1211,7 +1231,11 @@ impl Home {
             if at.right() + g.ox <= 0.0 || at.x + g.ox >= W {
                 continue;
             }
-            let chosen = if editing { self.editing.as_ref().and_then(|e| e.selected) == Some(j) } else { self.on_glance() && self.card == j };
+            if lifted == Some(j) {
+                held = Some((j, at));
+                continue;
+            }
+            let chosen = !editing && self.on_glance() && self.card == j;
             let (r, when) = self.draw_widget(g, Board::Glance, &widgets[j], at, grid.size_of(widgets[j].size), chosen, press, robot);
             next = earlier(next, when);
             if r.is_some() {
@@ -1219,8 +1243,13 @@ impl Home {
             }
         }
         self.draw_leaving(g, Board::Glance, 0.0);
+        if let Some((j, at)) = held {
+            let (r, when) = self.draw_widget(g, Board::Glance, &widgets[j], at, grid.size_of(widgets[j].size), true, press, robot);
+            next = earlier(next, when);
+            ring = r.or(ring);
+        }
         if let Some(r) = ring {
-            g.focus_ring(r, g.tile_radius() + 1.5);
+            ring_on(g, r, None, editing);
         }
         next
     }
@@ -1309,7 +1338,7 @@ impl Home {
         }
         *cx.settings.widgets.board_mut(e.board) = e.kept();
         self.layout = cx.settings.widgets.clone();
-        crate::save_settings(cx.settings);
+        crate::save_settings_soon(cx.settings);
         let selected = e.selected.filter(|_| e.picker.is_none()).filter(|j| *j < self.layout.board(e.board).len());
         match e.board {
             Board::Glance => self.card = selected.unwrap_or(self.card).min(self.layout.glance.len().saturating_sub(1)),
@@ -1318,12 +1347,13 @@ impl Home {
         self.gliding = true;
     }
 
-    /// Keep what is being edited: in the settings, and on the card.
+    /// Keep what is being edited: in the settings, and on the card (written
+    /// on a thread of its own, so a move is never held up by the card).
     fn commit(&mut self, cx: &mut Cx) {
         let Some(e) = &self.editing else { return };
         *cx.settings.widgets.board_mut(e.board) = e.kept();
         self.layout = cx.settings.widgets.clone();
-        crate::save_settings(cx.settings);
+        crate::save_settings_soon(cx.settings);
     }
 
     /// The picker's widget closing where it was (the picker put away).
@@ -1343,6 +1373,10 @@ impl Home {
         let Some(board) = self.editing.as_ref().map(|e| e.board) else { return };
         let (apps, focus) = (self.board_apps(board), self.focus);
         let Some(e) = &mut self.editing else { return };
+        if Kind::ALL.iter().all(|k| e.list.iter().any(|w| w.kind == *k)) {
+            *cx.say = Some("every widget is on this board".into());
+            return;
+        }
         let seq = crate::widgets::sequence(apps, &e.list);
         let before = match e.selected {
             Some(j) => seq.iter().position(|s| *s == Slot::Widget(j)).and_then(|at| seq.get(at + 1).copied()),
@@ -1494,8 +1528,10 @@ impl Home {
         let Some(j) = e.selected else { return Nav::Stay };
         match key {
             Key::Left | Key::Right => {
+                // Only kinds not on this board yet are offered.
+                let taken: Vec<Kind> = e.list.iter().enumerate().filter(|(i, _)| *i != j).map(|(_, w)| w.kind).collect();
                 if let Some(picker) = e.picker.as_mut() {
-                    picker.turn(if key == Key::Left { -1 } else { 1 }, calm);
+                    picker.turn(if key == Key::Left { -1 } else { 1 }, calm, &taken);
                     e.list[j].kind = picker.kind();
                 }
             }
@@ -1556,6 +1592,22 @@ impl Home {
     }
 }
 
+/// The focus ring round `r`: on Home's grid riding the strip of pages
+/// (`along` it), on the glance page as on any screen. While a board is
+/// edited it is part of the widget chosen, which it never lags: drawn where
+/// the widget is, its own glide left where it was until editing ends, when
+/// it glides on from there.
+fn ring_on(g: &mut Gfx, r: Rect, along: Option<f32>, editing: bool) {
+    let radius = g.tile_radius() + 1.5;
+    let still = g.focus_static;
+    g.focus_static = still || editing;
+    match along {
+        Some(along) => g.focus_ring_on(r, radius, along),
+        None => g.focus_ring(r, radius),
+    }
+    g.focus_static = still;
+}
+
 /// The earlier of two times, either perhaps none.
 fn earlier(a: Option<std::time::Instant>, b: Option<std::time::Instant>) -> Option<std::time::Instant> {
     match (a, b) {
@@ -1591,7 +1643,7 @@ impl Screen for Home {
 
     fn title(&self) -> &str {
         match &self.editing {
-            Some(e) if e.picker.is_some() => "Add widget",
+            Some(e) if e.picker.is_some() => "Add",
             Some(_) => "Widgets",
             None if self.on_glance() => "Glance",
             None => "Catalyst",
@@ -1846,8 +1898,11 @@ impl Screen for Home {
     fn draw(&mut self, g: &mut Gfx, robot: &Robot) {
         let arrangement = g.arrangement.clone();
         self.follow_arrangement(&arrangement);
-        let layout = g.widgets.clone();
-        self.follow_layout(&layout);
+        self.follow_layout(&g.widgets);
+        // The battery widget shows the shell's own reading.
+        if self.facts.battery != g.charge {
+            self.facts.battery.clone_from(&g.charge);
+        }
         // Two larger tiles across when chosen, and always at the large text size.
         let columns = if g.text_size == TextSize::Large { 2 } else { g.columns.clamp(2, 3) };
         if columns != self.columns {
@@ -3364,10 +3419,11 @@ impl SettingsApp {
             HomeSection => section("Home", format!("{} · {} across", g.home.name(), g.columns)),
             WidgetsPage => section(
                 "Widgets",
-                match (g.widgets.glance.len() + g.widgets.home.len(), g.widgets.home.len()) {
-                    (0, _) => "none".to_owned(),
+                match (g.widgets.glance.len(), g.widgets.home.len()) {
+                    (0, 0) => "none".to_owned(),
                     (n, 0) => format!("{n} on the glance page"),
-                    (n, _) => format!("{n} on two pages"),
+                    (0, n) => format!("{n} among the apps"),
+                    (glance, home) => format!("{glance} glance · {home} home"),
                 },
             ),
             ArrangeApps => section(

@@ -912,6 +912,9 @@ struct Status {
     wired: bool,
     wireless: bool,
     age: f32,
+    /// When the minute next turns: the clock is read again then, so it
+    /// turns with Home's clock widget, not up to a few seconds after.
+    turns: Option<std::time::Instant>,
 }
 
 impl Shell {
@@ -2163,16 +2166,20 @@ impl Shell {
             }
         }
         // The clock and the battery, a few times a minute (every second
-        // while the clock shows seconds).
+        // while the clock shows seconds), and as the minute turns.
         self.status.age += dt;
-        if self.status.age > if self.settings.seconds { 1.0 } else { 5.0 } {
+        let turned = self.status.turns.is_some_and(|at| std::time::Instant::now() >= at);
+        if turned || self.status.age > if self.settings.seconds { 1.0 } else { 5.0 } {
             self.status.age = 0.0;
             self.gfx.look_for_gpu();
-            let clock = self.settings.clock(chrono::Local::now());
-            let battery = crate::sys::battery_percent();
+            let now = chrono::Local::now();
+            let left = 60.0 - chrono::Timelike::second(&now) as f64 - chrono::Timelike::nanosecond(&now).min(999_999_999) as f64 / 1e9;
+            self.status.turns = Some(std::time::Instant::now() + std::time::Duration::from_secs_f64(left.max(0.0) + 0.01));
+            let clock = self.settings.clock(now);
+            let battery = self.care.gauge_percent().or_else(crate::sys::battery_percent);
             let (wired, wireless) = (crate::sys::link_up("eth0"), crate::sys::link_up("wlan0"));
             if (clock.as_str(), battery, wired, wireless) != (self.status.clock.as_str(), self.status.battery, self.status.wired, self.status.wireless) {
-                self.status = Status { clock, battery, wired, wireless, age: 0.0 };
+                self.status = Status { clock, battery, wired, wireless, age: 0.0, turns: self.status.turns };
                 self.dirty = true;
             }
         }
@@ -2981,7 +2988,7 @@ impl Shell {
 
     /// The island set outright, push-to-talk's or a message (or neither),
     /// for the gallery to check each over each screen.
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub fn stage_island(&mut self, talk: Option<crate::voice::Island>, message: Option<&str>) {
         self.voice.staged = talk;
         self.message = message.map(|m| (m.to_owned(), f32::INFINITY));
@@ -2990,7 +2997,7 @@ impl Shell {
     }
 
     /// How much of the title shows just now, 0 to 1.
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub fn title_alpha(&self) -> f32 {
         self.title_shown.value()
     }
@@ -3482,7 +3489,7 @@ impl Shell {
     }
 
     /// The galleries' and tests' charger.
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub fn pretend_charger(&mut self, on: Option<bool>) {
         self.charger = on;
         // The lock screen reads the charge afresh.
@@ -3491,7 +3498,7 @@ impl Shell {
 
     /// The galleries' and tests' live activities, as if just read (and
     /// not read again).
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub fn pretend_activities(&mut self, list: Vec<crate::liveactivity::Activity>) {
         self.activities.set(list, self.settings.calm);
         self.dirty = true;
@@ -3781,6 +3788,20 @@ impl Shell {
         let busy = self.update_busy();
         for event in self.care.tick(dt, asleep, &mut self.settings.battery, busy) {
             self.care_event(event);
+        }
+        // One reading for everything that shows the battery: Home's widget
+        // has it, and the island takes its charge as it comes. Drawn again
+        // only when what they show of it changes.
+        if self.gfx.charge != self.care.reading {
+            let shown = |r: &Option<crate::power::Reading>| r.as_ref().map(|r| (r.percent, r.flow, r.minutes_left, r.minutes_to_full));
+            if shown(&self.gfx.charge) != shown(&self.care.reading) {
+                self.dirty = true;
+            }
+            self.gfx.charge.clone_from(&self.care.reading);
+        }
+        if let Some(percent) = self.care.gauge_percent().filter(|p| self.status.battery != Some(*p)) {
+            self.status.battery = Some(percent);
+            self.dirty = true;
         }
         if self.standby.state() == crate::standby::State::Awake {
             self.lights.seen();
@@ -4074,7 +4095,7 @@ impl Shell {
 
     /// Deep standby as if it had lasted `seconds` drawing what `reading`
     /// says, for the gallery and the tests.
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub fn deep_for(&mut self, seconds: f32, reading: crate::power::Reading) {
         if !self.deep.on() {
             self.enter_deep();
@@ -4148,7 +4169,7 @@ impl Shell {
     }
 
     /// A screen opened straight away, for the gallery.
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub fn show(&mut self, screen: Box<dyn Screen>) {
         self.open(screen, Path::Slide);
     }
@@ -4620,12 +4641,12 @@ pub(crate) mod tests {
         assert_eq!(title(&shell), "Catalyst");
         frames(&mut shell, 120, FRAME);
         // From the glance page, Enter opens what the widget nearest Home is
-        // about (the battery, at the right of the first row) out of it.
+        // about (the next match, across the first row) out of it.
         shell.key(Key::Left);
         frames(&mut shell, 120, FRAME);
         shell.key(Key::Enter);
-        let Some(Transition { path: Path::Grow(from), .. }) = &shell.transition else { panic!("the robot opens out of its card") };
-        assert!(from.x > W * 0.5, "the card on the right: {from:?}");
+        let Some(Transition { path: Path::Grow(from), .. }) = &shell.transition else { panic!("the schedule opens out of the next match") };
+        assert!(from.w > W * 0.5 && from.y < H * 0.5, "the wide widget at the top: {from:?}");
         assert_eq!(shell.stack.len(), 2);
     }
 

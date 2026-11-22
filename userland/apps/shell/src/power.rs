@@ -695,6 +695,12 @@ impl Care {
         Care::from(Source::find())
     }
 
+    /// The charge as the gauge last gave it, on a handheld that has one
+    /// (the island shows this, as Home's battery widget does).
+    pub fn gauge_percent(&self) -> Option<u32> {
+        self.reading.as_ref().filter(|_| self.source == Source::Gauge).map(|r| r.percent)
+    }
+
     fn from(source: Source) -> Care {
         Care {
             reading: None,

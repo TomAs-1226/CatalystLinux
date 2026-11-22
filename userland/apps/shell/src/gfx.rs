@@ -146,6 +146,9 @@ pub struct Gfx {
     pub power: crate::standby::Power,
     /// Settings › Battery's choices, for the rows that show them.
     pub battery: crate::power::Choices,
+    /// The shell's battery reading, as the island and the lock screen have
+    /// it: what Home's battery widget shows.
+    pub charge: Option<crate::power::Reading>,
     /// Lift to wake and face down to sleep.
     pub lift_wake: bool,
     pub face_down: bool,
@@ -351,6 +354,7 @@ impl Gfx {
             screen_off: 60,
             power: crate::standby::Power::Balanced,
             battery: crate::power::Choices::default(),
+            charge: None,
             lift_wake: true,
             face_down: true,
             lock: crate::lock::Choices::default(),
