@@ -346,7 +346,7 @@ impl MusicScreen {
 
     fn lib_rows(&self) -> Vec<LibRow> {
         let mut rows = vec![LibRow::Artists, LibRow::Albums, LibRow::Songs, LibRow::Played];
-        rows.extend((0..library::playlists().len()).map(LibRow::Playlist));
+        rows.extend((0..library::playlist_count()).map(LibRow::Playlist));
         if library::count() + store::cache_count() > 0 {
             rows.push(LibRow::Shuffle);
         }
@@ -1419,7 +1419,7 @@ impl MusicScreen {
         let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         let width = W - 2.0 * PAD - 5.0;
         let playlists = library::playlists();
-        let (artists, albums, songs, played) = (library::artists().len(), library::albums(None).len(), library::count(), store::cache_count());
+        let (artists, albums, songs, played) = (library::artist_count(), library::album_count(), library::count(), store::cache_count());
         for (i, y) in self.list.layout(g, rows.len(), top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, y, width, row_h);
             let f = i == self.list.focus;

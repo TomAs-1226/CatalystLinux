@@ -607,6 +607,8 @@ pub struct Activities {
     /// them at its last frame (the shell says, as it draws): they run only
     /// while it does.
     pub bars: crate::livemusic::Bars,
+    /// The bars moved at the last tick: ambient, not motion (Shell::ambient).
+    pub bars_live: bool,
     pub bars_seen: bool,
     /// A new song coming in: 0 as it changes, springing to 1; and the song
     /// before, going.
@@ -665,6 +667,7 @@ impl Activities {
             pinned: false,
             quiet: None,
             bars: crate::livemusic::Bars::new(),
+            bars_live: false,
             bars_seen: false,
             song: Animated::new(1.0, role::smooth()).with_rest(0.004),
             previous: None,
@@ -777,7 +780,9 @@ impl Activities {
         // (never calm), settling flat otherwise and then costing nothing.
         let music = self.list.iter().find(|a| a.kind == Kind::Music);
         let seed = music.map_or(0, |a| crate::livemusic::song_seed(&a.title));
-        let bars = self.bars.tick(dt, md, playing && self.bars_seen && !calm, seed);
+        // Their own time, not motion's (which stands still at rest): ambient,
+        // they run between the frames of anything moving.
+        let bars = self.bars.tick(dt, dt.min(0.1), playing && self.bars_seen && !calm, seed);
         let row = if self.opened().is_some_and(|a| a.sung.is_some()) { 1.0 } else { 0.0 };
         if self.lyric.target() != row {
             if calm {
@@ -786,11 +791,17 @@ impl Activities {
                 self.lyric.set(row);
             }
         }
-        let moving = self.open.tick(md) | self.level.tick(md) | self.song.tick(md) | self.tint.tick(md) | self.lyric.tick(md) | bars;
+        let moving = self.open.tick(md) | self.level.tick(md) | self.song.tick(md) | self.tint.tick(md) | self.lyric.tick(md);
+        // The bars are ambient, not motion: drawn a few times a second on
+        // their own (Shell::ambient), so the frame beat still rests and the
+        // processor is not held up for them. As motion they kept every page
+        // at 60 frames a second while music played, and the beat, never
+        // resting, never came back from a heavy moment.
+        self.bars_live = bars;
         // A meter moving by itself, or a clock counting: a frame now and then
         // (the main loop looks in four times a second at rest).
         let live = self.list.iter().any(|a| a.meter.is_some_and(|m| m.moving()));
-        (moving, changed || moving || live)
+        (moving, changed || moving || live || bars)
     }
 
     /// Music's song changed (another one, not paused or played): the one

@@ -410,8 +410,99 @@ pub fn refresh(every_file: bool) {
 }
 
 /// Every song, by artist, album and track.
+// ------------------------------------------------- the lists, made once ---
+
+/// What the library's pages show, made from the index once and kept until
+/// it changes (playlists: until their folder does). The pages draw them
+/// every frame, and making them walks every song, and every playlist line
+/// to its song: made every frame, the library lagged as it opened.
+struct Made {
+    of: Option<Arc<Index>>,
+    songs: Option<Vec<Song>>,
+    albums: Option<Vec<Album>>,
+    artists: Option<Vec<(String, usize, usize)>>,
+    playlists: Option<(std::time::SystemTime, Vec<(String, Vec<Song>)>)>,
+}
+
+static MADE: Mutex<Made> = Mutex::new(Made { of: None, songs: None, albums: None, artists: None, playlists: None });
+
+fn made<T>(f: impl FnOnce(&mut Made, &Index) -> T) -> T {
+    let idx = index();
+    let mut m = MADE.lock().unwrap_or_else(|e| e.into_inner());
+    if !m.of.as_ref().is_some_and(|of| Arc::ptr_eq(of, &idx)) {
+        *m = Made { of: Some(idx.clone()), songs: None, albums: None, artists: None, playlists: None };
+    }
+    f(&mut m, &idx)
+}
+
+/// A playlist's file was written: its list is made again when next asked.
+fn playlists_changed() {
+    MADE.lock().unwrap_or_else(|e| e.into_inner()).playlists = None;
+}
+
 pub fn songs() -> Vec<Song> {
-    let mut all = index().songs.clone();
+    made(|m, idx| m.songs.get_or_insert_with(|| make_songs(idx)).clone())
+}
+
+pub fn albums(artist: Option<&str>) -> Vec<Album> {
+    made(|m, idx| {
+        if m.albums.is_none() {
+            let songs = m.songs.get_or_insert_with(|| make_songs(idx)).clone();
+            m.albums = Some(make_albums(songs));
+        }
+        let all = m.albums.as_ref().unwrap();
+        match artist {
+            None => all.clone(),
+            Some(want) => all.iter().filter(|a| a.artist == want).cloned().collect(),
+        }
+    })
+}
+
+pub fn album_count() -> usize {
+    made(|m, idx| {
+        if m.albums.is_none() {
+            let songs = m.songs.get_or_insert_with(|| make_songs(idx)).clone();
+            m.albums = Some(make_albums(songs));
+        }
+        m.albums.as_ref().map_or(0, Vec::len)
+    })
+}
+
+pub fn artists() -> Vec<(String, usize, usize)> {
+    made(|m, idx| m.artists.get_or_insert_with(|| make_artists(idx)).clone())
+}
+
+pub fn artist_count() -> usize {
+    made(|m, idx| m.artists.get_or_insert_with(|| make_artists(idx)).len())
+}
+
+pub fn playlists() -> Vec<(String, Vec<Song>)> {
+    with_playlists(|p| p.to_vec())
+}
+
+pub fn playlist_count() -> usize {
+    with_playlists(<[_]>::len)
+}
+
+fn with_playlists<T>(f: impl FnOnce(&[(String, Vec<Song>)]) -> T) -> T {
+    let folder = std::fs::metadata(store::library_dir().join("Playlists")).and_then(|m| m.modified()).ok();
+    made(|m, idx| {
+        match (folder, &m.playlists) {
+            (Some(at), Some((made_at, lists))) if *made_at == at => f(lists),
+            (Some(at), _) => {
+                let lists = make_playlists(idx);
+                let out = f(&lists);
+                m.playlists = Some((at, lists));
+                out
+            }
+            // No folder: no playlists, nothing to keep.
+            (None, _) => f(&make_playlists(idx)),
+        }
+    })
+}
+
+fn make_songs(idx: &Index) -> Vec<Song> {
+    let mut all = idx.songs.clone();
     all.sort_by(|a, b| sort_key(&a.album_artist_or_artist()).cmp(&sort_key(&b.album_artist_or_artist())).then(a.album.cmp(&b.album)).then(a.track.cmp(&b.track)).then(a.title.cmp(&b.title)));
     all
 }
@@ -441,13 +532,10 @@ pub struct Album {
 }
 
 /// Albums (of one artist, or all), by name.
-pub fn albums(artist: Option<&str>) -> Vec<Album> {
+fn make_albums(all: Vec<Song>) -> Vec<Album> {
     let mut map: HashMap<(String, String), Album> = HashMap::new();
-    for s in songs() {
+    for s in all {
         let a = s.album_artist_or_artist();
-        if artist.is_some_and(|want| want != a) {
-            continue;
-        }
         let album = if s.album.is_empty() { "Singles".to_owned() } else { s.album.clone() };
         let e = map.entry((a.clone(), album.clone())).or_insert_with(|| Album { name: album, artist: a, year: 0, songs: Vec::new() });
         e.year = e.year.max(s.year);
@@ -462,9 +550,9 @@ pub fn albums(artist: Option<&str>) -> Vec<Album> {
 }
 
 /// Artists, by name, with how many albums and songs.
-pub fn artists() -> Vec<(String, usize, usize)> {
+fn make_artists(idx: &Index) -> Vec<(String, usize, usize)> {
     let mut map: HashMap<String, (usize, std::collections::HashSet<String>)> = HashMap::new();
-    for s in index().songs.iter() {
+    for s in idx.songs.iter() {
         let e = map.entry(s.album_artist_or_artist()).or_default();
         e.0 += 1;
         e.1.insert(s.album.clone());
@@ -476,10 +564,11 @@ pub fn artists() -> Vec<(String, usize, usize)> {
 
 /// Playlists: `.m3u8` (or `.m3u`) files in `Playlists/`, their songs found
 /// in the library.
-pub fn playlists() -> Vec<(String, Vec<Song>)> {
+fn make_playlists(idx: &Index) -> Vec<(String, Vec<Song>)> {
     let root = store::library_dir();
     let dir = root.join("Playlists");
-    let idx = index();
+    // Each line to its song by its path at once, not by walking them all.
+    let by_path: HashMap<&Path, &Song> = idx.songs.iter().map(|s| (s.path.as_path(), s)).collect();
     let mut out: Vec<(String, Vec<Song>)> = std::fs::read_dir(&dir)
         .into_iter()
         .flatten()
@@ -496,7 +585,7 @@ pub fn playlists() -> Vec<(String, Vec<Song>)> {
                 .filter_map(|l| {
                     let path = if Path::new(l).is_absolute() { PathBuf::from(l) } else { dir.join(l) };
                     let path = normalise(&path);
-                    idx.songs.iter().find(|s| s.path == path).cloned()
+                    by_path.get(path.as_path()).map(|s| (*s).clone())
                 })
                 .collect();
             Some((stem, songs))
@@ -532,6 +621,7 @@ pub fn add_to_playlist(name: &str, song: &Path) {
         text.push_str(&line);
         text.push('\n');
         store::write_atomic(&file, text.as_bytes()).ok();
+        playlists_changed();
     }
 }
 
@@ -544,6 +634,7 @@ pub fn keep_only_in_playlist(name: &str, keep: &[PathBuf]) {
     let kept = kept_lines(&text, &dir, keep);
     if kept != text {
         store::write_atomic(&file, kept.as_bytes()).ok();
+        playlists_changed();
     }
 }
 

@@ -788,7 +788,8 @@ fn main() {
         } else if shell.panel_off() {
             standby::DARK_LOOK
         } else {
-            Duration::from_millis(250)
+            // Music's bars, a few times a second; else a look four times a second.
+            shell.ambient().unwrap_or(Duration::from_millis(250))
         };
         let Some(keys) = platform.poll(timeout) else { break };
         slack.woke();

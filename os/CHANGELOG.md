@@ -10,6 +10,11 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.8.1
+
+### Fixed
+- Music no longer lags as it opens, nor does the rest of the handheld while a song plays. The island's bars draw 15 times a second on their own instead of holding every page to 60 (which also kept the frame rate from ever coming back up after a heavy moment), and the library's lists of songs, albums, artists and playlists are made once instead of on every frame.
+
 ## 0.8.0
 
 ### Lyrics

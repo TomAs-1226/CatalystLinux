@@ -2284,6 +2284,15 @@ impl Shell {
         draw
     }
 
+    /// Something drawn a few times a second that is not motion (Music's
+    /// bars on the island): how often the main loop looks in for it.
+    pub fn ambient(&self) -> Option<std::time::Duration> {
+        // My own tuning: 15 a second, lively enough for bars that follow
+        // the music, and about a quarter of the frames (and the panel's
+        // time, as only the island's rows change) of keeping to the beat.
+        (!self.standby.asleep() && self.activities.bars_live).then_some(std::time::Duration::from_millis(66))
+    }
+
     /// Whether something on screen is in motion.
     pub fn moving(&self) -> bool {
         self.moving
@@ -6291,12 +6300,16 @@ pub(crate) mod tests {
                 seen.push(shell.activities.bars.heights());
             }
             assert!(seen.windows(2).filter(|w| w[0] != w[1]).count() > 20, "the bars dance at {size:?}");
-            assert!(shell.moving(), "frames kept coming while they do");
+            // Ambient, not motion: a few frames a second of their own, and the
+            // frame beat free to rest (as motion they held every page at 60).
+            assert!(!shell.moving(), "not motion");
+            assert!(shell.ambient().is_some(), "frames kept coming while they do");
             // Paused, they settle flat, and stop asking for frames.
             shell.pretend_activities(vec![crate::liveactivity::music(Some(&crate::nowplaying::NowPlaying { playing: false, ..np.clone() })).expect("music")]);
             frames(&mut shell, 60 * 6, FRAME);
             assert!(shell.activities.bars.heights().iter().all(|h| *h < 0.01), "flat at {size:?}");
             assert!(!shell.activities.bars.tick(FRAME, FRAME, false, 0), "still");
+            assert!(shell.ambient().is_none(), "and they ask for no frames");
         }
     }
 
