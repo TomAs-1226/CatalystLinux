@@ -62,7 +62,7 @@ macro_rules! choice {
     };
 }
 
-choice!(Face { Clock => "clock", Charge => "charge", Match => "next match", Weather => "weather", Photos => "photos", Everything => "everything" });
+choice!(Face { Clock => "clock", Music => "now playing", Charge => "charge", Match => "next match", Weather => "weather", Photos => "photos", Everything => "everything" });
 choice!(ClockStyle { Digits => "digits", Dial => "dial", Dots => "dots" });
 choice!(LockFace { Centre => "centre", Stacked => "stacked", Dots => "dots" });
 choice!(LockColour { White => "white", Ice => "ice", Amber => "amber", Accent => "accent" });
@@ -186,6 +186,8 @@ pub enum Prompt {
     Alert(String),
     /// The right one: open, as the lock screen slides away.
     Open,
+    /// Shown by hand with no passcode: any key goes back.
+    Curtain,
 }
 
 /// The field's height, where it sits, and its least width.
@@ -306,6 +308,7 @@ impl Field {
             Prompt::Wait(s) => ("timer", format!("try again in {}", passcode::wait_text(*s)), t.dim),
             Prompt::Alert(words) => ("battery_alert", words.clone(), t.amber_ink),
             Prompt::Open => ("lock_open", String::new(), t.ink),
+            Prompt::Curtain => ("lock_open", "any key to go back".to_owned(), t.dim),
         }
     }
 
@@ -384,7 +387,30 @@ pub struct Info {
     /// Notices since it locked: how many, the newest's words, and when.
     pub notices: usize,
     pub newest: Option<(String, i64)>,
+    /// Live activities, most important first (the lock screen shows two).
+    pub activities: Vec<crate::liveactivity::Activity>,
+    /// Music's level (1 playing, 0 paused, springing between).
+    pub level: f32,
+    /// Seconds since the lock screen began to come in, while its parts are
+    /// still rising into place (none: all in place).
+    pub rise: Option<f32>,
 }
+
+/// How far below its place a part of the lock screen still is, and how
+/// present, `order` steps into its entrance (Bezel's launcher cascade: each
+/// part 50 ms after the one before, rising 14 px on the release spring).
+pub fn rise(info: &Info, order: f32) -> (f32, f32) {
+    let Some(t) = info.rise else { return (0.0, 1.0) };
+    let since = t - order * 0.05;
+    if since <= 0.0 {
+        return (RISE, 0.0);
+    }
+    (RISE * role::release().solve(1.0, 0.0, since).0, (since / 0.22).min(1.0))
+}
+
+const RISE: f32 = 14.0;
+/// The entrance is over by then: the last part has settled.
+pub const RISE_FOR: f32 = 0.9;
 
 /// The lock screen's backdrop: the ground, with the colour's soft glow above
 /// and to the left (where Bezel's light comes from) and a fainter one below.
@@ -440,15 +466,16 @@ fn items(choices: &Choices, info: &Info, unix: i64, editing: bool) -> Vec<Item> 
     out
 }
 
-/// Lay the chips in rows `width` wide from `x` (centred on each row, or
-/// from its left), the first row's middle at `cy`, as many rows as fit
-/// above the field: each whole on its row (a long one, the notices' words,
-/// cut to the row), in order, as many as fit. Records where each went.
+/// Lay the chips in rows `width` wide from `x` (centred on each row, from
+/// its left, or to its right), the first row's middle at `cy`, as many rows
+/// as fit above `bottom`: each whole on its row (a long one, the notices'
+/// words, cut to the row), in order, as many as fit, rising in from `order`.
+/// Records where each went.
 #[allow(clippy::too_many_arguments)]
-fn flow(g: &mut Gfx, chips: &[Item], x: f32, width: f32, cy: f32, centred: bool, places: &mut Vec<(Part, Rect)>) {
+fn flow(g: &mut Gfx, chips: &[Item], x: f32, width: f32, cy: f32, align: Align, bottom: f32, info: &Info, order: f32, places: &mut Vec<(Part, Rect)>) {
     let t = g.tokens;
     let (gap, pitch) = (6.0, (g.ty.caption.size + 9.0).round() + 5.0);
-    let rows = (((FIELD_Y - 4.0) - (cy - (pitch - 5.0) * 0.5) + 5.0) / pitch).floor().max(1.0) as usize;
+    let rows = ((bottom - (cy - (pitch - 5.0) * 0.5) + 5.0) / pitch).floor().max(1.0) as usize;
     // Rows of (chip, its words, its width), if every one of `keep` fits.
     let arrange = |g: &mut Gfx, keep: &[usize], short: bool| -> Option<Vec<Vec<(usize, String, f32)>>> {
         let mut lines: Vec<Vec<(usize, String, f32)>> = vec![Vec::new()];
@@ -496,12 +523,17 @@ fn flow(g: &mut Gfx, chips: &[Item], x: f32, width: f32, cy: f32, centred: bool,
     };
     for (row, line) in lines.iter().enumerate() {
         let total: f32 = line.iter().map(|(_, _, w)| w).sum::<f32>() + gap * line.len().saturating_sub(1) as f32;
-        let mut at = if centred { x + (width - total) * 0.5 } else { x };
+        let mut at = match align {
+            Align::Center => x + (width - total) * 0.5,
+            Align::Left => x,
+            Align::Right => x + width - total,
+        };
+        let (dy, alpha) = rise(info, order + row as f32);
         let y = cy + row as f32 * pitch;
         for (i, words, w) in line {
             let (what, icon, dot, _, _, on) = &chips[*i];
-            let alpha = if *on { 1.0 } else { 0.3 };
-            chip(g, at.round(), y, *icon, *dot, words, t.surface2, t.ink, alpha);
+            let shown = if *on { 1.0 } else { 0.3 };
+            chip(g, at.round(), (y + dy).round(), *icon, *dot, words, t.surface2, t.ink, shown * alpha);
             places.push((Part::Item(*what), Rect::new(at.round(), y - pitch * 0.5 + 2.5, *w, pitch - 5.0)));
             at += w + gap;
         }
@@ -517,13 +549,17 @@ pub struct Layout {
 
 /// Draw the lock screen's face (all but the field) as `choices` have it.
 /// `editing`: the editor's preview, where what is switched off still shows,
-/// faintly.
+/// faintly. Each part rises into place in turn as the lock screen comes in.
 ///
 /// - **Centre**: the date, the time large in the middle, the chips beneath
 ///   in up to two rows, the field low and centred.
 /// - **Dots**: the same, the time set in dots.
 /// - **Stacked**: the hours over the minutes, large, down the left; the
 ///   date, the chips and the field down the right.
+/// - **With live activities** (music playing, a timer, the queue), any of
+///   them: the time smaller along the top (in its style and colour) with the
+///   date and the chips beside it, and the activities' cards beneath, the
+///   most important first: one large, or two.
 pub fn draw_face(g: &mut Gfx, choices: &Choices, info: &Info, now: NaiveDateTime, editing: bool) -> Layout {
     let t = g.tokens;
     let ty = g.ty;
@@ -534,7 +570,13 @@ pub fn draw_face(g: &mut Gfx, choices: &Choices, info: &Info, now: NaiveDateTime
     let time = time_text(now, info.h24);
     let date_on = choices.shows(Show::Date);
     let date_alpha = if date_on { 1.0 } else { 0.3 };
-    let chips = items(choices, info, unix, editing);
+    let mut chips = items(choices, info, unix, editing);
+    if !info.activities.is_empty() {
+        // What an activity already shows is not a chip as well.
+        use crate::liveactivity::Kind;
+        chips.retain(|c| !info.activities.iter().any(|a| (c.0 == Show::Match && a.kind == Kind::Match) || (c.0 == Show::Reminder && a.kind == Kind::Reminder)));
+        return band(g, choices, info, now, &time, &chips, editing, tint, date_alpha);
+    }
     match choices.lock_face {
         LockFace::Centre | LockFace::Dots => {
             let date_cy = 15.0;
@@ -542,13 +584,15 @@ pub fn draw_face(g: &mut Gfx, choices: &Choices, info: &Info, now: NaiveDateTime
                 let date = date_text(now);
                 let date = if g.measure(&date, ty.caption) > W - 2.0 * PAD { short_date(now) } else { date };
                 let w = g.measure(&date, ty.caption);
-                g.text.draw_aligned(&mut g.canvas, W * 0.5, (date_cy + ty.caption.size * 0.36).round(), Align::Center, &date, &ty.caption, t.dim, date_alpha);
+                let (dy, alpha) = rise(info, 0.0);
+                g.text.draw_aligned(&mut g.canvas, W * 0.5, (date_cy + dy + ty.caption.size * 0.36).round(), Align::Center, &date, &ty.caption, t.dim, date_alpha * alpha);
                 places.push((Part::Date, Rect::new((W - w) * 0.5 - 6.0, date_cy - 8.0, w + 12.0, 16.0)));
             }
+            let (dy, alpha) = rise(info, 1.0);
             let below = if choices.lock_face == LockFace::Dots {
                 let (pitch, top) = (6.5, 32.0);
                 let (cols, _) = crate::faces::dot_time(&time);
-                draw_dots(g, &time, &time, 1.0, W * 0.5, top, pitch, tint, 1.0);
+                draw_dots(g, &time, &time, 1.0, W * 0.5, top + dy, pitch, tint, alpha);
                 let w = cols as f32 * pitch;
                 places.push((Part::Time, Rect::new((W - w) * 0.5 - 4.0, top - 6.0, w + 8.0, 6.0 * pitch + 12.0)));
                 top + 6.0 * pitch + 19.0
@@ -558,11 +602,11 @@ pub fn draw_face(g: &mut Gfx, choices: &Choices, info: &Info, now: NaiveDateTime
                 let cap = g.text.cap_height(&style);
                 let w = tab.width(&time);
                 let baseline = (27.0 + cap).round();
-                tab.draw(g, &time, &time, 1.0, (W - w) * 0.5, baseline, tint, 1.0);
+                tab.draw(g, &time, &time, 1.0, (W - w) * 0.5, baseline + dy, tint, alpha);
                 places.push((Part::Time, Rect::new((W - w) * 0.5 - 6.0, baseline - cap - 3.0, w + 12.0, cap + 6.0)));
                 baseline + 19.0
             };
-            flow(g, &chips, PAD, W - 2.0 * PAD, below, true, &mut places);
+            flow(g, &chips, PAD, W - 2.0 * PAD, below, Align::Center, FIELD_Y - 4.0, info, 2.0, &mut places);
             Layout { places, field: (W * 0.5, W - 2.0 * PAD - 12.0) }
         }
         LockFace::Stacked => {
@@ -576,8 +620,10 @@ pub fn draw_face(g: &mut Gfx, choices: &Choices, info: &Info, now: NaiveDateTime
             let x = PAD + 6.0;
             let first = top + cap;
             let second = first + gap + cap;
-            tab.draw(g, hours, hours, 1.0, x, first, tint, 1.0);
-            tab.draw(g, minutes, minutes, 1.0, x, second, tint, 1.0);
+            let (dy, alpha) = rise(info, 0.0);
+            tab.draw(g, hours, hours, 1.0, x, first + dy, tint, alpha);
+            let (dy, alpha) = rise(info, 1.0);
+            tab.draw(g, minutes, minutes, 1.0, x, second + dy, tint, alpha);
             let w = tab.width("88");
             places.push((Part::Time, Rect::new(x - 6.0, top - 4.0, w + 12.0, 2.0 * cap + gap + 8.0)));
             // The rest down the right.
@@ -586,13 +632,72 @@ pub fn draw_face(g: &mut Gfx, choices: &Choices, info: &Info, now: NaiveDateTime
             if date_on || editing {
                 let date = date_text(now);
                 let date = if g.measure(&date, ty.caption) > width { short_date(now) } else { date };
-                let dw = g.text.draw(&mut g.canvas, col, (top + 6.0 + ty.caption.size * 0.36).round(), &date, &ty.caption, t.dim, date_alpha);
+                let (dy, alpha) = rise(info, 1.0);
+                let dw = g.text.draw(&mut g.canvas, col, (top + 6.0 + dy + ty.caption.size * 0.36).round(), &date, &ty.caption, t.dim, date_alpha * alpha);
                 places.push((Part::Date, Rect::new(col - 6.0, top - 2.0, dw + 12.0, 16.0)));
             }
-            flow(g, &chips, col, width, top + 30.0, false, &mut places);
+            flow(g, &chips, col, width, top + 30.0, Align::Left, FIELD_Y - 4.0, info, 2.0, &mut places);
             Layout { places, field: (col + width * 0.5, width) }
         }
     }
+}
+
+/// The lock screen with live activities: the time along the top in its
+/// style and colour, the date and chips at the right of it, and beneath, the
+/// activities' cards: one large, or the two most important (a third and
+/// more said in a chip).
+#[allow(clippy::too_many_arguments)]
+fn band(g: &mut Gfx, choices: &Choices, info: &Info, now: NaiveDateTime, time: &str, chips: &[Item], editing: bool, tint: Color, date_alpha: f32) -> Layout {
+    let t = g.tokens;
+    let ty = g.ty;
+    let mut places = Vec::new();
+    let x = PAD + 6.0;
+    let top = 8.0;
+    let (dy, alpha) = rise(info, 0.0);
+    let (time_w, time_h) = if choices.lock_face == LockFace::Dots {
+        let pitch = 4.2;
+        let (cols, _) = crate::faces::dot_time(time);
+        let w = cols as f32 * pitch;
+        draw_dots(g, time, time, 1.0, x + (w - pitch) * 0.5, top + 3.0 + dy, pitch, tint, alpha);
+        (w, 6.0 * pitch + 6.0)
+    } else {
+        let style = ty.display(38.0);
+        let tab = Tab::new(g, style);
+        let cap = g.text.cap_height(&style);
+        tab.draw(g, time, time, 1.0, x - 1.0, (top + cap + dy).round(), tint, alpha);
+        (tab.width(time), cap)
+    };
+    places.push((Part::Time, Rect::new(x - 6.0, top - 4.0, time_w + 12.0, time_h + 8.0)));
+    // The date and the chips, at the right of the time.
+    let right = W - PAD - 2.0;
+    let room = right - (x + time_w + 14.0);
+    if choices.shows(Show::Date) || editing {
+        let date = date_text(now);
+        let date = if g.measure(&date, ty.caption) > room { short_date(now) } else { date };
+        let (dy, alpha) = rise(info, 1.0);
+        let dw = g.measure(&date, ty.caption);
+        g.text.draw_aligned(&mut g.canvas, right, (top + 6.0 + dy + ty.caption.size * 0.36).round(), Align::Right, &date, &ty.caption, t.dim, date_alpha * alpha);
+        places.push((Part::Date, Rect::new(right - dw - 6.0, top - 2.0, dw + 12.0, 16.0)));
+    }
+    let more = info.activities.len().saturating_sub(2);
+    let mut chips: Vec<Item> = chips.to_vec();
+    if more > 0 {
+        chips.push((Show::Notices, Some("graphic_eq"), None, format!("+{more}"), None, true));
+    }
+    let cards_top = top + time_h + 10.0;
+    flow(g, &chips, right - room, room, top + 27.0, Align::Right, cards_top - 2.0, info, 2.0, &mut places);
+    // The cards.
+    let bottom = FIELD_Y - 6.0;
+    let shown = &info.activities[..info.activities.len().min(2)];
+    let gap = 5.0;
+    let h = ((bottom - cards_top) - gap * (shown.len() as f32 - 1.0)) / shown.len() as f32;
+    for (i, a) in shown.iter().enumerate() {
+        let (dy, alpha) = rise(info, 3.0 + i as f32);
+        let r = Rect::new(PAD, (cards_top + i as f32 * (h + gap) + dy).round(), W - 2.0 * PAD, h.floor());
+        g.canvas.rrect(r, g.radius(14.0).min(r.h * 0.5), t.surface1, alpha);
+        crate::liveactivity::draw_card(g, r, a, info.level, alpha);
+    }
+    Layout { places, field: (W * 0.5, W - 2.0 * PAD - 12.0) }
 }
 
 // ------------------------------------------------------------- the layer ---
@@ -604,6 +709,14 @@ const NOTICES_KEPT: usize = 20;
 pub struct Lock {
     /// Locked: only the passcode opens it.
     engaged: bool,
+    /// Shown by hand (Tab held) with no passcode set: the lock screen as a
+    /// curtain, which any key lifts.
+    curtain: bool,
+    /// Seconds since the lock screen began to come in (its parts rising in
+    /// turn), or none once they have all settled.
+    entering: Option<f32>,
+    /// The curtain was lifted by a key, to tell at the next tick.
+    lifted: bool,
     /// A passcode is set (as last read), and when that was read.
     armed: bool,
     armed_generation: u64,
@@ -633,6 +746,9 @@ impl Lock {
         let armed = passcode::is_set();
         Lock {
             engaged: armed,
+            curtain: false,
+            entering: armed.then_some(0.0),
+            lifted: false,
             armed,
             armed_generation: passcode::generation(),
             armed_age: 0.0,
@@ -656,14 +772,54 @@ impl Lock {
         self.engaged
     }
 
+    /// The lock screen takes the keys: locked, or shown as a curtain.
+    pub fn covering(&self) -> bool {
+        self.engaged || self.curtain
+    }
+
     /// Anything of the lock screen is on the panel.
     pub fn visible(&self) -> bool {
-        self.engaged || self.shown.value() > 0.004
+        self.covering() || self.shown.value() > 0.004
     }
 
     /// It covers the panel whole: nothing beneath need be drawn.
     pub fn covers(&self) -> bool {
-        self.engaged && self.shown.value() >= 0.999
+        self.covering() && self.shown.value() >= 0.999
+    }
+
+    /// Locked by hand (Tab held): the lock screen comes down over the screen
+    /// in front, its parts rising into place. With a passcode it is locked;
+    /// without one it is a curtain any key lifts.
+    pub fn show(&mut self, calm: bool) {
+        if self.covering() {
+            return;
+        }
+        if self.armed {
+            self.engaged = true;
+            self.field.clear();
+            self.wrong_words = None;
+            self.tries = Tries::load(passcode::unix_now());
+        } else {
+            self.curtain = true;
+        }
+        if calm {
+            self.shown.jump(1.0);
+        } else {
+            self.shown.set_with(1.0, role::release());
+        }
+        self.entering = (!calm).then_some(0.0);
+    }
+
+    /// The screen woke onto the lock screen: its parts rise in again.
+    pub fn woke(&mut self, calm: bool) {
+        if self.covering() && !calm {
+            self.entering = Some(0.0);
+        }
+    }
+
+    /// Seconds into the entrance, while its parts are rising.
+    pub fn entering(&self) -> Option<f32> {
+        self.entering
     }
 
     /// Whether a passcode is set, read again when it changes (or now and
@@ -685,6 +841,7 @@ impl Lock {
             return;
         }
         self.engaged = true;
+        self.curtain = false;
         self.shown.jump(1.0);
         self.field.clear();
         self.wrong_words = None;
@@ -728,8 +885,14 @@ impl Lock {
         self.checking.is_some()
     }
 
-    /// A key on the lock screen.
+    /// A key on the lock screen. Shown as a curtain (no passcode), any key
+    /// lifts it, and is spent doing so.
     pub fn key(&mut self, key: Key) {
+        if self.curtain && !self.engaged {
+            self.open();
+            self.lifted = true;
+            return;
+        }
         if !self.engaged || self.checking.is_some() || self.wait() > 0 {
             return;
         }
@@ -776,6 +939,9 @@ impl Lock {
 
     fn open(&mut self) {
         self.engaged = false;
+        self.curtain = false;
+        self.entering = None;
+        self.shown.set_with(0.0, role::release());
         self.field.clear();
         self.wrong_words = None;
         self.alert = None;
@@ -792,6 +958,16 @@ impl Lock {
             // No passcode any more (taken off over SSH, the file damaged).
             self.open();
             unlocked = true;
+        }
+        // The curtain lifted: as good as unlocked, for what was said meanwhile.
+        if std::mem::take(&mut self.lifted) {
+            unlocked = true;
+        }
+        if let Some(t) = &mut self.entering {
+            *t += md;
+            if *t >= RISE_FOR || calm {
+                self.entering = None;
+            }
         }
         if let Some(rx) = &self.checking {
             match rx.try_recv() {
@@ -819,7 +995,7 @@ impl Lock {
             self.shown.jump(self.shown.target());
         }
         let mut moving = self.shown.tick(md) | self.field.tick(md, calm);
-        moving |= self.checking.is_some();
+        moving |= self.checking.is_some() || self.entering.is_some();
         // A wait counting down, and the clock: a frame when either changes.
         let drawn = (self.wait(), time_text(crate::faces::local_now(), h24));
         if self.visible() && drawn != self.drawn {
@@ -831,7 +1007,9 @@ impl Lock {
 
     fn prompt(&self) -> Prompt {
         let wait = self.wait();
-        if !self.engaged {
+        if self.curtain {
+            Prompt::Curtain
+        } else if !self.engaged {
             Prompt::Open
         } else if wait > 0 {
             Prompt::Wait(wait)
@@ -850,7 +1028,7 @@ impl Lock {
     /// away as it opens.
     pub fn draw(&mut self, g: &mut Gfx, choices: &Choices, info: &Info, scratch: &mut Vec<u32>) {
         let shown = self.shown.value().clamp(0.0, 1.0);
-        if shown <= 0.004 && !self.engaged {
+        if shown <= 0.004 && !self.covering() {
             return;
         }
         let fading = shown < 0.999;
@@ -861,18 +1039,29 @@ impl Lock {
         let layout = draw_face(g, choices, info, now, false);
         let (cx, most) = layout.field;
         let prompt = self.prompt();
-        self.field.draw(g, cx, FIELD_Y, most, &prompt);
+        let (dy, _) = rise(info, 5.0);
+        self.field.draw(g, cx, FIELD_Y + dy.round(), most, &prompt);
         if fading {
-            // Opening: the lock screen slides up and away, revealing where
-            // the handheld was, fading only as it goes (so the two never
-            // stand over each other).
+            // Coming down over the screen in front, or opening: the lock
+            // screen slides from or up and away to the top, revealing where
+            // the handheld was, faded only near the end of its way (so the
+            // two never stand over each other).
             let w = W as usize;
             let rows = H as usize;
             let lifted = (((1.0 - shown) * H).round().max(0.0) as usize).min(rows);
             let lock = std::mem::replace(&mut g.canvas.px, std::mem::take(scratch));
             let mut moved = g.canvas.px.clone();
-            moved[..(rows - lifted) * w].copy_from_slice(&lock[lifted * w..]);
-            let alpha = (shown * 1.6).clamp(0.0, 1.0);
+            let edge = rows - lifted;
+            // A soft shadow below the sheet's edge, on what it uncovers.
+            for (i, row) in (edge..(edge + 8).min(rows)).enumerate() {
+                let k = 0.32 * (1.0 - i as f32 / 8.0).powi(2);
+                bezel::simd::mix_into(&mut moved[row * w..(row + 1) * w], None, (k * 256.0) as u32);
+            }
+            moved[..edge * w].copy_from_slice(&lock[lifted * w..]);
+            // Coming down, the sheet is whole; going, it fades over the last
+            // part of its way, gone before its field reaches the island (so
+            // the field's glyph never stands over what the island says).
+            let alpha = if self.covering() { 1.0 } else { ((shown - 0.25) * 2.2).clamp(0.0, 1.0) };
             bezel::simd::mix_into(&mut g.canvas.px, Some(&moved), (alpha * 256.0) as u32);
             *scratch = lock;
         }

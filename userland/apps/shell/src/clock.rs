@@ -147,6 +147,21 @@ pub fn due() -> Option<String> {
     })
 }
 
+/// The timer that runs out soonest, for live activities: (seconds left, its
+/// length, how many are running).
+pub fn soonest() -> Option<(f64, f64, usize)> {
+    shared(|s| {
+        let running: Vec<&Timer> = s.timers.iter().filter(|t| t.running()).collect();
+        let t = running.iter().min_by(|a, b| a.left().total_cmp(&b.left()))?;
+        Some((t.left(), t.total, running.len()))
+    })
+}
+
+/// The stopwatch, while it runs: its time.
+pub fn stopwatch_running() -> Option<f64> {
+    shared(|s| s.stopwatch.running().then(|| s.stopwatch.elapsed()))
+}
+
 /// A timer is counting down (deep standby waits for it: it must be said
 /// when it runs out). The stopwatch need not be watched: it is a time kept.
 #[cfg_attr(test, allow(dead_code))]

@@ -176,8 +176,13 @@ pub fn install(app: &Listing, dir: &Path, keys: &[String]) -> Result<(), String>
         }
         busy.push(app.id.clone());
     }
+    // A live activity while it installs, and a moment of done after.
+    let task = crate::liveactivity::task(crate::liveactivity::Kind::Download, format!("Installing {}", app.name), "from the catalogue");
     let result = install_now(app, dir, keys);
     INSTALLING.lock().unwrap().retain(|id| *id != app.id);
+    if result.is_ok() {
+        task.done("installed");
+    }
     result
 }
 

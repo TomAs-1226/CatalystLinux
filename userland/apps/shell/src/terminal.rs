@@ -218,7 +218,7 @@ impl Screen for Terminal {
             Key::End => b"\x1b[F".to_vec(),
             Key::F(n) => function_key(n).into_bytes(),
             // The shell takes these for the backlight and the sound before any screen sees them.
-            Key::BrightnessDown | Key::BrightnessUp | Key::Media(_) => return Nav::Stay,
+            Key::BrightnessDown | Key::BrightnessUp | Key::Media(_) | Key::Lock => return Nav::Stay,
             Key::Leave => return Nav::Pop,
         };
         // Typing returns to the live screen.

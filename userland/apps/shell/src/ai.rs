@@ -1955,7 +1955,13 @@ impl Assistant {
         let (service, key) = (*service, key.clone());
         let (tx, rx) = mpsc::channel();
         let started = std::thread::Builder::new().name("assistant".into()).stack_size(512 * 1024).spawn(move || {
-            tx.send(request(service, &key, &body)).ok();
+            // A live activity while the answer is written, wherever one is.
+            let task = crate::liveactivity::task(crate::liveactivity::Kind::Assistant, "Assistant", "thinking");
+            let answer = request(service, &key, &body);
+            if answer.is_ok() {
+                task.done("answer ready");
+            }
+            tx.send(answer).ok();
         });
         if started.is_err() {
             return self.failed("could not start the request".into());

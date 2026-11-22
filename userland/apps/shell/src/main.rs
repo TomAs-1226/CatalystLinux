@@ -11,6 +11,7 @@
 //!                                passcode takes on this processor
 //! catalyst-shell --standby-shots <dir>   StandBy's faces and the lock screen, to PNG
 //! catalyst-shell --cjk-shots <dir>   Chinese, Japanese and Korean text on the screens, to PNG
+//! catalyst-shell --activity-shots <dir>  live activities, Tab held, the lock screen with a song
 //!     --robot <team|ip|host>     robot to connect to (overrides the saved one)
 //!     --demo                     a scripted robot instead of a real one
 //!     --arrive <seconds>         the scripted robot, plugged in that long after start
@@ -76,6 +77,7 @@ mod ir;
 mod irremote;
 mod keys;
 mod lights;
+mod liveactivity;
 mod level;
 mod local;
 mod lock;
@@ -451,6 +453,10 @@ fn main() {
         let size = value("--text").and_then(|name| gfx::TextSize::from_name(&name)).unwrap_or(gfx::TextSize::Standard);
         let look = value("--look").unwrap_or_else(|| "catalyst".into());
         return fullheight::gallery(std::path::Path::new(&dir), &look, size);
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--activity-shots") {
+        return activity_shots(std::path::Path::new(&dir));
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--standby-shots") {
@@ -3189,7 +3195,7 @@ fn standby_shots(dir: &std::path::Path) {
     shell.key(Left);
     shell.key(Left);
     settle(&mut shell, 60);
-    for name in ["05-charge", "06-next-match", "07-weather", "08-photos", "09-everything"] {
+    for name in ["04b-nothing-playing", "05-charge", "06-next-match", "07-weather", "08-photos", "09-everything"] {
         shell.key(Down);
         settle(&mut shell, if name == "08-photos" { 30 } else { 200 });
         if name == "08-photos" {
@@ -3209,7 +3215,7 @@ fn standby_shots(dir: &std::path::Path) {
     save(&mut shell, "11-turning-between-faces");
     settle(&mut shell, 200);
     // Night: red, and the light down (the simulator dims the picture itself).
-    for _ in 0..5 {
+    for _ in 0..6 {
         shell.key(Up);
     }
     settle(&mut shell, 200);
@@ -3223,7 +3229,7 @@ fn standby_shots(dir: &std::path::Path) {
     settle(&mut shell, 200);
     save(&mut shell, "13-night-dial-resting");
     shell.key(Left);
-    for _ in 0..5 {
+    for _ in 0..6 {
         shell.key(Down);
     }
     settle(&mut shell, 300);
@@ -3235,6 +3241,7 @@ fn standby_shots(dir: &std::path::Path) {
     settle(&mut shell, 100);
     to_standby(&mut shell);
     save(&mut shell, "15-light-clock");
+    shell.key(Down);
     shell.key(Down);
     settle(&mut shell, 200);
     save(&mut shell, "16-light-charge");
@@ -3464,6 +3471,240 @@ fn standby_shots(dir: &std::path::Path) {
     passcode::remove().ok();
     faces::pretend_time(None);
     println!("StandBy and lock screen shots in {}", dir.display());
+}
+
+/// Live activities in the island (each kind, two at once, opened on one), on
+/// the lock screen (a song, two, three; each clock style; the curtain shown
+/// by hand; coming down; its parts rising), Tab held (the cue part way),
+/// and StandBy (now playing, by night, a card coming down), in both looks
+/// and at the largest text, at 9:41.
+#[cfg(not(target_arch = "aarch64"))]
+fn activity_shots(dir: &std::path::Path) {
+    use liveactivity::{Activity, Kind};
+    use Key::*;
+    std::fs::create_dir_all(dir).expect("create the screenshot folder");
+    tour_fixtures();
+    photos::seed_demo();
+    let morning = chrono::NaiveDate::from_ymd_opt(2026, 11, 21).and_then(|d| d.and_hms_opt(9, 41, 0));
+    faces::pretend_time(morning);
+    let cover = photos::list().first().map(|p| p.path.clone());
+    let unix = chrono::Utc::now().timestamp();
+    let at = std::time::Instant::now();
+    let song = |playing: bool| nowplaying::NowPlaying {
+        title: "Around the World".into(),
+        artist: "Daft Punk".into(),
+        album: "Homework".into(),
+        cover: cover.clone(),
+        position: 83.0,
+        duration: 427.0,
+        playing,
+        at,
+    };
+    nowplaying::set(Some(song(true)));
+    nowplaying::on_control(|_| {});
+    // Each provider's activity, from the inputs it reads.
+    let music = || liveactivity::music(Some(&song(true))).expect("music");
+    let timer = || liveactivity::timers(Some((272.0, 300.0, 1)), None).remove(0);
+    let last_minute = || liveactivity::timers(Some((42.0, 300.0, 2)), None).remove(0);
+    let stopwatch = || liveactivity::timers(None, Some(754.0)).remove(0);
+    let queue_view = |queue: i64, status: Option<&str>| schedule::View {
+        team: 5805,
+        matches: vec![schedule::Match { key: "q31".into(), label: "Q31".into(), red: vec![1507, 5254, 5805], blue: vec![3044, 6328, 2337], time: Some(unix + 23 * 60), score: None, status: status.map(str::to_owned), queue_at: Some(queue) }],
+        ..schedule::View::default()
+    };
+    let queue = || liveactivity::next_match(Some(&queue_view(unix + 8 * 60 + 12, None)), unix).expect("queue");
+    let queue_now = || liveactivity::next_match(Some(&queue_view(unix - 20, None)), unix).expect("queue now");
+    let reminder = || liveactivity::reminder(Some(&upnext::Reminder { title: "charge the spares".into(), due: Some(unix + 12 * 60 + 3) }), unix).expect("reminder");
+    let update = || liveactivity::update(&sysupdate::Status { state: "downloading".into(), version: "0.6.0".into(), progress: 0.46, ..Default::default() }, None).expect("update");
+    let installed = || {
+        let t = liveactivity::task(Kind::Download, "Installing Scouting", "from the catalogue");
+        t.done("installed");
+        let a = liveactivity::gather(&liveactivity::Sources { robot: &Robot::none(), update: &sysupdate::Status::default(), unix }, None).into_iter().find(|a| a.kind == Kind::Download).expect("the install");
+        a
+    };
+    let assistant = || {
+        let mut a = liveactivity::from_task(&liveactivity::Task::sample(Kind::Assistant, "Assistant", "thinking", 7.0));
+        a.state = "under way".into();
+        a
+    };
+    let robot = || liveactivity::running_robot("Atlas".into(), "teleop".into(), Some(12.4), Some(83.0));
+    let settle = |shell: &mut Shell, frames: usize| {
+        for _ in 0..frames {
+            if shell.tick(1.0 / 60.0) {
+                shell.draw();
+            }
+        }
+    };
+    let save = |shell: &mut Shell, name: &str| {
+        shell.draw();
+        platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}.png")), 3);
+        println!("{name}");
+    };
+    let fresh = |light: bool, text: gfx::TextSize| {
+        let mut shell = Shell::new(Robot::demo());
+        shell.settings.light = light;
+        shell.settings.text = text;
+        shell.apply_settings();
+        shell
+    };
+    let island = |name: &str, list: Vec<Activity>, light: bool, text: gfx::TextSize| {
+        let mut shell = fresh(light, text);
+        settle(&mut shell, 100);
+        // The first look opens nothing: as if each had been there a while.
+        shell.pretend_activities(Vec::new());
+        shell.pretend_activities(list.iter().map(|a| Activity { state: String::new(), ..a.clone() }).collect());
+        shell.pretend_activities(list);
+        settle(&mut shell, 10);
+        let mut shell = shell;
+        shell.close_island_for_gallery();
+        settle(&mut shell, 90);
+        save(&mut shell, name);
+    };
+    use gfx::TextSize::{Large, Standard};
+    island("a01-island-music", vec![music()], false, Standard);
+    island("a02-island-timer", vec![timer()], false, Standard);
+    island("a03-island-timer-last-minute", vec![last_minute()], false, Standard);
+    island("a04-island-queue-coming", vec![queue()], false, Standard);
+    island("a05-island-queue-now", vec![queue_now()], false, Standard);
+    island("a06-island-reminder", vec![reminder()], false, Standard);
+    island("a07-island-update", vec![update()], false, Standard);
+    island("a08-island-installed", vec![installed()], false, Standard);
+    island("a09-island-assistant", vec![assistant()], false, Standard);
+    island("a10-island-robot", vec![robot()], false, Standard);
+    island("a11-island-stopwatch", vec![stopwatch()], false, Standard);
+    island("a12-island-two-split", vec![timer(), music()], false, Standard);
+    island("a13-island-two-light", vec![queue_now(), music()], true, Standard);
+    island("a14-island-two-large-text", vec![timer(), music()], false, Large);
+    // A change opens the island on its card for a moment, then it closes.
+    for (name, list, light, text, frames) in [
+        ("a15-island-opening", vec![music()], false, Standard, 6),
+        ("a16-island-open-music", vec![music()], false, Standard, 60),
+        ("a17-island-open-queue-now", vec![queue_now(), music()], false, Standard, 60),
+        ("a18-island-open-light", vec![music()], true, Standard, 60),
+        ("a19-island-open-large-text", vec![timer()], false, Large, 60),
+    ] {
+        let mut shell = fresh(light, text);
+        settle(&mut shell, 100);
+        shell.pretend_activities(Vec::new());
+        shell.pretend_activities(list);
+        settle(&mut shell, frames);
+        save(&mut shell, name);
+    }
+
+    // Tab held: the cue part way round the island, on Home and in the Terminal.
+    let mut shell = fresh(false, Standard);
+    settle(&mut shell, 100);
+    shell.pretend_hold(0.55);
+    save(&mut shell, "c01-hold-cue-half");
+    shell.pretend_hold(0.92);
+    save(&mut shell, "c02-hold-cue-nearly");
+    let mut shell = fresh(true, Standard);
+    settle(&mut shell, 100);
+    shell.pretend_activities(vec![music()]);
+    settle(&mut shell, 10);
+    shell.close_island_for_gallery();
+    settle(&mut shell, 90);
+    shell.pretend_hold(0.55);
+    save(&mut shell, "c03-hold-cue-light-with-music");
+    let mut shell = fresh(false, Standard);
+    settle(&mut shell, 100);
+    for key in std::iter::repeat_n(Right, steps_to("Terminal")).chain([Enter]) {
+        shell.key(key);
+        settle(&mut shell, 30);
+    }
+    settle(&mut shell, 360);
+    shell.pretend_hold(0.6);
+    save(&mut shell, "c04-hold-cue-terminal");
+    shell.pretend_hold(0.0);
+    settle(&mut shell, 240);
+    save(&mut shell, "c05-terminal-with-activities");
+
+    // The lock screen with live activities: without a passcode first, shown
+    // by hand (the curtain), coming down and its parts rising.
+    let mut shell = fresh(false, Standard);
+    settle(&mut shell, 100);
+    shell.pretend_activities(vec![music()]);
+    settle(&mut shell, 10);
+    shell.close_island_for_gallery();
+    settle(&mut shell, 60);
+    shell.lock_as_if_held();
+    settle(&mut shell, 7);
+    save(&mut shell, "b01-lock-coming-down");
+    settle(&mut shell, 8);
+    save(&mut shell, "b02-lock-parts-rising");
+    settle(&mut shell, 90);
+    save(&mut shell, "b03-lock-curtain-with-a-song");
+    shell.key(Char(' '));
+    settle(&mut shell, 12);
+    save(&mut shell, "b04-lock-curtain-lifting");
+    // A passcode: locked.
+    let (phc, _, _) = passcode::make("2468").expect("hashes");
+    passcode::keep(&phc).expect("kept");
+    for (name, list, light, text, face) in [
+        ("b05-lock-song", vec![music()], false, Standard, lock::LockFace::Centre),
+        ("b06-lock-song-paused", vec![liveactivity::music(Some(&song(false))).expect("music")], false, Standard, lock::LockFace::Centre),
+        ("b07-lock-song-dots", vec![music()], false, Standard, lock::LockFace::Dots),
+        ("b08-lock-two", vec![queue_now(), music()], false, Standard, lock::LockFace::Stacked),
+        ("b09-lock-three", vec![timer(), music(), update()], false, Standard, lock::LockFace::Centre),
+        ("b10-lock-song-light", vec![music()], true, Standard, lock::LockFace::Centre),
+        ("b11-lock-song-large-text", vec![music()], false, Large, lock::LockFace::Centre),
+        ("b12-lock-two-large-text", vec![timer(), music()], false, Large, lock::LockFace::Centre),
+    ] {
+        let mut shell = fresh(light, text);
+        shell.settings.lock.lock_face = face;
+        shell.apply_settings();
+        settle(&mut shell, 120);
+        shell.pretend_activities(Vec::new());
+        shell.pretend_activities(list);
+        settle(&mut shell, 120);
+        save(&mut shell, name);
+    }
+    passcode::remove().ok();
+
+    // StandBy: music's face, picked by itself while it plays on the charger.
+    for (name, light, night) in [("d01-standby-now-playing", false, false), ("d02-standby-now-playing-light", true, false), ("d03-standby-now-playing-night", false, true)] {
+        faces::pretend_time(if night { chrono::NaiveDate::from_ymd_opt(2026, 11, 21).and_then(|d| d.and_hms_opt(23, 18, 0)) } else { morning });
+        let mut shell = fresh(light, Standard);
+        settle(&mut shell, 100);
+        shell.pretend_activities(vec![music()]);
+        settle(&mut shell, 10);
+        shell.close_island_for_gallery();
+        shell.pretend_charger(Some(true));
+        shell.settings.screen_off = 30;
+        for _ in 0..32 {
+            shell.tick(1.0);
+        }
+        settle(&mut shell, 300);
+        save(&mut shell, name);
+    }
+    faces::pretend_time(morning);
+    // A timer's last minute on StandBy: its card comes down for a moment.
+    let mut shell = fresh(false, Standard);
+    settle(&mut shell, 100);
+    shell.pretend_charger(Some(true));
+    shell.settings.screen_off = 30;
+    for _ in 0..32 {
+        shell.tick(1.0);
+    }
+    settle(&mut shell, 200);
+    shell.pretend_activities(Vec::new());
+    shell.pretend_activities(vec![last_minute()]);
+    settle(&mut shell, 70);
+    save(&mut shell, "d04-standby-card-coming-down");
+    // Nothing playing: music's face says so.
+    nowplaying::set(None);
+    let mut shell = fresh(false, Standard);
+    settle(&mut shell, 100);
+    shell.settings.lock.face = lock::Face::Music;
+    shell.pretend_charger(Some(true));
+    shell.settings.screen_off = 30;
+    for _ in 0..32 {
+        shell.tick(1.0);
+    }
+    settle(&mut shell, 200);
+    save(&mut shell, "d05-standby-nothing-playing");
+    faces::pretend_time(None);
+    println!("live activity shots in {}", dir.display());
 }
 
 /// Home's tiles come in the order of the built-in apps, and Left and Right go
