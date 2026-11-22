@@ -28,7 +28,12 @@ fi
 # M5Stack's drivers are built apart from the kernel, against it: a kernel
 # rebuilt leaves them refused at load (0.5.5's panel stayed dark so), so
 # they are built again with it.
-targets=()
+#
+# The boot partition's config.txt and cmdline.txt are copied from os/ only
+# when the firmware package installs, which a build that has already made it
+# skips: 0.6.1's cma=64M never reached an image so. Copied again every time
+# (it is only files).
+targets=(rpi-firmware-reinstall)
 for target in "${@:-all}"; do
 	targets+=("$target")
 	case "$target" in

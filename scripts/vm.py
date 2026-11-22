@@ -406,6 +406,10 @@ def tools(vm):
                  "dmesg | grep -c -E 'disagrees about version|Unknown symbol|Exec format error|invalid module format'; ls | wc -l", 180)
     f = out.split()
     check("the board's own drivers all load against this kernel", f[:1] == ["0"] and len(f) == 2 and f[1].isdigit() and int(f[1]) >= 8, " ".join(f))
+    # The core clock held in the image's own config.txt, so the panel's link
+    # holds 62.5 MHz from the first start (catalyst-power keeps it there).
+    out = vm.run("mkdir -p /tmp/bc && mount -t vfat -o ro /dev/mmcblk0p1 /tmp/bc && grep -c -x -E 'core_freq=250|core_freq_min=250' /tmp/bc/config.txt; umount /tmp/bc")
+    check("the image's config.txt holds the core clock for the panel", out.strip().split()[-1:] == ["2"], out)
     # Compressed swap in memory (zram, lz4), half the RAM; never the card.
     out = vm.run("grep -c '^/dev/zram0 ' /proc/swaps; cat /sys/block/zram0/comp_algorithm; cat /proc/sys/vm/swappiness; grep -c mmcblk /proc/swaps")
     f = out.split()
@@ -603,6 +607,9 @@ def updates(vm):
         parts = [p.strip() for p in boot.split("|")]
         check("config.txt starts system A and tries system B", len(parts) == 4 and "[all] os_prefix=slot-a/ [tryboot] os_prefix=slot-b/" in parts[0], parts[0] if parts else boot)
         check("system B's kernel is in slot-b, rooted on system B", len(parts) == 4 and "root=/dev/mmcblk0p3" in parts[1] and int("".join(c for c in parts[2].split()[-1:][0] if c.isdigit()) or 0) > 3 if parts[2].split() else False, boot)
+        # The board's cmdline.txt as it is in os/ (0.6.1 was made with an old
+        # copy, and its graphics memory stayed at 32 MB).
+        check("system B starts with the board's own command line: 64 MB for graphics", len(parts) == 4 and "cma=64M" in parts[1], parts[1] if len(parts) == 4 else boot)
         # The Pi firmware for this chip reads tryboot.txt, not config.txt, on
         # the start an update is tried in (the emulator has no firmware, so
         # only the file is checked): it must start system B.
