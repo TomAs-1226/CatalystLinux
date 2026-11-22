@@ -124,8 +124,10 @@ const ARTISTS_ONLY: &str = "EgWKAQIgAWoMEA4QChADEAQQCRAF";
 const PLAYLISTS_ONLY: &str = "EgWKAQIoAWoMEA4QChADEAQQCRAF";
 /// A long playlist, or all your likes: at most this many pages of it.
 const MAX_PAGES: usize = 30;
-/// Your likes: YouTube Music's library songs.
-const LIKES: &str = "FEmusic_liked_videos";
+/// Your likes: Liked music, the playlist of the songs you liked. Not the
+/// library's songs (`FEmusic_liked_videos`), which hold every song of every
+/// album you saved as well.
+pub const LIKES: &str = account::LIKED_MUSIC;
 
 /// The handheld (or its emulator): the real catalogue and player. Elsewhere
 /// the simulator's made-up ones.
@@ -223,19 +225,6 @@ fn is_count(text: &str) -> bool {
 pub fn parse_list(v: &Value) -> Vec<Track> {
     let mut items = Vec::new();
     find_all(v, "musicResponsiveListItemRenderer", &mut items);
-    tracks_of(items)
-}
-
-/// Your likes (YouTube Music's library songs, as ytmusicapi has them): a
-/// shelf of songs led, once there are two or more, by "Shuffle all", which
-/// is no song of its own (ytmusicapi leaves it out too). Songs in a list
-/// carry their place in it; that does not.
-pub fn parse_likes(v: &Value) -> Vec<Track> {
-    let mut items = Vec::new();
-    find_all(v, "musicResponsiveListItemRenderer", &mut items);
-    if items.len() >= 2 && items[0]["playlistItemData"].is_null() {
-        items.remove(0);
-    }
     tracks_of(items)
 }
 
@@ -563,7 +552,7 @@ fn start_page() -> Result<(String, Vec<Track>), String> {
     }
     let browse = |id: &str| innertube("browse", json!({"browseId": id}));
     if signed_in() {
-        return Ok(("your likes".into(), parse_likes(&browse(LIKES)?)));
+        return Ok(("your likes".into(), parse_list(&browse(LIKES)?)));
     }
     let home = browse("FEmusic_home")?;
     let picks = parse_list(&home);
@@ -737,7 +726,7 @@ pub fn liked_all() -> Result<Vec<Track>, String> {
     if !on_device() {
         return Ok(demo_catalogue());
     }
-    all_pages_read(innertube("browse", json!({"browseId": LIKES}))?, parse_likes)
+    all_pages_read(innertube("browse", json!({"browseId": LIKES}))?, parse_list)
 }
 
 pub fn open_collection(c: &Collection) -> Result<Opened, String> {
@@ -782,7 +771,7 @@ fn open_live(c: &Collection) -> Result<Opened, String> {
         Kind::Playlist | Kind::Liked => {
             let first = browse(&c.id)?;
             let (title, _, subtitle, _) = header(&first);
-            let tracks = all_pages_read(first, if c.kind == Kind::Liked { parse_likes } else { parse_list })?;
+            let tracks = all_pages_read(first, parse_list)?;
             let name = if title.is_empty() { c.title.clone() } else { title };
             let byline = if subtitle.is_empty() { format!("{} songs", tracks.len()) } else { format!("{} · {} songs", subtitle.replace(" • ", " · "), tracks.len()) };
             Ok(Opened { byline, metas: vec![library::Meta::default(); tracks.len()], tracks, playlist: Some(name) })
@@ -1304,19 +1293,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn your_likes_leave_out_the_shuffle_that_leads_them() {
-        let song = |id: &str, title: &str| json!({"musicResponsiveListItemRenderer": {"playlistItemData": {"videoId": id}, "flexColumns": [flex(title), flex("Mara Ellis")]}});
-        // "Shuffle all" plays the first song: it is not one more.
-        let shuffle = json!({"musicResponsiveListItemRenderer": {
-            "flexColumns": [flex("Shuffle all")],
-            "overlay": {"musicItemThumbnailOverlayRenderer": {"content": {"musicPlayButtonRenderer": {"playNavigationEndpoint": {"watchEndpoint": {"videoId": "a1", "playlistId": "RDAT"}}}}}}
-        }});
-        let v = json!({"contents": {"x": {"musicShelfRenderer": {"contents": [shuffle, song("a1", "Slow Signal"), song("b2", "Night Bus")]}}}});
-        let likes = parse_likes(&v);
-        assert_eq!(likes.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), ["Slow Signal", "Night Bus"]);
-        // One song alone has no shuffle before it.
-        let one = json!({"musicShelfRenderer": {"contents": [song("a1", "Slow Signal")]}});
-        assert_eq!(parse_likes(&one).len(), 1);
+    fn your_likes_are_liked_music_not_every_song_of_your_saved_albums() {
+        // The library's songs (FEmusic_liked_videos) hold each saved album's
+        // songs too: Liked music holds only the ones you liked.
+        assert_eq!(LIKES, "VLLM");
     }
 
     /// YouTube Music itself, signed out: a search, the home page and a radio

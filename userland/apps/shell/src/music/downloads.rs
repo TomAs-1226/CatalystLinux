@@ -406,16 +406,34 @@ pub fn maybe_save_likes() {
     if !c.auto || !super::signed_in() || !super::polite::on_wifi() {
         return;
     }
-    let mark = store::root().join("likes-saved");
+    // A new mark: the first look after the update comes at once and puts
+    // right a "Your likes" filled from the library's songs, saved albums and all.
+    let mark = store::root().join("likes-saved-liked-music");
     let last: i64 = std::fs::read_to_string(&mark).ok().and_then(|t| t.trim().parse().ok()).unwrap_or(0);
     if store::now_unix() - last < LIKES_EVERY {
         return;
     }
     store::write_atomic(&mark, store::now_unix().to_string().as_bytes()).ok();
     if let Ok(likes) = super::liked_all() {
+        keep_to_likes(&likes);
         let songs = likes.into_iter().map(|t| (t, Meta::default())).collect();
         add(songs, "your likes", Some("Your likes"));
     }
+}
+
+/// "Your likes" holds what you liked and nothing else: songs waiting to be
+/// saved into it that you never liked are let go, and its list loses them.
+fn keep_to_likes(likes: &[super::Track]) {
+    let liked: std::collections::HashSet<&str> = likes.iter().map(|t| t.id.as_str()).collect();
+    with(|q| {
+        let before = q.items.len();
+        q.items.retain(|i| i.playlist.as_deref() != Some("Your likes") || liked.contains(i.track.id.as_str()) || matches!(i.state, State::Active));
+        if q.items.len() != before {
+            save(q);
+        }
+    });
+    let keep: Vec<std::path::PathBuf> = likes.iter().filter_map(|t| library::by_youtube(&t.id)).map(|s| s.path).collect();
+    library::keep_only_in_playlist("Your likes", &keep);
 }
 
 #[cfg(test)]

@@ -535,6 +535,31 @@ pub fn add_to_playlist(name: &str, song: &Path) {
     }
 }
 
+/// A playlist kept to the songs given: any other line goes (the songs stay
+/// in the library).
+pub fn keep_only_in_playlist(name: &str, keep: &[PathBuf]) {
+    let dir = store::library_dir().join("Playlists");
+    let file = dir.join(format!("{}.m3u8", safe_name(name)));
+    let Ok(text) = std::fs::read_to_string(&file) else { return };
+    let kept = kept_lines(&text, &dir, keep);
+    if kept != text {
+        store::write_atomic(&file, kept.as_bytes()).ok();
+    }
+}
+
+fn kept_lines(text: &str, dir: &Path, keep: &[PathBuf]) -> String {
+    let keep: Vec<PathBuf> = keep.iter().map(|p| normalise(p)).collect();
+    let mut out = String::new();
+    for line in text.lines() {
+        let l = line.trim();
+        if l.is_empty() || l.starts_with('#') || keep.contains(&normalise(&dir.join(l))) {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// A library song saved from YouTube Music, by its id there.
 pub fn by_youtube(id: &str) -> Option<Song> {
     if id.is_empty() || id.starts_with("lib:") {
@@ -845,6 +870,14 @@ mod tests {
         let titles: Vec<&str> = third.songs.iter().map(|s| s.title.as_str()).collect();
         assert_eq!(titles, ["Slow Signal", "Afterglow Avenue", "Harbour Lights"]);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_playlist_kept_to_your_likes_drops_the_other_songs() {
+        let dir = Path::new("/data/music/library/Playlists");
+        let text = "#EXTM3U\n../Mara Ellis/Night Bus/01 Slow Signal.mp3\n../Other/Saved Album/03 Not Liked.mp3\n";
+        let kept = kept_lines(text, dir, &[PathBuf::from("/data/music/library/Mara Ellis/Night Bus/01 Slow Signal.mp3")]);
+        assert_eq!(kept, "#EXTM3U\n../Mara Ellis/Night Bus/01 Slow Signal.mp3\n");
     }
 
     #[test]

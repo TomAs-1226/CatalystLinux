@@ -104,7 +104,8 @@ enum YoursRow {
 
 fn yours_rows(lists: &account::Lists) -> Vec<YoursRow> {
     let mut rows = vec![YoursRow::Likes, YoursRow::Albums, YoursRow::Artists];
-    rows.extend((0..lists.playlists.len()).map(YoursRow::Playlist));
+    // Liked music is Your likes, already first: not again among the playlists.
+    rows.extend((0..lists.playlists.len()).filter(|&i| lists.playlists[i].id != account::LIKED_MUSIC).map(YoursRow::Playlist));
     rows
 }
 
@@ -1776,7 +1777,8 @@ mod tests {
         super::super::signed_in_for_shots(true);
         assert!(screen.start_rows().contains(&StartRow::Yours));
         let lists = account::lists();
-        assert_eq!(yours_rows(&lists)[..4], [YoursRow::Likes, YoursRow::Albums, YoursRow::Artists, YoursRow::Playlist(0)]);
+        // Liked music (the first playlist) is Your likes: shown once, at the top.
+        assert_eq!(yours_rows(&lists)[..4], [YoursRow::Likes, YoursRow::Albums, YoursRow::Artists, YoursRow::Playlist(1)]);
         assert_eq!(lists.playlists[0].title, "Liked music");
         // Its albums, narrowed by typing; Esc gives all of them back, then goes back.
         screen.push(Page::Yours);
