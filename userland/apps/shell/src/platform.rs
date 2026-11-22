@@ -42,6 +42,12 @@ pub enum Key {
     Lock,
 }
 
+/// Ctrl-Backspace, as [`Key::Ctrl`] carries it: the notifications. With
+/// Ctrl-Space (the control centre), Ctrl-Tab (the recent apps) and
+/// Ctrl-Enter (search), Ctrl and each of the keyboard's four wide keys
+/// brings something down over any screen.
+pub const NOTIFICATIONS: char = '\u{8}';
+
 /// The keys for sound and music, by what they do.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Media {
@@ -850,6 +856,11 @@ pub mod device {
             if (code == 28 || code == 96) && self.ctrl {
                 return (value == 1).then_some(Key::Ctrl('\n'));
             }
+            // Ctrl-Backspace brings the notifications down, the same way: a
+            // terminal is sent Backspace for it, so it takes nothing either.
+            if code == 14 && self.ctrl {
+                return (value == 1).then_some(Key::Ctrl(NOTIFICATIONS));
+            }
             if own {
                 if let Some(ch) = sym_char(code) {
                     return Some(Key::Char(ch));
@@ -1173,6 +1184,7 @@ pub mod sim {
                 K::Enter | K::NumPadEnter if ctrl => Key::Ctrl('\n'),
                 K::Enter | K::NumPadEnter => Key::Enter,
                 K::Escape => Key::Back,
+                K::Backspace if ctrl => Key::Ctrl(NOTIFICATIONS),
                 K::Backspace => Key::Backspace,
                 K::Tab if ctrl => Key::Ctrl('\t'),
                 K::Tab => Key::Tab,

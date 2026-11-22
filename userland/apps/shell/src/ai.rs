@@ -72,6 +72,9 @@ const CLAUDE_BETA: &str = "server-side-fallback-2026-07-01";
 /// reasoning models; 16,000 keeps a Claude request well inside a minute.
 const OPENAI_MAX_OUTPUT: u32 = 25_000;
 const CLAUDE_MAX_TOKENS: u32 = 16_000;
+/// An answer this long in the writing is a notification once written (one
+/// quicker is read where it was asked).
+const LONG_ANSWER: std::time::Duration = std::time::Duration::from_secs(10);
 /// How long one request may take before it is given up.
 const REQUEST_SECONDS: u32 = 180;
 /// Rounds of tool calls for one question before the assistant stops to ask.
@@ -1964,11 +1967,17 @@ impl Assistant {
         let (service, key) = (*service, key.clone());
         let (tx, rx) = mpsc::channel();
         let started = std::thread::Builder::new().name("assistant".into()).stack_size(512 * 1024).spawn(move || {
-            // A live activity while the answer is written, wherever one is.
+            // A live activity while the answer is written, wherever one is;
+            // a long one, a notification once it is (unsaid if the
+            // Assistant is still in front).
             let task = crate::liveactivity::task(crate::liveactivity::Kind::Assistant, "Assistant", "thinking");
+            let began = std::time::Instant::now();
             let answer = request(service, &key, &body);
             if answer.is_ok() {
                 task.done("answer ready");
+                if began.elapsed() >= LONG_ANSWER {
+                    crate::notify::post(crate::notify::Notification::new("Assistant", "auto_awesome", "your answer is written").tag("assistant:answer").action("builtin:Assistant"));
+                }
             }
             tx.send(answer).ok();
         });

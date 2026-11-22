@@ -7,6 +7,11 @@
 //! and volume bars glide to their levels. Along its foot, two actions: the
 //! recent apps, and a screenshot of the screen beneath (R and S while it is
 //! down).
+//!
+//! The same sheet turns to the notification centre (notify.rs): Ctrl-
+//! Backspace brings it down that way, and Notifications on it (N) turns to
+//! it; Ctrl-Space turns back. Quiet, beside Notifications, keeps them from
+//! being said.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -18,7 +23,7 @@ use crate::platform::Key;
 use crate::shell::Settings;
 
 /// Where the sheet rests when it is down.
-pub const SHEET: Rect = Rect { x: 8.0, y: 5.0, w: W - 16.0, h: 159.0 };
+pub const SHEET: Rect = Rect { x: 8.0, y: 4.0, w: W - 16.0, h: 162.0 };
 pub const SHEET_RADIUS: f32 = 18.0;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -28,14 +33,20 @@ enum Item {
     Light,
     /// The battery saver (Settings › Battery has the rest of its choices).
     Saver,
+    /// Do not disturb: notifications collect without a word.
+    Quiet,
+    /// The notification centre, on the same sheet.
+    Notices,
     Brightness,
     Volume,
     Recents,
     Screenshot,
 }
 
-/// In rows: two switches, two switches, the brightness and volume bars, two actions.
-const ITEMS: [Item; 8] = [Item::Wifi, Item::Ssh, Item::Light, Item::Saver, Item::Brightness, Item::Volume, Item::Recents, Item::Screenshot];
+/// In rows: two switches, two switches, Quiet and the notifications, the
+/// brightness and volume bars, two actions.
+const ITEMS: [Item; 10] = [Item::Wifi, Item::Ssh, Item::Light, Item::Saver, Item::Quiet, Item::Notices, Item::Brightness, Item::Volume, Item::Recents, Item::Screenshot];
+const ROWS: usize = ITEMS.len() / 2;
 
 /// Each item's row and column: two to a row.
 fn place(at: usize) -> (usize, usize) {
@@ -62,17 +73,28 @@ fn brightness() -> u32 {
     crate::sys::brightness().unwrap_or_else(|| DEMO_LEVEL.load(Ordering::Relaxed))
 }
 
+/// What the sheet shows: the switches, or the notifications.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Page {
+    Controls,
+    Notices,
+}
+
 pub struct Control {
     /// 0 put away, 1 fully down.
     pub shown: Animated,
     open: bool,
+    page: Page,
+    /// The page turning: 0 the switches, 1 the notifications.
+    turn: Animated,
+    pub notices: crate::notify::Centre,
     focus: usize,
     wifi: bool,
     ssh: bool,
     level: u32,
     /// Each switch's knob, 0 (off) to 1 (on), and the brightness and volume
     /// bars' fills.
-    knobs: [Animated; 4],
+    knobs: [Animated; 5],
     bar: Animated,
     volume: Animated,
     /// Its own focus ring (x, y, width, height), gliding between switches.
@@ -90,6 +112,8 @@ pub enum Outcome {
     Recents,
     /// A screenshot of the screen beneath, as the sheet goes.
     Screenshot,
+    /// Go where a notification leads (and put it away).
+    Open(u64),
 }
 
 impl Control {
@@ -98,11 +122,14 @@ impl Control {
         Control {
             shown: Animated::new(0.0, role::release()).with_rest(0.002),
             open: false,
+            page: Page::Controls,
+            turn: Animated::new(0.0, role::smooth()).with_rest(0.003),
+            notices: crate::notify::Centre::new(),
             focus: 0,
             wifi: false,
             ssh: false,
             level: 70,
-            knobs: [knob(), knob(), knob(), knob()],
+            knobs: [knob(), knob(), knob(), knob(), knob()],
             bar: Animated::new(0.7, role::hold()).with_rest(0.003),
             volume: Animated::new(0.65, role::hold()).with_rest(0.003),
             ring: std::array::from_fn(|_| Animated::new(0.0, role::hold()).with_rest(0.05)),
@@ -119,15 +146,44 @@ impl Control {
         self.open || self.shown.value() > 0.004
     }
 
-    /// Bring it down, or put it away, from wherever it is.
-    pub fn set_open(&mut self, open: bool, settings: &Settings) {
+    /// Which page shows.
+    pub fn page(&self) -> Page {
+        self.page
+    }
+
+    /// Turn to a page: the sheet comes down on it if it is put away (or on
+    /// its way), else the page turns.
+    pub fn turn_to(&mut self, page: Page, settings: &Settings, store: &mut crate::notify::Store) {
+        if page == Page::Notices && (self.page != page || !self.open) {
+            self.notices.opened(store);
+        }
+        let first = !self.open;
+        if first {
+            self.set_open(true, settings, store);
+        }
+        self.page = page;
+        let to = if page == Page::Notices { 1.0 } else { 0.0 };
+        if first || settings.calm {
+            self.turn.jump(to);
+        } else {
+            self.turn.set(to);
+        }
+    }
+
+    /// Bring it down (on the switches), or put it away (on whichever page
+    /// it shows), from wherever it is.
+    pub fn set_open(&mut self, open: bool, settings: &Settings, store: &crate::notify::Store) {
+        if open && !self.open {
+            self.page = Page::Controls;
+            self.turn.jump(0.0);
+        }
         self.open = open;
         if open {
             // What the switches say is read when the sheet is summoned.
             self.wifi = crate::wifi::switched_on();
             self.ssh = if on_device() { crate::ssh_enabled() } else { DEMO_SSH.load(Ordering::Relaxed) };
             self.level = brightness();
-            let states = self.states(settings);
+            let states = self.states(settings, store);
             for (knob, on) in self.knobs.iter_mut().zip(states) {
                 knob.jump(if on { 1.0 } else { 0.0 });
             }
@@ -144,12 +200,23 @@ impl Control {
         }
     }
 
-    fn states(&self, settings: &Settings) -> [bool; 4] {
-        [self.wifi, self.ssh, settings.light, settings.battery.saver]
+    fn states(&self, settings: &Settings, store: &crate::notify::Store) -> [bool; 5] {
+        [self.wifi, self.ssh, settings.light, settings.battery.saver, store.quiet()]
     }
 
     /// A key while the sheet is down. `None` means "put it away".
-    pub fn key(&mut self, key: Key, settings: &mut Settings) -> Option<Outcome> {
+    pub fn key(&mut self, key: Key, settings: &mut Settings, store: &mut crate::notify::Store) -> Option<Outcome> {
+        if self.page == Page::Notices {
+            return match self.notices.key(key, store) {
+                crate::notify::Did::Nothing => Some(Outcome::Nothing),
+                crate::notify::Did::Close => None,
+                crate::notify::Did::Controls => {
+                    self.turn_to(Page::Controls, settings, store);
+                    Some(Outcome::Nothing)
+                }
+                crate::notify::Did::Open(id) => Some(Outcome::Open(id)),
+            };
+        }
         let item = ITEMS[self.focus];
         let (row, col) = place(self.focus);
         match key {
@@ -157,10 +224,13 @@ impl Control {
             // Up past the top row pushes the sheet back where it came from.
             Key::Up if row == 0 => return None,
             Key::Up => self.focus = at(row - 1, col),
-            Key::Down if row < 3 => self.focus = at(row + 1, col),
-            // The two actions have keys of their own while the sheet is down.
+            Key::Down if row < ROWS - 1 => self.focus = at(row + 1, col),
+            // The two actions have keys of their own while the sheet is down,
+            // and so do the notifications.
             Key::Char('r') => return Some(Outcome::Recents),
             Key::Char('s') => return Some(Outcome::Screenshot),
+            Key::Char('n') | Key::Ctrl('\u{8}') => self.turn_to(Page::Notices, settings, store),
+            Key::Enter | Key::Char(' ') if item == Item::Notices => self.turn_to(Page::Notices, settings, store),
             Key::Enter | Key::Char(' ') if item == Item::Recents => return Some(Outcome::Recents),
             Key::Enter | Key::Char(' ') if item == Item::Screenshot => return Some(Outcome::Screenshot),
             Key::Left | Key::Right if item == Item::Brightness => {
@@ -188,13 +258,13 @@ impl Control {
             Key::Left if col == 1 => self.focus -= 1,
             Key::Right if col == 0 => self.focus += 1,
             Key::Tab => self.focus = (self.focus + 1) % ITEMS.len(),
-            Key::Enter | Key::Char(' ') => return Some(self.toggle(item, settings)),
+            Key::Enter | Key::Char(' ') => return Some(self.toggle(item, settings, store)),
             _ => {}
         }
         Some(Outcome::Nothing)
     }
 
-    fn toggle(&mut self, item: Item, settings: &mut Settings) -> Outcome {
+    fn toggle(&mut self, item: Item, settings: &mut Settings, store: &mut crate::notify::Store) -> Outcome {
         let outcome = match item {
             Item::Wifi => {
                 self.wifi = !self.wifi;
@@ -220,9 +290,13 @@ impl Control {
                 settings.battery.saver = !settings.battery.saver;
                 Outcome::Settings
             }
-            Item::Brightness | Item::Volume | Item::Recents | Item::Screenshot => Outcome::Nothing,
+            Item::Quiet => {
+                store.set_quiet(!store.quiet());
+                Outcome::Nothing
+            }
+            Item::Notices | Item::Brightness | Item::Volume | Item::Recents | Item::Screenshot => Outcome::Nothing,
         };
-        let states = self.states(settings);
+        let states = self.states(settings, store);
             for (knob, on) in self.knobs.iter_mut().zip(states) {
             let target = if on { 1.0 } else { 0.0 };
             if settings.calm {
@@ -242,7 +316,7 @@ impl Control {
         if self.volume.target() != heard {
             self.volume.set(heard);
         }
-        let mut moving = self.shown.tick(dt) | self.bar.tick(dt) | self.volume.tick(dt);
+        let mut moving = self.shown.tick(dt) | self.bar.tick(dt) | self.volume.tick(dt) | self.turn.tick(dt) | self.notices.tick(dt);
         for spring in self.knobs.iter_mut().chain(&mut self.ring) {
             moving |= spring.tick(dt);
         }
@@ -254,18 +328,46 @@ impl Control {
         (self.shown.value() - 1.0) * (SHEET.bottom() + 8.0)
     }
 
-    /// What sits on the glass: four switches and the brightness bar.
-    pub fn draw(&mut self, g: &mut Gfx) {
+    /// What sits on the glass: the switches, the bars and the actions; or
+    /// the notifications. Turning between them, the one going slides a
+    /// little aside and fades out first, then the other slides in and fades
+    /// up (the two never stand over each other); calm, at once.
+    pub fn draw(&mut self, g: &mut Gfx, store: &crate::notify::Store) {
+        let turn = self.turn.value().clamp(0.0, 1.0);
+        let dy = self.offset();
+        let inner = SHEET.inset(8.0).offset(0.0, dy);
+        // How present each page is, and how far aside (towards its side).
+        let controls = (1.0 - turn / 0.45).clamp(0.0, 1.0);
+        let notices = ((turn - 0.45) / 0.55).clamp(0.0, 1.0);
+        let page = |g: &mut Gfx, present: f32, draw: &mut dyn FnMut(&mut Gfx)| {
+            if present <= 0.001 {
+                return;
+            }
+            if present >= 0.999 {
+                return draw(g);
+            }
+            g.canvas.set_clip(SHEET.offset(0.0, dy));
+            let before = g.canvas.px.clone();
+            draw(g);
+            bezel::simd::mix_into(&mut g.canvas.px, Some(&before), ((1.0 - present) * 256.0) as u32);
+            g.canvas.clear_clip();
+        };
+        page(g, controls, &mut |g| self.draw_controls(g, store, -(1.0 - controls) * 24.0));
+        page(g, notices, &mut |g| self.notices.draw(g, store, inner.offset((1.0 - notices) * 24.0, 0.0), store.quiet()));
+    }
+
+    fn draw_controls(&mut self, g: &mut Gfx, store: &crate::notify::Store, dx: f32) {
         let t = g.tokens;
         let ty = g.ty;
         let dy = self.offset();
-        let inner = SHEET.inset(8.0).offset(0.0, dy);
-        let gap = 5.0;
-        let (tw, th) = ((inner.w - gap) * 0.5, 32.0);
-        let names = [("wifi", "Wi-Fi"), ("terminal", "SSH"), ("lightbulb", "Light"), ("battery_full", "Saver")];
+        let inner = SHEET.inset(8.0).offset(dx, dy);
+        let gap = 4.0;
+        let (tw, th) = ((inner.w - 5.0) * 0.5, ((inner.h - gap * (ROWS - 1) as f32) / ROWS as f32).floor());
+        let names = [("wifi", "Wi-Fi"), ("terminal", "SSH"), ("lightbulb", "Light"), ("battery_full", "Saver"), ("bedtime", "Quiet")];
+        let tile = |i: usize| Rect::new(inner.x + (i % 2) as f32 * (tw + 5.0), inner.y + (i / 2) as f32 * (th + gap), tw, th);
         let mut focus_rect = None;
         for (i, ((icon, name), knob)) in names.iter().zip(&self.knobs).enumerate() {
-            let r = Rect::new(inner.x + (i % 2) as f32 * (tw + gap), inner.y + (i / 2) as f32 * (th + gap), tw, th);
+            let r = tile(i);
             let on = knob.value().clamp(0.0, 1.0);
             g.canvas.rrect(r, 12.0, t.surface1, 0.72);
             g.icon(icon, on > 0.5, r.x + 16.0, r.cy(), 16.0, if on > 0.5 { t.ink } else { t.dim });
@@ -282,6 +384,22 @@ impl Control {
                 focus_rect = Some((r, 12.0));
             }
         }
+        // Notifications: a dot of the signal colour on the bell while some
+        // are new (how many, the island says).
+        {
+            let r = tile(5);
+            g.canvas.rrect(r, 12.0, t.surface1, 0.72);
+            let unread = store.unread() > 0;
+            g.icon("notifications", unread, r.x + 16.0, r.cy(), 16.0, t.ink);
+            if unread {
+                g.canvas.circle(r.x + 22.0, r.cy() - 6.0, 4.5, t.surface1, 1.0);
+                g.canvas.circle(r.x + 22.0, r.cy() - 6.0, 3.0, t.signal, 1.0);
+            }
+            g.text_fit(r.x + 30.0, r.cy(), "Notifications", ty.body, t.ink, r.w - 38.0);
+            if self.focus == 5 {
+                focus_rect = Some((r, 12.0));
+            }
+        }
         // The brightness and the volume, side by side: an icon, the bar, the value.
         let sound = crate::sound::level();
         let bars = [
@@ -290,32 +408,32 @@ impl Control {
         ];
         let value_w = g.measure("100%", ty.label);
         for (i, (icon, value, fill, color)) in bars.into_iter().enumerate() {
-            let r = Rect::new(inner.x + i as f32 * (tw + gap), inner.y + 2.0 * (th + gap), tw, th);
+            let r = tile(6 + i);
             g.canvas.rrect(r, 12.0, t.surface1, 0.72);
             g.icon(icon, true, r.x + 15.0, r.cy(), 15.0, t.dim);
             g.text_at(r.right() - 9.0, r.cy(), Align::Right, &value, ty.label, t.ink);
             g.meter(Rect::new(r.x + 28.0, r.cy() - 3.0, r.w - 43.0 - value_w, 6.0), fill, color);
-            if self.focus == 4 + i {
+            if self.focus == 6 + i {
                 focus_rect = Some((r, 12.0));
             }
         }
         // The two actions, each with the key that does it while the sheet is down.
         for (i, (icon, name, key)) in ACTIONS.iter().enumerate() {
-            let r = Rect::new(inner.x + i as f32 * (tw + gap), inner.y + 3.0 * (th + gap), tw, th);
+            let r = tile(8 + i);
             g.canvas.rrect(r, 12.0, t.surface1, 0.72);
             g.icon(icon, false, r.x + 16.0, r.cy(), 16.0, t.ink);
             g.text_fit(r.x + 30.0, r.cy(), name, ty.body, t.ink, r.w - 30.0 - 26.0);
             let cap = Rect::new(r.right() - 22.0, r.cy() - 7.5, 14.0, 15.0);
             g.canvas.rrect(cap, 4.0, t.surface2, 0.9);
             g.text_at(cap.cx(), r.cy(), Align::Center, key, ty.caption, t.dim);
-            if self.focus == 6 + i {
+            if self.focus == 8 + i {
                 focus_rect = Some((r, 12.0));
             }
         }
         if let Some((r, radius)) = focus_rect {
             // The ring glides between switches, and rides down with the sheet:
             // its place is kept as if the sheet were at rest.
-            let at = [r.x, r.y - dy, r.w, r.h];
+            let at = [r.x - dx, r.y - dy, r.w, r.h];
             for (spring, to) in self.ring.iter_mut().zip(at) {
                 if !self.ring_placed || g.calm {
                     spring.jump(to);
@@ -326,7 +444,7 @@ impl Control {
             }
             self.ring_placed = true;
             let [x, y, w, h] = [0, 1, 2, 3].map(|i| self.ring[i].value());
-            g.canvas.stroke_rrect(Rect::new(x, y + dy, w, h).inset(-2.5), radius + 2.5, 1.5, g.ring_color(), 1.0);
+            g.canvas.stroke_rrect(Rect::new(x + dx, y + dy, w, h).inset(-2.5), radius + 2.5, 1.5, g.ring_color(), 1.0);
         }
     }
 }
@@ -343,14 +461,15 @@ mod tests {
     fn it_comes_down_turns_back_mid_way_and_goes() {
         let mut s = settings();
         let mut c = Control::new();
-        c.set_open(true, &s);
+        let store = crate::notify::Store::memory();
+        c.set_open(true, &s, &store);
         for _ in 0..6 {
             c.tick(1.0 / 60.0);
         }
         let part_way = c.shown.value();
         assert!(part_way > 0.05 && part_way < 0.95, "still on its way down: {part_way}");
         // Put away mid-flight: it turns round from where it is, without a jump.
-        c.set_open(false, &s);
+        c.set_open(false, &s, &store);
         c.tick(1.0 / 60.0);
         assert!((c.shown.value() - part_way).abs() < 0.12, "a jump from {part_way} to {}", c.shown.value());
         assert!(c.visible());
@@ -360,7 +479,7 @@ mod tests {
         assert!(!c.visible());
         // The calm version lands at once.
         s.calm = true;
-        c.set_open(true, &s);
+        c.set_open(true, &s, &store);
         assert_eq!(c.shown.value(), 1.0);
     }
 
@@ -368,52 +487,56 @@ mod tests {
     fn keys_move_between_switches_flip_them_and_put_it_away() {
         let mut s = settings();
         let mut c = Control::new();
-        c.set_open(true, &s);
+        let mut store = crate::notify::Store::memory();
+        c.set_open(true, &s, &store);
         // Right to SSH, down to Saver, left to Light: flip it.
         for key in [Key::Right, Key::Down, Key::Left] {
-            assert!(c.key(key, &mut s).is_some());
+            assert!(c.key(key, &mut s, &mut store).is_some());
         }
-        assert!(matches!(c.key(Key::Enter, &mut s), Some(Outcome::Settings)));
+        assert!(matches!(c.key(Key::Enter, &mut s, &mut store), Some(Outcome::Settings)));
         assert!(s.light);
         // The knob slides rather than jumping.
         c.tick(1.0 / 60.0);
         assert!(c.knobs[2].value() > 0.0 && c.knobs[2].value() < 1.0);
-        // Down to brightness: left and right change it, within bounds.
-        assert!(c.key(Key::Down, &mut s).is_some());
+        // Down past Quiet to brightness: left and right change it, within bounds.
+        assert!(c.key(Key::Down, &mut s, &mut store).is_some());
+        assert!(c.key(Key::Down, &mut s, &mut store).is_some());
         let before = c.level;
-        c.key(Key::Left, &mut s);
+        c.key(Key::Left, &mut s, &mut store);
         assert_eq!(c.level, (before - 10).max(10));
         for _ in 0..20 {
-            c.key(Key::Right, &mut s);
+            c.key(Key::Right, &mut s, &mut store);
         }
         assert_eq!(c.level, 100);
         // Up from the top row, or Esc, puts the sheet away.
-        c.key(Key::Up, &mut s);
-        c.key(Key::Up, &mut s);
-        assert!(c.key(Key::Up, &mut s).is_none());
-        assert!(c.key(Key::Back, &mut s).is_none());
+        c.key(Key::Up, &mut s, &mut store);
+        c.key(Key::Up, &mut s, &mut store);
+        c.key(Key::Up, &mut s, &mut store);
+        assert!(c.key(Key::Up, &mut s, &mut store).is_none());
+        assert!(c.key(Key::Back, &mut s, &mut store).is_none());
     }
 
     #[test]
     fn the_foot_of_the_sheet_has_the_recent_apps_and_a_screenshot() {
         let mut s = settings();
         let mut c = Control::new();
-        c.set_open(true, &s);
+        let mut store = crate::notify::Store::memory();
+        c.set_open(true, &s, &store);
         // Down past the brightness bar to Recents; right to Screenshot.
-        for key in [Key::Down, Key::Down, Key::Down] {
-            c.key(key, &mut s);
+        for key in [Key::Down, Key::Down, Key::Down, Key::Down] {
+            c.key(key, &mut s, &mut store);
         }
-        assert!(matches!(c.key(Key::Enter, &mut s), Some(Outcome::Recents)));
-        c.key(Key::Right, &mut s);
-        assert!(matches!(c.key(Key::Enter, &mut s), Some(Outcome::Screenshot)));
-        // Up from there: the volume bar above it, then the switch above that.
-        c.key(Key::Up, &mut s);
+        assert!(matches!(c.key(Key::Enter, &mut s, &mut store), Some(Outcome::Recents)));
+        c.key(Key::Right, &mut s, &mut store);
+        assert!(matches!(c.key(Key::Enter, &mut s, &mut store), Some(Outcome::Screenshot)));
+        // Up from there: the volume bar above it, then Notifications above that.
+        c.key(Key::Up, &mut s, &mut store);
         assert_eq!(ITEMS[c.focus], Item::Volume);
-        c.key(Key::Up, &mut s);
-        assert_eq!(ITEMS[c.focus], Item::Saver);
+        c.key(Key::Up, &mut s, &mut store);
+        assert_eq!(ITEMS[c.focus], Item::Notices);
         // Their keys work from anywhere on the sheet.
-        assert!(matches!(c.key(Key::Char('r'), &mut s), Some(Outcome::Recents)));
-        assert!(matches!(c.key(Key::Char('s'), &mut s), Some(Outcome::Screenshot)));
+        assert!(matches!(c.key(Key::Char('r'), &mut s, &mut store), Some(Outcome::Recents)));
+        assert!(matches!(c.key(Key::Char('s'), &mut s, &mut store), Some(Outcome::Screenshot)));
     }
 
     #[test]
@@ -421,29 +544,63 @@ mod tests {
         let _one_at_a_time = crate::sound::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut s = settings();
         let mut c = Control::new();
+        let mut store = crate::notify::Store::memory();
         crate::sound::set_level(crate::sound::Level { volume: 50, muted: false });
-        c.set_open(true, &s);
-        // Down from Saver, the right-hand switch, to the volume beside the brightness.
-        for key in [Key::Right, Key::Down, Key::Down] {
-            c.key(key, &mut s);
+        c.set_open(true, &s, &store);
+        // Down from Saver, the right-hand switch, past Notifications to the
+        // volume beside the brightness.
+        for key in [Key::Right, Key::Down, Key::Down, Key::Down] {
+            c.key(key, &mut s, &mut store);
         }
         assert_eq!(ITEMS[c.focus], Item::Volume);
-        c.key(Key::Right, &mut s);
+        c.key(Key::Right, &mut s, &mut store);
         assert_eq!(crate::sound::level().volume, 55);
-        c.key(Key::Left, &mut s);
-        c.key(Key::Left, &mut s);
+        c.key(Key::Left, &mut s, &mut store);
+        c.key(Key::Left, &mut s, &mut store);
         assert_eq!(crate::sound::level().volume, 45);
         // Enter mutes, and the bar empties as it glides.
-        c.key(Key::Enter, &mut s);
+        c.key(Key::Enter, &mut s, &mut store);
         assert!(crate::sound::level().muted);
         c.tick(1.0 / 60.0);
         assert!(c.volume.value() < 0.45 && c.volume.target() == 0.0);
-        c.key(Key::Enter, &mut s);
+        c.key(Key::Enter, &mut s, &mut store);
         assert!(!crate::sound::level().muted);
         // Left from the volume is the brightness; Down, Recents' neighbour.
-        assert_eq!(place(c.focus), (2, 1));
-        c.key(Key::Down, &mut s);
+        assert_eq!(place(c.focus), (3, 1));
+        c.key(Key::Down, &mut s, &mut store);
         assert_eq!(ITEMS[c.focus], Item::Screenshot);
+    }
+
+    #[test]
+    fn quiet_switches_and_the_sheet_turns_to_the_notifications_and_back() {
+        let mut s = settings();
+        let mut store = crate::notify::Store::memory();
+        store.add(crate::notify::Notification::new("Clock", "timer", "Timer done"), false);
+        let mut c = Control::new();
+        c.set_open(true, &s, &store);
+        // Down to Quiet; Enter switches it on.
+        c.key(Key::Down, &mut s, &mut store);
+        c.key(Key::Down, &mut s, &mut store);
+        assert_eq!(ITEMS[c.focus], Item::Quiet);
+        c.key(Key::Enter, &mut s, &mut store);
+        assert!(store.quiet());
+        // Right to Notifications; Enter turns the sheet to them, seen.
+        c.key(Key::Right, &mut s, &mut store);
+        c.key(Key::Enter, &mut s, &mut store);
+        assert_eq!(c.page(), Page::Notices);
+        assert_eq!(store.unread(), 0);
+        c.tick(1.0 / 60.0);
+        assert!(c.turn.value() > 0.0 && c.turn.value() < 1.0, "the page turns, not jumps");
+        // Ctrl-Space turns back to the switches; Ctrl-Backspace (or N) to them again.
+        c.key(Key::Ctrl(' '), &mut s, &mut store);
+        assert_eq!(c.page(), Page::Controls);
+        c.key(Key::Ctrl('\u{8}'), &mut s, &mut store);
+        assert_eq!(c.page(), Page::Notices);
+        // Esc puts it away; down again, it is the switches.
+        assert!(c.key(Key::Back, &mut s, &mut store).is_none());
+        c.set_open(false, &s, &store);
+        c.set_open(true, &s, &store);
+        assert_eq!(c.page(), Page::Controls);
     }
 
     #[test]
@@ -456,9 +613,10 @@ mod tests {
             for (_, name, _) in ACTIONS {
                 assert!(g.measure(name, body) <= tw - 56.0, "{name}");
             }
-            for name in ["Wi-Fi", "SSH", "Light", "Saver"] {
+            for name in ["Wi-Fi", "SSH", "Light", "Saver", "Quiet"] {
                 assert!(g.measure(name, body) <= tw - 66.0, "{name}");
             }
+            assert!(g.measure("Notifications", body) <= tw - 38.0, "Notifications at {size:?}");
         }
         // The sheet, its four rows, rests on the panel.
         assert!(SHEET.bottom() <= crate::gfx::H - 4.0);

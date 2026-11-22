@@ -47,6 +47,10 @@ start() {
 	# while everything else waited on the card: the screen stuttered.
 	echo 4194304 >/proc/sys/vm/dirty_background_bytes
 	echo 16777216 >/proc/sys/vm/dirty_bytes
+	# BFQ for the card: it honours I/O priorities (mq-deadline, the default,
+	# ignores them), so downloads, updates and indexing, all at the idle
+	# class, wait behind what the screen reads.
+	echo bfq >/sys/block/mmcblk0/queue/scheduler 2>/dev/null
 	eend 0
 }
 

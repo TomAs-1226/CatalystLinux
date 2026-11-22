@@ -64,6 +64,7 @@ pub fn stops() -> Vec<Stop> {
         stop("settings-about-licences", Open::Setting("About this handheld"), &vec![Down; licences].into_iter().chain([Enter]).collect::<Vec<_>>()),
         stop("settings-update-whats-new", Open::Setting("System update"), &[Down, Down, Enter]),
         stop("over-control-centre", Open::Over(|shell| shell.key(Key::Ctrl(' '))), &[]),
+        stop("over-notifications", Open::Over(|shell| shell.key(Key::Ctrl(crate::platform::NOTIFICATIONS))), &[]),
         stop("over-spotlight", Open::Over(|shell| shell.key(Key::Ctrl('\n'))), &[Char('s')]),
         stop("over-recent-apps", Open::Over(recents), &[]),
         stop("over-setup", Open::Over(Shell::start_setup), &[]),

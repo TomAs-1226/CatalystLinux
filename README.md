@@ -348,10 +348,10 @@ switch off in Settings › Robot. `.\scripts\run-sim.ps1 -Arrive 5` shows the
 two together: no robot at first, then the demo one, back from a match.
 
 The **control centre** is a sheet of glass that drops from the top over
-whatever is showing: Wi-Fi, SSH, light or dark, the battery saver, and
-brightness and volume side by side (Left and Right set them; Enter on the
-volume mutes), with two actions along its foot, Recents and Screenshot (R and
-S while it is down). Ctrl-Space brings it down from any screen, a terminal
+whatever is showing: Wi-Fi, SSH, light or dark, the battery saver, Quiet
+and Notifications (below), and brightness and volume side by side (Left and
+Right set them; Enter on the volume mutes), with two actions along its foot,
+Recents and Screenshot (R and S while it is down). Ctrl-Space brings it down from any screen, a terminal
 included (so does the Opt key, if the keyboard reports one), and Up from the
 top of Home pulls it down too. Esc, Ctrl-Space again, or Up from its top row
 puts it away. The screen behind is held still while it is out, so the glass
@@ -616,9 +616,12 @@ a row each try waits longer (30 s, 1 min, 5, 15, then an hour), across
 restarts too. Its look is the user's own: Settings › Lock screen ›
 Customise is the lock screen itself, live, with the clock (centre, stacked,
 dots), its colour, and what shows with it (the date, the charge, the next
-match, notices, the next reminder). Notices said while it is locked are
-kept: the lock screen says how many (their words only if Settings › Lock
-screen › Notices on it says so), and the island says them once it opens.
+match, notifications, the next reminder). Notifications not yet seen show
+on it, newest first, as many as fit (stacked just above the field, or under
+a live activity's card): their words only if Settings › Lock screen ›
+Notices on it says so, else each says only its app and when. Fn-F and Fn-X
+pick one, and once the passcode is typed it opens; what came while it was
+locked is said in the island as it opens.
 
 **Locking by hand.** Hold Tab for 0.6 s, anywhere (the Terminal and text
 fields too): from 0.15 s a ring fills around the island, and let go before
@@ -647,6 +650,15 @@ by itself while a song plays, and back when it stops. Activities are worked
 out once a second and only while the screen is on: none keeps the screen
 on or wakes it, and with the screen off they cost nothing.
 
+**The lock screen's layout.** With live activities or notifications, the
+time sits small along the top, the date at its right and one row of chips
+(the charge, the match, how many notifications) under the date; the cards
+and notifications begin below whichever of the time and the chips reaches
+lower. Nothing on it ever meets anything else: a test lays it out charging
+or not, with no activity to three, no notification to four, words shown or
+not, in every face, text size and tone, with and without the field, and
+checks every two things drawn stand at least 2 px apart.
+
 The passcode is kept only as an Argon2id hash (19 MiB, two passes, a random
 salt) in `/data/catalyst/passcode`, readable by root alone. It is checked on
 a thread of its own; it is timed as it is made, and a handheld that took
@@ -656,6 +668,50 @@ the keys; it does not cover SSH, the setup page a computer opens, or the
 card itself. Forgotten, it comes off with `rm /data/catalyst/passcode` over
 SSH, or from the card on a Linux computer. `catalyst-shell --passcode-bench`
 says what a check takes on the handheld.
+
+## Notifications
+
+What the handheld's apps and the system have to tell, kept until seen and
+put away (`notify.rs`). Each has its app and the app's symbol, a title,
+what it says, when, and where it leads, if anywhere:
+
+- a reminder come due (to the reminder), a Clock timer run out;
+- a download done or failed: songs saved in Music, an app installed (or
+  not) from the catalogue, an update available, ready or installed;
+- the robot linked, a match's summary ready in Logs (when it could not be
+  shown at once), a brownout seen live;
+- queueing for the next match, five minutes ahead and when it is time;
+- the Assistant's answer, when it took ten seconds or more to write;
+- the battery's warnings (20%, 10%, the saver switched on).
+
+What the island says for a moment and is gone (a volume, brightness, a
+screenshot saved, an app's own word) stays that way. A notification is
+said in the island as it comes (with the screen off, Fn blinks until it
+wakes), then kept: at rest the island's dot turns the signal colour with
+how many are new at its end. One from the app in front is not said (the app
+shows it) and counts as seen. A newer one of the same kind takes an older
+one's place (the robot linked again, an update a stage further). At most
+50 are kept, newest first, in `/data/catalyst/notifications.json`, written
+on a thread of its own as they change: they survive a restart. Nothing
+polls: each is posted by the event it tells of, from whichever thread that
+happens on, and the shell takes it in on its next turn.
+
+**The notification centre** is the control centre's sheet turned to them:
+Ctrl-Backspace brings it down from any screen (with Ctrl-Space, Ctrl-Tab and
+Ctrl-Enter, Ctrl and each of the keyboard's four wide keys brings something
+down; a terminal is sent Backspace for it, so no program loses a key), and
+Notifications on the control centre (or N) turns to it. Opened, they are
+seen (each new one keeps its dot while it shows). By app, the app with the
+newest first, an app with more than one under its heading; Enter goes where
+one leads and puts it away, Fn-Backspace puts one away, Clear all is at the
+foot, Ctrl-Space turns back to the switches, and Esc, Up from the top or
+Ctrl-Backspace again put it away. The list fades out under its edges as it
+moves.
+
+**Quiet** (do not disturb, on the control centre): they still come and are
+kept and counted, but the island says nothing and the lights stay dark. A
+reminder come due, a timer run out and queue now break through: each was
+asked for at a time, or costs a match if missed.
 
 ## Battery
 
@@ -721,8 +777,9 @@ to show a modifier's state: on while held, a slow blink for one key, fast
 while locked. The shell borrows them for two things and gives them back. If
 a modifier changes meanwhile, the keyboard's state stands.
 
-- **A notice**: something was said while the screen was off (an update
-  ready, a message). Fn blinks slowly until the screen wakes.
+- **A notice**: a notification came while the screen was off (an update
+  ready, songs saved), and Quiet is off. Fn blinks slowly until the screen
+  wakes.
 - **A warning**: a battery warning, the pit timer moving to its next phase,
   queueing for the next match (five minutes ahead, then when it is time,
   from FRC Nexus). All three blink fast for eight seconds, then stop.

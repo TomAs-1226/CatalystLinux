@@ -327,6 +327,11 @@ pub enum Nav {
 
 pub trait Screen {
     fn title(&self) -> &str;
+    /// The app it is of, as a notification names it: its title, unless the
+    /// title changes with its page.
+    fn app(&self) -> &str {
+        self.title()
+    }
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav;
     fn draw(&mut self, g: &mut Gfx, robot: &Robot);
     /// True while a text field is being edited, so letters are not treated
@@ -832,6 +837,9 @@ pub struct Shell {
     charger_was: bool,
     /// Live activities: music, timers, the queue, downloads… (liveactivity.rs).
     activities: crate::liveactivity::Activities,
+    /// Notifications kept (notify.rs), and the robot's own as it tells them.
+    pub notes: crate::notify::Store,
+    robot_watch: crate::notify::RobotWatch,
     /// Tab held towards a lock: the cue round the island, 0 to 1, and
     /// whether the screen was lit at the last tick (a wake brings the lock
     /// screen's parts in again).
@@ -933,6 +941,7 @@ fn key_name(key: Key) -> String {
         Key::Char(' ') => "space".into(),
         Key::Char(c) => c.to_string(),
         Key::Ctrl(' ') => "ctrl space".into(),
+        Key::Ctrl(crate::platform::NOTIFICATIONS) => "ctrl bksp".into(),
         Key::Ctrl('\t') => "ctrl tab".into(),
         Key::Ctrl('\n') => "ctrl enter".into(),
         Key::Ctrl(c) => format!("ctrl {c}"),
@@ -1035,6 +1044,8 @@ impl Shell {
             charger: None,
             charger_was: false,
             activities: crate::liveactivity::Activities::new(),
+            notes: crate::notify::Store::kept(),
+            robot_watch: crate::notify::RobotWatch::default(),
             hold_cue: Animated::new(0.0, role::smooth()).with_rest(0.004),
             lit_was: true,
         }
@@ -1121,7 +1132,7 @@ impl Shell {
                 (self.switcher, self.switcher_under) = (None, None);
             }
         }
-        self.control.set_open(open, &self.settings);
+        self.control.set_open(open, &self.settings, &self.notes);
         self.dirty = true;
     }
 
@@ -1130,19 +1141,63 @@ impl Shell {
         self.control.is_open()
     }
 
+    /// Something said in the island for a moment (a volume, a screenshot
+    /// saved, an app's word): gone once said. What is worth keeping is a
+    /// notification (`notify`).
     pub fn say(&mut self, text: impl Into<String>) {
-        let text = text.into();
-        // Said while it is locked or StandBy shows: kept for the lock
-        // screen, and said again once it is unlocked (or StandBy is left).
-        if self.lock.covering() || self.faces.showing() {
-            self.lock.note(&text);
-        }
-        self.message = Some((text, MESSAGE_SECONDS));
+        self.message = Some((text.into(), MESSAGE_SECONDS));
         self.dirty = true;
-        // Said with the screen off: the Fn light blinks until it wakes.
-        if self.standby.state() == crate::standby::State::Off {
+    }
+
+    /// A notification: kept (the notification centre, the lock screen, the
+    /// island's count), and said in the island, with the Fn light blinking
+    /// until the screen wakes if it is off. Unsaid with Quiet on (what
+    /// breaks through aside), or when its app is in front (it shows it).
+    pub fn notify(&mut self, n: crate::notify::Notification) {
+        use crate::standby::State;
+        let awake = self.standby.state() == State::Awake && !self.lock.covering() && !self.faces.showing();
+        let front = awake && !n.urgent && self.stack.last().is_some_and(|(s, _)| s.app() == n.app);
+        let (said, urgent) = (n.said(), n.urgent);
+        self.notes.add(n, front);
+        self.dirty = true;
+        if front || (self.notes.quiet() && !urgent) {
+            return;
+        }
+        self.message = Some((said, MESSAGE_SECONDS));
+        if self.standby.state() == State::Off {
             self.lights.notice();
         }
+    }
+
+    /// The notification centre: the control centre's sheet, down and turned
+    /// to the notifications (or put away, if it shows them already).
+    fn show_notifications(&mut self) {
+        if self.control.is_open() && self.control.page() == crate::control::Page::Notices {
+            return self.set_control(false);
+        }
+        if !self.control.visible() {
+            self.control_under = None;
+            if self.switcher.as_ref().is_some_and(|s| s.leaving()) {
+                (self.switcher, self.switcher_under) = (None, None);
+            }
+        }
+        self.control.turn_to(crate::control::Page::Notices, &self.settings, &mut self.notes);
+        self.moving = true;
+        self.dirty = true;
+    }
+
+    /// Where a notification leads, opened over the screen in front; it is
+    /// put away as it opens.
+    fn open_notification(&mut self, id: u64) {
+        let Some(n) = self.notes.dismiss(id) else { return };
+        let Some(action) = n.leads_to() else { return };
+        let mut say = None;
+        let opened = crate::notify::open(&action, &mut Cx { robot: &mut self.robot, settings: &mut self.settings, say: &mut say, at_rest: true });
+        match opened {
+            Ok(screen) => self.open(screen, Path::Slide),
+            Err(why) => self.say(why),
+        }
+        self.moving = true;
     }
 
     /// Play the start animation, with `caption` under the name.
@@ -1411,7 +1466,7 @@ impl Shell {
         }
         // The control centre takes the keys while it is down.
         if self.control.is_open() {
-            match self.control.key(plain(key), &mut self.settings) {
+            match self.control.key(plain(key), &mut self.settings, &mut self.notes) {
                 None => self.set_control(false),
                 Some(Outcome::Settings) => {
                     self.apply_settings();
@@ -1422,10 +1477,15 @@ impl Shell {
                 // The recent apps, over the screen the sheet came down on.
                 Some(Outcome::Recents) => {
                     let under = self.control_under.take();
-                    self.control.set_open(false, &self.settings);
+                    self.control.set_open(false, &self.settings, &self.notes);
                     self.control.shown.jump(0.0);
                     self.control_glass = None;
                     self.open_recents(under);
+                }
+                // Where a notification leads: the sheet goes as it opens.
+                Some(Outcome::Open(id)) => {
+                    self.set_control(false);
+                    self.open_notification(id);
                 }
                 // A picture of the screen beneath the sheet, as the sheet goes.
                 Some(Outcome::Screenshot) => {
@@ -1439,9 +1499,13 @@ impl Shell {
             }
             return;
         }
-        // Ctrl-Space brings it down over any screen, a terminal included.
+        // Ctrl-Space brings it down over any screen, a terminal included;
+        // Ctrl-Backspace brings it down turned to the notifications.
         if key == Key::Ctrl(' ') {
             return self.set_control(true);
+        }
+        if key == Key::Ctrl(crate::platform::NOTIFICATIONS) {
+            return self.show_notifications();
         }
         // ? held for five seconds brings the shortcut list up over any
         // screen that is not taking text (in a terminal or a text field, it
@@ -1822,9 +1886,12 @@ impl Shell {
         }
         self.arrival = None;
         // Not over something the island is already saying.
+        let name = self.robot.string("Robot/Identity/Name").unwrap_or_else(|| "robot".into()).to_lowercase();
+        let linked = crate::notify::Notification::new("Robot", "smart_toy", format!("{name} linked")).tag("robot:link").action("builtin:Robot");
         if self.message.is_none() {
-            let name = self.robot.string("Robot/Identity/Name").unwrap_or_else(|| "robot".into()).to_lowercase();
-            self.say(format!("{name} linked"));
+            self.notify(linked);
+        } else {
+            self.notes.add(linked, false);
         }
     }
 
@@ -1848,7 +1915,7 @@ impl Shell {
         let stage = format!("{}:{}", s.state, s.version);
         if s != self.update && sysupdate::pref("announced", "") != stage {
             if let Some(words) = sysupdate::notice(&s) {
-                self.say(words);
+                self.notify(crate::notify::Notification::said_as("System update", "download", &words).tag("update").action("setting:System update"));
             }
             sysupdate::set_pref("announced", &stage);
             if s.state == "available" && sysupdate::pref("auto", "on") == "on" {
@@ -1927,7 +1994,7 @@ impl Shell {
         let short = title.split(" · ").next().unwrap_or(&title).to_owned();
         self.report_watch = None;
         if busy || !over {
-            self.say(format!("{short} summary is in Logs"));
+            self.notify(crate::notify::Notification::new("Logs", "insights", format!("how {short} went")).body("its summary is in Logs").action(format!("log:{}", row.name)));
             return;
         }
         self.say(format!("how {short} went"));
@@ -2134,6 +2201,12 @@ impl Shell {
         }
         self.watch_update(dt);
         let changed = self.robot.refresh(dt);
+        // The robot's own notifications, looked for only as its values change.
+        if changed {
+            if let Some(n) = self.robot_watch.look(&self.robot) {
+                self.notify(n);
+            }
+        }
         // Music standby, half a minute into the screen being dark with
         // music playing; deep standby, once the screen has been off long
         // enough with no key. Neither if something would be cut off.
@@ -2272,7 +2345,7 @@ impl Shell {
         }
         if self.faces.visible() {
             let reading = self.shown_reading();
-            let feed = crate::faces::Feed { reading: reading.as_ref(), h24: self.settings.clock24, notices: self.lock.notices(), generation: self.robot.schedule.generation(), activities: self.activities.list(), opened: self.activities.opened(), open: self.activities.open.value(), level: self.activities.level.value() };
+            let feed = crate::faces::Feed { reading: reading.as_ref(), h24: self.settings.clock24, notices: self.notes.unread(), generation: self.robot.schedule.generation(), activities: self.activities.list(), opened: self.activities.opened(), open: self.activities.open.value(), level: self.activities.level.value() };
             let Shell { gfx, faces, robot, settings, .. } = self;
             faces.draw(gfx, robot, &feed, &settings.lock);
         }
@@ -2346,7 +2419,7 @@ impl Shell {
     /// drawn on it.
     fn draw_control(&mut self) {
         const DIM: f32 = 0.45;
-        let Shell { gfx: g, control, control_glass, .. } = self;
+        let Shell { gfx: g, control, control_glass, notes, .. } = self;
         let dim = |px: &mut [u32], amount: f32| {
             let f = (amount.clamp(0.0, 1.0) * DIM * 256.0) as u32;
             bezel::simd::mix_into(px, None, f);
@@ -2360,7 +2433,7 @@ impl Shell {
         }
         dim(&mut g.canvas.px, control.shown.value());
         blit_sheet(&mut g.canvas.px, control_glass.as_ref().expect("made above"), control.offset());
-        control.draw(g);
+        control.draw(g, notes);
         if g.take_motion_started() {
             self.moving = true;
         }
@@ -2631,10 +2704,15 @@ impl Shell {
         // A message may take most of the width; status stays out of the title's way.
         let room = if icon { 250.0 } else { 96.0 };
         let label = g.text.fit(&label, &caption, room);
+        // At rest, notifications not yet seen: the dot in the signal colour,
+        // and how many at the island's end.
+        let unread = if icon || activity.is_some() { 0 } else { self.notes.unread() };
+        let count = (unread > 0).then(|| if unread > 99 { "99+".to_owned() } else { unread.to_string() });
+        let count_w = count.as_ref().map_or(0.0, |c| g.measure(c, caption) + 8.0);
         let want = match &activity {
             Some(_) if self.activities.open.target() > 0.5 && opened.is_some() => W - 2.0 * PAD,
             Some(a) => crate::liveactivity::compact_w(g, a),
-            None => g.measure(&label, caption) + 34.0,
+            None => g.measure(&label, caption) + 34.0 + count_w,
         };
         let want = want + talk.as_ref().map_or(0.0, |_| crate::voice::METER_ROOM);
         if !icon && activity.is_none() {
@@ -2752,9 +2830,13 @@ impl Shell {
                 crate::liveactivity::draw_compact(g, compact_rect, a, level, words * compact * shown);
             }
         } else {
-            let dot = if icon { t.signal } else if linked { t.ice } else { t.faint };
+            let dot = if icon || unread > 0 { t.signal } else if linked { t.ice } else { t.faint };
             g.canvas.circle(island.x + 12.0, island.cy(), 3.0, dot, shown);
             g.text_alpha(island.x + 22.0, island.cy(), &label, caption, t.ink, words * shown);
+            if let Some(count) = &count {
+                let w = g.measure(count, caption);
+                g.text_alpha(island.right() - 12.0 - w, island.cy(), count, caption, t.signal, words * shown);
+            }
         }
         g.canvas.clear_clip();
         if let (Some(b), true) = (&second, open < 0.5) {
@@ -3426,6 +3508,8 @@ impl Shell {
     #[cfg(not(target_arch = "aarch64"))]
     pub fn pretend_charger(&mut self, on: Option<bool>) {
         self.charger = on;
+        // The lock screen reads the charge afresh.
+        self.lock_info = None;
     }
 
     /// The galleries' and tests' live activities, as if just read (and
@@ -3495,8 +3579,9 @@ impl Shell {
     /// what a wake comes back to.
     fn lock_now(&mut self) {
         self.lock.engage();
+        self.notes.mark();
         if self.control.is_open() || self.control.visible() {
-            self.control.set_open(false, &self.settings);
+            self.control.set_open(false, &self.settings, &self.notes);
             self.control.shown.jump(0.0);
             self.control_under = None;
             self.control_glass = None;
@@ -3522,16 +3607,18 @@ impl Shell {
         self.dirty = true;
     }
 
-    /// The notices kept while it was locked (or StandBy showed), said in
-    /// the island: the newest, with how many there were.
+    /// The notifications that came while it was locked (or StandBy
+    /// showed), said in the island: the newest, with how many there were
+    /// (with Quiet on, only those that break through). Else how long deep
+    /// standby lasted, if it did.
     fn say_kept(&mut self) {
-        let kept = self.lock.take_notices();
         let after = self.after_unlock.take();
-        let newest = kept.last().map(|(text, _)| text.clone());
-        let words = match (newest, kept.len()) {
-            (Some(text), 1) => Some(text),
-            (Some(text), n) => Some(format!("{n} notices · {text}")),
-            (None, _) => after,
+        let quiet = self.notes.quiet();
+        let kept: Vec<&crate::notify::Notification> = self.notes.since_mark().into_iter().filter(|n| !quiet || n.urgent).collect();
+        let words = match kept.as_slice() {
+            [] => after,
+            [one] => Some(one.said()),
+            [newest, rest @ ..] => Some(format!("{} new · {}", rest.len() + 1, newest.title)),
         };
         if let Some(words) = words {
             // Said as the island says anything, but not kept again.
@@ -3550,12 +3637,13 @@ impl Shell {
         }
         if state == State::Faces && !self.faces.showing() {
             self.faces.show(&self.settings.lock, calm);
+            self.notes.mark();
             self.moving = true;
         } else if state != State::Faces && self.faces.showing() {
             self.leave_faces();
         }
         let reading = self.shown_reading();
-        let feed = crate::faces::Feed { reading: reading.as_ref(), h24: self.settings.clock24, notices: self.lock.notices(), generation: self.robot.schedule.generation(), activities: self.activities.list(), opened: self.activities.opened(), open: self.activities.open.value(), level: self.activities.level.value() };
+        let feed = crate::faces::Feed { reading: reading.as_ref(), h24: self.settings.clock24, notices: self.notes.unread(), generation: self.robot.schedule.generation(), activities: self.activities.list(), opened: self.activities.opened(), open: self.activities.open.value(), level: self.activities.level.value() };
         let (faces_moving, faces_changed) = self.faces.tick(dt, motion_dt, &feed, &self.settings.lock, calm);
         // Woken onto the lock screen: its parts rise in again.
         let lit = !self.standby.asleep();
@@ -3597,6 +3685,10 @@ impl Shell {
         if unlocked {
             self.say_kept();
             self.status.age = f32::MAX;
+            // A notification picked on the lock screen: where it leads.
+            if let Some(id) = self.lock.take_opened() {
+                self.open_notification(id);
+            }
         }
         if !self.lock.visible() && !self.lock_scratch.is_empty() {
             self.lock_scratch = Vec::new();
@@ -3659,8 +3751,8 @@ impl Shell {
             self.lock_info = Some((info, std::time::Instant::now()));
         }
         let mut info = self.lock_info.as_ref().map(|(i, _)| i.clone()).unwrap_or_default();
-        info.notices = self.lock.notices();
-        info.newest = self.lock.newest();
+        info.notes = self.notes.unread_list();
+        info.notices = info.notes.len();
         info.activities = self.activities.list().to_vec();
         info.level = self.activities.level.value();
         info.rise = self.lock.entering();
@@ -3728,8 +3820,13 @@ impl Shell {
         // A Clock timer run out, wherever the handheld is: said, and the
         // keyboard's lights blink (with the screen off, Fn until it wakes).
         if let Some(said) = crate::clock::due() {
-            self.say(said);
+            self.notify(crate::notify::Notification::new("Clock", "timer", said).urgent().action("builtin:Clock"));
             self.lights.warning();
+        }
+        // Notifications posted from other threads (a download done, an
+        // answer written).
+        for n in crate::notify::take_posted() {
+            self.notify(n);
         }
     }
 
@@ -3737,6 +3834,10 @@ impl Shell {
     fn care_event(&mut self, event: crate::power::Event) {
         use crate::power::Event;
         match event {
+            // Its warnings are kept (the rest, said and gone).
+            Event::Say(text) if text.starts_with("battery at") => {
+                self.notify(crate::notify::Notification::said_as("Battery", "battery_alert", &text).tag("battery").action("setting:Battery"));
+            }
             Event::Say(text) => self.say(text),
             // In deep standby the keyboard's lights stay dark: the red
             // light's reminder says it instead.
@@ -3941,10 +4042,10 @@ impl Shell {
             }
         }
         let said = crate::reminders::island(&rang);
-        // Locked (or StandBy shows): kept for the lock screen as a notice,
-        // and said again once it is unlocked, as anything else said is.
-        if self.lock.engaged() || self.faces.showing() {
-            self.lock.note(&said);
+        // Kept as notifications (they break through Quiet).
+        for ring in &rang {
+            let n = crate::notify::Notification::said_as("Reminders", "checklist", &ring.said).urgent().action(format!("reminder:{}", ring.id));
+            self.notes.add(n, false);
         }
         self.message = Some((said, REMINDER_SECONDS));
         self.lights.warning();
@@ -4044,7 +4145,12 @@ impl Shell {
         // tick wakes it for this too).
         self.standby.wake_now();
         self.lights.warning();
-        self.say(if stage == 1 { format!("time to queue for {label}") } else { format!("queue for {label} in 5 min") });
+        let n = if stage == 1 {
+            crate::notify::Notification::new("Schedule", "flag", format!("time to queue for {label}")).urgent()
+        } else {
+            crate::notify::Notification::new("Schedule", "flag", format!("queue for {label} in 5 min"))
+        };
+        self.notify(n.tag(format!("queue:{}", m.key)).action("builtin:Schedule"));
     }
 
     /// At start: the start the tear-free panel is tried in asks, over
@@ -4135,7 +4241,7 @@ impl Shell {
             return;
         }
         if self.control.visible() {
-            self.control.set_open(false, &self.settings);
+            self.control.set_open(false, &self.settings, &self.notes);
             self.control.shown.jump(0.0);
             self.control_under = None;
             self.control_glass = None;
@@ -5581,7 +5687,7 @@ pub(crate) mod tests {
             Key::Ctrl('\t'), Key::Ctrl(' '), Key::Ctrl('q'), Key::Ctrl('c'), Key::Ctrl('k'), Key::Ctrl('f'),
             Key::Leave, Key::Back, Key::Tab, Key::Home, Key::End, Key::PageUp, Key::PageDown, Key::Delete,
             Key::Up, Key::Down, Key::Left, Key::Right, Key::BrightnessUp, Key::BrightnessDown,
-            Key::Char('/'), Key::Char('?'), Key::Char('`'), Key::Enter, Key::Ctrl('\n'), Key::Lock,
+            Key::Char('/'), Key::Char('?'), Key::Char('`'), Key::Enter, Key::Ctrl('\n'), Key::Lock, Key::Ctrl(crate::platform::NOTIFICATIONS),
         ];
         keys.extend((1..=12).map(Key::F));
         for key in keys {
@@ -5601,16 +5707,16 @@ pub(crate) mod tests {
         }
         assert!(shell.locked() && shell.stack.len() == depth);
         // A robot linking, a match to queue for, the battery: still locked.
-        shell.say("time to queue for Q31");
+        shell.notify(crate::notify::Notification::new("Schedule", "flag", "time to queue for Q31").urgent());
         frames(&mut shell, 10, 0.25);
         assert!(shell.locked());
-        assert_eq!(shell.lock.notices(), 1, "kept for the lock screen");
+        assert_eq!(shell.lock_info().notes.len(), 1, "on the lock screen");
         // Typing it, with every wrong key first cleared by Esc: open.
         shell.key(Key::Back);
         type_code(&mut shell, "hunter2");
         assert!(!shell.locked());
         assert_eq!(shell.message.as_ref().map(|(m, _)| m.as_str()), Some("time to queue for Q31"), "said once unlocked");
-        assert_eq!(shell.lock.notices(), 0);
+        assert_eq!(shell.notes.unread(), 1, "not seen until the notification centre shows it");
     }
 
     #[test]
@@ -5910,6 +6016,136 @@ pub(crate) mod tests {
         shell.say("battery at 15%");
         frames(&mut shell, 2, FRAME);
         assert_eq!(shell.island_words, "battery at 15%");
+    }
+
+    fn note(app: &str, title: &str) -> crate::notify::Notification {
+        crate::notify::Notification::new(app, "notifications", title)
+    }
+
+    #[test]
+    fn a_notification_is_kept_said_and_counted_in_the_island_at_rest() {
+        let mut shell = shell();
+        // Over a live activity (the demo's next match), it is said too.
+        frames(&mut shell, 120, FRAME);
+        assert!(!shell.activities.list().is_empty());
+        shell.notify(note("Catalogue", "Scouting installed"));
+        frames(&mut shell, 40, FRAME);
+        assert_eq!(shell.island_words, "Scouting installed", "said over the activity");
+        frames(&mut shell, 60 * 4, FRAME);
+        shell.notes.clear();
+        // No live activity carrying the island: it is at rest.
+        shell.pretend_activities(Vec::new());
+        frames(&mut shell, 200, FRAME);
+        let rest = shell.places.island.expect("the island").w;
+        shell.notify(note("Music", "12 songs saved").body("in the library"));
+        assert_eq!(shell.message.as_ref().map(|(m, _)| m.as_str()), Some("12 songs saved · in the library"));
+        frames(&mut shell, 2, FRAME);
+        assert_eq!(shell.island_words, "12 songs saved · in the library", "said in the island");
+        // Said and gone; kept, and counted at the island's end.
+        frames(&mut shell, 60 * 4, FRAME);
+        assert!(shell.message.is_none());
+        assert_eq!(shell.notes.unread(), 1);
+        let counted = shell.places.island.expect("the island").w;
+        assert!(counted > rest + 4.0, "the count widens the island at rest: {rest} → {counted}");
+        // Seen in the notification centre: the count goes.
+        shell.key(Key::Ctrl(crate::platform::NOTIFICATIONS));
+        shell.key(Key::Back);
+        frames(&mut shell, 120, FRAME);
+        assert_eq!(shell.notes.unread(), 0);
+        assert!((shell.places.island.expect("the island").w - rest).abs() < 1.0);
+    }
+
+    #[test]
+    fn quiet_keeps_them_unsaid_and_dark_but_reminders_timers_and_queue_now_break_through() {
+        use crate::lights::Mode;
+        let mut shell = shell();
+        shell.notes.set_quiet(true);
+        shell.notify(note("Music", "12 songs saved"));
+        assert!(shell.message.is_none(), "unsaid");
+        assert_eq!(shell.notes.unread(), 1, "still kept");
+        shell.notify(note("Clock", "timer 5 min done").urgent());
+        assert_eq!(shell.message.as_ref().map(|(m, _)| m.as_str()), Some("timer 5 min done"), "it breaks through");
+        // With the screen off: Fn blinks for one that is said, not for a quiet one.
+        shell.settings.screen_off = 30;
+        until_off(&mut shell, 60).expect("the screen goes off");
+        shell.notify(note("Catalogue", "Scouting installed"));
+        assert!(!shell.lights.showing().contains(&Some(Mode::Blink)), "Quiet: the lights stay dark");
+        shell.notes.set_quiet(false);
+        shell.notify(note("Catalogue", "Scouting installed"));
+        assert_eq!(shell.lights.showing()[1], Some(Mode::Blink), "Fn blinks until it wakes");
+    }
+
+    #[test]
+    fn one_from_the_app_in_front_is_seen_there_and_not_said() {
+        let mut shell = shell();
+        open_app(&mut shell, "Robot", "Logs");
+        shell.message = None;
+        shell.notify(note("Logs", "how Q30 went"));
+        assert!(shell.message.is_none() && shell.notes.unread() == 0 && shell.notes.list().len() == 1);
+        // Clock names itself by its page; a notification knows it as Clock.
+        let clock = crate::clock::Clock::new();
+        assert_eq!((clock.title(), clock.app()), ("Stopwatch", "Clock"));
+    }
+
+    #[test]
+    fn ctrl_backspace_brings_them_down_and_enter_goes_where_one_leads() {
+        let mut shell = shell();
+        shell.notify(note("Robot", "brownout").action("builtin:Logs"));
+        let id = shell.notes.list()[0].id;
+        shell.key(Key::Ctrl(crate::platform::NOTIFICATIONS));
+        frames(&mut shell, 40, FRAME);
+        assert!(shell.control_open() && shell.control.page() == crate::control::Page::Notices);
+        assert_eq!(shell.notes.unread(), 0, "seen");
+        // Enter: the sheet goes, where it leads opens, and it is put away.
+        shell.key(Key::Enter);
+        frames(&mut shell, 90, FRAME);
+        assert!(!shell.control.visible());
+        assert_eq!(shell.top_title(), "Logs");
+        assert!(shell.notes.list().iter().all(|n| n.id != id));
+        // Ctrl-Backspace again puts it away; from the control centre it turns to them.
+        shell.key(Key::Ctrl(crate::platform::NOTIFICATIONS));
+        frames(&mut shell, 30, FRAME);
+        shell.key(Key::Ctrl(crate::platform::NOTIFICATIONS));
+        assert!(!shell.control_open());
+        frames(&mut shell, 60, FRAME);
+        shell.key(Key::Ctrl(' '));
+        shell.key(Key::Char('n'));
+        assert!(shell.control_open() && shell.control.page() == crate::control::Page::Notices);
+        shell.key(Key::Back);
+        assert!(!shell.control_open());
+    }
+
+    #[test]
+    fn posted_from_another_thread_it_is_taken_in_on_the_next_turn() {
+        let mut shell = shell();
+        crate::notify::post(note("Assistant", "your answer is written").action("builtin:Assistant"));
+        assert!(shell.notes.list().is_empty());
+        frames(&mut shell, 1, FRAME);
+        assert_eq!(shell.notes.list().len(), 1);
+        assert_eq!(shell.message.as_ref().map(|(m, _)| m.as_str()), Some("your answer is written"));
+    }
+
+    #[test]
+    fn locked_they_show_on_the_lock_screen_and_one_picked_opens_once_unlocked() {
+        let mut shell = with_passcode("2468");
+        shell.pretend_activities(Vec::new());
+        shell.notify(note("Clock", "timer 5 min done").urgent().action("builtin:Logs"));
+        shell.notify(note("Music", "12 songs saved").action("builtin:Logs"));
+        frames(&mut shell, 30, FRAME);
+        assert_eq!(shell.lock_info().notes.len(), 2, "both, unseen");
+        // ↓ picks the newest; the passcode opens the lock and then it.
+        shell.key(Key::Down);
+        frames(&mut shell, 2, FRAME);
+        assert!(shell.lock.pick().is_some());
+        let picked = shell.lock.pick().unwrap();
+        type_code(&mut shell, "2468");
+        assert!(!shell.locked());
+        frames(&mut shell, 60, FRAME);
+        let opened = if shell.notes.list().iter().any(|n| n.id == picked) { None } else { Some(()) };
+        assert!(opened.is_some(), "put away as it opened");
+        assert_eq!(shell.top_title(), "Logs");
+        // What came while it was locked is said as it opens.
+        assert!(shell.message.is_some() || shell.notes.list().len() == 1);
     }
 
     #[test]
