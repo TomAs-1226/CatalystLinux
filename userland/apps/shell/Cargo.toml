@@ -30,8 +30,19 @@ sha2 = "0.10"
 sha1 = "0.11"
 # The lock screen's passcode, kept only as an Argon2id hash (RustCrypto's,
 # pure Rust: BLAKE2b's 64-bit adds and rotations, nothing the CM0's A53
-# lacks). No `rand`: the salt is read from the kernel.
-argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "password-hash"] }
+# lacks). No `rand`: the salt is read from the kernel. With `zeroize`, its
+# memory is wiped once the vault's key is derived from it.
+argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "password-hash", "zeroize"] }
+# The vault (vault/): XChaCha20-Poly1305, RustCrypto's pure Rust, fast on
+# the A53 with no AES instructions; its cipher state wiped after use. No
+# `alloc` or `getrandom` of its own: it seals buffers in place, and nonces
+# come from `getrandom` below.
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"] }
+# The kernel's random numbers (getrandom(2) on the handheld, the system's
+# generator on a computer): the vault's keys, salts, nonces and passwords.
+getrandom = "0.4"
+# Secrets wiped from memory once used (the vault's key, its entries).
+zeroize = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 vte = "0.15"
 # QR codes for the setup page's address (Project Nayuki's encoder; no dependencies).

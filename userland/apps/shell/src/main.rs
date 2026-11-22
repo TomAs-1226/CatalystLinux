@@ -127,6 +127,7 @@ mod tools;
 mod trends;
 mod units;
 mod upnext;
+mod vault;
 mod voice;
 mod weather;
 mod wifi;
@@ -375,6 +376,16 @@ fn main() {
     if flag("--passcode-bench") {
         println!("{}", passcode::bench());
         return;
+    }
+    // And what opening the vault takes.
+    if flag("--vault-bench") {
+        println!("{}", vault::bench());
+        return;
+    }
+    // The Vault app's pages, from demo data, in both looks at each text size.
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--vault-shots") {
+        return vault::shots::gallery(std::path::Path::new(&dir));
     }
     // The offline assistant's evaluation: its questions asked of the model
     // at CATALYST_LOCAL_URL (or the facts alone), the results to a file.

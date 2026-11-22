@@ -3548,6 +3548,9 @@ impl Shell {
         if matches!(state, State::Off | State::Faces) && !self.lock.engaged() && self.lock.armed() {
             self.lock_now();
         }
+        // The vault locks with the screen off, StandBy or the lock screen
+        // (with a passcode or not), and after two idle minutes.
+        crate::vault::watch(matches!(state, State::Off | State::Faces) || self.lock.covering());
         if state == State::Faces && !self.faces.showing() {
             self.faces.show(&self.settings.lock, calm);
             self.moving = true;
@@ -4236,6 +4239,7 @@ impl Shell {
             self.spotlight_warmed = true;
             crate::spotlight::warm();
             crate::music::register_spotlight();
+            crate::vault::register_spotlight();
         }
         let mut moving = false;
         if self.spotlight.visible() {

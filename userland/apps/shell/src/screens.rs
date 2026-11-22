@@ -52,7 +52,7 @@ struct App {
     open: fn(&Robot) -> Box<dyn Screen>,
 }
 
-const APPS: [App; 37] = [
+const APPS: [App; 38] = [
     App { icon: "smart_toy", name: "Robot", open: |_| Box::new(RobotScreen::default()) },
     App { icon: "monitor_heart", name: "Health", open: |_| Box::new(Health::default()) },
     App { icon: "description", name: "Logs", open: |_| Box::new(LogsScreen::default()) },
@@ -85,6 +85,8 @@ const APPS: [App; 37] = [
     App { icon: "timer", name: "Clock", open: |_| Box::new(crate::clock::Clock::new()) },
     App { icon: "sticky_note_2", name: "Notes", open: |_| Box::new(crate::notes::Notes::new()) },
     App { icon: "notifications", name: "Reminders", open: |_| Box::new(crate::reminders::Reminders::new()) },
+    // Passwords and secrets, sealed on the card, opened with the passcode.
+    App { icon: "encrypted", name: "Vault", open: |_| Box::new(crate::vault::Vault::new()) },
     App { icon: "square_foot", name: "Units", open: |_| Box::new(crate::units::UnitsApp::new()) },
     App { icon: "api", name: "HTTP", open: |_| Box::new(crate::http::Http::new()) },
     App { icon: "qr_code_2", name: "Share", open: |robot| Box::new(crate::share::Share::new(robot)) },
@@ -471,6 +473,7 @@ impl Home {
             "Calculator" => ("math · hex".into(), None),
             "Notes" => ("pit notes".into(), None),
             "Reminders" => crate::reminders::tile(),
+            "Vault" => ((if crate::vault::is_open() { "open" } else { "passwords" }).into(), None),
             "Units" => ("in·lb · N·m".into(), None),
             "HTTP" => ("GET · POST".into(), None),
             "Share" => ("as a QR code".into(), None),
@@ -3674,7 +3677,7 @@ mod tests {
         pretend(Some(Found::Nothing));
         let shown = builtin(&Home::new());
         assert!(!shown.iter().any(|n| n == "Level" || n == "Compass"), "{shown:?}");
-        assert_eq!(shown.len(), 35, "the thirty-five the emulator's run counts on (all but Level and Compass are on every unit)");
+        assert_eq!(shown.len(), 36, "the thirty-six the emulator's run counts on (all but Level and Compass are on every unit)");
         assert_eq!(shown.last().map(String::as_str), Some("Settings"), "Settings stays last");
         assert_eq!(builtin_apps().position(|(_, _, n)| n == "Terminal"), Some(8), "Terminal where it was");
         assert!(!builtin_apps().any(|(_, _, n)| n == "Level"), "nor in search");
