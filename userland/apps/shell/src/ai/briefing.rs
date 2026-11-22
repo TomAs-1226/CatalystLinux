@@ -568,14 +568,7 @@ mod tests {
         assert!(b.rows[0].text.starts_with("Q31 on red with 1507 5254 · queue in 8 min · starts in 23 min"), "{:?}", b.rows[0]);
         assert!(b.rows[0].urgent, "queueing in under ten minutes");
         assert!(b.rows.iter().any(|r| r.icon.starts_with("battery") && r.text.starts_with("76% · 4 h 38 m left")), "{:?}", b.rows);
-        // The reminder is for Q31's queueing, 8 minutes on: today's, unless
-        // that is past midnight (then tomorrow's, and not in today's list).
-        let now = crate::reminders::now();
-        if local_date(now + 8 * 60) == local_date(now) {
-            assert!(b.rows.iter().any(|r| r.icon == "notifications" && r.text.contains("swap the battery")), "{:?}", b.rows);
-        } else {
-            assert!(b.rows.iter().any(|r| r.icon == "notifications" && r.text == "no reminders today"), "{:?}", b.rows);
-        }
+        assert!(b.rows.iter().any(|r| r.icon == "notifications" && r.text.contains("swap the battery")), "{:?}", b.rows);
         assert!(b.rows.iter().any(|r| r.text.starts_with("Q14 · the robot browned out")), "the newest log's worst: {:?}", b.rows);
         assert!(b.said.starts_with("Q31 is next, on red with 1507 and 5254. Queue in 8 min."), "{}", b.said);
         assert_eq!(b.data["nextMatch"]["partners"], json!([1507, 5254]));
