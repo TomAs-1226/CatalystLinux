@@ -1379,49 +1379,102 @@ off the radio is not powered and nothing of it runs.
 
 ## Music
 
-Music plays YouTube Music: search, the start page (the home page's quick
-picks, or its first playlist; your likes when signed in), a song and its
-radio after it, the queue (play next, take out, jump to), and a now-playing
-page with the cover, where the song is, and the transport. It plays on
-behind every other app and with the screen off: Fn + Q (play or pause),
-Fn + W and Fn + E (previous, next) work from anywhere, Home's tile says what
-is playing, and the volume keys and Bluetooth headphones apply as for
-anything else. While music plays the handheld does not go into deep
-standby (which would switch its Wi-Fi off). Spotlight finds the songs Music
-has listed, and offers a search of YouTube Music for anything typed.
+Music plays YouTube Music and the music on the card: search (songs,
+albums, artists, playlists), the start page (the home page's quick picks,
+or its first playlist; your likes when signed in), a song and its radio
+after it, an album, a playlist or an artist's top songs, the library, the
+queue (play next, take out, jump to; shuffle and repeat), and a
+now-playing page with the cover, where the song is, and the transport. It
+plays on behind every other app and with the screen off: Fn + Q (play or
+pause), Fn + W and Fn + E (previous, next) work from anywhere, Home's tile
+says what is playing, the lock screen, the island and StandBy show it (it
+tells `nowplaying` every change, with the song's small cover), and the
+volume keys and Bluetooth headphones apply as for anything else. Spotlight
+finds the songs Music has listed and those on the card, and offers a search
+of YouTube Music for anything typed. Offline, Music opens on the library,
+and search looks on the card.
 
-- **Finding songs:** YouTube Music's own web API (InnerTube, as its web
-  page, `WEB_REMIX`), through curl.
-- **Playing:** yt-dlp (`/usr/libexec/catalyst/yt-dlp`, its single-file
-  release) finds the audio-only stream, Opus where there is one (else AAC),
-  answering YouTube's player challenge in QuickJS (`qjs`); ffmpeg fetches it
-  over HTTPS, decodes it, resamples it to 48 kHz and plays it to ALSA's
-  `default`. Pausing stops ffmpeg, so the speaker's amplifier goes off;
-  playing again starts it where it was. The next song's stream is found
-  while one plays. Account › Stream finder brings the newest yt-dlp to
-  `/data/music` when YouTube changes under the one in the image.
+- **Finding a song's stream** (`music/lookup.rs`): YouTube's own player
+  API asked as its visionOS app, which is given audio addresses outright,
+  so there is no player JavaScript to run: one HTTPS request through curl,
+  about 0.3 s, with a visitor id YouTube gives once (kept in
+  `/data/music/visitor`). Only if that fails: yt-dlp asked for the same
+  client (about 2 to 3 s and 70 MB of Python on a PC), then yt-dlp as it
+  is, answering YouTube's player challenge in QuickJS (6 s and 200 MB on a
+  PC, 15 to 25 s on the A53): at nice 15, OOM score 800, capped at 400 MB
+  of address space, only with 260 MB free, never two at once. Account ›
+  Stream finder brings the newest yt-dlp to `/data/music`.
+- **Fetching** (`music/fetch.rs`): one worker does every download, one at a
+  time: the song playing first, then the next six in the queue (so the next
+  starts at once, and in music standby Wi-Fi can switch off until they run
+  low), then saves to the library. A song comes in 1 MiB ranges over one
+  curl connection (googlevideo slows a whole-file request to the song's own
+  bit rate, 35 KB/s; ranges come at full speed, 3 to 9 MB/s), the ranges
+  and address in a file of curl's own. At nice 10 with OOM score 800; looking
+  ahead waits while less than 80 MB is free or in deep standby.
+- **Playing** (`music/player.rs`, `catalyst-play`): from the card whenever
+  the song is there (the library, else the played cache), so a song saved
+  or played before needs no network at all; otherwise from the cache file
+  as it downloads, starting once about five seconds of it are in, waiting
+  (and saying "buffering") only if the download falls behind, and seeking
+  anywhere already downloaded. `catalyst-play` (`userland/apps/play`)
+  decodes with symphonia (AAC, MP3, FLAC, Vorbis, ALAC, WAV) and libopus,
+  resamples to 48 kHz only a song at another rate (Opus passes straight
+  through), and writes to ALSA's `default` at nice -10. It replaced
+  ffmpeg's command line tool, which kept 16 threads for one song: measured
+  on a PC paced as ALSA plays, catalyst-play takes 3.6 MB and 0.25% of a
+  core and wakes 23.5 times a second (once an ALSA period); ffmpeg took
+  5.8 MB and 0.9% and woke 201 times a second. Under a heavy processor load
+  with a stalling network, the old player ran dry 13 times in 90 s (4 s of
+  silence) and this one not once (`scripts/music-xrun-harness.py`).
+  Pausing stops it, so the speaker's amplifier goes off. ffmpeg still plays
+  what symphonia does not read (HE-AAC).
+- **Kept on the card** (`music/store.rs`): every song played stays in
+  `/data/music/cache/<id>.webm` with its cover, to play again offline; past
+  the limit (4 GB unless changed in Settings › Music) the songs played
+  longest ago make way, never one playing or coming up. Library › Played
+  lists them.
+- **The library** (`music/library.rs`): `/data/music/library/<Artist>/<Album>/<NN> <Title>.opus`,
+  each album with `cover.jpg` (512 px) and `cover-small.jpg` (96 px, which
+  the player, lists and the lock screen decode). Songs saved from YouTube
+  Music are copied as they are into Ogg Opus (no re-encoding), tagged
+  (title, artist, album, album artist, number, year, the song's YouTube id)
+  with the cover inside (METADATA_BLOCK_PICTURE; an AAC song stays M4A with
+  its `covr`). Your own music (MP3, FLAC, M4A, Ogg, Opus, WAV) goes beside
+  it: over SSH (`scp -r "Album" root@<handheld>:/data/music/library/Artist/`)
+  or with Files; tags win over the folders' names, a song's own cover or the
+  folder's picture becomes the album's, and an album with none gets one
+  drawn from its initials (kept in `/data/music/covers`). The index
+  (`library/.index`) is read the first time it is wanted and brought up to
+  date in the background by each folder's time, opening only files new or
+  changed; Settings › Music › Look for new music looks at every file. USB's
+  drive mode is the read-only snapshot of match logs, so music is copied in
+  over SSH (USB's network mode works too) rather than as a drive.
+- **Downloads** (`music/downloads.rs`): Download all on an album, a
+  playlist (saved as `library/Playlists/<name>.m3u8` too), an artist's top
+  songs or your likes, and Save all on the songs played, each with its size
+  before it starts. The queue is kept in `/data/music/downloads.json` and
+  goes on after a restart; a song part done goes on from there. One at a
+  time behind whatever plays, only over Wi-Fi and only while charging if
+  chosen, waiting while the battery is low or in deep standby; pause and
+  resume all, retry, take out. A song played before is saved from the
+  cache, without the network; each album's cover is fetched once. It shows
+  as a live activity while it runs. Signed in, your likes are saved by
+  themselves twice a day over Wi-Fi (Settings › Music).
 - **Signed out by default:** nothing is sent but searches and the songs
   asked for. To sign in, put a browser's `cookies.txt` for
   music.youtube.com at `/data/music/cookies.txt`; the page says that
   third-party players like this one can break YouTube's terms. The cookies
   go to curl and yt-dlp in files, never on a command line, and Sign out
-  deletes them.
-- **What it costs:** nothing at rest. While a song plays, ffmpeg is about
-  10 to 15 MB (most of it its libraries' pages, shared and given back under
-  pressure) and a few per cent of one core: Opus at 128 to 160 kbit/s
-  decodes in well under 5%, and the HTTPS stream is 16 to 20 KB/s, which
-  OpenSSL's NEON code deciphers without the AES instructions the CM0 lacks.
-  Finding a stream is the costly part: YouTube's player challenge is its
-  2.5 MB player script run in QuickJS. On a PC (WSL) yt-dlp takes about 6 s
-  for a song, 3 s of it QuickJS, and QuickJS peaks at about 200 MB
-  (Python alone, 70 MB); on the A53, an estimated 15 to 25 s. So streams
-  are found one at a time (never two QuickJS at once), the next song's
-  while one plays (a song ends into the next without that wait), and each
-  is kept for four hours. The first song after opening the app waits for
-  its own ("finding it…").
+  deletes them. What is saved is for this handheld: Music shares and
+  exports nothing.
+- **What it costs:** nothing at rest. While a song plays, catalyst-play's
+  3 to 4 MB and a few per cent of one A53 core; the worker sleeps until
+  something happens (no polling), and the page draws again only when what
+  it shows changes. `catalyst-music-stats` measures it on the handheld.
 
-On a computer (the simulator) a made-up catalogue stands in, with covers
-drawn from each song's name, and songs play silently.
+On a computer (the simulator) a made-up catalogue and library stand in,
+with covers drawn from each song's name, and songs play silently.
 
 ## Match logs
 
@@ -2372,7 +2425,9 @@ code word lists), Orbits from AstroBox (eggfly, kur1k0). Each app's
 Sound, Bluetooth and Music use, from the image: ALSA's library and tools
 (LGPL-2.1 and GPL-2.0), BlueZ (GPL-2.0 and LGPL-2.1), bluez-alsa (MIT),
 D-Bus (AFL-2.1 or GPL-2.0), FFmpeg built without its GPL parts (LGPL-2.1),
-QuickJS (MIT) and yt-dlp's release (Unlicense, with astring (MIT) and
-meriyah (ISC) inside). The codec, amplifier and machine drivers are
-M5Stack's (GPL-2.0), with our patches. The shell signs YouTube requests
-with sha1 (RustCrypto, MIT or Apache 2.0).
+libopus (BSD-3-Clause), QuickJS (MIT) and yt-dlp's release (Unlicense, with
+astring (MIT) and meriyah (ISC) inside). The codec, amplifier and machine
+drivers are M5Stack's (GPL-2.0), with our patches. The shell signs YouTube
+requests with sha1 (RustCrypto, MIT or Apache 2.0); catalyst-play decodes
+with symphonia (MPL-2.0); album covers are written with jpeg-encoder (MIT or
+Apache 2.0).
