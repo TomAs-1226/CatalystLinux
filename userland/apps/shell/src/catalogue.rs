@@ -183,6 +183,12 @@ pub fn install(app: &Listing, dir: &Path, keys: &[String]) -> Result<(), String>
     if result.is_ok() {
         task.done("installed");
     }
+    // A notification either way (unsaid if the catalogue is in front).
+    let n = match &result {
+        Ok(()) => crate::notify::Notification::new("Catalogue", "download_done", format!("{} installed", app.name)),
+        Err(why) => crate::notify::Notification::new("Catalogue", "error", format!("{} not installed", app.name)).body(why.clone()),
+    };
+    crate::notify::post(n.action("builtin:Catalogue"));
     result
 }
 

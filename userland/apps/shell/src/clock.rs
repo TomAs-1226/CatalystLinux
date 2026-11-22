@@ -414,6 +414,10 @@ impl Clock {
 }
 
 impl Screen for Clock {
+    fn app(&self) -> &str {
+        "Clock"
+    }
+
     /// Each page names itself (no pager dots: they would sit on the keys).
     fn title(&self) -> &str {
         match PAGES[self.page] {

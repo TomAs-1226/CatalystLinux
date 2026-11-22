@@ -12,6 +12,7 @@
 //! catalyst-shell --standby-shots <dir>   StandBy's faces and the lock screen, to PNG
 //! catalyst-shell --cjk-shots <dir>   Chinese, Japanese and Korean text on the screens, to PNG
 //! catalyst-shell --activity-shots <dir>  live activities, Tab held, the lock screen with a song
+//! catalyst-shell --notify-shots <dir>    notifications: the centre, Quiet, the island, the lock screen
 //!     --robot <team|ip|host>     robot to connect to (overrides the saved one)
 //!     --demo                     a scripted robot instead of a real one
 //!     --arrive <seconds>         the scripted robot, plugged in that long after start
@@ -88,6 +89,7 @@ mod monitor;
 mod music;
 mod nettools;
 mod notes;
+mod notify;
 mod nowplaying;
 mod object3d;
 mod offline;
@@ -457,6 +459,10 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--activity-shots") {
         return activity_shots(std::path::Path::new(&dir));
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--notify-shots") {
+        return notify_shots(std::path::Path::new(&dir));
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--standby-shots") {
@@ -3803,6 +3809,226 @@ fn activity_shots(dir: &std::path::Path) {
     save(&mut shell, "d05-standby-nothing-playing");
     faces::pretend_time(None);
     println!("live activity shots in {}", dir.display());
+}
+
+/// Notifications, to PNG: the notification centre (both tones, the Bezel
+/// look, every text size, empty, Quiet, scrolled, the page turning), the
+/// control centre's Quiet and Notifications, the island's count, the lock
+/// screen with notifications (words hidden and shown, one picked, under a
+/// song), and the lock screen charging with a song at every text size (the
+/// chip that used to clip into the card).
+#[cfg(not(target_arch = "aarch64"))]
+fn notify_shots(dir: &std::path::Path) {
+    use gfx::TextSize::{Compact, Large, Standard};
+    use notify::Notification;
+    use Key::*;
+    std::fs::create_dir_all(dir).expect("create the screenshot folder");
+    tour_fixtures();
+    photos::seed_demo();
+    let morning = chrono::NaiveDate::from_ymd_opt(2026, 11, 21).and_then(|d| d.and_hms_opt(9, 41, 0));
+    faces::pretend_time(morning);
+    let cover = photos::list().first().map(|p| p.path.clone());
+    let song = nowplaying::NowPlaying {
+        title: "Around the World".into(),
+        artist: "Daft Punk".into(),
+        album: "Homework".into(),
+        cover,
+        position: 83.0,
+        duration: 427.0,
+        playing: true,
+        at: std::time::Instant::now(),
+    };
+    let music = || liveactivity::music(Some(&song)).expect("music");
+    let now = chrono::Utc::now().timestamp();
+    // One from each source, as each would post it, over the last day.
+    let samples = || {
+        vec![
+            Notification::new("Reminders", "checklist", "swap the battery").body("after Q31").urgent().action("reminder:1").at(now - 40),
+            Notification::new("Schedule", "flag", "queue for Q31 in 5 min").tag("queue:q31").action("builtin:Schedule").at(now - 3 * 60),
+            Notification::new("Assistant", "auto_awesome", "your answer is written").action("builtin:Assistant").at(now - 18 * 60),
+            Notification::new("Logs", "insights", "how Q30 went").body("its summary is in Logs").at(now - 26 * 60),
+            Notification::new("Music", "download_done", "12 songs saved").body("in the library, to play offline").action("builtin:Music").at(now - 52 * 60),
+            Notification::new("Catalogue", "download_done", "Scouting installed").action("builtin:Catalogue").at(now - 2 * 3600),
+            Notification::new("Robot", "bolt", "Brownout").body("Atlas's battery at 6.8 V").action("builtin:Robot").at(now - 3 * 3600),
+            Notification::new("System update", "download", "update 0.6.2 ready").body("restart in settings").action("setting:System update").at(now - 5 * 3600),
+            Notification::new("Clock", "timer", "timer 5 min done").urgent().action("builtin:Clock").at(now - 26 * 3600),
+        ]
+    };
+    let settle = |shell: &mut Shell, frames: usize| {
+        for _ in 0..frames {
+            if shell.tick(1.0 / 60.0) {
+                shell.draw();
+            }
+        }
+    };
+    let save = |shell: &mut Shell, name: &str| {
+        shell.draw();
+        platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}.png")), 3);
+        println!("{name}");
+    };
+    let fresh = |light: bool, bezel: bool, text: gfx::TextSize, notes: usize| {
+        let mut shell = Shell::new(Robot::demo());
+        shell.settings.light = light;
+        if bezel {
+            (shell.settings.theme, shell.settings.wallpaper, shell.settings.accent) = (look::Theme::Bezel, look::Wallpaper::Glow, bezel::Accent::Orange);
+        }
+        shell.settings.text = text;
+        shell.apply_settings();
+        shell.notes.clear();
+        for n in samples().into_iter().take(notes) {
+            shell.notes.add(n, false);
+        }
+        settle(&mut shell, 100);
+        shell
+    };
+
+    // The notification centre: Ctrl-Backspace, over Home.
+    for (name, light, bezel, text, notes) in [
+        ("n01-centre", false, false, Standard, 9),
+        ("n02-centre-light", true, false, Standard, 9),
+        ("n03-centre-bezel", false, true, Standard, 9),
+        ("n04-centre-bezel-light", true, true, Standard, 9),
+        ("n05-centre-compact", false, false, Compact, 9),
+        ("n06-centre-large", false, false, Large, 9),
+        ("n07-centre-empty", false, false, Standard, 0),
+    ] {
+        let mut shell = fresh(light, bezel, text, notes);
+        shell.key(Ctrl(platform::NOTIFICATIONS));
+        settle(&mut shell, 90);
+        save(&mut shell, name);
+    }
+    // Scrolled down the list, and coming down.
+    let mut shell = fresh(false, false, Standard, 9);
+    shell.key(Ctrl(platform::NOTIFICATIONS));
+    settle(&mut shell, 7);
+    save(&mut shell, "n08-centre-coming-down");
+    settle(&mut shell, 80);
+    for _ in 0..6 {
+        shell.key(Down);
+        settle(&mut shell, 12);
+    }
+    settle(&mut shell, 60);
+    save(&mut shell, "n09-centre-scrolled");
+    // Quiet on: the heading says so; empty, it says they wait.
+    let mut shell = fresh(false, false, Standard, 4);
+    shell.notes.set_quiet(true);
+    shell.key(Ctrl(platform::NOTIFICATIONS));
+    settle(&mut shell, 90);
+    save(&mut shell, "n10-centre-quiet");
+    let mut shell = fresh(true, false, Standard, 0);
+    shell.notes.set_quiet(true);
+    shell.key(Ctrl(platform::NOTIFICATIONS));
+    settle(&mut shell, 90);
+    save(&mut shell, "n11-centre-quiet-empty");
+    // The control centre: Quiet, and Notifications beside it (a dot on the
+    // bell while some are new); the page turning to them.
+    for (name, light, text) in [("n12-control-centre", false, Standard), ("n13-control-centre-light", true, Standard), ("n14-control-centre-large", false, Large), ("n15-control-centre-compact", false, Compact)] {
+        let mut shell = fresh(light, false, text, 3);
+        shell.notes.set_quiet(true);
+        shell.key(Ctrl(' '));
+        settle(&mut shell, 60);
+        for key in [Down, Down, Right] {
+            shell.key(key);
+            settle(&mut shell, 12);
+        }
+        settle(&mut shell, 60);
+        save(&mut shell, name);
+    }
+    let mut shell = fresh(false, false, Standard, 3);
+    shell.key(Ctrl(' '));
+    settle(&mut shell, 60);
+    shell.key(Char('n'));
+    settle(&mut shell, 6);
+    save(&mut shell, "n16-control-centre-turning");
+
+    // The island: how many are new, at rest (no live activity carrying
+    // it); one said as it comes; with Quiet, kept and counted, unsaid.
+    for (name, light, text) in [("n17-island-count", false, Standard), ("n18-island-count-light", true, Standard), ("n19-island-count-large", false, Large)] {
+        let mut shell = fresh(light, false, text, 3);
+        shell.pretend_activities(Vec::new());
+        settle(&mut shell, 300);
+        save(&mut shell, name);
+    }
+    for (name, quiet) in [("n20-island-said", false), ("n21-island-quiet", true)] {
+        let mut shell = fresh(false, false, Standard, 2);
+        shell.pretend_activities(Vec::new());
+        shell.notes.set_quiet(quiet);
+        settle(&mut shell, 300);
+        shell.notify(Notification::new("Music", "download_done", "12 songs saved").body("in the library").action("builtin:Music"));
+        settle(&mut shell, 40);
+        save(&mut shell, name);
+    }
+
+    // The lock screen with notifications (a passcode set: locked).
+    let (phc, _, _) = passcode::make("2468").expect("hashes");
+    passcode::keep(&phc).expect("kept");
+    // (`acts`: the demo's next match, as it comes; or none; or a song.)
+    for (name, light, bezel, text, notes, words, acts, pick) in [
+        ("n30-lock-notifications", false, false, Standard, 3, false, "none", false),
+        ("n31-lock-notifications-words", false, false, Standard, 3, true, "none", false),
+        ("n32-lock-one-picked", false, false, Standard, 3, true, "none", true),
+        ("n33-lock-song-and-a-notification", false, false, Standard, 3, true, "song", false),
+        ("n34-lock-match-and-a-notification", false, false, Standard, 3, true, "match", false),
+        ("n35-lock-notifications-light", true, false, Standard, 3, true, "none", false),
+        ("n36-lock-notifications-bezel", false, true, Standard, 3, true, "none", false),
+        ("n37-lock-notifications-compact", false, false, Compact, 4, true, "none", false),
+        ("n38-lock-notifications-large", false, false, Large, 3, true, "none", false),
+        ("n39-lock-song-and-a-notification-large", false, false, Large, 3, true, "song", false),
+    ] {
+        let mut shell = fresh(light, bezel, text, notes);
+        shell.settings.lock.previews = words;
+        shell.apply_settings();
+        match acts {
+            "none" => shell.pretend_activities(Vec::new()),
+            "song" => {
+                shell.pretend_activities(Vec::new());
+                shell.pretend_activities(vec![music()]);
+            }
+            _ => {}
+        }
+        settle(&mut shell, 120);
+        if pick {
+            shell.key(Down);
+        }
+        settle(&mut shell, 60);
+        save(&mut shell, name);
+    }
+    // Charging with a song: the chip under the date, the card below it
+    // (it used to run into the card), at every text size and in each tone,
+    // locked and as the curtain.
+    for (name, light, text) in [
+        ("n40-lock-charging-song", false, Standard),
+        ("n41-lock-charging-song-compact", false, Compact),
+        ("n42-lock-charging-song-large", false, Large),
+        ("n43-lock-charging-song-light", true, Standard),
+        ("n44-lock-charging-song-two", false, Standard),
+    ] {
+        let mut shell = fresh(light, false, text, 0);
+        shell.pretend_charger(Some(true));
+        shell.pretend_activities(Vec::new());
+        let list = if name.ends_with("two") { vec![liveactivity::timers(Some((272.0, 300.0, 1)), None).remove(0), music()] } else { vec![music()] };
+        shell.pretend_activities(list);
+        settle(&mut shell, 180);
+        save(&mut shell, name);
+    }
+    passcode::remove().ok();
+    let mut shell = fresh(false, false, Standard, 0);
+    shell.pretend_charger(Some(true));
+    shell.pretend_activities(Vec::new());
+    shell.pretend_activities(vec![music()]);
+    settle(&mut shell, 10);
+    shell.close_island_for_gallery();
+    shell.lock_as_if_held();
+    settle(&mut shell, 120);
+    save(&mut shell, "n45-curtain-charging-song");
+    let mut shell = fresh(false, false, Standard, 3);
+    shell.lock_as_if_held();
+    settle(&mut shell, 120);
+    shell.key(Down);
+    settle(&mut shell, 30);
+    save(&mut shell, "n46-curtain-one-picked");
+    faces::pretend_time(None);
+    println!("notification shots in {}", dir.display());
 }
 
 /// Home's tiles come in the order of the built-in apps, and Left and Right go
