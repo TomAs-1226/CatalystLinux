@@ -476,6 +476,9 @@ pub struct Camera {
     /// A code put away with Esc: not offered again while it stays in sight.
     dismissed: Option<Code>,
     clock: f32,
+    /// Opened by quick capture (`capture.rs`): one photo, and it gives way.
+    quick: bool,
+    done: bool,
 }
 
 /// A code's card stays this long after the code was last seen; its outline
@@ -532,11 +535,23 @@ impl Camera {
             found_at: None,
             dismissed: None,
             clock: 0.0,
+            quick: false,
+            done: false,
         };
         // The simulator's album has a few photos to begin with.
         #[cfg(not(target_arch = "aarch64"))]
         photos::seed_demo();
         camera.load_last(None);
+        camera
+    }
+
+    /// For quick capture: the camera for one photo. Enter (or Ctrl-P, the
+    /// key that opened it) takes it into Photos, and the camera gives way
+    /// at once; Esc goes back with none.
+    pub fn quick() -> Self {
+        let mut camera = Camera::new();
+        camera.quick = true;
+        camera.note = Some(("enter: take it · esc: none".into(), 0.0));
         camera
     }
 
@@ -653,6 +668,11 @@ impl Screen for Camera {
         true
     }
 
+    /// Quick capture's photo is in: it gives way to what it opened over.
+    fn finished(&self) -> bool {
+        self.done
+    }
+
     /// Leaving it stops the camera, which would otherwise run on unseen.
     fn keep_in_recents(&self) -> bool {
         false
@@ -680,7 +700,7 @@ impl Screen for Camera {
             }
             Key::Back | Key::Leave => return Nav::Pop,
             Key::Left | Key::Right | Key::Tab => self.set_mode(if self.mode == Mode::Photo { Mode::Scan } else { Mode::Photo }),
-            Key::Enter | Key::Char(' ') => match self.mode {
+            Key::Enter | Key::Char(' ') | Key::Ctrl('p' | 'P') if self.quick || matches!(key, Key::Enter | Key::Char(' ')) => match self.mode {
                 Mode::Scan => return self.act(),
                 Mode::Photo if self.countdown.is_some() => {}
                 Mode::Photo if self.timer > 0 => self.countdown = Some(Instant::now() + Duration::from_secs(self.timer.into())),
@@ -810,6 +830,11 @@ impl Screen for Camera {
             match event {
                 Event::Saved { path, size } => {
                     photos::changed();
+                    // Quick capture's photo: said in the island, and the camera gives way.
+                    if self.quick {
+                        crate::capture::photo_taken(path.clone());
+                        self.done = true;
+                    }
                     self.say(if size.0 >= 3000 { "saved to photos".to_owned() } else { format!("saved · {} × {}", size.0, size.1) });
                     self.load_last(Some(path));
                 }

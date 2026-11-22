@@ -428,6 +428,32 @@ pub trait Screen {
     fn dictated(&mut self, _text: &str, _cx: &mut Cx) -> Nav {
         Nav::Stay
     }
+    /// Copy (Ctrl-C; clipboard.rs): what this screen copies, where it
+    /// knows better than the shell. Otherwise the shell copies the field
+    /// being typed in, else the value of the row in focus, as last drawn.
+    fn copy(&mut self, _robot: &Robot) -> Option<String> {
+        None
+    }
+    /// Paste (Ctrl-V, or Enter in the clipboard's history): `text` put in
+    /// where the typing is, on a screen that `wants_text`. By default it is
+    /// typed in a character at a time on one line (a line break as a space),
+    /// so every text field takes a paste with nothing of its own; one that
+    /// takes lines (the editor, the terminal) puts them in as they are.
+    fn paste(&mut self, text: &str, cx: &mut Cx) -> Nav {
+        for c in crate::clipboard::one_line(text).chars() {
+            match self.key(Key::Char(c), cx) {
+                Nav::Stay => {}
+                other => return other,
+            }
+        }
+        Nav::Stay
+    }
+    /// A terminal: Ctrl-C and Ctrl-V are its programs' (the interrupt, and
+    /// the next key as it is). Copy and paste there are Ctrl-Shift-C and V,
+    /// which reach the screen as keys (`Key::Ctrl('C')`, `Key::Ctrl('V')`).
+    fn keeps_ctrl(&self) -> bool {
+        false
+    }
 }
 
 const MESSAGE_SECONDS: f32 = 2.4;
@@ -837,6 +863,8 @@ pub struct Shell {
     /// screen's parts in again).
     hold_cue: Animated,
     lit_was: bool,
+    /// The clipboard's history and quick capture, over whatever shows (shell/clip.rs).
+    sheets: clip::Sheets,
 }
 
 /// How long the island holds a reminder coming due (a message holds 2.4 s).
@@ -935,6 +963,7 @@ fn key_name(key: Key) -> String {
         Key::Ctrl(' ') => "ctrl space".into(),
         Key::Ctrl('\t') => "ctrl tab".into(),
         Key::Ctrl('\n') => "ctrl enter".into(),
+        Key::Ctrl(c) if c.is_ascii_uppercase() => format!("ctrl shift {}", c.to_ascii_lowercase()),
         Key::Ctrl(c) => format!("ctrl {c}"),
         Key::Leave => "esc held".into(),
         Key::Lock => "tab held".into(),
@@ -1037,6 +1066,7 @@ impl Shell {
             activities: crate::liveactivity::Activities::new(),
             hold_cue: Animated::new(0.0, role::smooth()).with_rest(0.004),
             lit_was: true,
+            sheets: clip::Sheets::new(),
         }
     }
 
@@ -1326,6 +1356,13 @@ impl Shell {
             self.moving = true;
             return;
         }
+        // The clipboard's history (Ctrl-Shift-H) and quick capture
+        // (Ctrl-Shift-N) come up from anywhere past the lock, a terminal
+        // included, and take the keys while they show (shell/clip.rs).
+        if self.sheets_key(key) {
+            self.moving = true;
+            return;
+        }
         // The recent apps take the keys while they show. On their way out
         // they go on going, over the screen drawn live, and the key lands
         // on that screen.
@@ -1468,6 +1505,8 @@ impl Shell {
                 self.drift.1.nudge(push.1);
             }
         }
+        // Copy and paste, into and out of the screen in front (shell/clip.rs).
+        let Some(key) = self.clipboard_key(key) else { return };
         let (top, _) = self.stack.last_mut().expect("the home screen is always there");
         let key = if top.wants_text() { key } else { plain(key) };
         // Enter answers as it lands: what it pressed gives a little.
@@ -2074,6 +2113,7 @@ impl Shell {
             self.dirty = true;
         }
         moving |= self.tick_spotlight(motion_dt);
+        moving |= self.tick_sheets(dt, motion_dt);
         if self.transition.is_none() {
             moving |= self.stack.last_mut().is_some_and(|(s, _)| s.tick(motion_dt));
             // Work that reached the screen from outside, and a screen that is done.
@@ -2107,6 +2147,7 @@ impl Shell {
         let enter_repeats = self.transition.is_none()
             && !self.control.is_open()
             && !self.spotlight.is_open()
+            && !self.sheets.open()
             && self.switcher.is_none()
             && self.tour.is_none()
             && self.stack.last().is_some_and(|(s, _)| s.repeats_enter());
@@ -2304,6 +2345,10 @@ impl Shell {
             return;
         }
         let over = self.control.visible();
+        // The clipboard's history or quick capture, as Spotlight below (shell/clip.rs).
+        if !over && self.draw_sheets() {
+            return;
+        }
         // Spotlight is up: the screen behind is held as it was (drawn live
         // only while a screen is still on its way), and the bar grows over it.
         if self.spotlight.visible() && !over {
@@ -2576,8 +2621,9 @@ impl Shell {
         // Where the status begins: the island growing past it, it gives way.
         self.status_left = x;
         // With Spotlight up, the island and the page dots go through the
-        // glass pass with its bar, over this frame held still (`draw_spotlight`).
-        if self.spotlight.visible() {
+        // glass pass with its bar, over this frame held still (`draw_spotlight`);
+        // so with a sheet up (`draw_sheets`).
+        if self.spotlight.visible() || self.sheets.visible() {
             if g.take_motion_started() {
                 self.moving = true;
             }
@@ -2737,7 +2783,10 @@ impl Shell {
         let grown = if travel.abs() < 1.0 { 1.0 } else { ((self.island_w.value() - self.island_from) / travel).clamp(0.0, 1.0) };
         let words = ((grown - 0.55) / 0.45).clamp(0.0, 1.0);
         g.canvas.set_clip(island.inset(2.0));
-        if let Some(talk) = &talk {
+        // Under a sheet grown out of the island (Spotlight, the clipboard,
+        // quick capture), push-to-talk's icon and meter are not drawn: the
+        // sheet says it listens itself.
+        if let Some(talk) = talk.as_ref().filter(|_| hide <= 0.0) {
             crate::voice::draw_island(g, island, talk, &label, words * shown);
         } else if let Some(a) = &activity {
             // Open: the card, its words in once the island is most of the
@@ -2769,9 +2818,12 @@ impl Shell {
         if !screen.full_screen() {
             draw_title(g, screen.title());
         }
-        // What this screen draws along the foot, and its lists, start afresh.
+        // What this screen draws along the foot, and its lists, start afresh;
+        // and what Copy would take from it.
         g.foot = H;
         g.viewports.clear();
+        g.copy_field = None;
+        g.copy_row = None;
         screen.draw(g, robot);
         // Page dots asked for sit on their glass along the foot (`draw_chrome`).
         if g.pager.is_some() {
@@ -2847,8 +2899,10 @@ impl Shell {
         // the start, the tour, the control centre or the recent apps.
         // Never under the lock screen or StandBy: the microphone and the
         // assistant are past the passcode.
-        let in_the_way = self.intro.is_some() || self.tour.is_some() || self.switcher.is_some() || self.control.visible() || self.lock.covering() || self.faces.showing();
+        let in_the_way = self.intro.is_some() || self.tour.is_some() || self.switcher.is_some() || self.control.visible() || self.lock.covering() || self.faces.showing() || self.sheets.panel.is_open();
         let here = match self.stack.last() {
+            // Quick capture's sheet takes what is said, as a note's page does.
+            _ if down && !in_the_way && self.sheets.capture.is_open() => Some(Target { kind: Dictation::Text, depth: usize::MAX, title: crate::capture::TITLE.to_owned() }),
             Some((top, _)) if down && !in_the_way && !top.full_screen() => {
                 Some(Target { kind: top.dictation().unwrap_or(Dictation::Question), depth: self.stack.len(), title: top.title().to_owned() })
             }
@@ -2886,6 +2940,9 @@ impl Shell {
         // gone off): what was said goes nowhere.
         if self.lock.covering() || self.faces.showing() {
             return;
+        }
+        if target.depth == usize::MAX && target.title == crate::capture::TITLE {
+            return self.heard_for_capture(text);
         }
         let takes = self.stack.last().and_then(|(top, _)| top.dictation());
         let same_page = self.stack.len() == target.depth && self.stack.last().is_some_and(|(top, _)| top.title() == target.title);
@@ -4127,6 +4184,8 @@ impl Shell {
             self.control_under = None;
             self.control_glass = None;
         }
+        // The clipboard's history in its place (shell/clip.rs).
+        self.sheets.panel.gone_now();
         if !self.spotlight.visible() {
             self.spotlight_under = None;
         }
@@ -4157,6 +4216,10 @@ impl Shell {
                 return self.set_control(true);
             }
             _ => {}
+        }
+        // Copy what it found, paste into what is typed (shell/clip.rs).
+        if self.spotlight_clipboard(key) {
+            return;
         }
         match self.spotlight.key(key, &self.robot) {
             Outcome::Stay => {}
@@ -4269,6 +4332,12 @@ impl Shell {
         }
     }
 }
+
+mod clip;
+#[cfg(not(target_arch = "aarch64"))]
+pub use clip::gallery as clip_gallery;
+#[allow(unused_imports)]
+pub use clip::Sheet;
 
 #[cfg(test)]
 mod fast_keys;
@@ -5569,14 +5638,20 @@ pub(crate) mod tests {
             Key::Leave, Key::Back, Key::Tab, Key::Home, Key::End, Key::PageUp, Key::PageDown, Key::Delete,
             Key::Up, Key::Down, Key::Left, Key::Right, Key::BrightnessUp, Key::BrightnessDown,
             Key::Char('/'), Key::Char('?'), Key::Char('`'), Key::Enter, Key::Ctrl('\n'), Key::Lock,
+            // The clipboard's: copy, paste, its history, quick capture.
+            Key::Ctrl('C'), Key::Ctrl('v'), Key::Ctrl('V'), Key::Ctrl('x'), Key::Ctrl('H'), Key::Ctrl('N'), Key::Ctrl('P'),
         ];
         keys.extend((1..=12).map(Key::F));
+        crate::clipboard::copy("on the clipboard", crate::clipboard::Sensitivity::Normal);
         for key in keys {
             shell.key(key);
             frames(&mut shell, 3, FRAME);
             assert!(shell.locked(), "{key:?} got round the lock");
             assert!(!shell.recents_open() && !shell.control_open(), "{key:?} opened something over the lock");
             assert!(!shell.spotlight_open() && !shell.spotlight.visible(), "{key:?} brought Spotlight up over the lock");
+            assert!(!shell.sheets.visible(), "{key:?} brought the clipboard or quick capture up over the lock");
+            // Only `/`, `?` and `` ` `` are typed there: never a paste.
+            assert!(shell.lock.field.len() <= 3, "{key:?} pasted into the passcode");
             assert!(shell.tour.is_none() && shell.echo.is_empty(), "{key:?}");
             assert_eq!(shell.stack.len(), depth, "{key:?} reached the screen beneath");
             assert!(shell.take_launch().is_none());

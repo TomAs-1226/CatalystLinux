@@ -125,19 +125,31 @@ impl Notes {
     }
 
     fn start(&mut self, robot: &Robot) -> Result<PathBuf, String> {
-        std::fs::create_dir_all(&self.dir).map_err(|_| "cannot make the notes folder".to_owned())?;
-        let now = chrono::Local::now();
-        let label = robot.schedule.view().and_then(|v| v.next(chrono::Utc::now().timestamp()).map(|m| m.label.clone()));
-        let text = format!("\n\n{}\n", stamp(label.as_deref(), now));
-        let mut name = now.format("%Y-%m-%d-%H%M%S").to_string();
-        while self.dir.join(format!("{name}.txt")).exists() {
-            name.push('b');
-        }
-        let path = self.dir.join(format!("{name}.txt"));
-        std::fs::write(&path, &text).map_err(|_| "cannot write the note".to_owned())?;
+        let (path, text) = write_new(&self.dir, "", robot)?;
         self.fresh = Some((path.clone(), text));
         Ok(path)
     }
+}
+
+/// A new note in `dir` saying `words`, stamped at its foot as a new note
+/// is: its file, and all it holds.
+fn write_new(dir: &Path, words: &str, robot: &Robot) -> Result<(PathBuf, String), String> {
+    std::fs::create_dir_all(dir).map_err(|_| "cannot make the notes folder".to_owned())?;
+    let now = chrono::Local::now();
+    let label = robot.schedule.view().and_then(|v| v.next(chrono::Utc::now().timestamp()).map(|m| m.label.clone()));
+    let text = format!("{}\n\n{}\n", words.trim_end(), stamp(label.as_deref(), now));
+    let mut name = now.format("%Y-%m-%d-%H%M%S").to_string();
+    while dir.join(format!("{name}.txt")).exists() {
+        name.push('b');
+    }
+    let path = dir.join(format!("{name}.txt"));
+    std::fs::write(&path, &text).map_err(|_| "cannot write the note".to_owned())?;
+    Ok((path, text))
+}
+
+/// Quick capture (capture.rs): a new note of `words`, kept at once.
+pub fn capture(words: &str, robot: &Robot) -> Result<PathBuf, String> {
+    write_new(&dir(), words, robot).map(|(path, _)| path)
 }
 
 impl Screen for Notes {

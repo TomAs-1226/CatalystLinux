@@ -91,6 +91,33 @@ fn describe(p: &Parsed, n: &Now, h24: bool) -> String {
     }
 }
 
+// ---------------------------------------------------------- quick capture ---
+
+/// Quick capture (capture.rs): `typed` read as quick add reads it. Whether
+/// it says a time, and when that is in words ("in 10 min", "tmrw 08:00",
+/// "no time: on today's list"); or why it cannot be a reminder.
+pub fn capture_reading(typed: &str, robot: &Robot, h24: bool) -> Result<(bool, String), String> {
+    edit(robot, |_, n| {
+        let items = parse::parse(typed, n)?;
+        let timed = items.iter().any(|p| p.when != When::Whenever);
+        let when = describe(&items[0], n, h24);
+        Ok((timed, if items.len() > 1 { format!("{} reminders · {when}", items.len()) } else { when }))
+    })
+}
+
+/// Quick capture: `typed` added as quick add would add it. The reminder
+/// Reminders shows (the last of several), how many, and when, in words.
+pub fn capture_add(typed: &str, robot: &Robot, h24: bool) -> Result<(u64, usize, String), String> {
+    let items = edit(robot, |_, n| parse::parse(typed, n))?;
+    let count = items.len();
+    let (id, when) = edit(robot, |book, n| {
+        let when = describe(&items[0], n, h24);
+        (items.into_iter().map(|p| book.add(p, n)).last().unwrap_or(0), when)
+    });
+    with(|s| s.show = Some(id));
+    Ok((id, count, when))
+}
+
 /// Room either side of a list's name in the header.
 const HEAD_PAD: f32 = 7.0;
 

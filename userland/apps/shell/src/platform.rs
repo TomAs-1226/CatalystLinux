@@ -32,7 +32,9 @@ pub enum Key {
     /// handheld, and a USB keyboard's own.
     Media(Media),
     Char(char),
-    /// A letter with Ctrl held.
+    /// A letter with Ctrl held: lower case, or upper case with Shift as well
+    /// (Ctrl-Shift-C, which a terminal's program could not tell from
+    /// Ctrl-C, so the shell takes it: copy, paste, the clipboard, capture).
     Ctrl(char),
     /// Esc held for a second: leave whatever has the screen, even a program
     /// that takes every other key for itself. (A short Esc is still `Back`.)
@@ -57,7 +59,7 @@ impl Key {
     /// The two ways out of anything that has the whole keyboard: Ctrl-Q, or
     /// Esc held down.
     pub fn leaves(self) -> bool {
-        matches!(self, Key::Ctrl('q') | Key::Leave)
+        matches!(self, Key::Ctrl('q' | 'Q') | Key::Leave)
     }
 }
 
@@ -135,6 +137,18 @@ pub fn fn_key(code: u16) -> Option<Key> {
         163 => Key::Media(Media::Next),
         _ => return None,
     })
+}
+
+/// Whether a Ctrl-letter is Ctrl-Shift-letter ([`Key::Ctrl`] in upper case).
+/// The handheld's keyboard driver keeps Shift down for the next key when it
+/// is tapped, and for every key while it is locked (tapped twice, for
+/// capitals): so on its own keyboard Shift only counts for a Ctrl-letter
+/// while it is fresh, down since the last key typed with it. Locked for
+/// capitals and typing on, Ctrl-C stays the terminal's interrupt. A USB
+/// keyboard's Shift is only ever held.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn shifted_ctrl(shift: bool, fresh: bool, own: bool) -> bool {
+    shift && (fresh || !own)
 }
 
 /// How long Esc is held before it means [`Key::Leave`].
@@ -635,6 +649,8 @@ pub mod device {
         /// Tells when a keyboard is plugged in or pulled out.
         watch: Option<File>,
         shift: bool,
+        /// Shift came down since the last key it changed: see `shifted_ctrl`.
+        shift_fresh: bool,
         ctrl: bool,
         /// The key held down, repeating on the shell's clock (the kernel's
         /// own repeats are let go), by its key code.
@@ -777,6 +793,7 @@ pub mod device {
                 inputs: Vec::new(),
                 watch: watch_inputs(),
                 shift: false,
+                shift_fresh: false,
                 ctrl: false,
                 repeat: Repeat::default(),
                 shown: Vec::new(),
@@ -810,6 +827,9 @@ pub mod device {
             }
             if code == 42 || code == 54 {
                 self.shift = value != 0;
+                if value == 1 {
+                    self.shift_fresh = true;
+                }
                 return None;
             }
             if code == 29 || code == 97 {
@@ -862,7 +882,13 @@ pub mod device {
                     let (base, plain, shifted) = ROWS.iter().find(|(base, row, _)| code >= *base && ((code - base) as usize) < row.len())?;
                     let row = if self.shift { shifted } else { plain };
                     let ch = row.as_bytes()[(code - base) as usize] as char;
-                    if self.ctrl && ch.is_ascii_alphabetic() { Key::Ctrl(ch.to_ascii_lowercase()) } else { Key::Char(ch) }
+                    if self.ctrl && ch.is_ascii_alphabetic() {
+                        Key::Ctrl(if shifted_ctrl(self.shift, self.shift_fresh, own) { ch.to_ascii_uppercase() } else { ch.to_ascii_lowercase() })
+                    } else {
+                        // A key typed with Shift: Shift is spent (see `shifted_ctrl`).
+                        self.shift_fresh = false;
+                        Key::Char(ch)
+                    }
                 }
             })
         }
@@ -1186,7 +1212,8 @@ pub mod sim {
                         return None;
                     };
                     if ctrl && ch.is_ascii_alphabetic() {
-                        Key::Ctrl(ch)
+                        // With Shift too, in upper case: Ctrl-Shift-C, the shell's.
+                        Key::Ctrl(if shift { ch.to_ascii_uppercase() } else { ch })
                     } else {
                         Key::Char(if shift { ch.to_ascii_uppercase() } else { ch })
                     }
@@ -1378,6 +1405,18 @@ mod tests {
         assert!(held.next().is_some());
         held.press(2u16, Key::Media(Media::PlayPause), t0);
         assert!(held.next().is_none());
+    }
+
+    #[test]
+    fn shift_counts_for_ctrl_only_while_fresh_on_the_handhelds_keyboard() {
+        // Tapped (or held) just before: Ctrl-Shift-C.
+        assert!(shifted_ctrl(true, true, true));
+        // Locked for capitals, and a capital typed since: Ctrl-C, the interrupt.
+        assert!(!shifted_ctrl(true, false, true));
+        // A USB keyboard's Shift is held, however long.
+        assert!(shifted_ctrl(true, false, false));
+        assert!(!shifted_ctrl(false, true, true));
+        assert!(Key::Ctrl('Q').leaves() && Key::Ctrl('q').leaves());
     }
 
     #[test]

@@ -43,6 +43,24 @@ pub struct Terminal {
     greeted: bool,
     /// When the program last printed: while it does, the screen stays awake.
     printed: Option<std::time::Instant>,
+    /// Copy mode (Ctrl-Shift-C): the lines picked, by their number in the
+    /// terminal's lines (`Term::line_text`).
+    copying: Option<Copying>,
+}
+
+/// Lines being picked to copy: the one the highlight is on, and the one
+/// Space marked, the lines between them picked too.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Copying {
+    at: usize,
+    mark: Option<usize>,
+}
+
+impl Copying {
+    fn range(&self) -> (usize, usize) {
+        let mark = self.mark.unwrap_or(self.at);
+        (mark.min(self.at), mark.max(self.at))
+    }
 }
 
 /// How long after a program last printed the screen may go off.
@@ -52,7 +70,7 @@ impl Terminal {
     /// The login shell, picked up where it was left.
     pub fn new() -> Self {
         let (session, term) = KEPT.with_borrow_mut(Option::take).map_or((None, None), |(s, t)| (Some(s), Some(t)));
-        Terminal { title: "Terminal".into(), program: None, serial: None, banner: None, session, term, back: 0, ended: false, greeted: false, printed: None }
+        Terminal { title: "Terminal".into(), program: None, serial: None, banner: None, session, term, back: 0, ended: false, greeted: false, printed: None, copying: None }
     }
 
     /// The same, with a dim first line saying what it is.
@@ -75,6 +93,7 @@ impl Terminal {
             ended: false,
             greeted: false,
             printed: None,
+            copying: None,
         }
     }
 
@@ -92,6 +111,119 @@ impl Terminal {
             ended: false,
             greeted: false,
             printed: None,
+            copying: None,
+        }
+    }
+
+    /// For the gallery: a terminal showing `printed` (no program behind it),
+    /// in copy mode with the last `lines` lines it printed picked.
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn showing(printed: &str, cols: usize, rows: usize, lines: usize) -> Self {
+        let mut t = Terminal::running("Terminal", "true", std::env::temp_dir());
+        let mut term = Term::new(cols, rows);
+        term.feed(printed.as_bytes());
+        t.term = Some(term);
+        if lines > 0 {
+            t.start_copying();
+            if let Some(c) = &mut t.copying {
+                c.mark = Some(c.at);
+                c.at = c.at.saturating_sub(lines - 1);
+            }
+        }
+        t
+    }
+
+    /// The grid the panel holds at the text size in use (for the gallery).
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn grid_for(g: &mut Gfx) -> (usize, usize) {
+        let (cols, rows, ..) = Self::layout(g);
+        (cols, rows)
+    }
+
+    /// Copy mode: the last line with words above the cursor (what the last
+    /// command printed) is picked first.
+    fn start_copying(&mut self) {
+        let Some(term) = &self.term else { return };
+        let cursor = term.history() + term.cursor.1;
+        let at = (0..cursor).rev().take(term.rows).find(|&i| !term.line_text(i).is_empty()).unwrap_or(cursor);
+        self.copying = Some(Copying { at, mark: None });
+        self.show_line(at);
+    }
+
+    /// Scroll so that line `at` is in view.
+    fn show_line(&mut self, at: usize) {
+        let Some(term) = &self.term else { return };
+        let history = term.history();
+        // In view are lines history - back … history - back + rows - 1.
+        let first = history - self.back.min(history);
+        if at < first {
+            self.back = history - at;
+        } else if at >= first + term.rows {
+            self.back = (history + term.rows - 1).saturating_sub(at).min(history);
+        }
+    }
+
+    /// A key in copy mode: ↑ ↓ (or F, X: nothing types here) move, Space
+    /// marks where more lines start, Enter (or Ctrl-Shift-C again) copies,
+    /// Esc leaves it.
+    fn copy_key(&mut self, key: Key, cx: &mut Cx) {
+        let (Some(term), Some(mut c)) = (&self.term, self.copying) else { return };
+        let last = term.lines_total() - 1;
+        let page = term.rows.saturating_sub(1).max(1);
+        match key {
+            Key::Up | Key::Char('f') => c.at = c.at.saturating_sub(1),
+            Key::Down | Key::Char('x') => c.at = (c.at + 1).min(last),
+            Key::PageUp => c.at = c.at.saturating_sub(page),
+            Key::PageDown => c.at = (c.at + page).min(last),
+            Key::Home => c.at = 0,
+            Key::End => c.at = last,
+            Key::Char(' ') => c.mark = if c.mark.is_some() { None } else { Some(c.at) },
+            Key::Enter | Key::Ctrl('C') => {
+                let (from, to) = c.range();
+                let lines: Vec<String> = (from..=to).map(|i| term.line_text(i)).collect();
+                let text = lines.join("\n");
+                self.copying = None;
+                self.back = 0;
+                if text.trim().is_empty() {
+                    *cx.say = Some("nothing on those lines".into());
+                } else {
+                    let n = to - from + 1;
+                    crate::clipboard::copy_quietly(&text, crate::clipboard::Sensitivity::Normal);
+                    *cx.say = Some(if n == 1 { "line copied".into() } else { format!("{n} lines copied") });
+                }
+                return;
+            }
+            Key::Back | Key::Backspace => {
+                self.copying = None;
+                self.back = 0;
+                return;
+            }
+            _ => {}
+        }
+        self.copying = Some(c);
+        self.show_line(c.at);
+    }
+
+    /// Text into the program, as a terminal pastes it: line breaks as Enter,
+    /// other control characters left out (so a paste cannot carry escape
+    /// sequences in), and marked as a paste when the program asked
+    /// (bracketed paste).
+    fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+        let mut clean = String::with_capacity(text.len());
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\r' if chars.peek() == Some(&'\n') => {}
+                '\r' | '\n' => clean.push('\r'),
+                '\t' => clean.push('\t'),
+                c if c.is_control() => {}
+                c => clean.push(c),
+            }
+        }
+        if bracketed {
+            format!("\x1b[200~{clean}\x1b[201~").into_bytes()
+        } else {
+            clean.into_bytes()
         }
     }
 
@@ -163,6 +295,27 @@ impl Screen for Terminal {
         true
     }
 
+    /// Ctrl-C is the interrupt and Ctrl-V the next key as it is: copying
+    /// here is Ctrl-Shift-C (copy mode) and pasting Ctrl-Shift-V.
+    fn keeps_ctrl(&self) -> bool {
+        true
+    }
+
+    /// A paste (Ctrl-Shift-V, or Enter in the clipboard's history) goes to
+    /// the program as typed, its lines as Enter.
+    fn paste(&mut self, text: &str, _cx: &mut Cx) -> Nav {
+        if self.ended {
+            return Nav::Stay;
+        }
+        self.copying = None;
+        self.back = 0;
+        let bracketed = self.term.as_ref().is_some_and(|t| t.bracketed);
+        if let Some(session) = &mut self.session {
+            session.write(&Self::paste_bytes(text, bracketed));
+        }
+        Nav::Stay
+    }
+
     fn greeting(&self) -> Option<&'static str> {
         Some("ctrl-q returns home")
     }
@@ -188,11 +341,32 @@ impl Screen for Terminal {
         !self.ended && (self.program.is_some() || self.printed.is_some_and(|at| at.elapsed() < AWAKE_AFTER_OUTPUT))
     }
 
-    fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
+    fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         // Esc belongs to the programs in the terminal, so leaving is Ctrl-Q,
         // or Esc held down.
         if self.ended || key.leaves() {
             return Nav::Pop;
+        }
+        // Copy mode takes the keys while it is on.
+        if self.copying.is_some() {
+            self.copy_key(key, cx);
+            return Nav::Stay;
+        }
+        match key {
+            Key::Ctrl('C') => {
+                self.start_copying();
+                return Nav::Stay;
+            }
+            Key::Ctrl('V') => {
+                return match crate::clipboard::paste_text() {
+                    Some(text) => self.paste(&text, cx),
+                    None => {
+                        *cx.say = Some("the clipboard is empty".into());
+                        Nav::Stay
+                    }
+                };
+            }
+            _ => {}
         }
         let bytes: Vec<u8> = match key {
             Key::PageUp | Key::PageDown => {
@@ -244,6 +418,10 @@ impl Screen for Terminal {
         if !replies.is_empty() {
             session.write(&replies);
         }
+        // A program put something on the clipboard (OSC 52).
+        if let Some(text) = term.take_clip() {
+            crate::clipboard::copy(&text, crate::clipboard::Sensitivity::Normal);
+        }
         if !session.alive() {
             // Whatever it printed last stays on screen; the next key leaves.
             self.ended = true;
@@ -290,11 +468,27 @@ impl Screen for Terminal {
         let (x0, y0) = (panel.x + 4.0, panel.y + ((panel.h - rows as f32 * cell_h) * 0.5).round());
         let bold = TextStyle { wght: 700.0, ..style };
         let mut utf8 = [0u8; 4];
+        // Copy mode: the lines picked under a state layer, the one the
+        // highlight is on ringed.
+        let first_line = term.history() - back;
+        if let Some(c) = self.copying {
+            let (from, to) = c.range();
+            for row in 0..rows {
+                let at = first_line + row;
+                if (from..=to).contains(&at) {
+                    let r = Rect::new(x0 - 2.0, y0 + row as f32 * cell_h, cols as f32 * cell_w + 4.0, cell_h);
+                    g.canvas.rrect(r, 2.0, t.ink, 0.12);
+                    if at == c.at {
+                        g.canvas.stroke_rrect(r.inset(-1.0), 3.0, 1.5, g.ring_color(), 1.0);
+                    }
+                }
+            }
+        }
         for row in 0..rows {
             let cy = y0 + (row as f32 + 0.5) * cell_h;
             for (col, cell) in term.line(row, back).iter().enumerate().take(cols) {
                 let x = x0 + col as f32 * cell_w;
-                let is_cursor = back == 0 && !self.ended && term.cursor_visible && (col, row) == term.cursor;
+                let is_cursor = back == 0 && !self.ended && self.copying.is_none() && term.cursor_visible && (col, row) == term.cursor;
                 // Reverse video swaps ink and ground; the cursor is a block in the signal colour.
                 let (mut ink, mut ground) =
                     (if cell.fg == DEFAULT { t.ink } else { ansi(g, cell.fg) }, if cell.bg == DEFAULT { None } else { Some(ansi(g, cell.bg)) });
@@ -313,7 +507,15 @@ impl Screen for Terminal {
             }
         }
         // A note in the corner: how far back the view is, or that the program is done.
-        let note = if self.ended {
+        let note = if let Some(c) = self.copying {
+            let (from, to) = c.range();
+            let n = to - from + 1;
+            let picked = if n == 1 { "1 line".to_owned() } else { format!("{n} lines") };
+            let choices = [format!("{picked} · ↑↓ · space marks · enter copies"), format!("{picked} · enter copies · esc"), format!("{picked} · enter copies")];
+            let room = panel.w - 22.0;
+            let fits = choices.iter().find(|s| g.measure(s, style) <= room).unwrap_or(&choices[2]).clone();
+            Some(fits)
+        } else if self.ended {
             Some("ended · any key returns".to_owned())
         } else if back > 0 {
             Some(format!("{back} lines back · page down"))
@@ -332,6 +534,38 @@ impl Screen for Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_paste_is_typed_with_lines_as_enter_and_no_escapes_and_bracketed_when_asked() {
+        assert_eq!(Terminal::paste_bytes("ls -la\r\ncd /data\n", false), b"ls -la\rcd /data\r");
+        assert_eq!(Terminal::paste_bytes("a\x1b[201~b\tc", false), b"a[201~b\tc", "nothing can end the paste early");
+        assert_eq!(Terminal::paste_bytes("x", true), b"\x1b[200~x\x1b[201~");
+    }
+
+    #[test]
+    fn copy_mode_picks_the_last_lines_printed_and_copies_them() {
+        let mut t = Terminal::running("t", "true", std::env::temp_dir());
+        let mut term = Term::new(20, 4);
+        term.feed(b"$ ip\r\n10.58.5.2\r\nup 3 days\r\n$ ");
+        t.term = Some(term);
+        let (mut robot, mut settings, mut say) = (Robot::none(), crate::shell::Settings::default(), None);
+        let mut cx = Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true };
+        assert!(t.keeps_ctrl(), "Ctrl-C is the program's");
+        t.key(Key::Ctrl('C'), &mut cx);
+        assert_eq!(t.copying.map(|c| c.at), Some(2), "on what the last command printed");
+        t.key(Key::Char(' '), &mut cx);
+        t.key(Key::Char('f'), &mut cx);
+        t.key(Key::Enter, &mut cx);
+        assert!(t.copying.is_none());
+        assert_eq!(crate::clipboard::paste_text().as_deref(), Some("10.58.5.2\nup 3 days"));
+        assert_eq!(say.as_deref(), Some("2 lines copied"));
+        // Esc leaves it with nothing copied.
+        let mut cx = Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true };
+        t.key(Key::Ctrl('C'), &mut cx);
+        t.key(Key::Back, &mut cx);
+        assert!(t.copying.is_none());
+        assert_eq!(crate::clipboard::paste_text().as_deref(), Some("10.58.5.2\nup 3 days"));
+    }
 
     #[test]
     fn function_keys_send_what_xterm_sends() {

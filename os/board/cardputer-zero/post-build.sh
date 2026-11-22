@@ -14,6 +14,8 @@ if [ ! -x "$SHELL_BIN" ] || [ ! -x "$UPDATE_BIN" ] || [ ! -x "$AI_BIN" ] || [ ! 
 	exit 1
 fi
 install -D -m 0755 "$SHELL_BIN" "$TARGET_DIR/usr/bin/catalyst-shell"
+# The clipboard for scripts and the Terminal: the shell by another name.
+ln -sf catalyst-shell "$TARGET_DIR/usr/bin/catalyst-clip"
 install -D -m 0755 "$UPDATE_BIN" "$TARGET_DIR/usr/bin/catalyst-update"
 install -D -m 0755 "$AI_BIN" "$TARGET_DIR/usr/bin/ai"
 # The handheld's own screens for apps that are shell scripts.

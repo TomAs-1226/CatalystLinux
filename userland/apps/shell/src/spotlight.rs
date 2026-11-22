@@ -397,6 +397,39 @@ impl Spotlight {
         self.find(robot);
     }
 
+    /// What Copy takes here (clipboard.rs): the answer in focus where it is
+    /// a value (a sum's, a conversion's, the robot's), a file's path, else
+    /// what is typed.
+    pub fn copy_text(&self) -> String {
+        let Some(hit) = self.hits.get(self.focus).filter(|_| !self.recent) else { return self.query.clone() };
+        let item = &hit.item;
+        if item.id.starts_with("sum:") {
+            return item.title.trim_start_matches('=').trim().to_owned();
+        }
+        if item.id.starts_with("units:") {
+            return item.title.clone();
+        }
+        if let Some(rel) = item.id.strip_prefix("file:").filter(|rel| !rel.split('/').any(|p| p == "..")) {
+            return crate::files::storage().join(rel).display().to_string();
+        }
+        if item.weight == weight::VALUE {
+            return item.detail.clone();
+        }
+        self.query.clone()
+    }
+
+    /// Paste: the clipboard's first line, onto what is typed.
+    pub fn paste(&mut self, text: &str, robot: &Robot) {
+        let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+        for c in crate::clipboard::one_line(line).chars() {
+            if self.query.chars().count() >= QUERY_MOST {
+                break;
+            }
+            self.query.push(c);
+        }
+        self.typed(robot);
+    }
+
     /// Tab: the focused result's preview, from memory at once, else read on
     /// a thread and slid in when it comes. Where there is nothing to show,
     /// the list only gives a little.
