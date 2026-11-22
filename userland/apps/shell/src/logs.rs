@@ -128,24 +128,6 @@ impl Digest {
     }
 }
 
-/// A scripted match for the demo robot's logs, summarised as a real one is.
-fn demo_match(battery: f64, overruns: u32, worst_loop: f64, elevator: (f64, f64), can: f64, fired: &[(&str, u32)]) -> Digest {
-    let summary = Summary {
-        seconds: 150.2,
-        enabled_seconds: Some(135.0),
-        battery_low: Some(battery),
-        brownouts: 0,
-        worst_loop_ms: Some(worst_loop),
-        loop_overruns: overruns,
-        fired: fired.iter().map(|(name, times)| ((*name).to_owned(), *times)).collect(),
-        mechanisms: vec![("Elevator".into(), Some(elevator.0), Some(elevator.1)), ("Shooter".into(), Some(elevator.0 - 9.0), Some(38.0))],
-        can_peak: Some(can),
-        records: 0,
-        truncated: false,
-    };
-    Digest::of(&summary)
-}
-
 /// One log as the list shows it.
 #[derive(Clone, Debug)]
 pub struct Row {
@@ -254,25 +236,16 @@ impl Logs {
         Logs { dir: None, shared: Arc::new(Shared::default()), demo: Vec::new(), listed: Mutex::new(None), demo_held: None }
     }
 
-    /// An event's worth of scripted matches, for the demo robot: a day and
-    /// a half of qualifying in which the robot slowly gets worse (the
-    /// battery sags further, the elevator runs hotter, the loop starts to
-    /// overrun) until the newest match browns out. And a practice log not
-    /// yet read.
+    /// An event's worth of matches, for the demo robot: a day and a half of
+    /// qualifying in which the robot slowly gets worse (the battery sags
+    /// further, the elevator runs hotter, the loop starts to overrun) until
+    /// the newest match browns out. Each is a whole log made up as a robot
+    /// writes one (`offline::synth`), summarised as a real one is, so Logs,
+    /// Trends and the assistant offline tell the same story. And a practice
+    /// log not yet read.
     pub fn demo() -> Self {
-        let sample = wpilog::sample();
-        let digest = wpilog::summarize(&sample[..]).ok().map(|s| Digest::of(&s));
-        let can = "CAN · can_s0/HighUtilization";
-        let demo = vec![
-            Row { name: "FRC_20261116_101500_NYRO_Q14.wpilog".into(), bytes: sample.len() as u64, digest },
-            Row { name: "FRC_20261116_095800_NYRO_Q12.wpilog".into(), bytes: 19_100_000, digest: Some(demo_match(10.6, 3, 24.0, (74.0, 49.0), 0.58, &[(can, 1)])) },
-            Row { name: "FRC_20261116_093200_NYRO_Q9.wpilog".into(), bytes: 18_400_000, digest: Some(demo_match(11.4, 0, 9.8, (58.0, 41.0), 0.47, &[])) },
-            Row { name: "FRC_20261115_171800.wpilog".into(), bytes: 31_250_000, digest: None },
-            Row { name: "FRC_20261115_164000_NYRO_Q7.wpilog".into(), bytes: 18_900_000, digest: Some(demo_match(11.6, 0, 8.9, (56.0, 40.0), 0.44, &[])) },
-            Row { name: "FRC_20261115_151200_NYRO_Q5.wpilog".into(), bytes: 18_200_000, digest: Some(demo_match(11.8, 1, 21.4, (53.0, 38.0), 0.42, &[])) },
-            Row { name: "FRC_20261115_135000_NYRO_Q3.wpilog".into(), bytes: 18_700_000, digest: Some(demo_match(11.9, 0, 8.4, (54.0, 37.0), 0.41, &[])) },
-            Row { name: "FRC_20261115_110500_NYRO_Q1.wpilog".into(), bytes: 18_300_000, digest: Some(demo_match(12.0, 0, 8.1, (51.0, 36.0), 0.40, &[])) },
-        ];
+        let mut demo: Vec<Row> = crate::offline::demo_logs().iter().map(|(name, bytes, summary)| Row { name: name.clone(), bytes: *bytes, digest: Some(Digest::of(summary)) }).collect();
+        demo.insert(3.min(demo.len()), Row { name: "FRC_20261115_171800.wpilog".into(), bytes: 31_250_000, digest: None });
         let logs = Logs { dir: None, shared: Arc::new(Shared::default()), demo, listed: Mutex::new(None), demo_held: None };
         *logs.shared.status.lock().unwrap() = "demo logs".into();
         logs
@@ -299,7 +272,7 @@ impl Logs {
 
     /// Keep the logs of the robot at `host`, pulling new ones in the background.
     pub fn for_robot(host: &str) -> Self {
-        let dir = std::env::var_os("CATALYST_LOGS").map(PathBuf::from).unwrap_or_else(|| "/data/logs".into());
+        let dir = kept_dir();
         let shared = Arc::new(Shared::default());
         *shared.status.lock().unwrap() = "waiting for the robot".into();
         if fs::create_dir_all(&dir).is_err() {
@@ -349,21 +322,39 @@ impl Logs {
                 return rows.clone();
             }
         }
-        let mut rows: Vec<Row> = local_files(dir)
-            .into_iter()
-            .map(|(name, _, bytes)| {
-                let digest = fs::read(dir.join(format!("{name}.json")))
-                    .ok()
-                    .and_then(|text| serde_json::from_slice::<Value>(&text).ok())
-                    .and_then(|v| Digest::from_json(&v, bytes));
-                Row { name, bytes, digest }
-            })
-            .collect();
-        // WPILib names sort by time.
-        rows.sort_by(|a, b| b.name.cmp(&a.name));
+        let rows = rows_in(dir);
         *self.listed.lock().unwrap() = Some((generation, rows.clone()));
         rows
     }
+
+    /// The folder the logs are kept in, for a robot that has one.
+    pub fn dir(&self) -> Option<&Path> {
+        self.dir.as_deref()
+    }
+
+    /// The demo robot's made-up event.
+    pub fn is_demo(&self) -> bool {
+        self.dir.is_none() && !self.demo.is_empty()
+    }
+}
+
+/// Where logs are kept: `/data/logs` on the handheld (`CATALYST_LOGS` elsewhere).
+pub fn kept_dir() -> PathBuf {
+    std::env::var_os("CATALYST_LOGS").map(PathBuf::from).unwrap_or_else(|| "/data/logs".into())
+}
+
+/// The logs in a folder, newest first, with their digests where made.
+pub fn rows_in(dir: &Path) -> Vec<Row> {
+    let mut rows: Vec<Row> = local_files(dir)
+        .into_iter()
+        .map(|(name, _, bytes)| {
+            let digest = fs::read(dir.join(format!("{name}.json"))).ok().and_then(|text| serde_json::from_slice::<Value>(&text).ok()).and_then(|v| Digest::from_json(&v, bytes));
+            Row { name, bytes, digest }
+        })
+        .collect();
+    // WPILib names sort by time.
+    rows.sort_by(|a, b| b.name.cmp(&a.name));
+    rows
 }
 
 impl Drop for Logs {
@@ -409,6 +400,7 @@ pub fn clean(dir: &Path, room: u64, making_room_for: Option<&str>) -> usize {
     for name in &clear {
         fs::remove_file(dir.join(name)).ok();
         fs::remove_file(dir.join(format!("{name}.json"))).ok();
+        fs::remove_file(crate::offline::facts::sheet_path(dir, name)).ok();
     }
     if !clear.is_empty() {
         remember_cleared(dir, &clear);
@@ -416,7 +408,9 @@ pub fn clean(dir: &Path, room: u64, making_room_for: Option<&str>) -> usize {
     clear.len()
 }
 
-/// Write the digest of a log beside it.
+/// Write the digest of a log beside it. (Its sheet of facts for the
+/// assistant offline is not made here: only when a question first needs it,
+/// so nothing is worked out that nobody asks about.)
 fn digest_file(dir: &Path, name: &str) {
     let path = dir.join(name);
     let Ok(bytes) = fs::metadata(&path).map(|m| m.len()) else { return };

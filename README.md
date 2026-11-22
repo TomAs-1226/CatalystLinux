@@ -1178,7 +1178,9 @@ linked and not running an opmode, resumes where it stopped, and each log is
 summarised once (brownouts, battery low point, health checks fired, loop
 overruns, hottest mechanisms, the busiest CAN bus). A summary an older shell
 wrote is made again the next time its log is looked at, so trends have
-everything. Logs are cleared after 30 days, oldest first
+everything. The first time the Assistant needs a match's log it reads it
+again, once, into a sheet of facts kept beside it (*Offline answers*); a
+cleared log's sheet goes with it. Logs are cleared after 30 days, oldest first
 if the card fills; `/data` grows to fill the SD card on first boot. Space is
 made for a log before it is pulled, and one the card could never hold is not
 started; the space kept free is 256 MB, or a quarter of the partition if
@@ -1654,11 +1656,13 @@ test, `live_open_meteo`); not yet from a CardputerZero over its own Wi-Fi.
 The Assistant app answers questions about the robot, typed on the
 keyboard, with the team's own key for **OpenAI** (GPT-6.2 Sol) or **Claude**
 (Claude Opus 5.5): Settings › Keys, the handheld's setup, or the page for
-setting up from a computer. A third service, **on this handheld**, is the
-on-device model once it is downloaded in Settings; until then Tab › Answers
-with says where to get it. Tab › Answers with goes round the services that
-can answer; a change of service starts a new conversation. **Effort** is
-light (`low`) or medium (`medium`, the default).
+setting up from a computer. A third service, **on this handheld**, needs no
+key and no internet: it answers from the match logs (see *Offline answers*
+below), its words from the on-device model once one is downloaded. With no
+key it is the one that answers. Tab › Answers with goes round the services
+that can answer; a change of service starts a new conversation. **Effort**
+is light (`low`) or medium (`medium`, the default). **Ctrl R** gives the
+newest match's report with any service, no model needed.
 
 **Lightweight on purpose.** With OpenAI or Claude nothing of the model runs
 on the handheld: each turn is one HTTPS request made with `curl`, as the
@@ -1670,10 +1674,11 @@ sign-in token, which Anthropic allows only in its own apps.
 
 The on-device model is asked the same way, over plain HTTP to its server on
 the handheld itself (`127.0.0.1` only; curl is held to `http` there), in
-OpenAI's chat-completions shape (`POST /chat/completions`, at most 400
-tokens back). It answers from what it knows, with no tools and no web, and
-its server is started when it is first asked and stopped when the service
-is changed away from it.
+OpenAI's chat-completions shape (`POST /chat/completions`). Asked about the
+robot, it words facts it is given (below); asked anything else, it answers
+from what it knows, with no tools and no web. Its server is started when it
+is first asked and stopped when the service is changed away from it (and,
+by Settings' on-device model, after a while unasked).
 
 - OpenAI: the Responses API, `store: false`, so nothing is kept on OpenAI's
   side between turns; every turn sends the conversation back, reasoning
@@ -1698,7 +1703,8 @@ it, with nothing typed, lists them, and Enter on one opens it in the Web app
 
 **Its tools:** what the robot publishes (Catalyst's telemetry by group, and
 the health checks firing), the Catalyst Agent's report from the Systemcore,
-the match logs pulled to the handheld, the event's schedule (the team's next
+the match logs pulled to the handheld and each match's sheet of facts (as
+offline answers use it), the event's schedule (the team's next
 match, and the rest), the live graphs' latest values, the handheld itself
 (battery, Wi-Fi, storage, memory, temperature, uptime, version), a text file
 under `/data` (at most 64 KB, a folder listed; never keys, Wi-Fi, SSH,
@@ -1733,6 +1739,89 @@ repository's tests or from a CardputerZero: the web tools' real replies,
 whether the Claude Console organization has web search turned on (web fetch
 needs nothing), OpenAI taking its `web_search_call` items back with
 `store: false`, and the on-device model's server are all still to be seen.
+
+## Offline answers
+
+With no internet, no key, or *on this handheld* chosen, the Assistant says
+**Working offline** and answers about the robot from what is on the
+handheld: the match logs pulled from the robot (they stay after it is
+unplugged), the schedule kept from the last time there was internet, and
+the robot itself if it is linked. It opens on the questions it answers best
+for the logs there are (the newest match's report; why it browned out, or
+what went wrong; what changed since the match before; a hot motor; the two
+compared), chosen with Up, Down and Enter, or typed. A question asked of
+OpenAI or Claude that fails for want of internet is answered this way too,
+saying so.
+
+A small model cannot be trusted to read a log or to do sums, so it does
+neither (`userland/apps/shell/src/offline`):
+
+1. **Facts.** Each log is read once, as a stream, into a ranked sheet of
+   facts kept beside it (`<log>.facts.json`): brownouts with the voltage,
+   when and for how long, and what was drawing at the time; the worst sag
+   that did not brown out; how charged the battery started; e-stops, comms
+   lost and other disables mid-match (the pause between auto and teleop is
+   not one); each CAN bus's peak, time over 90%, time down and error
+   counters; loop overruns and the worst loop; each motor's peak
+   temperature (and how long over 70 °C), peak current and stalls (drawing
+   40 A while its mechanism does not move); motors that dropped off their
+   bus; mechanisms short of their setpoint for 2 s or more (asked, and
+   reached); health checks and error alerts not said otherwise; exceptions
+   the code threw; the auto routine, whether it finished, and how far off
+   its start the robot was; the code it ran. Each fact carries its numbers
+   and its time into the match ("at 1:18 in teleop"). Measures for comparing
+   matches, and every logged value's range, are kept too. Key names are FRC
+   Catalyst's, as DataLogManager or Catalyst's own sink records them (a key
+   logged both ways is read once), with WPILib's `DS:` entries and the FMS
+   table. A sheet is made when a question first needs it, never in the
+   background.
+2. **Routing.** Rules read the question: the matches it names (`Q31`, `qm
+   31`, "match 31", "last match", "the one before", a follow-up's "and
+   Q12?"), its topic and what it asks (why, what went wrong, compare, what
+   changed, which matches, a trend, a value, the report, the schedule, the
+   robot now). Only a question the rules cannot place goes to the model
+   (one of 250M parameters or more), held by a grammar to four words from
+   fixed lists, whose matches are only those logged here.
+3. **Tools.** One match's facts on a topic, two matches compared (worse
+   first, new code within the first three), which matches had something,
+   a measure's trend over the event (judged as Logs › Trends judges it), one
+   value's range, a match's report. A match not logged here is said not to
+   be, and a fault a match did not have is said not to have happened.
+4. **Words.** The answer is first made from the facts alone. If a model is
+   downloaded, it is asked to word those facts (one fixed instruction and
+   example, which llama-server keeps cached, then the facts and the
+   question), and its answer is checked before it is shown: every number
+   and time must be in the facts, in the same unit (a count is a count: the
+   20 of "20 ms" is not 20 overruns); every match, motor, bus and commit it
+   names must be in them; a fault it mentions must be one of theirs, one
+   they have must not be denied, and one they deny must not be claimed; a
+   time must go with its own event, a temperature with its own motor; it
+   gives no cause or conclusion the facts do not; and it carries the first
+   fact's match, number, time and name. Anything else, or no answer in its
+   time (30 to 60 s by size), and the answer made from the facts is shown.
+   Esc while it words shows that one at once.
+
+Under each answer a line says what it rests on ("from the log of Q14"), and
+whether a model worded it and the check passed. Asked about something that
+is not the robot, the model answers from what it knows, said to be that;
+with no model, the Assistant says what offline answers are.
+
+**Memory.** Nothing is kept between questions: the sheets on the card are
+the index, read again for each question (16 at most) and let go once it is
+answered. Measured in the tests: a 26 MB match log is read at a peak of
+0.3 MB of heap, and a question over 16 sheets takes 1.2 MB at its peak; 0
+bytes are left after either. The model's server is the on-device model's,
+started and stopped by Settings › On-device model; offline answers make one
+request to it per question (two if the rules cannot place it) and hold
+nothing open.
+
+**Evaluated.** `scripts/offline-eval.sh fetch` puts llama.cpp's
+`llama-server` (b8117, the image's) and ten small models (135M to 1.5B)
+in a folder outside the repository; `scripts/offline-eval.sh run` asks
+each of them 40 pit questions, and 26 more asked other ways, about an
+event of made-up match logs with faults put in at known times
+(`offline::eval`, `--offline-eval` in the simulator). The answers made from
+the facts alone are right for all of them (a test holds them to it).
 
 ## Browse
 
@@ -1771,7 +1860,8 @@ one is downloaded when asked for, over HTTPS with curl, to `/data/models`,
 carrying on after a dropped connection, and kept only if its sum checks out.
 Be honest about them: they are quick and offline, fine for short answers and
 wording, often wrong on facts, and they have none of the assistant's tools
-(they cannot see the robot or run Actions).
+(they cannot see the robot or run Actions). So for the robot they only word
+facts worked out for them, and every word is checked (*Offline answers*).
 
 It runs as llama.cpp's `llama-server` (Buildroot's `llama-cpp`, b8117), only
 while something asks: on 127.0.0.1:8088, one conversation, three threads

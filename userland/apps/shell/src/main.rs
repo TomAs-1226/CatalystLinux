@@ -77,6 +77,12 @@ mod look;
 mod monitor;
 mod nettools;
 mod notes;
+mod offline;
+
+// The tests count each thread's heap, for what the offline answers cost.
+#[cfg(test)]
+#[global_allocator]
+static METERED: offline::meter::Metered = offline::meter::Metered;
 mod panel;
 mod passcode;
 mod photos;
@@ -352,6 +358,13 @@ fn main() {
     // What making and checking the lock screen's passcode takes here.
     if flag("--passcode-bench") {
         println!("{}", passcode::bench());
+        return;
+    }
+    // The offline assistant's evaluation: its questions asked of the model
+    // at CATALYST_LOCAL_URL (or the facts alone), the results to a file.
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(path) = value("--offline-eval") {
+        offline::eval::main(std::path::Path::new(&path));
         return;
     }
     // StandBy's and the lock screen's "next reminder": from Reminders.
@@ -1064,6 +1077,115 @@ fn motion(dir: &std::path::Path) {
     println!("motion in {}", dir.display());
 }
 
+/// The assistant offline: with no key it answers on this handheld, from the
+/// demo robot's match logs. The questions it offers, an answer and what it
+/// rests on, a follow-up, a match's report (no model), two matches compared,
+/// a hot motor, the robot just now, its choices; light, and the large text
+/// size. With `CATALYST_LOCAL_URL` naming a llama-server (and
+/// `CATALYST_LOCAL_MODEL` its name), its model words the answers, and the
+/// pictures are named "-worded".
+#[cfg(not(target_arch = "aarch64"))]
+fn offline_shots(dir: &std::path::Path) {
+    use Key::*;
+    let settle = |shell: &mut Shell, frames: usize| {
+        for _ in 0..frames {
+            if shell.tick(1.0 / 60.0) {
+                shell.draw();
+            }
+        }
+    };
+    let worded = if std::env::var_os("CATALYST_LOCAL_URL").is_some() { "-worded" } else { "" };
+    let save = |shell: &mut Shell, name: &str| {
+        shell.draw();
+        platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}{worded}.png")), 3);
+    };
+    let press = |shell: &mut Shell, keys: &[Key], frames: usize| {
+        for key in keys {
+            shell.key(*key);
+            settle(shell, frames);
+        }
+    };
+    // Until the answer is in (on its thread; a model takes a few seconds).
+    let answered = |shell: &mut Shell| {
+        for _ in 0..800 {
+            std::thread::sleep(Duration::from_millis(20));
+            settle(shell, 2);
+            if !shell.animating() {
+                break;
+            }
+        }
+        settle(shell, 60);
+    };
+    let ask = |shell: &mut Shell, text: &str| {
+        for c in text.chars() {
+            shell.key(Char(c));
+        }
+        settle(shell, 4);
+        shell.key(Enter);
+    };
+    keys::Keys::default().save().ok();
+    std::fs::remove_file(config_dir().join("assistant")).ok();
+    std::fs::remove_dir_all(config_dir().join("assistant-chats")).ok();
+    let mut shell = Shell::new(Robot::demo());
+    shell.apply_settings();
+    settle(&mut shell, 100);
+    press(&mut shell, &vec![Right; steps_to("Assistant")], 20);
+    settle(&mut shell, 60);
+    press(&mut shell, &[Enter], 90);
+    save(&mut shell, "120-offline");
+    press(&mut shell, &[Down], 40);
+    save(&mut shell, "120b-offline-choosing");
+    // The question offered: why Q14 browned out, worked out from its log.
+    shell.key(Enter);
+    settle(&mut shell, 3);
+    save(&mut shell, "120c-offline-working");
+    answered(&mut shell);
+    save(&mut shell, "121-offline-brownout");
+    ask(&mut shell, "and Q12?");
+    answered(&mut shell);
+    save(&mut shell, "121b-offline-follow-up");
+    // The newest match's report: Ctrl R, no model.
+    shell.key(Ctrl('r'));
+    answered(&mut shell);
+    save(&mut shell, "122-offline-report");
+    press(&mut shell, &[Up, Up, Up, Up, Up], 40);
+    save(&mut shell, "122b-offline-report-scrolled");
+    press(&mut shell, &[Up, Up], 40);
+    save(&mut shell, "122c-offline-report-top");
+    for question in ["compare Q14 and Q12", "any motor running hot?", "how is the robot doing?"] {
+        press(&mut shell, &[Ctrl('n')], 30);
+        ask(&mut shell, question);
+        answered(&mut shell);
+        let name = match question.split(' ').next() {
+            Some("compare") => "123-offline-compare",
+            Some("any") => "123b-offline-hot-motor",
+            _ => "123c-offline-robot-now",
+        };
+        save(&mut shell, name);
+    }
+    press(&mut shell, &[Tab], 90);
+    save(&mut shell, "124-offline-choices");
+    press(&mut shell, &[Back], 90);
+    // Light, and the large text size.
+    shell.settings.light = true;
+    shell.apply_settings();
+    press(&mut shell, &[Ctrl('n')], 60);
+    save(&mut shell, "125-offline-light");
+    ask(&mut shell, "why did we brown out in Q14?");
+    answered(&mut shell);
+    save(&mut shell, "125b-offline-light-answer");
+    shell.settings.light = false;
+    shell.settings.text = gfx::TextSize::Large;
+    shell.apply_settings();
+    press(&mut shell, &[Ctrl('n')], 60);
+    save(&mut shell, "126-offline-large");
+    shell.key(Ctrl('r'));
+    answered(&mut shell);
+    save(&mut shell, "126b-offline-large-report");
+    shell.settings.text = gfx::TextSize::Standard;
+    shell.apply_settings();
+    std::fs::remove_dir_all(config_dir().join("assistant-chats")).ok();
+}
 /// Spotlight's part of the tour: growing out of the island, results as they
 /// are typed (apps and values, a sum, a conversion, a match, a team), a
 /// preview, over an app, a result opening out of its row, the recent picks,
@@ -1186,6 +1308,9 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     // Only Spotlight's part, when that is all that is wanted.
     if std::env::var("CATALYST_SHOTS_ONLY").as_deref() == Ok("spotlight") {
         return spotlight_shots(dir);
+    }
+    if std::env::var("CATALYST_SHOTS_ONLY").as_deref() == Ok("offline") {
+        return offline_shots(dir);
     }
     // From Files to Settings, however many apps lie between.
     let files_to_settings: Vec<Key> =
@@ -2343,6 +2468,8 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     std::fs::remove_dir_all(config_dir().join("assistant-chats")).ok();
     std::fs::remove_file(config_dir().join("commands")).ok();
     std::fs::remove_file(config_dir().join("commands-ask")).ok();
+    // The assistant again with no key: offline, from the match logs.
+    offline_shots(dir);
 
     // Settings › On-device model: its row, the page with nothing downloaded,
     // a download part way, and the model here with an answer it gave (a
