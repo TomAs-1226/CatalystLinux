@@ -308,6 +308,43 @@ impl Buffer {
         self.modified = true;
     }
 
+    /// Words put in at the cursor (dictation), as if typed: a space between
+    /// them and a word they would run into, a line break for each in them,
+    /// and (with `width` above 0) a line break before a word that would run
+    /// past that many columns, as a typist would at the panel's edge, so the
+    /// whole of it stays in view.
+    pub fn insert_text(&mut self, text: &str, width: usize) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        let (line, col) = self.cursor;
+        let before = if col > 0 { self.lines[line].chars().nth(col - 1) } else { None };
+        let after = self.lines[line].chars().nth(col);
+        let mut gap = before.is_some_and(|c| !c.is_whitespace());
+        for (i, part) in text.split('\n').enumerate() {
+            if i > 0 {
+                self.new_line();
+                gap = false;
+            }
+            for word in part.split_whitespace() {
+                let word: String = word.chars().filter(|c| !c.is_control()).collect();
+                let len = word.chars().count();
+                let at = self.cursor.1;
+                if width > 0 && at > 0 && at + usize::from(gap) + len > width {
+                    self.new_line();
+                } else if gap {
+                    self.insert(' ');
+                }
+                word.chars().for_each(|c| self.insert(c));
+                gap = true;
+            }
+        }
+        if after.is_some_and(char::is_alphanumeric) {
+            self.insert(' ');
+        }
+    }
+
     /// Enter: split the line at the cursor, keeping the indent.
     pub fn new_line(&mut self) {
         let (line, col) = self.cursor;
@@ -375,6 +412,10 @@ impl Buffer {
     }
 }
 
+/// Columns the editor shows at the standard text size, for words dictated
+/// into it before it has been drawn.
+const DICTATION_COLUMNS: usize = 48;
+
 pub struct Editor {
     path: PathBuf,
     title: String,
@@ -384,6 +425,8 @@ pub struct Editor {
     /// Ctrl-Q was pressed on unsaved changes; again discards them.
     leaving: bool,
     rows: usize,
+    /// Columns in view, as last drawn: dictated words break before them.
+    cols: usize,
 }
 
 impl Editor {
@@ -405,13 +448,13 @@ impl Editor {
             return Err("too large to open".into());
         }
         let text = String::from_utf8(bytes).map_err(|_| "not a text file".to_string())?;
-        Ok(Editor { path, title, buffer: Buffer::from_text(&text), view: (0, 0), leaving: false, rows: 8 })
+        Ok(Editor { path, title, buffer: Buffer::from_text(&text), view: (0, 0), leaving: false, rows: 8, cols: 0 })
     }
 
     /// Write the file by way of a temporary one, so a power cut mid-save
     /// leaves the old contents rather than half of the new. The file keeps
     /// its permissions: a script stays runnable.
-    fn save(&mut self) -> bool {
+    pub(crate) fn save(&mut self) -> bool {
         let ok = crate::sys::write_atomic(&self.path, self.buffer.text().as_bytes()).is_ok();
         if ok {
             self.buffer.modified = false;
@@ -431,6 +474,21 @@ impl Screen for Editor {
 
     fn greeting(&self) -> Option<&'static str> {
         Some("ctrl-s saves · ctrl-q closes")
+    }
+
+    /// Push-to-talk here dictates: the words are typed at the cursor.
+    fn dictation(&self) -> Option<crate::voice::Dictation> {
+        Some(crate::voice::Dictation::Text)
+    }
+
+    fn dictated(&mut self, text: &str, cx: &mut Cx) -> Nav {
+        // Not yet drawn (a note started by dictation): the panel's width at
+        // the standard text size. One column spare, for the cursor after it.
+        let width = if self.cols > 0 { self.cols } else { DICTATION_COLUMNS };
+        self.buffer.insert_text(text, width.saturating_sub(1));
+        let words = text.split_whitespace().count();
+        *cx.say = Some(if words == 1 { "typed 1 word".into() } else { format!("typed {words} words") });
+        Nav::Stay
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -466,7 +524,7 @@ impl Screen for Editor {
             Key::Delete => b.delete_forward(),
             // Esc does nothing here, so a slip does not close an unsaved file.
             // Neither does holding it: the way out is Ctrl-Q, which asks first.
-            Key::Back | Key::Leave | Key::Ctrl(_) | Key::F(_) | Key::BrightnessDown | Key::BrightnessUp => {}
+            Key::Back | Key::Leave | Key::Ctrl(_) | Key::F(_) | Key::BrightnessDown | Key::BrightnessUp | Key::Media(_) => {}
         }
         Nav::Stay
     }
@@ -479,6 +537,7 @@ impl Screen for Editor {
         let panel = Rect::new(4.0, g.top() - 3.0, W - 8.0, H - g.top() - g.hint_h() - 1.0);
         g.surface(panel, 10.0, t.surface1);
         let cols = ((panel.w - 8.0) / cell_w).floor().max(2.0) as usize;
+        self.cols = cols;
         self.rows = ((panel.h - 6.0) / cell_h).floor().max(1.0) as usize;
         // Keep the cursor in view, both ways.
         let (line, col) = self.buffer.cursor;
@@ -513,6 +572,34 @@ impl Screen for Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dictated_words_go_in_at_the_cursor_as_typed_ones_would() {
+        // After a word: a space first. Before one: a space after.
+        let mut b = Buffer::from_text("swap the belt\n");
+        b.cursor = (0, 4);
+        b.insert_text(" intake ", 0);
+        assert_eq!(b.lines[0], "swap intake the belt");
+        assert_eq!(b.cursor, (0, 11));
+        assert!(b.modified);
+        // At the end of a line: just the words.
+        let mut b = Buffer::from_text("Intake\n");
+        b.cursor = (0, 6);
+        b.insert_text("belt slips", 0);
+        assert_eq!(b.lines[0], "Intake belt slips");
+        // Too long for the panel: broken between words, never inside one.
+        let mut b = Buffer::from_text("");
+        b.insert_text("Swap the intake belt before Q32, and check the CAN wiring.", 20);
+        assert_eq!(b.lines, ["Swap the intake belt", "before Q32, and", "check the CAN", "wiring."]);
+        assert_eq!(b.cursor, (3, 7));
+        // Its own line breaks are kept; nothing heard, nothing changes.
+        let mut b = Buffer::from_text("");
+        b.insert_text("one\ntwo", 0);
+        assert_eq!(b.lines, ["one", "two"]);
+        let mut b = Buffer::from_text("x");
+        b.insert_text("  ", 0);
+        assert!(!b.modified);
+    }
 
     #[test]
     fn typing_splitting_and_joining_lines() {

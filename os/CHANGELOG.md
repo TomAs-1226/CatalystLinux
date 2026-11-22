@@ -10,6 +10,48 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.5.6
+
+### Fixed
+- 0.5.5 could leave the screen dark after it installed: its panel driver did not match its kernel. Fixed, and an update that leaves the panel dark now goes back to the system before it by itself.
+- This update also brings everything 0.5.5 had: apps from the Catalogue, Catalyst Kit, and compressed swap in memory.
+
+### Sound
+- The speaker and headphones work. The speaker plays both channels, and its amplifier is on only while something plays.
+- Volume on Fn+S and Fn+D, mute on Fn+A, a volume bar in the control centre, and Settings › Sound.
+- The microphone works, and any program can record from it. Settings › Sound shows its level.
+- Bluetooth headphones and speakers, off until switched on in Settings. The first time, the handheld restarts once; the serial console stays where it was.
+- Reminders chime through the speaker, with a brighter sound for pit reminders.
+
+### Music
+- Music: YouTube Music, signed out unless you choose to sign in. Search, quick picks, a song's radio and the queue, with the cover on the now-playing page.
+- It plays on behind other apps and with the screen off. Fn+Q, W and E play, pause and skip from anywhere, and Spotlight finds music.
+
+### Voice
+- Talk to the Assistant: hold Alt anywhere and speak; let go and it writes down what you said and asks it. While it listens, the island shows a microphone and a live level.
+- What you said sits in the question line for a moment before it sends: press any key to edit it first, or Enter to send now.
+- Dictate into Notes: hold Alt in a note to type what you say at the cursor; on the Notes list it starts a new note.
+- Spoken answers, off unless you turn them on in the Assistant's choices: for questions asked aloud, or for every answer. Long answers are said in two sentences, and any key stops it.
+- ai --listen in the Terminal: ask out loud and press Enter when you're done.
+- Titles and the status give way under a wide island, fading out and back instead of being cut short.
+
+## 0.5.5
+
+### Apps
+- Get apps over the air from the Catalogue: Sudoku, Battleship, Typing and Orbits, rebuilt from M5Stack's CardputerZero store, plus Hello.
+- Every catalogue app is signed, and the handheld installs only what the catalogue's key signed.
+- Each app has its own page: what it uses, its credit and licence, Get, Update or Remove. u updates them all.
+- Spotlight finds apps in the catalogue you haven't got yet.
+- Apps keep what they save across updates, and can bring their own icon.
+
+### For developers
+- Catalyst Kit: write apps that look and move like the handheld's own.
+- catalyst-ui gives shell scripts the handheld's own screens: menus, input, confirm and messages.
+- ai app in the Terminal writes an app for you, shows it whole, and puts it on Home only on a yes.
+
+### System
+- Compressed swap in memory (zram): idle memory is squeezed to about a third and kept in RAM, so the on-device model and big pages have more room. Nothing is written to the card.
+
 ## 0.5.4
 
 ### StandBy and the lock screen

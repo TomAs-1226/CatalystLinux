@@ -34,6 +34,8 @@ pub fn builtin() -> Vec<Arc<dyn Provider>> {
         Arc::new(Schedule),
         Arc::new(Sums),
         Arc::new(Elsewhere),
+        // What the app catalogue offers that is not on this handheld yet.
+        Arc::new(crate::catalogue::Finder),
     ]
 }
 

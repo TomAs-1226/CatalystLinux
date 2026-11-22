@@ -93,6 +93,12 @@ BR2_PACKAGE_LINKS=y
 # other llama tool is taken out of the image in post-build.sh.
 BR2_PACKAGE_LLAMA_CPP=y
 BR2_PACKAGE_LLAMA_CPP_TOOLS=y
+# Voice for the assistant: arecord and aplay (alsa-utils, under Sound below)
+# listen while the talk key (Alt) is held and say answers aloud, each started
+# for that and gone after it, so the codec's input and the amplifier are only
+# powered then. espeak says answers offline when chosen (Assistant > choices >
+# Voice); about 3 MB with its voices, its WAV written to aplay.
+BR2_PACKAGE_ESPEAK=y
 # The Terminal says it is an xterm, which ncurses describes; tmux's own
 # descriptions too, for what runs inside it.
 BR2_PACKAGE_NCURSES_ADDITIONAL_TERMINFO="t/tmux t/tmux-256color"
@@ -140,6 +146,46 @@ BR2_PACKAGE_MESA3D_OPENGL_EGL=y
 BR2_PACKAGE_MESA3D_OPENGL_ES=y
 BR2_PACKAGE_MESA3D_GBM=y
 BR2_PACKAGE_M5STACK_CARDPUTER_ZERO=y
+# Sound: the ES8389 codec's drivers come with M5Stack's package above; ALSA
+# here (its library, with the mixing, sharing and volume plugins
+# /usr/share/catalyst/asound.conf uses), and its tools: amixer and aplay
+# for catalyst-audio and the shell, arecord with them, speaker-test, and
+# alsamixer for the Terminal. alsactl is left out: catalyst-audio keeps the
+# few settings itself.
+BR2_PACKAGE_ALSA_LIB=y
+BR2_PACKAGE_ALSA_UTILS=y
+# BR2_PACKAGE_ALSA_UTILS_ALSACTL is not set
+BR2_PACKAGE_ALSA_UTILS_AMIXER=y
+BR2_PACKAGE_ALSA_UTILS_APLAY=y
+BR2_PACKAGE_ALSA_UTILS_SPEAKER_TEST=y
+# Bluetooth headphones and speakers, off unless switched on in Settings:
+# BlueZ (bluetoothd, and bluetoothctl, which catalyst-bluetooth drives) and
+# bluez-alsa (A2DP straight to ALSA; SBC), on D-Bus's system bus. About
+# 7 MB of memory while on, nothing while off. (PipeWire with WirePlumber
+# would be some 25 MB for the same headphones.) The radio's firmware
+# (brcm/BCM4343A2.hcd for the CM0's CYW43439) comes with the Wi-Fi's.
+BR2_PACKAGE_BRCMFMAC_SDIO_FIRMWARE_RPI_BT=y
+BR2_PACKAGE_BLUEZ5_UTILS=y
+BR2_PACKAGE_BLUEZ5_UTILS_CLIENT=y
+BR2_PACKAGE_BLUEZ_ALSA=y
+# Music (YouTube Music in the shell): yt-dlp finds a song's audio stream
+# (Python's already here; QuickJS runs its answer to YouTube's player
+# challenge), and ffmpeg plays it: fetched over HTTPS (OpenSSL), the
+# container read, Opus or AAC decoded, resampled to 48 kHz and played to
+# ALSA's "default". Only what that takes is built: about 4 MB of image, and
+# nothing runs until a song plays.
+BR2_PACKAGE_QUICKJS=y
+BR2_PACKAGE_CATALYST_YT_DLP=y
+BR2_PACKAGE_FFMPEG=y
+BR2_PACKAGE_FFMPEG_ENCODERS="pcm_s16le"
+BR2_PACKAGE_FFMPEG_DECODERS="aac opus vorbis mp3 flac"
+BR2_PACKAGE_FFMPEG_MUXERS="null pcm_s16le"
+BR2_PACKAGE_FFMPEG_DEMUXERS="mov matroska ogg mp3 aac flac wav"
+BR2_PACKAGE_FFMPEG_PARSERS="aac opus vorbis mpegaudio flac"
+BR2_PACKAGE_FFMPEG_BSFS=""
+BR2_PACKAGE_FFMPEG_PROTOCOLS="file pipe http https tcp tls"
+BR2_PACKAGE_FFMPEG_FILTERS="aresample aformat anull atrim volume"
+# BR2_PACKAGE_FFMPEG_INDEVS is not set
 BR2_TARGET_ROOTFS_EXT2=y
 BR2_TARGET_ROOTFS_EXT2_4=y
 # Each system slot is 1 GB: room for more tools and apps than the first

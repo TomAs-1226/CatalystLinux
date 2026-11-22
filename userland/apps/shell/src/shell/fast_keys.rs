@@ -586,6 +586,9 @@ fn paint() -> crate::apps::App {
         run: "paint".into(),
         dir: std::path::PathBuf::new(),
         kind: crate::apps::Kind::Own,
+        id: "paint".into(),
+        version: String::new(),
+        permissions: Vec::new(),
     }
 }
 

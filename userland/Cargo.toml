@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/detent", "crates/bezel", "crates/nt4", "crates/apriltag", "crates/localmodel", "apps/shell", "apps/update", "apps/flasher", "apps/ai-cli"]
+members = [
+    "crates/detent", "crates/bezel", "crates/nt4", "crates/apriltag", "crates/localmodel", "crates/speech", "apps/shell", "apps/update", "apps/flasher", "apps/ai-cli",
+    # Apps for the catalogue: the kit they are written with, the package
+    # format and its tool, and the apps themselves.
+    "crates/kit", "crates/appkg", "catalogue/hello", "catalogue/sudoku", "catalogue/battleship", "catalogue/typing", "catalogue/orbits",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +18,9 @@ bezel = { path = "crates/bezel" }
 nt4 = { path = "crates/nt4" }
 apriltag = { path = "crates/apriltag" }
 localmodel = { path = "crates/localmodel" }
+catalyst-kit = { path = "crates/kit" }
+catalyst-appkg = { path = "crates/appkg" }
+speech = { path = "crates/speech" }
 
 # The device build: small, fast, no unwinding tables.
 [profile.release]

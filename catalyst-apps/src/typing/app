@@ -1,0 +1,12 @@
+id = typing
+name = Typing
+icon = icon.svg
+about = words a minute on this keyboard
+description = Type the word shown, letter by letter, against the clock: thirty seconds, sixty, or ten words. Words a minute, accuracy, and your best for each round and word list (everyday English, code, or the pit).
+version = 1.0.0
+run = ./catalyst-typing
+screen = own
+binary = catalyst-typing
+credit = Rebuilt for Catalyst from taM5CZTyping (key-dash) by yuk1-kondo (MIT), in the CardputerZero app store
+licence = MIT
+source = https://github.com/TomAs-1226/CatalystLinux/tree/main/userland/catalogue/typing

@@ -1,0 +1,41 @@
+From: Catalyst Linux
+Subject: [PATCH] cardputerzero-v5: the speaker plays both channels; the mic stays put
+
+The AW8737A speaker amplifier takes the codec's left output only (LOUTP/N;
+the right output goes to the headphone jack alone), so the speaker lost
+the right channel of anything in stereo. Without headphones the right
+channel is now mixed into the left, 6 dB down so the sum does not clip.
+
+The jack no longer switches the microphone between the handheld's own
+(MIC1) and a headset's (MIC2): headphones without a microphone left every
+recording silent. catalyst-audio chooses it instead.
+
+--- a/modules/CardputerZero/cardputerzero-v5-overlay.dts	2026-11-21 11:33:13.624395704 -0800
++++ b/modules/CardputerZero/cardputerzero-v5-overlay.dts	2026-11-21 11:35:58.857661281 -0800
+@@ -389,12 +389,22 @@
+ 
+                 simple-audio-card,hp-det-gpios = <&gpio 17 0>;
+                 m5stack,hp-mute-pins = "Speaker";
++                /*
++                 * Catalyst Linux: the speaker's amplifier hangs off the
++                 * left output alone, so without headphones the right
++                 * channel is mixed into the left (6 dB down, so the sum
++                 * does not clip); headphones get both, as they are. The
++                 * microphone is not switched with the jack: headphones
++                 * without one would leave every recording silent.
++                 * catalyst-audio chooses it (the handheld's own unless
++                 * told otherwise).
++                 */
+                 m5stack,hp-absent-controls =
+-                    "PGAL Select=Line 1P",
+-                    "PGAR Select=Line 1N";
++                    "IF DACL Mixer DACR DACL Mixer=on",
++                    "DACL Playback Volume=179";
+                 m5stack,hp-present-controls =
+-                    "PGAL Select=Line 2P",
+-                    "PGAR Select=Line 2N";
++                    "IF DACL Mixer DACR DACL Mixer=off",
++                    "DACL Playback Volume=191";
+ 
+                 simple-audio-card,aux-devs = <
+                     &spk_mute_switch

@@ -1,0 +1,9 @@
+[package]
+name = "catalyst-hello"
+description = "Hello: Catalyst Kit's example app, the one to copy."
+version = "1.0.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+catalyst-kit = { workspace = true }

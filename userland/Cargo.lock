@@ -140,6 +140,24 @@ dependencies = [
  "libc",
  "localmodel",
  "serde_json",
+ "speech",
+]
+
+[[package]]
+name = "catalyst-appkg"
+version = "1.0.0"
+dependencies = [
+ "ed25519-compact",
+ "flate2",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "catalyst-battleship"
+version = "1.0.0"
+dependencies = [
+ "catalyst-kit",
 ]
 
 [[package]]
@@ -155,12 +173,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "catalyst-hello"
+version = "1.0.0"
+dependencies = [
+ "catalyst-kit",
+]
+
+[[package]]
+name = "catalyst-kit"
+version = "1.0.0"
+dependencies = [
+ "bezel",
+ "chrono",
+ "detent",
+ "libc",
+ "minifb",
+ "png",
+]
+
+[[package]]
+name = "catalyst-orbits"
+version = "1.0.0"
+dependencies = [
+ "catalyst-kit",
+]
+
+[[package]]
 name = "catalyst-shell"
 version = "0.1.0"
 dependencies = [
  "apriltag",
  "argon2",
  "bezel",
+ "catalyst-appkg",
  "chrono",
  "detent",
  "jpeg-decoder",
@@ -173,8 +218,24 @@ dependencies = [
  "qrcodegen",
  "rqrr",
  "serde_json",
+ "sha1",
  "sha2",
+ "speech",
  "vte",
+]
+
+[[package]]
+name = "catalyst-sudoku"
+version = "1.0.0"
+dependencies = [
+ "catalyst-kit",
+]
+
+[[package]]
+name = "catalyst-typing"
+version = "1.0.0"
+dependencies = [
+ "catalyst-kit",
 ]
 
 [[package]]
@@ -991,6 +1052,14 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
+name = "speech"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
+]
 
 [[package]]
 name = "subtle"

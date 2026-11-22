@@ -1,0 +1,12 @@
+id = hello
+name = Hello
+icon = front_hand
+about = Catalyst Kit's example
+description = The app to copy when writing one of your own with Catalyst Kit: a list, a message in the island, words kept between runs, pages that slide, and springs.
+version = 1.0.0
+run = ./catalyst-hello
+screen = own
+binary = catalyst-hello
+credit = Catalyst Linux
+licence = MIT
+source = https://github.com/TomAs-1226/CatalystLinux/tree/main/userland/catalogue/hello

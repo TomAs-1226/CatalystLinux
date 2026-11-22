@@ -43,11 +43,23 @@ if rustc --print cfg --target "$TARGET" $CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL
 fi
 
 cd "$HERE/userland"
-# The shell, the system updater it starts, and `ai` for the Terminal.
-cargo build --release --target "$TARGET" -p catalyst-shell -p catalyst-update -p catalyst-ai
+# The shell, the system updater it starts, `ai` for the Terminal, and
+# `catalyst-ui` (Catalyst Kit's screens for shell scripts).
+cargo build --release --target "$TARGET" -p catalyst-shell -p catalyst-update -p catalyst-ai -p catalyst-kit
 mkdir -p "$BUILD/out"
-for bin in catalyst-shell catalyst-update ai; do
+for bin in catalyst-shell catalyst-update ai catalyst-ui; do
 	cp "$CARGO_TARGET_DIR/$TARGET/release/$bin" "$BUILD/out/"
 	ls -l "$BUILD/out/$bin"
 	file "$BUILD/out/$bin"
+done
+
+# The catalogue's apps written with Catalyst Kit: not in the image, but
+# packed and signed by scripts/pack-catalogue.sh from out/apps, and got
+# over the air. Linked as the shell is, against the image's musl.
+APPS=(catalyst-hello catalyst-sudoku catalyst-battleship catalyst-typing catalyst-orbits)
+cargo build --release --target "$TARGET" $(printf -- '-p %s ' "${APPS[@]}")
+mkdir -p "$BUILD/out/apps"
+for bin in "${APPS[@]}"; do
+	cp "$CARGO_TARGET_DIR/$TARGET/release/$bin" "$BUILD/out/apps/"
+	ls -l "$BUILD/out/apps/$bin"
 done

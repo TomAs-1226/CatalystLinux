@@ -2,9 +2,16 @@
 //!
 //!   ai <question>               an answer in plain words
 //!   ai cmd <what you want>      one command proposed; it runs only on a yes
+//!   ai app <what it should do>  an app written for you (a script on the
+//!                               handheld's own screens, catalyst-ui), put
+//!                               on Home only on a yes
 //!   <command> 2>&1 | ai explain [question]
 //!                               what some output or an error means
 //!   ai --local …                the on-device model rather than a key
+//!   ai --listen [cmd]           the question (or what the command should
+//!                               do) said aloud: the microphone listens until
+//!                               Enter, and OpenAI's gpt-transcribe writes it
+//!                               down with the OpenAI key
 //!
 //! It answers with the service the Assistant app uses (Settings › Keys:
 //! OpenAI's GPT-6.2 Sol or Claude Opus 5.5, at the effort chosen there), or
@@ -41,16 +48,21 @@ const HELP: &str = "ai: the assistant, in the terminal
       an answer in plain words
   ai cmd <what you want>
       one command, run on your yes (needs a key)
+  ai app <what it should do>
+      an app for Home, written for you (needs a key)
   <command> 2>&1 | ai explain [question]
       what some output or an error means
 
   --local   the on-device model
             (Settings > On-device model)
   --cloud   use a key even with the model here
+  --listen  say it aloud; enter stops listening
+            (ai --listen, ai --listen cmd)
 
 examples
   ai what does a brownout do to the robot
   ai cmd find the ten biggest files in /data
+  ai app a log of pit batteries and their volts
   dmesg | tail -n 30 | ai explain";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +77,8 @@ enum Mode {
     Ask(String),
     Cmd(String),
     Explain(String),
+    /// An app written for you: a script using catalyst-ui, put on Home on a yes.
+    App(String),
     Help,
 }
 
@@ -72,27 +86,34 @@ enum Mode {
 struct Args {
     mode: Mode,
     local: Option<bool>,
+    /// The question (or the command's purpose) said aloud.
+    listen: bool,
 }
 
 fn parse_args(args: &[String]) -> Args {
     let mut local = None;
+    let mut listen = false;
     let mut words: Vec<&str> = Vec::new();
     for a in args {
         match a.as_str() {
             "--local" => local = Some(true),
             "--cloud" => local = Some(false),
-            "-h" | "--help" | "help" if words.is_empty() => return Args { mode: Mode::Help, local },
+            "--listen" | "-l" => listen = true,
+            "-h" | "--help" | "help" if words.is_empty() => return Args { mode: Mode::Help, local, listen: false },
             other => words.push(other),
         }
     }
     let rest = |from: usize| words[from..].join(" ");
     let mode = match words.first().copied() {
+        // Nothing typed, to be said instead.
+        None if listen => Mode::Ask(String::new()),
         None => Mode::Help,
         Some("cmd") => Mode::Cmd(rest(1)),
         Some("explain") => Mode::Explain(rest(1)),
+        Some("app") => Mode::App(rest(1)),
         Some(_) => Mode::Ask(rest(0)),
     };
-    Args { mode, local }
+    Args { mode, local, listen }
 }
 
 // ------------------------------------------------------------------ setup ---
@@ -445,6 +466,220 @@ fn confirm(prompt: &str, want: &[&str]) -> bool {
     read.is_ok() && want.iter().any(|w| answer.trim().eq_ignore_ascii_case(w))
 }
 
+// -------------------------------------------------------------------- apps ---
+
+/// How `ai app` asks for an app: a script on the handheld's own screens.
+const APP_RULES: &str = "Write a small app for this handheld: a BusyBox ash script that asks and answers with catalyst-ui, the handheld's own screens (320 by 170, keys only). Reply with exactly two files, each as a line `FILE: <name>` followed by one fenced block: first `app`, then `run.sh`. Nothing else.
+
+The `app` file is `key = value` lines:
+id = lowercase letters, digits and dashes
+name = at most 24 characters
+icon = one of: apps timer schedule checklist calculate notes sticky_note_2 battery_full bolt star folder event insights speed lightbulb network_check settings front_hand person emoji_events play_arrow history thermostat
+about = at most 40 characters, lowercase
+version = 1.0.0
+run = sh ./run.sh
+screen = own
+
+catalyst-ui pages (each prints its answer on stdout; exit status 1 means Esc was pressed, so `|| exit 0` or `|| continue`):
+  catalyst-ui menu TITLE ITEM...          prints the item chosen; an item may be icon:Label with an icon from the list above
+  catalyst-ui input TITLE [PROMPT] [--value TEXT]   prints what was typed
+  catalyst-ui confirm TITLE QUESTION [--yes WORD] [--no WORD]   exit status 0 for yes
+  catalyst-ui message TITLE TEXT          until Enter or Esc
+  catalyst-ui view TITLE [FILE]           a file, or text piped in, to scroll through
+
+The script loops on a menu and ends when the menu is left (Esc). What it keeps goes in files under \"$CATALYST_APP_DATA\" (the app's own folder, kept across updates). Short titles; words a few lines long at most. It must never delete or change anything outside \"$CATALYST_APP_DATA\", and use the network only if asked to.";
+
+/// The `app` file and `run.sh` an `ai app` reply holds.
+fn app_files(reply: &str) -> Result<(String, String), String> {
+    let mut files: Vec<(String, String)> = Vec::new();
+    let mut lines = reply.lines();
+    while let Some(line) = lines.next() {
+        let Some(name) = line.trim().trim_matches(['*', '`']).strip_prefix("FILE:") else { continue };
+        let name = name.trim().trim_matches(['*', '`']).trim().to_owned();
+        // Its block: from the next fence to the one closing it.
+        let mut body = Vec::new();
+        let mut open = false;
+        for l in lines.by_ref() {
+            if l.trim_start().starts_with("```") {
+                if open {
+                    break;
+                }
+                open = true;
+            } else if open {
+                body.push(l);
+            }
+        }
+        files.push((name, body.join("\n") + "\n"));
+    }
+    let find = |n: &str| files.iter().find(|(name, _)| name == n).map(|(_, b)| b.clone());
+    match (find("app"), find("run.sh")) {
+        (Some(app), Some(script)) => Ok((app, script)),
+        _ => Err("it did not write an app file and a run.sh".into()),
+    }
+}
+
+/// An app file fit to put on Home: its id, and the file as it will be
+/// written (what the handheld needs, in its words). Each problem said plainly.
+fn checked_app(app: &str) -> Result<(String, String), String> {
+    let field = |key: &str| app.lines().filter_map(|l| l.split_once('=')).find(|(k, _)| k.trim() == key).map(|(_, v)| v.trim().to_owned()).unwrap_or_default();
+    let id = field("id");
+    if id.is_empty() || id.len() > 40 || id.starts_with('-') || !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+        return Err(format!("its id ({id:?}) is not one a folder can take"));
+    }
+    let name: String = field("name").chars().take(24).collect();
+    if name.is_empty() {
+        return Err("it has no name".into());
+    }
+    if field("run") != "sh ./run.sh" || field("screen") != "own" {
+        return Err("its app file does not run its script on the screen".into());
+    }
+    let about: String = field("about").chars().take(40).collect();
+    let icon = field("icon");
+    let file = format!(
+        "id = {id}\nname = {name}\nicon = {}\nabout = {}\nversion = 1.0.0\nrun = sh ./run.sh\nscreen = own\ncredit = written by the assistant\n",
+        if icon.is_empty() { "apps" } else { &icon },
+        if about.is_empty() { "an app of my own" } else { &about }
+    );
+    Ok((id, file))
+}
+
+/// The folder apps of your own are kept in: the last of `CATALYST_APPS`
+/// (as the shell reads it), else /data/apps.
+fn apps_dir() -> PathBuf {
+    std::env::var_os("CATALYST_APPS").and_then(|list| std::env::split_paths(&list).last()).unwrap_or_else(|| PathBuf::from("/data/apps"))
+}
+
+/// Put an app on Home: its folder, its app file, its script. Never over
+/// an app that is there already.
+fn put_app(dir: &Path, id: &str, app: &str, script: &str) -> Result<PathBuf, String> {
+    let folder = dir.join(id);
+    if folder.exists() {
+        return Err(format!("there is an app called {id} already: ask for it by another name"));
+    }
+    std::fs::create_dir_all(&folder).map_err(|e| format!("making {}: {e}", folder.display()))?;
+    std::fs::write(folder.join("app"), app).map_err(|e| e.to_string())?;
+    std::fs::write(folder.join("run.sh"), script).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(folder.join("run.sh"), std::fs::Permissions::from_mode(0o755)).ok();
+    }
+    Ok(folder)
+}
+
+// ------------------------------------------------------------------ voice ---
+
+/// Listening stops by itself after this long.
+const LISTEN_MOST: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A level as a meter a terminal can show: `[||||||......]`.
+fn meter(level: f32) -> String {
+    let filled = (level.clamp(0.0, 1.0) * 12.0).round() as usize;
+    format!("[{}{}]", "|".repeat(filled), ".".repeat(12 - filled))
+}
+
+/// What is said aloud, written down: the microphone (ALSA's `default`)
+/// listens until Enter (or 30 s), with a meter on the terminal, and OpenAI's
+/// gpt-transcribe writes it down with the OpenAI key. The microphone is
+/// closed again the moment it is done with.
+fn listen_aloud(keys: &[(String, String)]) -> Result<String, String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc};
+    let key = key_for(keys, Service::OpenAi).ok_or("--listen needs an OpenAI key (Settings > Keys): OpenAI writes down what you say")?;
+    let procs = speech::Procs::default();
+    let stop = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = mpsc::channel::<Result<Vec<i16>, String>>();
+    let (mic_procs, mic_stop) = (procs.clone(), stop.clone());
+    std::thread::spawn(move || {
+        use speech::source::Source;
+        let mut mic = match speech::source::Arecord::start("default", &mic_procs) {
+            Ok(mic) => mic,
+            Err(why) => {
+                tx.send(Err(why)).ok();
+                return;
+            }
+        };
+        while !mic_stop.load(Ordering::Relaxed) {
+            let mut chunk = Vec::new();
+            match mic.read(&mut chunk) {
+                Ok(more) => {
+                    if tx.send(Ok(chunk)).is_err() || !more {
+                        break;
+                    }
+                }
+                Err(why) => {
+                    tx.send(Err(why)).ok();
+                    break;
+                }
+            }
+        }
+    });
+    // Enter, from the terminal itself (stdin may be piped).
+    let (enter_tx, enter_rx) = mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        match std::fs::File::open("/dev/tty") {
+            Ok(tty) => {
+                std::io::BufRead::read_line(&mut std::io::BufReader::new(tty), &mut line).ok();
+            }
+            Err(_) => {
+                std::io::stdin().read_line(&mut line).ok();
+            }
+        }
+        enter_tx.send(()).ok();
+    });
+    let shown = std::io::stderr().is_terminal();
+    let started = std::time::Instant::now();
+    let mut samples: Vec<i16> = Vec::new();
+    let mut level = 0.0;
+    let mut failed = None;
+    loop {
+        while let Ok(heard) = rx.try_recv() {
+            match heard {
+                Ok(chunk) => {
+                    level = speech::level(&chunk);
+                    samples.extend(chunk);
+                }
+                Err(why) => failed = Some(why),
+            }
+        }
+        if failed.is_some() || enter_rx.try_recv().is_ok() || started.elapsed() >= LISTEN_MOST {
+            break;
+        }
+        if shown {
+            eprint!("\r\x1b[Klistening {} enter stops", meter(level));
+            std::io::stderr().flush().ok();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(80));
+    }
+    // The last of it, then the microphone closed.
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    stop.store(true, Ordering::Relaxed);
+    procs.kill_all();
+    while let Ok(Ok(chunk)) = rx.recv_timeout(std::time::Duration::from_millis(100)) {
+        samples.extend(chunk);
+    }
+    if shown {
+        eprint!("\r\x1b[K");
+    }
+    if let (Some(why), true) = (failed, samples.is_empty()) {
+        return Err(why);
+    }
+    let clip = speech::Clip { samples };
+    if clip.silent() {
+        return Err("heard nothing: is the microphone on?".into());
+    }
+    let text = {
+        let _w = Waiting::new("writing it down…");
+        speech::openai::transcribe(&key, &clip.wav(), speech::openai::KEYWORDS, &std::env::temp_dir())?
+    };
+    if text.trim().is_empty() {
+        return Err("did not catch that: try again".into());
+    }
+    eprintln!("you: {}", text.trim());
+    Ok(text.trim().to_owned())
+}
+
 // -------------------------------------------------------------------- main ---
 
 /// "thinking…" on the terminal while it waits, gone when the answer comes.
@@ -471,13 +706,21 @@ impl Drop for Waiting {
 
 fn run() -> Result<i32, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let args = parse_args(&args);
+    let mut args = parse_args(&args);
     if args.mode == Mode::Help {
         println!("{HELP}");
         return Ok(0);
     }
     let dir = config_dir();
     let keys = pairs(&std::fs::read_to_string(dir.join("keys")).unwrap_or_default());
+    // Said aloud: the question, or what the command should do.
+    if args.listen {
+        args.mode = match args.mode {
+            Mode::Ask(_) => Mode::Ask(listen_aloud(&keys)?),
+            Mode::Cmd(_) => Mode::Cmd(listen_aloud(&keys)?),
+            _ => return Err("--listen asks a question (ai --listen) or for a command (ai --listen cmd)".into()),
+        };
+    }
     let prefs = pairs(&std::fs::read_to_string(dir.join("assistant")).unwrap_or_default());
     let models = lm::dir();
     let (service, key) = choose(args.local, &prefs, &keys, lm::present(&models, lm::chosen(&models)))?;
@@ -542,6 +785,37 @@ fn run() -> Result<i32, String> {
             let status = Command::new("sh").arg("-c").arg(&command).status().map_err(|e| format!("could not run it: {e}"))?;
             Ok(status.code().unwrap_or(1))
         }
+        Mode::App(want) => {
+            if want.trim().is_empty() {
+                return Err("say what the app should do: ai app a tally of pit batteries and their volts".into());
+            }
+            if service == Service::Local {
+                return Err("the on-device model is too small to write an app you can trust: ai app needs an OpenAI or Claude key (Settings > Keys)".into());
+            }
+            let (app, script) = {
+                let _w = Waiting::new(&format!("writing it · {who}…"));
+                app_files(&ask(service, key.as_deref(), &format!("{ABOUT}\n\n{APP_RULES}"), &want, effort, 1600)?)?
+            };
+            let (id, app) = checked_app(&app)?;
+            // All of it shown before anything is written: it runs as root.
+            println!("{app}");
+            for (n, line) in script.lines().enumerate() {
+                println!("{:>3} {line}", n + 1);
+            }
+            let risky = script.lines().any(dangerous);
+            let go = if risky {
+                confirm("its script could delete or change things. type yes to put it on Home: ", &["yes"])
+            } else {
+                confirm("put it on Home? [y/N] ", &["y", "yes"])
+            };
+            if !go {
+                println!("not written");
+                return Ok(0);
+            }
+            let folder = put_app(&apps_dir(), &id, &app, &script)?;
+            println!("on Home now, from {} (back to Home to see its tile)", folder.display());
+            Ok(0)
+        }
         Mode::Help => Ok(0),
     }
 }
@@ -570,7 +844,9 @@ mod tests {
         assert_eq!(s(&["what", "is", "can"]).mode, Mode::Ask("what is can".into()));
         assert_eq!(s(&["cmd", "find", "big", "files"]).mode, Mode::Cmd("find big files".into()));
         assert_eq!(s(&["explain"]).mode, Mode::Explain(String::new()));
-        assert_eq!(s(&["--local", "explain", "why?"]), Args { mode: Mode::Explain("why?".into()), local: Some(true) });
+        assert_eq!(s(&["--local", "explain", "why?"]), Args { mode: Mode::Explain("why?".into()), local: Some(true), listen: false });
+        assert_eq!(s(&["--listen"]), Args { mode: Mode::Ask(String::new()), local: None, listen: true }, "said, not typed");
+        assert_eq!(s(&["-l", "cmd"]).mode, Mode::Cmd(String::new()));
         assert_eq!(s(&[]).mode, Mode::Help);
         assert_eq!(s(&["--help"]).mode, Mode::Help);
         assert_eq!(s(&["help", "me"]).mode, Mode::Help, "help first is help");
@@ -617,6 +893,35 @@ mod tests {
         assert_eq!(proposal("COMMAND: none\nWHY: that needs two steps").unwrap_err(), "that needs two steps");
         assert!(proposal("I would rather not.").is_err());
         assert!(NO_LOCAL_COMMANDS.contains("Settings > Keys"));
+    }
+
+    #[test]
+    fn an_app_written_for_you_is_read_checked_and_put_on_home() {
+        let reply = "Here it is.\n\nFILE: app\n```\nid = battery-log\nname = Battery log\nicon = battery_full\nabout = volts of each pit battery\nversion = 1.0.0\nrun = sh ./run.sh\nscreen = own\n```\n\n**FILE: run.sh**\n```sh\n#!/bin/sh\nwhile choice=$(catalyst-ui menu \"Battery log\" \"Add\" \"Show\"); do\n\t:\ndone\n```\n";
+        let (app, script) = app_files(reply).unwrap();
+        assert!(script.starts_with("#!/bin/sh\n") && script.contains("catalyst-ui menu"));
+        let (id, file) = checked_app(&app).unwrap();
+        assert_eq!(id, "battery-log");
+        assert!(file.contains("screen = own\n") && file.contains("credit = written by the assistant"));
+        // What a handheld cannot take.
+        assert!(checked_app(&app.replace("battery-log", "../x")).is_err());
+        assert!(checked_app(&app.replace("sh ./run.sh", "rm -rf /")).is_err());
+        assert!(app_files("FILE: app\n```\nid = x\n```\n").is_err(), "no script, no app");
+        // Put on Home once; never over an app already there.
+        let dir = std::env::temp_dir().join(format!("ai-app-test-{}", std::process::id()));
+        let folder = put_app(&dir, &id, &file, &script).unwrap();
+        assert_eq!(std::fs::read_to_string(folder.join("run.sh")).unwrap(), script);
+        assert!(put_app(&dir, &id, &file, &script).unwrap_err().contains("already"));
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(parse_args(&["app".into(), "a".into(), "timer".into()]).mode, Mode::App("a timer".into()));
+    }
+
+    #[test]
+    fn the_listening_meter_is_plain_characters_any_font_has() {
+        assert_eq!(meter(0.0), "[............]");
+        assert_eq!(meter(0.5), "[||||||......]");
+        assert_eq!(meter(2.0), "[||||||||||||]");
+        assert!(meter(0.7).is_ascii());
     }
 
     #[test]

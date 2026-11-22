@@ -4,8 +4,12 @@
 # it is used; keep every USB driver as a module on the card, so anything the
 # Pi kernel knows how to talk to over USB still works when plugged in.
 
+# Swap, for compressed swap in memory (zram, set up by catalyst-zram): idle
+# pages squeezed to about a third and kept in RAM, never on the card. It
+# costs next to nothing while no swap is switched on.
+CONFIG_SWAP=y
+
 # --- already off since the first image ---
-# CONFIG_SWAP is not set
 # CONFIG_AUDIT is not set
 # CONFIG_FTRACE is not set
 # CONFIG_KPROBES is not set
