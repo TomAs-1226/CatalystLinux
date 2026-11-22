@@ -534,12 +534,16 @@ fn main() {
     let mut lit = false;
     loop {
         let moving = shell.animating();
-        // Idle, a look four times a second (for a lift); in deep standby,
-        // once a minute (sooner when a reminder or the queue comes first).
+        // Idle, a look four times a second; with the screen dark, every two
+        // seconds (a lift wakes it sooner: see platform::wake); in deep or
+        // music standby, once a minute (sooner when a reminder or the queue
+        // comes first).
         let timeout = if moving {
             next_frame.saturating_duration_since(Instant::now())
         } else if shell.deep_asleep() {
             shell.deep_wait()
+        } else if shell.panel_off() {
+            standby::DARK_LOOK
         } else {
             Duration::from_millis(250)
         };
@@ -558,9 +562,10 @@ fn main() {
             continue;
         }
         let work = Instant::now();
-        // In deep standby a tick stands for the whole minute that passed.
+        // In deep standby a tick stands for the whole minute that passed,
+        // and with the screen dark for the seconds between looks.
         let elapsed = (work - last).as_secs_f32();
-        let dt = if shell.deep_asleep() { elapsed } else { elapsed.min(0.25) };
+        let dt = if shell.deep_asleep() || shell.panel_off() { elapsed } else { elapsed.min(0.25) };
         last = work;
         if arrive.is_some_and(|at| work >= at) {
             arrive = None;

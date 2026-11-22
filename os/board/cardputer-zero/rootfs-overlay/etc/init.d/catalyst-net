@@ -5,11 +5,15 @@
 # the link from the interface's own flags: asking the adapter (ethtool, MII)
 # every two seconds would wake it each time from the sleep it takes while
 # idle, which is most of what it costs.
+#
+# -M also has the kernel say when the link changes (netlink): a cable
+# plugged in is heard at once, and the poll (-t) is only a backstop, every
+# 30 s rather than every 2 s (one wakeup where there were fifteen).
 
 description="Catalyst Linux wired network"
 supervisor=supervise-daemon
 command=/usr/sbin/ifplugd
-command_args="-n -i eth0 -M -m iff -I -u 0 -d 1 -t 2 -r /usr/sbin/catalyst-net"
+command_args="-n -i eth0 -M -m iff -I -u 0 -d 1 -t 30 -r /usr/sbin/catalyst-net"
 respawn_delay=2
 
 depend() {

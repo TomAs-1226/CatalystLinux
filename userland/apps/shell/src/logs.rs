@@ -227,6 +227,8 @@ fn remember_cleared(dir: &Path, names: &[String]) {
 struct Shared {
     allowed: AtomicBool,
     stop: AtomicBool,
+    /// The wait between looks at the robot, which a stop ends.
+    nap: crate::deep::Nap,
     generation: AtomicU64,
     status: Mutex<String>,
     /// The log being pulled: (name, bytes so far, bytes in all).
@@ -369,6 +371,7 @@ impl Logs {
 impl Drop for Logs {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
+        self.shared.nap.stop();
     }
 }
 
@@ -451,13 +454,10 @@ fn pull_loop(shared: &Shared, dir: &Path, host: &str) {
         } else {
             set("waiting: robot away or enabled".into());
         }
-        for _ in 0..75 {
-            if shared.stop.load(Ordering::Relaxed) {
-                return;
-            }
-            // In deep standby, parked here: no wakeups until it wakes.
-            crate::deep::rest();
-            thread::sleep(Duration::from_millis(200));
+        // Fifteen seconds in one wait (a stop ends it; in deep standby it
+        // parks after): one wakeup, where steps of 200 ms were seventy-five.
+        if shared.nap.nap(Duration::from_secs(15)) || shared.stop.load(Ordering::Relaxed) {
+            return;
         }
     }
 }

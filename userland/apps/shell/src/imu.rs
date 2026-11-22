@@ -993,6 +993,12 @@ mod device {
                     s.lifted |= lifted;
                     s.face_down = chip.mode() == Mode::Watch && gestures.face_down();
                     s.trouble = None;
+                    drop(s);
+                    // Picked up: the shell's wait (seconds, with the screen
+                    // off) ends now, so the screen comes on at once.
+                    if lifted {
+                        crate::platform::wake();
+                    }
                 }
                 Err(e) => {
                     errors += 1;

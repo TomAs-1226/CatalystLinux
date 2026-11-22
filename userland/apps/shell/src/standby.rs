@@ -92,6 +92,12 @@ pub fn screen_off_name(seconds: u32) -> String {
 const DIM_BEFORE: f32 = 8.0;
 /// How bright it is while dimmed, as a share of its brightness.
 const DIM_LEVEL: f32 = 0.3;
+/// With the screen off and dark, how long the shell waits between looks
+/// (a key ends the wait at once, and so does a lift: the motion sensor's
+/// thread wakes the main loop). Two seconds: a Clock timer or a reminder is
+/// said at most that late, and the shell wakes half a time a second where
+/// it woke four.
+pub const DARK_LOOK: std::time::Duration = std::time::Duration::from_secs(2);
 /// Woken by a lift, how long it stays on with no key: a look at it.
 const GLANCE: u32 = 10;
 
@@ -202,6 +208,13 @@ impl Standby {
     /// screen: deep standby counts its wait from here.
     pub fn idle(&self) -> f32 {
         self.idle
+    }
+
+    /// Time that passed without ticks (music standby looks in once a
+    /// minute and does not tick standby): still time with no key, so deep
+    /// standby's wait counts it.
+    pub fn add_idle(&mut self, seconds: f32) {
+        self.idle += seconds.max(0.0);
     }
 
     /// A key came. True if it was spent waking the screen.

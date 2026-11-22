@@ -217,6 +217,8 @@ struct Shared {
     view: Mutex<Option<View>>,
     generation: AtomicU64,
     stop: AtomicBool,
+    /// The wait between looks, which a stop ends.
+    nap: crate::deep::Nap,
 }
 
 pub struct Schedule {
@@ -226,6 +228,7 @@ pub struct Schedule {
 impl Drop for Schedule {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
+        self.shared.nap.stop();
     }
 }
 
@@ -353,13 +356,10 @@ fn run(shared: &Shared, team: u32) {
                 }
             }
         }
-        for _ in 0..50 {
-            if shared.stop.load(Ordering::Relaxed) {
-                return;
-            }
-            // In deep standby, parked here: no wakeups until it wakes.
-            crate::deep::rest();
-            std::thread::sleep(Duration::from_millis(200));
+        // Ten seconds in one wait (a stop ends it; in deep standby it parks
+        // after): one wakeup, where steps of 200 ms were fifty.
+        if shared.nap.nap(Duration::from_secs(10)) {
+            return;
         }
     }
 }

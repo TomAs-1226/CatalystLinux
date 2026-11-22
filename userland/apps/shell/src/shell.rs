@@ -839,6 +839,13 @@ fn queue_alert_at(view: &crate::schedule::View, now: i64, warned: &[(String, u8)
         .min()
 }
 
+/// Music is playing (or about to): what it tells the live activities
+/// (nowplaying), or what the player itself says (before Music sets
+/// nowplaying, and while a stream is still being found).
+fn music_playing() -> bool {
+    crate::nowplaying::playing() || crate::music::playing()
+}
+
 /// A Clock timer is running: deep standby waits for it to be said.
 #[cfg(not(test))]
 fn timer_running() -> bool {
@@ -1186,13 +1193,13 @@ impl Shell {
         self.dirty = true;
         self.last_key = std::time::Instant::now();
         // The sound and music keys work with the screen off (music in a
-        // pocket) without waking it, and without a word for nobody to read.
-        // In deep standby nothing plays (music keeps it out of it) and the
+        // pocket) without waking it, and without a word for nobody to read:
+        // in music standby too. In deep standby nothing plays and the
         // radios are off: there only the volume keys stay asleep, and play
         // wakes it like any key.
         if let Key::Media(media) = key {
             let volume = matches!(media, crate::platform::Media::Mute | crate::platform::Media::VolumeDown | crate::platform::Media::VolumeUp);
-            if (self.deep.on() && volume) || (!self.deep.on() && self.standby.state() == crate::standby::State::Off) {
+            if (self.deep.on() && (volume || self.deep.music())) || (!self.deep.on() && self.standby.state() == crate::standby::State::Off) {
                 crate::sound::media_key(media);
                 return;
             }
@@ -1885,11 +1892,15 @@ impl Shell {
                 self.voice.spend();
             }
             self.tick_deep(dt);
-            if self.standby.asleep() {
+            if self.deep.on() && self.standby.asleep() {
                 return false;
             }
-            // Woken by something other than a key (the battery running out).
-            self.leave_deep();
+            // Woken by something other than a key (the battery running
+            // out); or music standby gave way to plain standby, the screen
+            // still dark, and the shell ticks as it does there.
+            if self.deep.on() {
+                self.leave_deep();
+            }
             dt = dt.min(0.25);
         }
         if self.deep.waking() {
@@ -2068,9 +2079,14 @@ impl Shell {
         }
         self.watch_update(dt);
         let changed = self.robot.refresh(dt);
-        // Deep standby, once the screen has been off long enough with no
-        // key, unless something would be cut off.
-        if self.standby.asleep() && self.deep.due(self.standby.idle(), self.settings.battery.deep_after, dt) && self.deep_blocker().is_none() {
+        // Music standby, half a minute into the screen being dark with
+        // music playing; deep standby, once the screen has been off long
+        // enough with no key. Neither if something would be cut off.
+        if self.deep.music_due(self.standby.asleep(), music_playing(), dt) {
+            if self.music_blocker().is_none() {
+                self.enter_music_standby();
+            }
+        } else if self.standby.asleep() && self.deep.due(self.standby.idle(), self.settings.battery.deep_after, dt) && self.deep_blocker().is_none() {
             self.enter_deep();
         }
         // With the screen off and dark, nothing is drawn (or sent to the panel).
@@ -3354,8 +3370,9 @@ impl Shell {
 
     /// Lift to wake, and face down to sleep: the motion sensor watches at
     /// its slowest while either could happen, and standby hears of it.
-    /// (A lift needs the main loop to look in a few times a second while
-    /// the screen is off, which its idle wait of a quarter second does.)
+    /// (The sensor's thread reads it four times a second, and on a lift
+    /// wakes the main loop, which with the screen off looks in only every
+    /// two seconds otherwise: platform::wake.)
     fn lift_and_lay_down(&mut self) -> bool {
         use crate::standby::State;
         let off = self.standby.state() == State::Off;
@@ -3452,7 +3469,28 @@ impl Shell {
             update: self.update_busy(),
             timer: timer_running(),
             saving: self.saving.is_some(),
-            music: crate::music::playing(),
+            music: music_playing(),
+        })
+    }
+
+    /// What music standby would cut off: what deep standby would, less the
+    /// music and a computer on USB (the USB host is left to it), and SSH
+    /// only if Wi-Fi would go.
+    fn music_blocker(&self) -> Option<&'static str> {
+        let wifi = crate::nowplaying::needs_network();
+        // Streaming over a cable: the Ethernet adapter is on the USB host
+        // that music standby stops.
+        if wifi && crate::sys::link_up("eth0") {
+            return Some("the music streams over Ethernet");
+        }
+        crate::deep::blocker(crate::deep::Busy {
+            robot: self.robot.linked() && !self.robot.is_demo(),
+            computer: false,
+            ssh: !wifi && crate::power::ssh_session(),
+            update: self.update_busy(),
+            timer: timer_running(),
+            saving: self.saving.is_some(),
+            music: false,
         })
     }
 
@@ -3462,6 +3500,52 @@ impl Shell {
         for step in crate::deep::STEPS {
             self.deep_step(step, true);
         }
+    }
+
+    /// Into music standby: deep standby's steps, the sound (and the radios,
+    /// and Wi-Fi while the music streams) left alone.
+    fn enter_music_standby(&mut self) {
+        self.deep.begin_music(crate::nowplaying::needs_network());
+        for step in crate::deep::STEPS {
+            self.deep_step(step, true);
+        }
+    }
+
+    /// Music standby's look, once a minute: Wi-Fi off once what plays next
+    /// is all here; once the music has stopped for as long as the screen
+    /// takes to go off, deep standby in place if its wait is over, else
+    /// back to plain standby (the screen still dark).
+    fn look_at_the_music(&mut self, dt: f32) {
+        use crate::deep::{MusicNext, Step};
+        let linger = if self.settings.screen_off > 0 { self.settings.screen_off as f32 } else { 60.0 };
+        let after = self.settings.battery.deep_after;
+        let idle = self.standby.idle() + self.deep.dark_for();
+        let playing = music_playing();
+        let deep_ok = !playing && after > 0 && idle >= after as f32 * 60.0 && self.deep_blocker().is_none();
+        match self.deep.music_next(playing, crate::nowplaying::needs_network(), linger, deep_ok, dt) {
+            MusicNext::Stay => {}
+            // catalyst-power takes only the steps not taken yet.
+            MusicNext::WifiOff => self.deep_step(Step::System, true),
+            MusicNext::Deepen => {
+                let reading = self.care.reading.clone();
+                self.deep.deepen(reading.as_ref());
+                self.deep_step(Step::System, true);
+            }
+            MusicNext::Leave => self.leave_quietly(),
+        }
+    }
+
+    /// Out of music standby with the screen left dark: every step undone,
+    /// and the time in it counted as standby's idle time (deep standby's
+    /// wait goes on from there).
+    fn leave_quietly(&mut self) {
+        let reading = self.care.reading.clone();
+        let Some(woke) = self.deep.end(reading.as_ref()) else { return };
+        for step in crate::deep::waking_first() {
+            self.deep_step(step, false);
+        }
+        self.finish_waking();
+        self.standby.add_idle(woke.seconds);
     }
 
     /// One of deep standby's steps, taken (`deep`) or undone.
@@ -3500,6 +3584,9 @@ impl Shell {
         // shell notices as the screen being lit).
         self.standby.set_faces(self.faces_wanted());
         self.watch_charger();
+        if self.deep.music() && self.standby.asleep() {
+            self.look_at_the_music(dt);
+        }
     }
 
     /// The main loop's wait for a key in deep standby: a minute, or less
@@ -3560,9 +3647,9 @@ impl Shell {
     /// its own thread, and the steps taken before it wait for it.
     fn leave_deep(&mut self) {
         let reading = self.care.reading.clone();
-        let Some((slept, reminding)) = self.deep.end(reading.as_ref()) else { return };
+        let Some(woke) = self.deep.end(reading.as_ref()) else { return };
         // The reminder began after the system went deep: out before it comes back.
-        if reminding {
+        if woke.reminding {
             crate::lights::red_reminder(false);
         }
         for step in crate::deep::waking_first() {
@@ -3571,10 +3658,13 @@ impl Shell {
         self.finish_waking();
         // How long, and what it drew (the charge is at the top right); once
         // unlocked, if it is locked (it is no notice for the lock screen).
-        if self.lock.engaged() {
-            self.after_unlock = Some(slept.island());
-        } else {
-            self.say(slept.island());
+        // From music standby nothing is said: the music says itself.
+        if let Some(slept) = woke.slept {
+            if self.lock.engaged() {
+                self.after_unlock = Some(slept.island());
+            } else {
+                self.say(slept.island());
+            }
         }
         // The clock and the battery at the top, read afresh for the first frame.
         self.status.age = f32::MAX;
@@ -5185,6 +5275,148 @@ pub(crate) mod tests {
         shell.deep_for(3600.0, Reading { flow: Flow::Charging, ..night });
         shell.key(Key::Char('c'));
         assert_eq!(shell.message.as_ref().map(|(m, _)| m.as_str()), Some("slept 1 h 0 m · charging"));
+    }
+
+    // ------------------------------------------------------- music standby ---
+
+    /// A song playing (or paused), as Music tells the live activities.
+    fn music(playing: bool) {
+        crate::nowplaying::set(Some(crate::nowplaying::NowPlaying {
+            title: "Slow Signal".into(),
+            artist: "Mara Ellis".into(),
+            album: "Night Bus".into(),
+            cover: None,
+            position: 0.0,
+            duration: 201.0,
+            playing,
+            at: std::time::Instant::now(),
+        }));
+    }
+
+    /// A shell playing music, its screen off after half a minute, in music
+    /// standby: returns the seconds it took.
+    fn into_music_standby(shell: &mut Shell) -> u32 {
+        shell.settings.screen_off = 30;
+        music(true);
+        let at = until_deep(shell, 120).expect("music standby");
+        assert!(shell.deep.music());
+        at
+    }
+
+    #[test]
+    fn music_standby_comes_half_a_minute_into_the_dark_and_keeps_the_sound() {
+        use crate::deep::STEPS;
+        let mut shell = shell();
+        let at = into_music_standby(&mut shell);
+        // Dark at about 31 s, then half a minute (the shell is two seconds old).
+        assert!((55..=64).contains(&at), "music standby after {at} s");
+        assert!(shell.panel_off() && !shell.animating());
+        assert_eq!(shell.deep.log, STEPS.map(|s| (s, true)), "deep standby's steps, in order");
+        assert_eq!(shell.deep.asked(), [vec!["deep", "on", "keep-wifi", "keep-radios"]], "the radios kept, and Wi-Fi: it streams");
+        // A minute at a time, nothing drawn, still playing.
+        assert!(!shell.tick(60.0));
+        assert!(shell.deep.music());
+        // The sound keys do their work without waking it. (Play and next go
+        // to the one player every test shares, so they are not pressed
+        // here; they take the same way through `Shell::key`.)
+        {
+            let _sound = crate::sound::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let before = crate::sound::level();
+            for media in [crate::platform::Media::VolumeUp, crate::platform::Media::VolumeDown] {
+                shell.key(Key::Media(media));
+                assert!(shell.deep.music(), "{media:?} keeps it asleep");
+            }
+            crate::sound::set_level(before);
+        }
+        // Any other key wakes it, every step undone the last first, and
+        // nothing said (the lock screen shows the music).
+        shell.message = None;
+        shell.key(Key::Down);
+        assert!(!shell.deep_asleep());
+        assert_eq!(shell.standby_state(), crate::standby::State::Awake);
+        let mut back: Vec<_> = STEPS.map(|s| (s, false)).to_vec();
+        back.reverse();
+        assert_eq!(shell.deep.log[STEPS.len()..], back[..]);
+        assert_eq!(shell.deep.asked().last().unwrap(), &vec!["deep", "off"]);
+        assert_eq!(shell.message, None);
+    }
+
+    #[test]
+    fn music_standby_lets_wifi_go_once_what_plays_next_is_here() {
+        let mut shell = shell();
+        crate::nowplaying::on_needs_network(|| false);
+        into_music_standby(&mut shell);
+        assert_eq!(shell.deep.asked(), [vec!["deep", "on", "keep-radios"]], "played from the library: Wi-Fi off too");
+        // The queue goes back to streaming: out (the screen stays dark),
+        // and in again with Wi-Fi.
+        crate::nowplaying::on_needs_network(|| true);
+        shell.tick(60.0);
+        assert!(!shell.deep_asleep() && shell.panel_off());
+        assert_eq!(shell.deep.asked().last().unwrap(), &vec!["deep", "off"]);
+        until_deep(&mut shell, 60).expect("music standby again");
+        assert_eq!(shell.deep.asked().last().unwrap(), &vec!["deep", "on", "keep-wifi", "keep-radios"]);
+    }
+
+    #[test]
+    fn music_stopped_moves_on_to_standby_and_then_deep_standby() {
+        let mut shell = shell();
+        shell.settings.battery.deep_after = 10;
+        into_music_standby(&mut shell);
+        // Paused after a few minutes: it waits as long as the screen takes to
+        // go off, then gives way to plain standby (deep standby's ten
+        // minutes are not up), the screen still dark.
+        shell.tick(60.0);
+        shell.tick(60.0);
+        music(false);
+        shell.tick(20.0);
+        assert!(shell.deep.music(), "a moment's pause");
+        shell.tick(20.0);
+        assert!(!shell.deep_asleep() && shell.panel_off(), "plain standby, dark");
+        assert_eq!(shell.deep.asked().last().unwrap(), &vec!["deep", "off"]);
+        // Deep standby's wait counts the music's time: about four minutes
+        // already, so the rest of the ten, not ten more.
+        let at = until_deep(&mut shell, 600).expect("deep standby");
+        assert!(at < 400, "deep after {at} s more");
+        assert!(!shell.deep.music());
+        assert_eq!(shell.deep.asked().last().unwrap(), &vec!["deep", "on"]);
+    }
+
+    #[test]
+    fn music_stopped_after_a_long_listen_goes_deep_in_place() {
+        let mut shell = shell();
+        shell.settings.battery.deep_after = 10;
+        into_music_standby(&mut shell);
+        // Half an hour of music, then it ends.
+        for _ in 0..30 {
+            shell.tick(60.0);
+        }
+        music(false);
+        shell.tick(60.0);
+        assert!(shell.deep_asleep() && !shell.deep.music(), "deep standby, never out of it");
+        assert_eq!(
+            shell.deep.asked(),
+            [vec!["deep", "on", "keep-wifi", "keep-radios"], vec!["deep", "on"]],
+            "Wi-Fi and the radios go too; nothing else is taken twice"
+        );
+        // A key wakes it, and the island says deep standby's own time.
+        shell.key(Key::Down);
+        assert!(shell.message.as_ref().is_some_and(|(m, _)| m.starts_with("slept ")), "{:?}", shell.message);
+    }
+
+    #[test]
+    fn what_music_standby_would_cut_off_keeps_it_away() {
+        let mut shell = shell();
+        shell.settings.screen_off = 30;
+        music(true);
+        TIMER_RUNNING.with(|t| t.set(true));
+        assert_eq!(until_deep(&mut shell, 300), None, "a Clock timer running: it must be said");
+        TIMER_RUNNING.with(|t| t.set(false));
+        assert!(until_deep(&mut shell, 11).is_some(), "the timer done: within ten seconds");
+        // Nothing playing: no music standby, and deep standby as ever.
+        let mut shell = self::shell();
+        shell.settings.screen_off = 30;
+        music(false);
+        assert_eq!(until_deep(&mut shell, 300), None);
     }
 
     /// A shell with an empty book of reminders (each test's thread has its own).
