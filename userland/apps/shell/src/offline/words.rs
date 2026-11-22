@@ -449,8 +449,13 @@ pub fn check(answer: &str, lines: &[Line], question: &str, names: &[String]) -> 
         if name.len() < 3 {
             continue;
         }
-        let said = if name.contains(' ') { trimmed.to_lowercase().contains(&name) } else { lower_words.iter().any(|w| *w == name) };
-        if said && !facts_lower.contains(&name) && !question.to_lowercase().contains(&name) {
+        // Whole names: "Drive" is not FrontLeftDrive.
+        let (said, in_facts) = if name.contains(' ') {
+            (trimmed.to_lowercase().contains(&name), facts_lower.contains(&name))
+        } else {
+            (lower_words.iter().any(|w| *w == name), fact_words.iter().any(|w| w.trim_end_matches("'s") == name))
+        };
+        if said && !in_facts && !question.to_lowercase().contains(&name) {
             problems.push(format!("{name} is not in the facts"));
             invented = true;
         }
@@ -509,6 +514,19 @@ pub fn check(answer: &str, lines: &[Line], question: &str, names: &[String]) -> 
             }
         }
     }
+    // A score is said as the facts write it: 87–112, never 112–112.
+    for w in &words {
+        let parts: Vec<&str> = w.split(['–', '-']).collect();
+        if parts.len() == 2 && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())) && !tokens(&facts_text).iter().any(|f| f.replace('-', "–") == w.replace('-', "–")) {
+            problems.push(format!("{w} is not in the facts"));
+            invented = true;
+        }
+    }
+    // Said once: a sentence said again is a model going round.
+    let said_sentences: Vec<String> = trimmed.split(". ").map(|s| s.trim().trim_end_matches('.').to_lowercase()).filter(|s| s.len() > 12).collect();
+    if said_sentences.iter().enumerate().any(|(i, s)| said_sentences[..i].iter().any(|p| p.contains(s.as_str()) || s.contains(p.as_str()))) {
+        problems.push("says the same thing twice".into());
+    }
     for judgement in JUDGEMENTS {
         if answer_lower.contains(judgement) && !facts_lower.contains(judgement) {
             problems.push(format!("says '{judgement}', which the facts do not"));
@@ -539,19 +557,24 @@ pub fn check(answer: &str, lines: &[Line], question: &str, names: &[String]) -> 
         }
     }
 
-    // A time is said with its own event: "short of its setpoint at 0:52"
-    // when 0:52 was a stall is not what the facts say; and a measurement
-    // with its own motor: the Shooter's 61 °C is not the Elevator's.
+    // What a stretch says comes from one fact about the same thing: "short
+    // of its setpoint at 0:52" when 0:52 was a stall is not what the facts
+    // say; and a measurement goes with its own motor: the Shooter's 61 °C
+    // is not the Elevator's.
     let line_texts: Vec<String> = lines.iter().map(Line::text).collect();
     for clause in clauses(trimmed) {
         let about = topics(&clause);
-        if !about.is_empty() {
-            for said in numbers(&clause).into_iter().filter(|n| n.time) {
-                let with: Vec<&String> = line_texts.iter().filter(|t| tokens(t).iter().any(|w| *w == said.raw)).collect();
-                if !with.is_empty() && !with.iter().any(|t| topics(t).iter().any(|k| about.contains(k))) {
-                    problems.push(format!("puts {} with the wrong event", said.raw));
-                    invented = true;
-                }
+        let said: Vec<Said> = numbers(&clause).into_iter().filter(|n| n.unit != Some("n") && !SPELLED.iter().any(|(s, _)| n.raw.eq_ignore_ascii_case(s))).collect();
+        if !about.is_empty() && !said.is_empty() {
+            let from_one = line_texts.iter().any(|t| {
+                let theirs = numbers(t);
+                topics(t).iter().any(|k| about.contains(k)) && said.iter().all(|s| theirs.iter().any(|x| (x.value - s.value).abs() < 1e-6 && x.time == s.time))
+            });
+            let all_known = said.iter().all(|s| allowed.iter().any(|a| (a.value - s.value).abs() < 1e-6 && a.time == s.time));
+            if all_known && !from_one {
+                let what = said.iter().find(|s| s.time).or(said.first()).map(|s| s.raw.clone()).unwrap_or_default();
+                problems.push(format!("puts {what} with the wrong event"));
+                invented = true;
             }
         }
         let clause_words: Vec<String> = tokens(&clause.to_lowercase()).iter().map(|w| w.trim_end_matches("'s").to_owned()).collect();
@@ -690,6 +713,14 @@ mod tests {
         let v = check("Q31 browned out once at 1:18 in teleop at 6.4 V. The battery was not fully charged.", &brownout(), "why did we brown out in Q31?", &names());
         assert!(v.problems.iter().any(|p| p.starts_with("says 'fully charged'")), "{:?}", v.problems);
         assert!(check("Q31 browned out at 1:18 in teleop when the battery fell to 6.4 V for 0.4 s, while FrontLeftDrive drew 70 A.", &brownout(), "why?", &names()).ok);
+        // A score as written; said once; whole names.
+        let lost = vec![Line { labels: vec!["Q31".into()], body: "the team lost 87–112 on red".into(), kind: Kind::Outcome, level: Level::Fine, negative: false, names: vec![], key: Some("87–112".into()) }];
+        let v = check("Q31: the team lost 87–112 on red, the match was 112–112.", &lost, "did we win Q31?", &names());
+        assert!(v.problems.iter().any(|p| p.starts_with("112–112 is not in the facts")), "{:?}", v.problems);
+        let v = check("Q31: the team lost 87–112 on red. The team lost 87–112 on red.", &lost, "did we win Q31?", &names());
+        assert!(v.problems.contains(&"says the same thing twice".to_owned()), "{:?}", v.problems);
+        let v = check("Q31 browned out at 1:18 in teleop at 6.4 V while Drive drew 70 A.", &brownout(), "why did we brown out in Q31?", &names());
+        assert!(v.problems.iter().any(|p| p.starts_with("drive is not in the facts")), "{:?}", v.problems);
         // Cut off, or the facts pasted in as written.
         let pair = vec![Line { labels: vec!["Q14".into(), "Q12".into()], body: "brownouts 1 vs none, worse".into(), kind: Kind::Brownout, level: Level::Warn, negative: false, names: vec![], key: Some("1".into()) }];
         let v = check("Q14 vs Q12: brownouts 1 vs none, worse Q14 vs Q12: the difference between Q14 and Q", &pair, "compare Q14 and Q12", &names());

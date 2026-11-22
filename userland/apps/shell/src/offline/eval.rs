@@ -310,7 +310,7 @@ fn run_set(lib: &Library, set: &[Case], model: Option<&dyn Model>) -> Value {
             "q": c.q, "rulesRouted": rules_right, "modelRouted": model_plan,
             "intent": answer.plan.intent.word(), "topic": answer.plan.topic.name(),
             "facts": answer.lines.iter().map(|l| l.text()).collect::<Vec<_>>(),
-            "answer": text, "basis": answer.basis, "wordedBy": answer.worded_by, "right": ok, "templateChecks": checks_itself, "draft": draft_json, "seconds": took,
+            "answer": text, "basis": answer.basis, "wordedBy": answer.worded_by, "routedByModel": answer.routed_by_model, "right": ok, "templateChecks": checks_itself, "draft": draft_json, "seconds": took,
         }));
     }
     let n = set.len();

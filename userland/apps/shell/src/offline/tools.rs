@@ -539,7 +539,7 @@ impl Library {
         fn alias(w: &str) -> &str {
             match w {
                 "temp" | "temperature" | "hot" | "heat" => "temperature",
-                "amps" | "amp" | "current" | "draw" => "current",
+                "amps" | "amp" | "amperage" | "amperes" | "current" | "draw" => "current",
                 "volts" | "voltage" | "battery" => "volts",
                 "speed" | "velocity" | "rpm" | "rps" => "velocity",
                 "position" | "height" => "position",

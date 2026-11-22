@@ -535,7 +535,7 @@ fn prefer(lines: &mut [Line], words: &[String]) {
         Some(&[Kind::Battery, Kind::Sag])
     } else if has(&["version", "commit", "deployed", "deploy", "running", "ran", "on"]) && !has(&["exception", "exceptions", "crash", "errors", "error", "threw"]) {
         Some(&[Kind::Code])
-    } else if has(&["peak", "max", "maximum", "most", "highest"]) && has(&["current", "amps", "amp", "draw"]) {
+    } else if has(&["peak", "max", "maximum", "most", "highest"]) && has(&["current", "amps", "amp", "amperage", "draw"]) {
         Some(&[Kind::Current])
     } else if has(&["utilisation", "utilization", "busy", "busiest", "percent", "load"]) {
         Some(&[Kind::CanBusy, Kind::Can])

@@ -169,7 +169,7 @@ fn topic_of(w: &[String], text: &str) -> Topic {
         Topic::Auto
     } else if any(&["exception", "exceptions", "crash", "crashed", "crashes", "code", "deploy", "deployed", "version", "commit", "errors", "error"]) {
         Topic::Code
-    } else if any(&["current", "amps", "amp", "draw", "drawing", "drew"]) {
+    } else if any(&["current", "amps", "amp", "amperage", "amperes", "draw", "drawing", "drew"]) {
         Topic::Current
     } else if any(&["setpoint", "setpoints", "reach", "reached", "reaching", "position"]) {
         Topic::Mechanism
