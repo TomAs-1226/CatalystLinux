@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Full height</title>
+<style>
+  :root {
+    --ground: #0d0d10;
+    --surface: #18181d;
+    --surface2: #222229;
+    --ink: #f2f2f5;
+    --dim: #a3a3ad;
+    --faint: #5c5c66;
+    --signal: #e94560;
+    --mono: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--ground); color: var(--ink); font: 15px/1.5 var(--sans); }
+  main { max-width: 1400px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 28px; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .lede { color: var(--dim); max-width: 860px; margin: 0 0 20px; }
+  .lede b { color: var(--ink); font-weight: 600; }
+  nav { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+  nav button {
+    font: 13px var(--mono); color: var(--dim); background: var(--surface); border: 1px solid var(--surface2);
+    border-radius: 999px; padding: 6px 12px; cursor: pointer;
+  }
+  nav button[aria-pressed="true"] { color: var(--ink); border-color: var(--signal); }
+  .bar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 0 0 18px; color: var(--dim); font: 13px var(--mono); }
+  .bar input[type=search] {
+    font: 13px var(--mono); color: var(--ink); background: var(--surface); border: 1px solid var(--surface2);
+    border-radius: 8px; padding: 6px 10px; width: 220px; max-width: 100%;
+  }
+  .bar label { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+  .bar input[type=checkbox] { accent-color: var(--signal); margin: 0; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 660px), 1fr)); gap: 14px; }
+  .card { min-width: 0; background: var(--surface); border-radius: 14px; padding: 10px 10px 8px; }
+  .card h2 { font: 13px var(--mono); color: var(--dim); margin: 0 0 8px 2px; font-weight: 400; }
+  .pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+  figure { margin: 0; }
+  figure img { display: block; width: 100%; height: auto; aspect-ratio: 320 / 170; image-rendering: pixelated; border-radius: 6px; background: #000; }
+  figcaption { font: 11px var(--mono); color: var(--faint); margin: 4px 2px 0; text-transform: lowercase; }
+  figure.after figcaption { color: var(--signal); }
+  .single .pair { grid-template-columns: minmax(0, 1fr); }
+  .single figure.before { display: none; }
+  .same { margin: 22px 2px 0; color: var(--faint); font: 12px var(--mono); }
+  .same b { color: var(--dim); font-weight: 400; }
+  @media (max-width: 520px) { .pair { grid-template-columns: minmax(0, 1fr); } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Every screen, full height</h1>
+  <p class="lede">
+    Bezel keeps the foot of its 720&nbsp;&times;&nbsp;720 wall panels free for a dock, even while it is hidden.
+    The handheld has no dock, so that room was wasted. <b>Now lists run to the bottom of the panel and fade out under it</b>;
+    room is kept only where something sits there: a hint line, Home's page dots, buttons, Spotlight's own glass.
+    The Terminal gets a row more at every text size. Before on the left, after on the right, at the panel's own pixels.
+  </p>
+  <nav id="sets"></nav>
+  <div class="bar">
+    <input id="find" type="search" placeholder="find a screen" aria-label="Find a screen">
+    <label><input id="only-after" type="checkbox"> after only</label>
+    <span id="count"></span>
+  </div>
+  <div class="grid" id="grid"></div>
+  <p class="same" id="same"></p>
+</main>
+<script>
+const SHOTS = {"catalyst-compact": {"dir": "gallery/catalyst-compact", "changed": ["app-actions", "app-camera", "app-compass", "app-connect", "app-health", "app-http", "app-level", "app-logs", "app-motors", "app-pit", "app-reminders", "app-robot", "app-schedule", "app-settings", "app-tables", "app-terminal", "app-units", "clock-world", "logs-match", "monitor-processes", "over-recent-apps", "over-spotlight", "pit-checklist", "reminders-upcoming", "remote-buttons", "settings-about-licences", "settings-about-this-handheld", "settings-appearance", "settings-arrange-apps", "settings-battery", "settings-display", "settings-glance-page-cards", "settings-help-shortcuts", "settings-home", "settings-keys-for-online-services", "settings-network", "settings-network-wifi", "settings-sound", "settings-system-update", "tables-elevator", "units-torque", "weather-week"], "same": ["app-apriltag", "app-assistant", "app-browse", "app-calculator", "app-catalogue", "app-clock", "app-console", "app-files", "app-git", "app-graphs", "app-loop", "app-monitor", "app-music", "app-net-tools", "app-notes", "app-photos", "app-remote", "app-share", "app-weather", "files-editor", "logs-trends", "net-tools-find", "over-control-centre", "over-setup", "over-setup-wifi", "settings-bluetooth", "settings-help", "settings-lock-screen", "settings-name-time", "settings-on-device-model", "settings-robot-settings", "settings-set-up-from-a-computer", "settings-ssh-access", "settings-standby", "settings-text", "settings-update-whats-new", "settings-usb"]}, "catalyst-standard": {"dir": "gallery/catalyst-standard", "changed": ["app-actions", "app-camera", "app-compass", "app-connect", "app-health", "app-http", "app-level", "app-logs", "app-motors", "app-pit", "app-reminders", "app-robot", "app-schedule", "app-settings", "app-tables", "app-terminal", "app-units", "clock-world", "logs-match", "logs-trends", "monitor-processes", "over-control-centre", "over-recent-apps", "over-spotlight", "pit-checklist", "reminders-upcoming", "remote-buttons", "settings-about-licences", "settings-about-this-handheld", "settings-appearance", "settings-arrange-apps", "settings-battery", "settings-display", "settings-glance-page-cards", "settings-help-shortcuts", "settings-home", "settings-keys-for-online-services", "settings-network", "settings-network-wifi", "settings-set-up-from-a-computer", "settings-sound", "settings-system-update", "tables-elevator", "units-torque", "weather-week"], "same": ["app-apriltag", "app-assistant", "app-browse", "app-calculator", "app-catalogue", "app-clock", "app-console", "app-files", "app-git", "app-graphs", "app-loop", "app-monitor", "app-music", "app-net-tools", "app-notes", "app-photos", "app-remote", "app-share", "app-weather", "files-editor", "net-tools-find", "over-setup", "over-setup-wifi", "settings-bluetooth", "settings-help", "settings-lock-screen", "settings-name-time", "settings-on-device-model", "settings-robot-settings", "settings-ssh-access", "settings-standby", "settings-text", "settings-update-whats-new", "settings-usb"]}, "catalyst-large": {"dir": "gallery/catalyst-large", "changed": ["app-actions", "app-assistant", "app-camera", "app-compass", "app-connect", "app-health", "app-http", "app-level", "app-logs", "app-motors", "app-net-tools", "app-pit", "app-reminders", "app-robot", "app-schedule", "app-settings", "app-tables", "app-terminal", "app-units", "clock-world", "logs-match", "logs-trends", "monitor-processes", "over-control-centre", "over-recent-apps", "over-spotlight", "pit-checklist", "reminders-upcoming", "remote-buttons", "settings-about-licences", "settings-about-this-handheld", "settings-appearance", "settings-arrange-apps", "settings-battery", "settings-display", "settings-glance-page-cards", "settings-help-shortcuts", "settings-home", "settings-keys-for-online-services", "settings-network", "settings-network-wifi", "settings-on-device-model", "settings-set-up-from-a-computer", "settings-sound", "settings-system-update", "tables-elevator", "units-torque", "weather-week"], "same": ["app-apriltag", "app-browse", "app-calculator", "app-catalogue", "app-clock", "app-console", "app-files", "app-git", "app-graphs", "app-loop", "app-monitor", "app-music", "app-notes", "app-photos", "app-remote", "app-share", "app-weather", "files-editor", "net-tools-find", "over-setup", "over-setup-wifi", "settings-bluetooth", "settings-help", "settings-lock-screen", "settings-name-time", "settings-robot-settings", "settings-ssh-access", "settings-standby", "settings-text", "settings-update-whats-new", "settings-usb"]}, "bezel-compact": {"dir": "gallery/bezel-compact", "changed": ["app-actions", "app-camera", "app-compass", "app-connect", "app-health", "app-http", "app-level", "app-logs", "app-monitor", "app-motors", "app-pit", "app-reminders", "app-robot", "app-schedule", "app-settings", "app-tables", "app-terminal", "app-units", "clock-world", "logs-match", "monitor-processes", "over-recent-apps", "over-spotlight", "pit-checklist", "reminders-upcoming", "remote-buttons", "settings-about-licences", "settings-about-this-handheld", "settings-appearance", "settings-arrange-apps", "settings-battery", "settings-display", "settings-glance-page-cards", "settings-help-shortcuts", "settings-home", "settings-keys-for-online-services", "settings-network", "settings-network-wifi", "settings-set-up-from-a-computer", "settings-sound", "settings-system-update", "tables-elevator", "units-torque", "weather-week"], "same": ["app-apriltag", "app-assistant", "app-browse", "app-calculator", "app-catalogue", "app-clock", "app-console", "app-files", "app-git", "app-graphs", "app-loop", "app-music", "app-net-tools", "app-notes", "app-photos", "app-remote", "app-share", "app-weather", "files-editor", "logs-trends", "net-tools-find", "over-control-centre", "over-setup", "over-setup-wifi", "settings-bluetooth", "settings-help", "settings-lock-screen", "settings-name-time", "settings-on-device-model", "settings-robot-settings", "settings-ssh-access", "settings-standby", "settings-text", "settings-update-whats-new", "settings-usb"]}, "bezel-standard": {"dir": "gallery/bezel-standard", "changed": ["app-actions", "app-camera", "app-compass", "app-connect", "app-health", "app-http", "app-level", "app-logs", "app-monitor", "app-motors", "app-pit", "app-reminders", "app-robot", "app-schedule", "app-settings", "app-tables", "app-terminal", "app-units", "clock-world", "logs-match", "logs-trends", "monitor-processes", "over-control-centre", "over-recent-apps", "over-spotlight", "pit-checklist", "reminders-upcoming", "remote-buttons", "settings-about-licences", "settings-about-this-handheld", "settings-appearance", "settings-arrange-apps", "settings-battery", "settings-display", "settings-glance-page-cards", "settings-help-shortcuts", "settings-home", "settings-keys-for-online-services", "settings-network", "settings-network-wifi", "settings-set-up-from-a-computer", "settings-sound", "settings-system-update", "tables-elevator", "units-torque", "weather-week"], "same": ["app-apriltag", "app-assistant", "app-browse", "app-calculator", "app-catalogue", "app-clock", "app-console", "app-files", "app-git", "app-graphs", "app-loop", "app-music", "app-net-tools", "app-notes", "app-photos", "app-remote", "app-share", "app-weather", "files-editor", "net-tools-find", "over-setup", "over-setup-wifi", "settings-bluetooth", "settings-help", "settings-lock-screen", "settings-name-time", "settings-on-device-model", "settings-robot-settings", "settings-ssh-access", "settings-standby", "settings-text", "settings-update-whats-new", "settings-usb"]}, "bezel-large": {"dir": "gallery/bezel-large", "changed": ["app-actions", "app-assistant", "app-camera", "app-compass", "app-connect", "app-health", "app-http", "app-level", "app-logs", "app-motors", "app-net-tools", "app-pit", "app-reminders", "app-robot", "app-schedule", "app-settings", "app-tables", "app-terminal", "app-units", "clock-world", "logs-match", "logs-trends", "monitor-processes", "over-control-centre", "over-recent-apps", "over-spotlight", "pit-checklist", "reminders-upcoming", "remote-buttons", "settings-about-licences", "settings-about-this-handheld", "settings-appearance", "settings-arrange-apps", "settings-battery", "settings-display", "settings-glance-page-cards", "settings-help-shortcuts", "settings-home", "settings-keys-for-online-services", "settings-network", "settings-network-wifi", "settings-on-device-model", "settings-set-up-from-a-computer", "settings-sound", "settings-system-update", "tables-elevator", "units-torque", "weather-week"], "same": ["app-apriltag", "app-browse", "app-calculator", "app-catalogue", "app-clock", "app-console", "app-files", "app-git", "app-graphs", "app-loop", "app-monitor", "app-music", "app-notes", "app-photos", "app-remote", "app-share", "app-weather", "files-editor", "net-tools-find", "over-setup", "over-setup-wifi", "settings-bluetooth", "settings-help", "settings-lock-screen", "settings-name-time", "settings-robot-settings", "settings-ssh-access", "settings-standby", "settings-text", "settings-update-whats-new", "settings-usb"]}, "tour": {"dir": "tour", "changed": ["02-robot", "03-health", "04-logs", "04b-match", "04c-tables", "05-tables-elevator", "06b-schedule", "07-motors", "08b-terminal", "09-settings", "09b-appearance", "09c-light-blue", "09d-network", "09e-wifi", "09g-about", "102-weather-week", "103-weather-day", "104-weather-place", "104b-weather-fahrenheit", "105-settings-update-whats-new", "105c-home-esc-at-the-start", "107-update-history", "109b-assistant-confirm", "109c-assistant-confirm-run-it", "11-app-opening", "110-assistant-choices", "111-actions-built-in", "112-settings-on-device-model", "112b-browse-start", "112b-home-tools-more", "112d-on-device-model-answer", "114-units", "114b-units-torque", "115-notes", "115b-notes-search", "116-clock-timers", "116c-clock-world", "117-http", "117b-http-response", "117c-http-headers", "118-share", "119-monitor-processes", "12-page-sliding", "121-talk-listening", "121b-reminders-today", "121b-talk-writing", "121c-reminders-today-cues", "121c-talk-question", "121d-reminders-turning", "121d-talk-answer-spoken", "121e-assistant-voice-choices", "122-reminders-new", "122b-reminders-new-read", "122c-reminders-new-repeat", "122d-reminders-new-several", "124-notes-bell", "124b-notes-remind", "125-reminders-bezel-light", "126-reminder-due-waking", "126b-reminder-due", "140-control-centre-volume", "141-settings-sound-row", "141b-sound", "141c-sound-microphone", "141d-sound-bluetooth", "141e-sound-bezel-light-large", "142c-bluetooth-found", "142d-bluetooth-pairing", "142e-bluetooth-playing", "142f-bluetooth-bezel-light-large", "143b-music-start", "143g-music-up-next", "143i-music-start-playing", "143k-music-paused-bezel-light-large", "15-app-own-screen", "16-control-coming-down", "17-control-centre", "18-glance", "19-carousel", "20-carousel-turning", "21-robot-arriving", "21b-match-report", "24-setup-computer", "32b-spotlight", "32c-spotlight-lo", "32d-spotlight-sum", "32e-spotlight-units", "32f-spotlight-match", "32g-spotlight-team", "32h-spotlight-preview-value", "32i-spotlight-preview-note", "32k-spotlight-over-an-app", "32l-spotlight-opening", "32m-spotlight-opened", "32n-spotlight-recent", "32o-spotlight-light", "32p-spotlight-large-text", "33b-git-account", "33c-git-your-repositories", "33d-git-cloning", "33e-git-repository", "33f-git-history", "33g-git-history-down", "33j-git-commit-message", "33k-git-repository-top", "34-about", "35-build-number", "35b-a-developer", "38-version", "39-easter-egg", "39b-easter-egg-settled", "40-licences", "41-shortcuts", "41a-hold-for-shortcuts", "41b-shortcuts-home", "50-tables-graphing", "51-graphs", "52-graphs-paused", "53-pit", "54-pit-checklist", "57-pit-timer-card", "58-logs-trends", "59-trends", "59b-trends-earlier-match", "60-monitor", "61-monitor-processes", "64-ping", "65-ports", "66-wifi-survey", "67-connect", "68-serial", "69-actions", "69b-action-running", "70-control-centre", "71-recent-apps", "72-recent-apps-chosen", "73-recent-app-growing", "74-recent-app-let-go", "75-screenshot-flash", "76-screenshot-saved", "77-display-standby", "78-standby-dimmed", "80-apriltag", "80b-apriltag-later", "80c-camera", "80d-camera-timer", "80e-camera-shutter", "80f-camera-saved", "80g-camera-scan", "80h-photos", "80i-photo", "80j-photo-zoomed", "80k-photo-details", "80l-photo-delete", "81-battery", "81b-battery-below", "81c-battery-deep-standby", "82-control-centre-saver", "86-setup-name-and-time", "86b-setup-name-and-time-chosen", "87-time-zones", "89-shortcuts-keyboard", "90-network", "90c-tailscale-sign-in", "90d-tailscale-on", "90e-tailscale-machines", "90f-tailscale-sign-out", "90g-tailscale-sign-in-bezel-light-large", "91-remote-buttons", "92-remote-sending", "93-remote-listening", "94-remote-learned", "94c-remote-kept", "95-level", "95b-level-zeroed", "96-level-on-edge", "97-compass", "97b-compass-calibrating", "98-display-lift-to-wake"], "same": ["00-cascade", "01-home", "06-loop", "08-console", "08c-files", "08d-editor", "09f-wifi-password", "10-home-page-3-light", "100-home-weather-tile", "101-weather", "101b-weather-hours", "105-home-graphs-tile", "105b-home-esc-gliding-back", "105b-whats-new-before-installing", "105c-whats-new-scrolled", "106-home-assistant-tile", "106-whats-new-after-updating", "106b-assistant-no-key", "107-assistant", "107b-assistant-typed", "107b-release-notes", "107c-assistant-thinking", "107c-release-notes-turning", "107d-release-notes-bezel-light-large", "108-assistant-answer", "108b-assistant-scrolled-up", "108c-assistant-web-answer", "108d-assistant-sources", "109-assistant-asks", "109d-assistant-skipped", "110b-assistant-conversations", "111b-action-asks-first", "112-home-browse-tile", "112-home-tools", "112b-on-device-model", "112c-browse-reading", "112c-on-device-model-downloading", "112d-browse-page", "112e-browse-scrolled", "112f-browse-link", "112g-browse-typed", "112h-browse-answer", "113-calculator", "113b-calculator-answer", "113c-calculator-programmer", "113d-calculator-64-bit", "116b-clock-stopwatch", "118b-share-wifi-code", "119b-monitor-process", "120-files-hex", "120b-files-hex-found", "121-home-reminders", "121e-reminders-upcoming", "121f-notes-dictating", "121f-reminders-done", "121g-notes-dictated", "123-reminders-pit-routine", "13-home-apps", "14-app-in-terminal", "140b-volume-key", "142-bluetooth-off", "142b-bluetooth-restart", "143-home-music", "143c-music-search-typing", "143d-music-search-found", "143e-music-loading", "143f-music-playing", "143h-music-paused-from-home", "143j-music-account", "143l-music-account-bezel-light-large", "22-robot-settings", "23-setup-welcome", "24b-setup-computer-no-network", "24c-setup-receiving", "24d-setup-received", "24e-setup-after-computer-hardware", "24f-setup-after-computer-lesson", "25-setup-team", "26-setup-wifi", "27-setup-keys", "28-setup-choices", "29-setup-look", "30-setup-working", "31-setup-all-set", "32-spotlight-growing", "32j-spotlight-back-into-the-island", "33-git", "33h-git-commit", "33i-git-branches", "36-developer-options", "37-show-keys", "42-tour-welcome", "43-tour-apps", "44-tour-back", "45-tour-island", "46-tour-pages", "47-tour-end", "55-match-timer", "56-match-timer-end-game", "62-net-tools", "63-find-the-robot", "65b-name-lookup", "69c-action-edit", "80bc-home-camera", "80m-photos-empty", "81d-deep-standby-estimate", "81e-deep-standby-measured", "81f-deep-standby-woke", "83-battery-empty", "84-setup-hardware", "84b-setup-hardware-battery", "84c-setup-power", "84d-keep-the-tear-free-panel", "84e-try-lower-voltage", "85-setup-lesson-modifiers", "85b-setup-lesson-moving", "85c-setup-lesson-capitals", "85d-setup-lesson-text-arrows", "85e-setup-lesson-fn-keys", "87b-time-zone-search", "88-settings-name-and-time", "90-remote", "90b-tailscale-off", "94b-remote-naming", "99-home-level-tile"]}};
+const NAMES = {
+  "catalyst-compact": "catalyst · compact", "catalyst-standard": "catalyst · standard", "catalyst-large": "catalyst · large",
+  "bezel-compact": "bezel · compact", "bezel-standard": "bezel · standard", "bezel-large": "bezel · large",
+  "tour": "the tour · catalyst · standard",
+};
+const nav = document.getElementById("sets");
+const grid = document.getElementById("grid");
+let current = "catalyst-standard";
+for (const key of Object.keys(SHOTS)) {
+  const b = document.createElement("button");
+  b.textContent = (NAMES[key] || key) + "  " + SHOTS[key].changed.length;
+  b.onclick = () => { current = key; draw(); };
+  b.dataset.key = key;
+  nav.appendChild(b);
+}
+function figure(src, word, alt) {
+  const f = document.createElement("figure");
+  f.className = word;
+  const img = document.createElement("img");
+  img.loading = "lazy";
+  img.src = src;
+  img.alt = alt;
+  img.width = 320;
+  img.height = 170;
+  const c = document.createElement("figcaption");
+  c.textContent = word;
+  f.append(img, c);
+  return f;
+}
+function draw() {
+  for (const b of nav.children) b.setAttribute("aria-pressed", String(b.dataset.key === current));
+  const set = SHOTS[current];
+  const find = document.getElementById("find").value.trim().toLowerCase();
+  grid.classList.toggle("single", document.getElementById("only-after").checked);
+  grid.replaceChildren();
+  const names = set.changed.filter((n) => n.toLowerCase().includes(find));
+  for (const name of names) {
+    const card = document.createElement("section");
+    card.className = "card";
+    const h = document.createElement("h2");
+    h.textContent = name;
+    const pair = document.createElement("div");
+    pair.className = "pair";
+    pair.append(figure(set.dir + "/" + name + "-before.webp", "before", name + " before"), figure(set.dir + "/" + name + "-after.webp", "after", name + " after"));
+    card.append(h, pair);
+    grid.appendChild(card);
+  }
+  document.getElementById("count").textContent = names.length + " changed";
+  const same = set.same.filter((n) => n.toLowerCase().includes(find));
+  document.getElementById("same").innerHTML = same.length ? "<b>the same as before:</b> " + same.map((n) => n.replace(/&/g, "&amp;").replace(/</g, "&lt;")).join(" · ") : "";
+}
+document.getElementById("find").oninput = draw;
+document.getElementById("only-after").onchange = draw;
+draw();
+</script>
+</body>
+</html>
