@@ -9,6 +9,7 @@
 //! place's offset is asked of the zone database (`TZ=… date +%z`), and kept
 //! for ten minutes.
 
+#[cfg(not(test))]
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -116,10 +117,23 @@ struct Shared {
     next_id: u32,
 }
 
+#[cfg(not(test))]
 static SHARED: Mutex<Shared> = Mutex::new(Shared { stopwatch: Stopwatch { started: None, banked: 0.0, laps: Vec::new() }, timers: Vec::new(), next_id: 1 });
 
+// Each test's own: a shell ticking in one test would otherwise announce (and
+// so take) a timer another test set.
+#[cfg(test)]
+thread_local! {
+    static SHARED: std::cell::RefCell<Shared> = const {
+        std::cell::RefCell::new(Shared { stopwatch: Stopwatch { started: None, banked: 0.0, laps: Vec::new() }, timers: Vec::new(), next_id: 1 })
+    };
+}
+
 fn shared<T>(f: impl FnOnce(&mut Shared) -> T) -> T {
-    f(&mut SHARED.lock().unwrap_or_else(|e| e.into_inner()))
+    #[cfg(not(test))]
+    return f(&mut SHARED.lock().unwrap_or_else(|e| e.into_inner()));
+    #[cfg(test)]
+    SHARED.with(|s| f(&mut s.borrow_mut()))
 }
 
 /// Start a timer of `seconds`.
@@ -429,6 +443,10 @@ impl Clock {
 }
 
 impl Screen for Clock {
+    fn app(&self) -> &str {
+        "Clock"
+    }
+
     /// Each page names itself (no pager dots: they would sit on the keys).
     fn title(&self) -> &str {
         match PAGES[self.page] {
@@ -706,12 +724,6 @@ impl Clock {
     }
 }
 
-/// A shell ticking on another thread announces a timer that runs out too
-/// (`Shell::tick`): a test that keeps shells ticking for long holds this,
-/// and so does the test that waits for its own timer's announcement.
-#[cfg(test)]
-pub(crate) static TIMERS_ANNOUNCED: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -753,7 +765,6 @@ mod tests {
 
     #[test]
     fn a_timer_that_runs_out_is_announced_once() {
-        let _alone = TIMERS_ANNOUNCED.lock().unwrap_or_else(|e| e.into_inner());
         let id = add_timer(0.05);
         std::thread::sleep(Duration::from_millis(80));
         let mut said = None;

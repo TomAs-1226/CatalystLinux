@@ -79,7 +79,11 @@ pub fn run(step: &str) -> Result<(), String> {
     if !available() {
         return Err("updates are made on the handheld".into());
     }
-    std::process::Command::new("sh")
+    // SCHED_IDLE, the card's idle class and timer slack, for it and the curl
+    // it starts (sched.rs): it runs on a processor nothing else wants, which
+    // with four cores is nearly always one, and never ahead of a frame.
+    let mut command = std::process::Command::new("sh");
+    crate::sched::command(&mut command, crate::sched::Class::Idle)
         .args(["-c", &format!("{PROGRAM} {step} >/dev/null 2>&1 &")])
         .status()
         .map_err(|e| format!("could not start the update: {e}"))?;

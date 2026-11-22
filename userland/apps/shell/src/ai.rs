@@ -86,6 +86,9 @@ const CLAUDE_BETA: &str = "server-side-fallback-2026-07-01";
 /// reasoning models; 16,000 keeps a Claude request well inside a minute.
 const OPENAI_MAX_OUTPUT: u32 = 25_000;
 const CLAUDE_MAX_TOKENS: u32 = 16_000;
+/// An answer this long in the writing is a notification once written (one
+/// quicker is read where it was asked).
+const LONG_ANSWER: std::time::Duration = std::time::Duration::from_secs(10);
 /// How long one request may take before it is given up.
 const REQUEST_SECONDS: u32 = 180;
 /// Rounds of tool calls for one question before the assistant stops to ask.
@@ -2027,6 +2030,12 @@ impl Assistant {
         }
     }
 
+    /// The question under way is one the match logs answer (not a chat).
+    fn about_logs(&self) -> bool {
+        let plan = crate::offline::route::rules(&self.question, &crate::offline::tools::Library::default(), None);
+        plan.sure && plan.intent != crate::offline::route::Intent::Chat
+    }
+
     /// Answering on this handheld, from the match logs.
     fn offline_mode(&self) -> bool {
         self.service.as_ref().is_some_and(|(s, _)| *s == Service::Local)
@@ -2044,6 +2053,9 @@ impl Assistant {
         ctx.stop = Some(stop.clone());
         let (tx, rx) = mpsc::channel();
         let started = std::thread::Builder::new().name("offline".into()).stack_size(1024 * 1024).spawn(move || {
+            // Reading the match logs, for someone waiting: SCHED_BATCH at
+            // nice 10, so the frames still come first (sched.rs).
+            crate::sched::enter(crate::sched::Class::Batch(10));
             let mut send = |e: crate::offline::Event| {
                 tx.send(e).ok();
             };
@@ -2282,7 +2294,14 @@ impl Assistant {
         }
         let (tx, rx) = mpsc::channel();
         let started = std::thread::Builder::new().name("assistant".into()).stack_size(512 * 1024).spawn(move || {
-            tx.send(request(service, &key, &body)).ok();
+            // A long one, a notification once it is (unsaid if the
+            // Assistant is still in front); its live activity is the page's.
+            let began = std::time::Instant::now();
+            let answer = request(service, &key, &body);
+            if answer.is_ok() && began.elapsed() >= LONG_ANSWER {
+                crate::notify::post(crate::notify::Notification::new("Assistant", "auto_awesome", "your answer is written").tag("assistant:answer").action("builtin:Assistant"));
+            }
+            tx.send(answer).ok();
         });
         if started.is_err() {
             return self.failed("could not start the request".into());
@@ -2341,18 +2360,18 @@ impl Assistant {
                     }
                 };
             }
-            // No internet, and a question the logs can answer: answered
-            // offline, on this handheld, saying so.
-            Err(why) if no_internet(&why) && self.rounds == 0 && {
-                let plan = crate::offline::route::rules(&self.question, &crate::offline::tools::Library::default(), None);
-                plan.sure && plan.intent != crate::offline::route::Intent::Chat
-            } => {
+            // No internet: a question the logs can answer, or any question
+            // when a model is on this handheld, is answered offline, on this
+            // handheld, saying so.
+            Err(why) if no_internet(&why) && self.rounds == 0 && (self.about_logs() || crate::local::ready()) => {
                 if let Some(chat) = &mut self.chat {
                     chat.rewind(self.mark);
                 }
                 self.calls.clear();
                 self.outcomes.clear();
-                self.push(Entry::Note(format!("{why} · answered offline, from the match logs")));
+                self.activity = None;
+                let from = if self.about_logs() { "answered offline, from the match logs" } else { "answered on this handheld" };
+                self.push(Entry::Note(format!("{why} · {from}")));
                 let question = self.question.clone();
                 return self.ask_offline(Some(question), robot);
             }

@@ -742,7 +742,6 @@ mod tests {
 
     #[test]
     fn timers_start_from_lengths_as_said_and_stop() {
-        let _alone = crate::clock::TIMERS_ANNOUNCED.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(length_of("10 min"), Some(600.0));
         assert_eq!(length_of("1 hour 20 minutes"), Some(4800.0));
         assert_eq!(length_of("90 seconds"), Some(90.0));

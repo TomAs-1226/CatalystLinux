@@ -62,6 +62,25 @@ for f in etc/init.d/catalyst-early etc/init.d/catalyst-shell etc/init.d/catalyst
 done
 mkdir -p "$TARGET_DIR/data"
 
+# TLS: ChaCha20-Poly1305 asked for first. The A53 has no AES instructions,
+# so AES-GCM (OpenSSL's first choice, which YouTube's, Google's video,
+# Cloudflare's and GitHub's servers all take) runs in software at several
+# times ChaCha's cost per byte; listed first, ChaCha is what each of them
+# takes. Every program using OpenSSL follows it (curl for Music and updates,
+# Python for yt-dlp, git). Only the order of TLS 1.3's three suites changes.
+SSLCNF="$TARGET_DIR/etc/ssl/openssl.cnf"
+if [ -f "$SSLCNF" ] && ! grep -q '^\[catalyst_tls\]' "$SSLCNF"; then
+	sed -i '/^\[openssl_init\]/a ssl_conf = catalyst_ssl' "$SSLCNF"
+	cat >>"$SSLCNF" <<'TLS'
+
+[catalyst_ssl]
+system_default = catalyst_tls
+
+[catalyst_tls]
+Ciphersuites = TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384
+TLS
+fi
+
 # Sound: ALSA's configuration is written at boot by catalyst-audio (the
 # speaker's, or Bluetooth headphones in front of it while they are the
 # output), so /etc/asound.conf leads to where it is written.

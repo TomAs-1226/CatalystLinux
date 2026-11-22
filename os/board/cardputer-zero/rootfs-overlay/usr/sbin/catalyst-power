@@ -11,7 +11,8 @@
 #                                 deep standby: everything a key need not
 #                                 have off, and back (see deep_on); music
 #                                 standby keeps the radios (and Wi-Fi)
-#   catalyst-power boot           at start: a trial that never held is undone
+#   catalyst-power boot           at start: a trial that never held is undone,
+#                                 and the panel's clock block put in if missing
 #
 # Both trials are lines in config.txt, above the system block, tried before
 # they are kept: the first start with them counts, and the shell confirms
@@ -30,6 +31,15 @@
 #
 # Tear-free panel: the cardputerzero-portrait overlay after M5Stack's, which
 # drives the panel in its own scan order and in step with its refresh.
+#
+# The panel's clock is not a trial but always there: the core clock held at
+# 250 MHz, the speed the firmware idles at anyway. The panel's SPI clock is
+# the core clock over a divider chosen once, at boot; left free, the firmware
+# moved the core between 250 and 400 MHz, and the link ran at 31 MHz most of
+# the time (30 frames a second at most). Held, the panel's driver picks the
+# divider for it: 62.5 MHz, the panel's own limit. Images made since have it
+# in config.txt; a handheld updated from before has it put in at its first
+# start on such a system, in force from the start after.
 
 BOOT_DEV=/dev/mmcblk0p1
 MNT=/run/catalyst-boot
@@ -49,6 +59,7 @@ begin_of() {
 	case "$1" in
 	undervolt) echo "# catalyst-power: lower voltage (Settings > Developer options)" ;;
 	panel) echo "# catalyst-power: tear-free panel (Settings > Developer options)" ;;
+	clock) echo "# catalyst-power: the core clock held, so the panel's link holds 62.5 MHz" ;;
 	esac
 }
 
@@ -56,6 +67,7 @@ lines_of() {
 	case "$1" in
 	undervolt) printf 'over_voltage=-1\nover_voltage_min=-2\n' ;;
 	panel) printf 'dtoverlay=cardputerzero-portrait\n' ;;
+	clock) printf 'core_freq=250\ncore_freq_min=250\n' ;;
 	esac
 }
 
@@ -193,6 +205,19 @@ boot_trial() {
 		fi
 		;;
 	esac
+}
+
+# At start (catalyst-early, before the shell and the updater): the panel's
+# clock block, if config.txt has none yet. Looked for with the partition
+# read-only; written only when it is missing, so once.
+ensure_clock() {
+	mkdir -p "$MNT"
+	mount -t vfat -o ro "$BOOT_DEV" "$MNT" || return 1
+	grep -qxF "$(begin_of clock)" "$MNT/config.txt"
+	found=$?
+	umount "$MNT"
+	[ $found = 0 ] && return 0
+	with_boot add_block clock
 }
 
 # Deep standby: as near off as the handheld can be while a key can still wake
@@ -377,6 +402,7 @@ panel)
 boot)
 	boot_trial undervolt
 	boot_trial panel
+	ensure_clock
 	;;
 *)
 	echo "usage: $0 wifi-sleep|wifi-wake|undervolt ...|panel ...|deep ...|boot" >&2

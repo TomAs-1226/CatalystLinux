@@ -290,7 +290,15 @@ impl Schedule {
             }
         }
         let thread_shared = shared.clone();
-        std::thread::Builder::new().name("schedule".into()).stack_size(256 * 1024).spawn(move || run(&thread_shared, team)).ok();
+        std::thread::Builder::new()
+            .name("schedule".into())
+            .stack_size(256 * 1024)
+            .spawn(move || {
+                // Its looks every ten seconds folded into other wakeups (sched.rs).
+                crate::sched::enter(crate::sched::Class::Poller);
+                run(&thread_shared, team)
+            })
+            .ok();
         Schedule { shared }
     }
 
