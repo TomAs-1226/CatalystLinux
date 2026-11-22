@@ -2,9 +2,10 @@
 //! work it does in the background waits while memory, the battery or the
 //! network are short.
 //!
-//! - **Helpers** (curl fetching, yt-dlp, QuickJS) run at nice 10 with an
-//!   OOM score of 800, so the kernel ends them before anything that matters
-//!   if memory runs out; the slow lookup is also capped in address space.
+//! - **Helpers** (curl fetching, yt-dlp, QuickJS) run at nice 10 under
+//!   SCHED_BATCH with an OOM score of 800, so the kernel ends them before
+//!   anything that matters if memory runs out; the slow lookup is also
+//!   capped in address space.
 //! - **ffmpeg playing** runs at nice -10, ahead of drawing: the sound must
 //!   not wait for a frame. (Not real-time: with a third of a second of ALSA
 //!   buffer a nice level is enough, and a runaway real-time decoder could
@@ -38,12 +39,16 @@ pub fn polite(cmd: &mut Command, manner: Manner) -> &mut Command {
         cmd.pre_exec(move || {
             // Only what is safe between fork and exec: system calls, no allocation.
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-            let nice = match manner {
-                Manner::Background => 10,
-                Manner::Capped(_) => 15,
-                Manner::Playing => -10,
-            };
-            libc::setpriority(libc::PRIO_PROCESS, 0, nice);
+            // Helpers are SCHED_BATCH as well (sched.rs): they never preempt
+            // a frame on waking, and their timers fold into others'. The
+            // decoder stays with the ordinary scheduler.
+            match manner {
+                Manner::Background => crate::sched::enter(crate::sched::Class::Batch(10)),
+                Manner::Capped(_) => crate::sched::enter(crate::sched::Class::Batch(15)),
+                Manner::Playing => {
+                    libc::setpriority(libc::PRIO_PROCESS, 0, -10);
+                }
+            }
             // Downloads and lookups wait for the card behind everything else
             // (IOPRIO_WHO_PROCESS 1, this process, IOPRIO_CLASS_IDLE 3 << 13):
             // the screen never queues behind a song being saved.
@@ -69,12 +74,10 @@ pub fn polite(cmd: &mut Command, manner: Manner) -> &mut Command {
 
 /// This thread's own priority lowered (Linux keeps one for each thread):
 /// for the shell's own threads that fetch and write in the background.
+/// SCHED_BATCH at nice 10, with timer slack (sched.rs): what they fetch may
+/// be the song playing, so they are never starved.
 pub fn background_thread() {
-    #[cfg(target_os = "linux")]
-    unsafe {
-        let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
-        libc::setpriority(libc::PRIO_PROCESS, tid, 10);
-    }
+    crate::sched::enter(crate::sched::Class::Batch(10));
 }
 
 /// Run to the end, or until `limit`: killed then, and said so.

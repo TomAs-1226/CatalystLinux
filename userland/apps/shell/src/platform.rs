@@ -390,6 +390,12 @@ pub trait Platform {
     fn panel_frame(&self) -> Option<Duration> {
         None
     }
+    /// When the first key of the last poll went down, by the kernel's
+    /// monotonic clock in ns (pacing.rs times frames from it). Taken: asked
+    /// again, none until another key.
+    fn key_time_ns(&mut self) -> Option<i64> {
+        None
+    }
 }
 
 /// The kernel's own time over a flush before the first pixel leaves: about a
@@ -692,6 +698,8 @@ pub mod device {
         /// How long the panel takes over a whole frame, from its driver's
         /// `link_hz`, where that is known.
         panel_frame: Option<Duration>,
+        /// When the first key of the last poll went down (monotonic ns).
+        key_ns: Option<i64>,
     }
 
     /// Tell the kernel's text console to stand aside. The boot line puts it
@@ -780,6 +788,11 @@ pub mod device {
                     continue;
                 }
                 if let Ok(f) = OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(format!("/dev/input/{name}")) {
+                    // Its events stamped on the monotonic clock (EVIOCSCLOCKID,
+                    // for this reader only), to time a key to its frame.
+                    const EVIOCSCLOCKID: libc::c_ulong = 0x4004_45a0;
+                    let clock: libc::c_int = libc::CLOCK_MONOTONIC;
+                    unsafe { libc::ioctl(f.as_raw_fd(), EVIOCSCLOCKID as _, &clock) };
                     // The handheld's keyboard, as its driver names it (`tca8418c`).
                     let own = std::fs::read_to_string(format!("/sys/class/input/{name}/device/name")).is_ok_and(|n| n.contains("tca8418"));
                     self.inputs.push((name, f, own));
@@ -835,6 +848,7 @@ pub mod device {
                 column: Vec::new(),
                 _console: quiet_console(),
                 panel_frame,
+                key_ns: None,
             };
             device.find_inputs();
             // A shell restarted while the screen was off finds the panel asleep.
@@ -925,6 +939,7 @@ pub mod device {
 
     impl Platform for Device {
         fn poll(&mut self, timeout: Duration) -> Option<Vec<Key>> {
+            self.key_ns = None;
             let mut fds: Vec<libc::pollfd> =
                 self.inputs.iter().map(|(_, f, _)| libc::pollfd { fd: f.as_raw_fd(), events: libc::POLLIN, revents: 0 }).collect();
             if let Some(watch) = &self.watch {
@@ -974,7 +989,14 @@ pub mod device {
                     for ev in buf[..n].chunks_exact(24) {
                         let kind = u16::from_ne_bytes([ev[16], ev[17]]);
                         if kind == 1 {
-                            events.push((u16::from_ne_bytes([ev[18], ev[19]]), i32::from_ne_bytes(ev[20..24].try_into().unwrap()), own));
+                            let value = i32::from_ne_bytes(ev[20..24].try_into().unwrap());
+                            // A key going down: when, by the kernel's clock.
+                            if value == 1 && self.key_ns.is_none() {
+                                let sec = i64::from_ne_bytes(ev[0..8].try_into().unwrap());
+                                let usec = i64::from_ne_bytes(ev[8..16].try_into().unwrap());
+                                self.key_ns = Some(sec * 1_000_000_000 + usec * 1_000);
+                            }
+                            events.push((u16::from_ne_bytes([ev[18], ev[19]]), value, own));
                         }
                     }
                 }
@@ -1067,6 +1089,10 @@ pub mod device {
 
         fn panel_frame(&self) -> Option<Duration> {
             self.panel_frame
+        }
+
+        fn key_time_ns(&mut self) -> Option<i64> {
+            self.key_ns.take()
         }
 
         fn framebuffer(&self) -> Option<String> {

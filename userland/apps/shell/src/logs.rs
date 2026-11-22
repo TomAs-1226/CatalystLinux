@@ -285,7 +285,11 @@ impl Logs {
         thread::Builder::new()
             .name("logs".into())
             .stack_size(512 * 1024)
-            .spawn(move || pull_loop(&thread_shared, &thread_dir, &host))
+            .spawn(move || {
+                // Behind the frames, its looks folded into other wakeups (sched.rs).
+                crate::sched::enter(crate::sched::Class::Background);
+                pull_loop(&thread_shared, &thread_dir, &host)
+            })
             .expect("spawn logs thread");
         Logs { dir: Some(dir), shared, demo: Vec::new(), listed: Mutex::new(None), demo_held: None }
     }

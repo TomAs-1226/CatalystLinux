@@ -9,6 +9,8 @@
 //!                                handheld's estimated speed and at worse
 //! catalyst-shell --passcode-bench   what making and checking the lock screen's
 //!                                passcode takes on this processor
+//! catalyst-shell --sched-bench [clock|power|io]   the handheld's own figures for
+//!                                the processor's pace and the card (sched.rs)
 //! catalyst-shell --standby-shots <dir>   StandBy's faces and the lock screen, to PNG
 //! catalyst-shell --cjk-shots <dir>   Chinese, Japanese and Korean text on the screens, to PNG
 //! catalyst-shell --activity-shots <dir>  live activities, Tab held, the lock screen with a song
@@ -98,6 +100,7 @@ mod offline;
 #[cfg(test)]
 #[global_allocator]
 static METERED: offline::meter::Metered = offline::meter::Metered;
+mod pacing;
 mod panel;
 mod passcode;
 mod photos;
@@ -111,6 +114,8 @@ mod remote;
 mod robot;
 mod robot3d;
 mod schedule;
+mod sched;
+mod schedbench;
 mod screens;
 mod screenshot;
 mod setup;
@@ -400,6 +405,16 @@ fn main() {
         println!("{}", passcode::bench());
         return;
     }
+    // The clock, the battery and the card, measured for sched.rs's choices.
+    if let Some(at) = args.iter().position(|a| a == "--sched-bench") {
+        let what = args.get(at + 1).filter(|a| !a.starts_with("--")).cloned().unwrap_or_else(|| "clock".into());
+        return schedbench::run(&what, || {
+            let mut shell = Shell::new(Robot::none());
+            load_settings(&mut shell.settings);
+            shell.apply_settings();
+            shell
+        });
+    }
     // The offline assistant's evaluation: its questions asked of the model
     // at CATALYST_LOCAL_URL (or the facts alone), the results to a file.
     #[cfg(not(target_arch = "aarch64"))]
@@ -615,8 +630,23 @@ fn main() {
     let mut panel_asleep = false;
     // The backlight is dark from power-on until the first picture is sent.
     let mut lit = false;
+    // The clock at speed from a key's first frame to the motion's end, the
+    // drawing thread's own timer slack, and the frames as the handheld
+    // drew them, when asked (sched.rs, pacing.rs).
+    let mut booster = sched::Booster::start();
+    let mut slack = sched::LoopSlack::default();
+    let mut pacing = pacing::Pacing::default();
     loop {
         let moving = shell.animating();
+        slack.wait(if moving {
+            sched::Wait::Frame
+        } else if shell.deep_asleep() {
+            sched::Wait::Deep
+        } else if shell.panel_off() {
+            sched::Wait::Dark
+        } else {
+            sched::Wait::Idle
+        });
         // Idle, a look four times a second; with the screen dark, every two
         // seconds (a lift wakes it sooner: see platform::wake); in deep or
         // music standby, once a minute (sooner when a reminder or the queue
@@ -631,9 +661,21 @@ fn main() {
             Duration::from_millis(250)
         };
         let Some(keys) = platform.poll(timeout) else { break };
+        slack.woke();
+        // A key going down on a lit screen raises the clock before it is
+        // handled, so its first frame is drawn at speed.
+        let keyed = !keys.is_empty();
+        if keyed {
+            booster.key(Instant::now(), shell.boost_place());
+            pacing.key(platform.key_time_ns());
+        }
         // Keys are taken in whenever they arrive; the frame waits for its beat.
         for key in keys {
             shell.key(key);
+        }
+        // One that woke the screen raises it now it is lit.
+        if keyed {
+            booster.key(Instant::now(), shell.boost_place());
         }
         // A key that woke the screen wakes the panel before anything is drawn.
         if panel_asleep && !shell.panel_off() {
@@ -645,6 +687,7 @@ fn main() {
             continue;
         }
         let work = Instant::now();
+        let work_ns = pacing::now_ns();
         // In deep standby a tick stands for the whole minute that passed,
         // and with the screen dark for the seconds between looks.
         let elapsed = (work - last).as_secs_f32();
@@ -671,6 +714,8 @@ fn main() {
         // An external app that draws for itself: once its page has arrived,
         // the panel is its own until it ends or is left.
         if let Some(app) = shell.take_launch() {
+            // The app's own pace is the governor's to set.
+            booster.release();
             let result = apps::run(&app, &shell.settings, platform.as_mut(), &shell.gfx.canvas);
             // What it left on the panel: its window closes from that picture.
             let left = platform.capture();
@@ -698,8 +743,13 @@ fn main() {
         // was sent. The beat slows to one the handheld can hold, so frames
         // stay evenly spaced rather than alternating fast and slow.
         let beats = if part > 0.0 { beat.frame_and_panel_took(cost + speed.panel.mul_f32(part), panel_frame.mul_f32(part)) } else { 1 };
+        if part > 0.0 {
+            pacing.frame(work_ns, pacing::now_ns(), beats, booster.on());
+        }
+        booster.after(Instant::now(), shell.moving() && !shell.panel_off(), shell.boost_place());
         next_frame += beat.interval() * beats;
         if !shell.animating() {
+            pacing.settle(beat.interval());
             beat.rest();
             next_frame = Instant::now();
         } else if next_frame < Instant::now() {
@@ -4243,10 +4293,14 @@ fn smooth(mut shell: Shell) {
     /// Measure one kind of motion: press `key`, follow it frame by frame as
     /// the handheld's loop would, then `undo` it; several times over. With
     /// `leave`, the step is left done for the one after it.
-    fn measure(shell: &mut Shell, beat: &mut Beat, speed: &Speed, label: &str, key: Key, undo: Key, leave: bool) {
+    fn measure(shell: &mut Shell, beat: &mut Beat, speed: &Speed, label: &str, key: Key, undo: Key, leave: bool, kept: &mut Vec<(String, Vec<(f32, f32)>)>) {
         // Several runs, because a 0.5 ms frame on a PC is easily disturbed.
         let (mut firsts, mut rest, mut counts) = (Vec::new(), Vec::new(), Vec::new());
+        // Each run's frames (ms of processor at the top clock, ms of panel),
+        // for the clock's model.
+        let mut runs: Vec<Vec<(f32, f32)>> = Vec::new();
         for _ in 0..7 {
+            let mut costs = Vec::new();
             let mut shown = Vec::new();
             platform::changed_rows(&mut shown, &shell.gfx.canvas);
             shell.key(key);
@@ -4260,6 +4314,7 @@ fn smooth(mut shell: Shell) {
                 }
                 let work = started.elapsed().as_secs_f32() * speed.cpu;
                 let part = platform::changed_rows(&mut shown, &shell.gfx.canvas).map_or(0.0, |(first, end)| (end - first) as f32 / gfx::H);
+                costs.push((work * 1e3, speed.panel.as_secs_f32() * part * 1e3));
                 // The beat in force once this frame's needs are known.
                 let beats = if part > 0.0 { beat.frame_took(Duration::from_secs_f32(work + speed.panel.as_secs_f32() * part)) } else { 1 };
                 let interval = beat.interval().as_secs_f32() * beats as f32;
@@ -4271,6 +4326,7 @@ fn smooth(mut shell: Shell) {
                 }
             }
             counts.push(frames);
+            runs.push(costs);
             beat.rest();
             settle(shell);
             // Undo, so every run starts from the same place.
@@ -4295,6 +4351,55 @@ fn smooth(mut shell: Shell) {
         let even = rest.iter().filter(|i| (**i * 1e3 - typical).abs() < 0.5).count() as f32 / rest.len().max(1) as f32;
         counts.sort();
         println!("  {label:<20} {:>6} {:>8.0}ms {:>8.0}ms {:>8.0}ms {:>8.0}%", counts[counts.len() / 2], median(&mut firsts), typical, worst, even * 100.0);
+        // For the clock's model, each frame's median over the runs (a frame
+        // on a PC is easily disturbed), as many frames as the median run.
+        let frames = counts[counts.len() / 2];
+        let costs = (0..frames)
+            .map(|i| {
+                let mut at: Vec<(f32, f32)> = runs.iter().filter_map(|r| r.get(i).copied()).collect();
+                at.sort_by(|a, b| (a.0 + a.1).total_cmp(&(b.0 + b.1)));
+                at.get(at.len() / 2).copied().unwrap_or((0.0, 0.0))
+            })
+            .collect();
+        kept.push((label.to_owned(), costs));
+    }
+
+    /// A motion's frames replayed on the handheld's clock as `policy` would
+    /// set it from rest (sched::model): the key to the first frame on the
+    /// panel, the frames that ran late, the typical and worst gap, and the
+    /// beat it ends on, in ms.
+    fn replay(frames: &[(f32, f32)], policy: sched::model::Policy) -> (f32, usize, f32, f32, f32) {
+        let mut beat = Beat::new();
+        let mut clock = sched::model::Clock::new(policy);
+        let (mut start, mut first, mut late, mut gaps) = (0.0f32, 0.0f32, 0usize, Vec::new());
+        for (i, &(work, panel)) in frames.iter().enumerate() {
+            clock.idle_until(start);
+            let needed = clock.run(work) + panel;
+            if i == 0 {
+                first = needed;
+            }
+            let beats = if work + panel > 0.0 { beat.frame_took(Duration::from_secs_f32(needed / 1e3)) } else { 1 };
+            late += usize::from(beats > 1);
+            let gap = beat.interval().as_secs_f32() * 1e3 * beats as f32;
+            gaps.push(gap);
+            start += gap;
+        }
+        gaps.sort_by(f32::total_cmp);
+        let typical = gaps.get(gaps.len() / 2).copied().unwrap_or(0.0);
+        (first, late, typical, gaps.last().copied().unwrap_or(0.0), beat.interval().as_secs_f32() * 1e3)
+    }
+
+    /// The same motions on the handheld's clock: boosted as the key goes
+    /// down, and schedutil alone from rest. A model (sched.rs says what it
+    /// assumes), so its figures compare the two, not the handheld's own.
+    fn clock_table(kept: &[(String, Vec<(f32, f32)>)]) {
+        use sched::model::Policy;
+        println!("  the clock from rest at 600 MHz, modelled: boosted | schedutil alone");
+        println!("  {:<20} {:>16} {:>10} {:>16} {:>16}", "", "key to frame", "late", "typical", "beat at end");
+        for (label, frames) in kept.iter().filter(|(_, f)| !f.is_empty()) {
+            let (b, s) = (replay(frames, Policy::Boost), replay(frames, Policy::Schedutil));
+            println!("  {label:<20} {:>6.1} | {:>5.1} ms {:>4} | {:<3} {:>6.0} | {:>3.0} ms {:>6.0} | {:>3.0} ms", b.0, s.0, b.1, s.1, b.2, s.2, b.4, s.4);
+        }
     }
 
     // Each kind of motion: the keys that get to where it starts, its name,
@@ -4320,6 +4425,7 @@ fn smooth(mut shell: Shell) {
     for name in ["device", "worse"] {
         let speed = Speed::named(Some(name));
         let mut beat = Beat::new();
+        let mut kept = Vec::new();
         // Home, the Settings tile focused: first on the third page.
         for _ in 0..steps_to("Settings") {
             shell.key(Right);
@@ -4332,19 +4438,20 @@ fn smooth(mut shell: Shell) {
                 shell.key(*key);
                 settle(&mut shell);
             }
-            measure(&mut shell, &mut beat, &speed, label, key, undo, leave);
+            measure(&mut shell, &mut beat, &speed, label, key, undo, leave, &mut kept);
         }
         // The other Home.
         shell.settings.home = shell::HomeStyle::Carousel;
         shell.apply_settings();
         settle(&mut shell);
-        measure(&mut shell, &mut beat, &speed, "carousel turns", Right, Left, false);
+        measure(&mut shell, &mut beat, &speed, "carousel turns", Right, Left, false, &mut kept);
         // And Flow: a card on, and one turned over.
         shell.settings.home = shell::HomeStyle::Flow;
         shell.apply_settings();
         settle(&mut shell);
-        measure(&mut shell, &mut beat, &speed, "flow turns", Right, Left, false);
-        measure(&mut shell, &mut beat, &speed, "flow turns over", Enter, Back, false);
+        measure(&mut shell, &mut beat, &speed, "flow turns", Right, Left, false, &mut kept);
+        measure(&mut shell, &mut beat, &speed, "flow turns over", Enter, Back, false, &mut kept);
+        clock_table(&kept);
         // Back to the grid, on the first tile, for the next speed.
         shell.settings.home = shell::HomeStyle::Grid;
         shell.apply_settings();

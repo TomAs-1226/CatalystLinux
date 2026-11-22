@@ -399,10 +399,12 @@ Settings › Display:
 
 - **Screen off after**: 30 seconds, 1 minute (the default), 2, 5, or never.
 - **Processor**: *balanced* (fast when there is work, slow when not:
-  `schedutil` or `ondemand`), *power saving* (`conservative`, or
-  `powersave`), or *performance*. While the screen is off the processor runs
-  at its slowest (`powersave`), whatever is chosen. The kernel's own
-  governors, so only on the handheld.
+  `schedutil` or `ondemand`), *power saving* (`conservative`, which leaves
+  background work at nice above 0 out of its load, or `powersave`), or
+  *performance*. While the screen is off the processor runs at its slowest
+  (`powersave`), whatever is chosen. Whatever is chosen, it is at full speed
+  from a key's first frame to the end of the motion it begins (see *The
+  processor's pace*). The kernel's own governors, so only on the handheld.
 
 A screen with something to watch keeps it awake while it shows (the hook is
 `Screen::keeps_awake`): an app's program running in a terminal, and the login
@@ -727,7 +729,9 @@ Its choices:
 
 - **Battery saver**: 30 frames a second instead of 40, the wallpaper held
   still, and the processor capped at 800 MHz and slow to climb (the kernel's
-  `conservative`). It is a switch in the control centre too, and comes on by
+  `conservative`), with background work never climbing it at all. Motion
+  still gets the clock at once, up to that cap. It is a switch in the
+  control centre too, and comes on by
   itself at 20% (**On by itself at 20%**), going off again on the charger
   unless you switched it on yourself.
 - **Turn off at 5%**: warnings at 15% and at 10%, once each time on battery.
@@ -970,7 +974,9 @@ second as at 60, and nothing moves while the screen is idle.
 Even frames matter more than fast ones, so while anything moves, frames start
 on a steady beat: 25 ms (40 a second) if the handheld holds it, else 33, 50 or
 100 ms. One late frame is let go; a second soon after slows the beat, and it
-only quickens again between animations. `catalyst-shell --smooth` reports,
+only quickens again between animations. The processor is at full speed from
+a key's first frame to the motion's end (*The processor's pace*), so the
+beat is not slowed by a clock still climbing. `catalyst-shell --smooth` reports,
 for each kind of motion (apps opening and closing, pages, the control centre,
 a list scrolling, Home's pages, the glance page, the carousel), the first,
 typical and worst gap between frames at the simulator's two speeds. At the
@@ -1009,6 +1015,110 @@ frame-rate independence, that an animation begun after an idle spell starts
 from its beginning, a list gliding and giving at its end, the control centre
 coming down over any screen, and a robot's arrival opening the Robot app from
 Home and nowhere else.
+
+## The processor's pace
+
+The CM0's four cores share one clock, 600 to 1000 MHz in steps of 100, so
+the only question is when it runs fast. The shell knows that exactly, and
+sets it (`sched.rs`).
+
+**At speed for motion.** Measured on the handheld (0.6.0), the clock sat at
+600 MHz 97% of the time, scrolling included: 2539 s at 600 against 26 s at
+1 GHz. schedutil sets it from the drawing thread's utilisation, which after
+a rest is near nothing and takes about 74 ms to climb to where it asks for
+the top; and a thread busy half of each 25 ms beat at 600 MHz never asks for
+more than 600 at all. Now, from a key going down (before it is handled), or
+the first frame of any motion on a lit screen, the clock's floor
+(`scaling_min_freq`) is raised to its ceiling, and it comes down 50 ms after
+the motion's last frame (that frame's rows reaching the panel). So the
+drawing thread, the kernel's worker that sends the rows and the SPI transfer
+all run at speed; the firmware's turbo raises the core clock the SPI is
+divided from along with it. A thread of its own writes the floor, so the
+drawing thread never waits on cpufreq's lock or the firmware's mailbox, and
+the kernel switches the clock while the first frame is already being drawn.
+Never with the screen dark; a dimming screen and StandBy's faces only for a
+key; and a motion running on by itself for four seconds with no key lets it
+go. The battery saver's 800 MHz ceiling stays the ceiling. `touch
+/run/catalyst-noboost` switches it off, to compare.
+
+Not uclamp: the kernel has no `CONFIG_UCLAMP_TASK` (a rebuild, with
+M5Stack's modules rebuilt against it), a clamp on the drawing thread would
+not cover the kernel's worker or the SPI, and it is dropped whenever the
+thread sleeps between frames, so the clock would rise and fall every frame.
+Not a lower rate limit: schedutil's (1.5 ms here) is not what holds it back.
+
+`catalyst-shell --smooth` replays each motion's frames on a model of the
+clock from rest (the kernel's rules, a switch assumed to land 1 ms after it
+is asked for). At the estimated device speed, boosted, 8 of its 13 motions
+hold the 25 ms beat; with schedutil alone 2 do, the rest dropping to 33 ms
+(Flow to 50). Measured on a busy PC, so its figures compare the two, not the
+handheld's own: those come from the handheld (below).
+
+**Background work gives way.** Work off the drawing thread runs in a class:
+
+| Class | Scheduling | For |
+|---|---|---|
+| Idle | SCHED_IDLE, nice 19, the card's idle class | the system update, the on-device model's download |
+| Background | SCHED_BATCH, nice 19 | Spotlight's index, catalogue installs, the robot's logs |
+| Batch | SCHED_BATCH, nice 10 (15 for the slow lookup) | Music's fetching and lookups, the offline assistant's log reading, llama-server |
+| Poller | as it was, with timer slack | the event schedule |
+
+SCHED_IDLE runs only where nothing else wants a processor (with four cores,
+nearly always one) and gives way at once; SCHED_BATCH never preempts a frame
+on waking. The shell's own background threads are BATCH, not IDLE, because
+the drawing thread takes their locks too, and a lock held by a starved
+thread would stall a frame. Each has timer slack (10 to 50 ms) so its
+wakeups fold into others'; the drawing thread's own idle look has 10 ms of
+it (100 ms with the screen dark), and none while it keeps the frame beat.
+
+**The sound** is not raised further: catalyst-play runs at nice −10 under
+the ordinary scheduler, waking once an ALSA period with 341 ms of buffer.
+Real time would add nothing it needs, and would have schedutil run the
+clock at the top whenever the decoder ran.
+
+**The governors.** Awake, `schedutil` with the kernel's settings; power
+saving and the battery saver, `conservative` with `ignore_nice_load`, so
+background work never climbs the clock there; the screen dark (standby and
+music standby), `powersave`, 600 MHz. `ondemand` would leave nice work out
+too, but at nice 10 llama-server's answers would then come at 600 MHz.
+Cores cannot be parked: the CM0's are started by spin table, which has no
+way to stop one (`op_cpu_disable` says EOPNOTSUPP), and an idle core already
+waits in WFI, there being no deeper idle state (no cpuidle driver).
+
+**The kernel** needs nothing new for this. Kept as it is: HZ 250 (frame
+timeouts are high-resolution timers; idle cores take no ticks, `NO_HZ_IDLE`;
+the keyboard is interrupt-driven, so key latency does not depend on HZ);
+no `NO_HZ_FULL` (it costs every kernel entry, for isolated cores this does
+not have); no UCLAMP (above). `CONFIG_SCHED_DEBUG` is gone from 6.18.
+
+**Interrupts.** The Wi-Fi's SDIO (mmc1) takes 6,000 to 9,000 interrupts a
+second while downloading, spread evenly over the four cores: the BCM2835's
+peripheral interrupt controller has no affinity, and the Pi kernel turns
+its routing to the next core on every interrupt
+(`bcm2836_arm_irqchip_spin_gpu_irq`). So it cannot be pinned to a core
+from user space; keeping the shell off one would take a kernel change.
+
+**TLS** asks for ChaCha20-Poly1305 first (`/etc/ssl/openssl.cnf`, written
+by `post-build.sh`). The A53 has no AES instructions, so AES-GCM, OpenSSL's
+first choice, runs in software; YouTube's, Google's video, Cloudflare's and
+GitHub's servers all took AES-GCM from OpenSSL's default order and all take
+ChaCha when it comes first (checked from a PC). curl (Music, updates),
+Python (yt-dlp) and git follow it.
+
+**Measuring it on the handheld.** `: > /run/catalyst-pacing` has the shell
+add a line there for each motion as it settles: its frames, from the key
+going down (the kernel's own time for it) to the first frame handed to the
+panel, the gaps between frames, those that ran late, the clock as the
+first began and as the last ended, and whether the boost was on.
+`catalyst-shell --sched-bench clock` gives the boost's own delay (the floor
+raised to the clock having changed) and a frame's cost at 600 and 1000 MHz;
+`power`, from the fuel gauge, the draw at rest at each clock and drawing
+without a pause, so what a frame costs in energy at each; `io`, a settings
+save's and an uncached read's latency, quiet and behind a song being saved
+or an update being written. `scripts/device-sched-check.sh` runs them, and
+measures scenarios (rest, scrolling, page turns, music with the screen
+dark, the model answering, the boost off and on) for the draw, the time at
+each clock, the processor, interrupts and the frames.
 
 ## The processor's share: NEON
 
@@ -1054,7 +1164,24 @@ It is automatic, and never a risk:
 - A software renderer is never used in its place, and if the GPU's driver has
   not loaded yet when the shell starts, the shell looks again when its device
   (`/dev/dri/renderD128`) appears.
-- Any error while drawing hands everything back to the processor for good.
+- Any error while drawing (its memory running out, say: the GPU's textures
+  come from the kernel's contiguous pool, CMA, which the camera and the
+  binner share) finishes that frame on the processor, with nothing of the
+  GPU's half-drawn left in it. The GPU is let go (its context and textures
+  back to the pool) and the processor draws for 30 s before the GPU is tried
+  again, then 60 s after a second failure, doubling to half an hour, and
+  back to 30 s once it has held for ten minutes. Each failure is logged
+  once, never each frame. While the processor draws, nothing is read back
+  from the GPU.
+- Its textures are only those of the jobs it takes: the glass's (the scene
+  and two frosts, 0.33 MB) only if glass is the GPU's job, a growing
+  window's two pictures (0.43 MB) for 30 s after the last window grew, and
+  Flow's atlases (2.9 MB) for a minute after Flow was last on screen.
+  `catalyst-shell --about` gives what it holds now (`textures … mb`). The
+  kernel reports the pool as `CmaTotal` and `CmaFree` in `/proc/meminfo`;
+  the boot line asks for 64 MB of it (`cma=64M`, which this kernel takes
+  over the Device Tree's `linux,cma` node, saying "Skipping dt
+  linux,cma-default" as it boots).
 - Memory: Mesa is loaded only once a GPU device is found, so without one, or
   with Graphics set to the processor, it costs nothing (the emulator's idle
   figures are unchanged). With it, the shell's share grows by the driver's.
