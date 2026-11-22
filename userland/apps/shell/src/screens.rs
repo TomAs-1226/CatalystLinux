@@ -693,8 +693,8 @@ impl Home {
         let (t, ty) = (g.tokens, g.ty);
         let off = (self.flow.pos.value() - self.focus as f32).abs();
         let speed = self.flow.pos.velocity().abs();
-        let shown = (1.0 - off * 2.0).clamp(0.0, 1.0) * (1.0 - 3.0 * self.flow.openness()).clamp(0.0, 1.0) * (1.0 - speed / 6.0).clamp(0.0, 1.0);
-        if shown > 0.01 && count > 0 {
+        let shown = (1.0 - off * 2.0).clamp(0.0, 1.0) * (1.0 - 6.0 * self.flow.openness().abs()).clamp(0.0, 1.0) * (1.0 - speed / 6.0).clamp(0.0, 1.0);
+        if shown > 0.01 && count > 0 && !self.flow.waiting() {
             let (status, attention) = self.status(self.focus, robot);
             let status = g.text.fit(&status, &ty.caption, W - 4.0 * PAD);
             // Clear of the page track at the bottom (its platter starts 13 px up).

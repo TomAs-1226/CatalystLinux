@@ -4294,10 +4294,12 @@ pub(crate) mod tests {
         let mut shell = flow();
         shell.draw();
         assert!(shell.places.pager.is_some_and(|p| (p.w - SCRUB_W).abs() < 0.5), "a track, not 39 dots");
-        // At rest nothing moves, so nothing is drawn and standby comes as ever.
+        // At rest nothing moves: no frames are asked for (only what the
+        // robot or the clock says may still be drawn), and standby comes as ever.
         shell.key(Key::Right);
         frames(&mut shell, 90, FRAME);
-        assert!(!shell.tick(FRAME) && !shell.moving(), "the flow at rest asks for no frames");
+        shell.tick(FRAME);
+        assert!(!shell.moving() && !shell.animating(), "the flow at rest asks for no frames");
         let mut shell = flow();
         shell.settings.screen_off = 30;
         frames(&mut shell, 40 * 4, 0.25);

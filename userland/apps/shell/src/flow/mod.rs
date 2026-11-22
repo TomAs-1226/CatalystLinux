@@ -49,6 +49,11 @@ const LIFT: f32 = 28.0;
 /// The other cards draw this much further aside while one is enlarged.
 const MAKE_WAY: f32 = 52.0;
 
+/// Paint the cards' pictures on the thread that asks rather than one of
+/// their own: for the previews, whose frames run far quicker than the
+/// clock and must each show what the handheld would. (The tests always do.)
+pub static PAINT_HERE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// How many cards either side of the middle are drawn: the sixth out is
 /// already wholly behind the fifth and past the panel's edge.
 const REACH: f32 = 5.5;
@@ -390,7 +395,8 @@ impl Flow {
         let (send, painted) = std::sync::mpsc::channel();
         let specs = wanted.0.clone();
         // The tests (and a system that will not start a thread) paint them here and now.
-        let started = !cfg!(test) && std::thread::Builder::new().name("flow-cards".into()).spawn(move || send.send(paint(specs)).ok()).is_ok();
+        let here = cfg!(test) || PAINT_HERE.load(std::sync::atomic::Ordering::Relaxed);
+        let started = !here && std::thread::Builder::new().name("flow-cards".into()).spawn(move || send.send(paint(specs)).ok()).is_ok();
         if started {
             self.painting = Some((painted, wanted));
             return false;

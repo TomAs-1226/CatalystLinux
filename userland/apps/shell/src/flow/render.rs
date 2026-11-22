@@ -107,7 +107,9 @@ fn scale(p: u32, f: u32) -> u32 {
     rb | ag
 }
 
-/// The ground, its glow and the floor, over the flow's columns.
+/// The ground, its glow and the floor, over the flow's columns (with
+/// nothing on it: the bench's and the tests' measure).
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
 pub fn background(px: &mut [u32], scene: &Scene) {
     ground(px, scene, false);
 }

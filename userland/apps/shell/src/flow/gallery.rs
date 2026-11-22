@@ -105,6 +105,8 @@ pub fn shots(dir: &Path) {
     use crate::gfx::TextSize::{Compact, Large, Standard};
     use Key::*;
     std::fs::create_dir_all(dir).expect("create the preview folder");
+    // Each frame as the handheld would show it: the cards painted in time.
+    super::PAINT_HERE.store(true, std::sync::atomic::Ordering::Relaxed);
     // Whatever the keys change is kept in a folder of its own.
     let own = std::env::temp_dir().join(format!("catalyst-flow-shots-{}", std::process::id()));
     std::fs::create_dir_all(&own).ok();
@@ -246,6 +248,7 @@ pub fn shots(dir: &Path) {
 pub fn bench() {
     use std::time::Instant;
     use Key::*;
+    super::PAINT_HERE.store(true, std::sync::atomic::Ordering::Relaxed);
     let own = std::env::temp_dir().join(format!("catalyst-flow-bench-{}", std::process::id()));
     std::fs::create_dir_all(&own).ok();
     std::env::set_var("CATALYST_CONF", own.join("robot"));
