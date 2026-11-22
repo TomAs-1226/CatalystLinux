@@ -33,7 +33,10 @@ const CLIENT_VERSION: &str = "1.02";
 pub const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
 const PLAYER: &str = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
 const VISITOR: &str = "https://www.youtube.com/youtubei/v1/visitor_id?prettyPrint=false";
-const VISITOR_FILE: &str = "/data/music/visitor";
+/// The visitor id YouTube gave, kept in Music's folder (0600).
+fn visitor_file() -> std::path::PathBuf {
+    super::store::root().join("visitor")
+}
 
 const QUICK_SECONDS: u64 = 15;
 const SLOWER_SECONDS: u64 = 45;
@@ -158,21 +161,21 @@ fn visitor_id() -> Result<String, String> {
     if let Some(v) = VISITOR_ID.lock().unwrap().clone() {
         return Ok(v);
     }
-    if let Some(v) = std::fs::read_to_string(VISITOR_FILE).ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()) {
+    if let Some(v) = std::fs::read_to_string(visitor_file()).ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()) {
         *VISITOR_ID.lock().unwrap() = Some(v.clone());
         return Ok(v);
     }
     let answer = post(VISITOR, &json!({"context": {"client": {"clientName": CLIENT, "clientVersion": CLIENT_VERSION, "hl": "en"}}}), &[])?;
     let v = answer["responseContext"]["visitorData"].as_str().filter(|s| !s.is_empty()).ok_or("youtube gave no visitor id")?.to_owned();
-    std::fs::create_dir_all(super::DIR).ok();
-    crate::sys::write_private(std::path::Path::new(VISITOR_FILE), v.as_bytes()).ok();
+    std::fs::create_dir_all(super::store::root()).ok();
+    crate::sys::write_private(&visitor_file(), v.as_bytes()).ok();
     *VISITOR_ID.lock().unwrap() = Some(v.clone());
     Ok(v)
 }
 
 fn forget_visitor() {
     *VISITOR_ID.lock().unwrap() = None;
-    std::fs::remove_file(VISITOR_FILE).ok();
+    std::fs::remove_file(visitor_file()).ok();
 }
 
 /// A JSON request as the visionOS app makes it, through curl (headers in a
@@ -216,7 +219,7 @@ fn post(url: &str, body: &Value, extra: &[(&str, &str)]) -> Result<Value, String
 
 /// yt-dlp: `client` (None: its own choice, with QuickJS for the puzzle).
 fn ytdlp(id: &str, client: Option<&str>, signed_in: bool, manner: Manner, seconds: u64) -> Result<Stream, String> {
-    std::fs::create_dir_all(std::path::Path::new(super::DIR).join("cache")).ok();
+    std::fs::create_dir_all(super::store::root()).ok();
     let mut cmd = Command::new("python3");
     cmd.arg(super::resolver())
         .args(["--quiet", "--no-warnings", "--no-playlist", "--no-progress", "-f", "bestaudio[acodec=opus]/bestaudio[ext=m4a]/bestaudio"])

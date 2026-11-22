@@ -445,6 +445,40 @@ pub fn download(url: &str, part: &Path, total: Option<u64>, progress: &mut dyn F
 mod tests {
     use super::*;
 
+    /// YouTube itself: a song found and fetched in ranges, whole, at full
+    /// speed, and a stop part way goes on from there.
+    /// Over the network: `cargo test -- --ignored live_fetch`.
+    #[test]
+    #[ignore]
+    fn live_fetch_a_song_in_ranges_whole_and_resumed() {
+        let id = "xukbqwRuN5w";
+        let started = Instant::now();
+        let s = lookup::find(id, false, false, &|_| {}).unwrap();
+        let found = started.elapsed();
+        let part = store::root().join("live-fetch.webm.part");
+        std::fs::create_dir_all(store::root()).unwrap();
+        std::fs::remove_file(&part).ok();
+        // Stopped after the first megabyte or so…
+        let mut said = 0;
+        let r = download(&s.url, &part, s.bytes, &mut |have| {
+            said += 1;
+            have < 1_200_000
+        });
+        assert!(matches!(r, Dl::Stopped), "stopped part way");
+        let kept = std::fs::metadata(&part).unwrap().len();
+        assert!(kept >= 1_200_000 && kept < s.bytes.unwrap(), "{kept}");
+        // …and on from there to the end.
+        let again = Instant::now();
+        let r = download(&s.url, &part, s.bytes, &mut |_| true);
+        let took = again.elapsed();
+        assert!(matches!(r, Dl::Done(n) if Some(n) == s.bytes), "whole");
+        let bytes = std::fs::read(&part).unwrap();
+        assert_eq!(bytes.len() as u64, s.bytes.unwrap());
+        assert_eq!(&bytes[..4], &[0x1A, 0x45, 0xDF, 0xA3], "a WebM from its first byte");
+        println!("found in {:.2} s; the rest ({} KB) in {:.2} s: {:.1} MB/s; told {said} times", found.as_secs_f32(), (bytes.len() as u64 - kept) / 1000, took.as_secs_f32(), (bytes.len() as u64 - kept) as f32 / 1e6 / took.as_secs_f32());
+        std::fs::remove_file(&part).ok();
+    }
+
     #[test]
     fn a_song_on_the_card_needs_no_fetching() {
         let t = Track { id: "notcached01".into(), ..Track::default() };

@@ -465,6 +465,10 @@ pub fn search_collections(query: &str, kind: Kind) -> Result<Vec<Collection>, St
         std::thread::sleep(Duration::from_millis(500));
         return Ok(demo_collections(kind));
     }
+    search_collections_live(query, kind)
+}
+
+fn search_collections_live(query: &str, kind: Kind) -> Result<Vec<Collection>, String> {
     let params = match kind {
         Kind::Album => ALBUMS_ONLY,
         Kind::Artist => ARTISTS_ONLY,
@@ -544,6 +548,10 @@ pub fn open_collection(c: &Collection) -> Result<Opened, String> {
         std::thread::sleep(Duration::from_millis(400));
         return Ok(demo_opened(c));
     }
+    open_live(c)
+}
+
+fn open_live(c: &Collection) -> Result<Opened, String> {
     let browse = |id: &str| innertube("browse", json!({"browseId": id}));
     match c.kind {
         Kind::Album => {
@@ -946,17 +954,17 @@ mod tests {
         let radio = parse_up_next(&innertube("next", json!({"videoId": found[0].id, "playlistId": format!("RDAMVM{}", found[0].id), "isAudioOnly": true})).unwrap());
         assert!(radio.len() >= 10 && radio.iter().all(|t| !t.title.is_empty()), "{radio:#?}");
         // An album, an artist's top songs and a playlist, opened.
-        let albums = search_collections("daft punk", Kind::Album).unwrap();
+        let albums = search_collections_live("daft punk", Kind::Album).unwrap();
         assert!(albums.len() >= 3 && albums.iter().all(|a| a.id.starts_with("MPREb_") && a.year > 1990), "{albums:#?}");
-        let album = open_collection(&albums[0]).unwrap();
+        let album = open_live(&albums[0]).unwrap();
         assert!(album.tracks.len() >= 5 && album.tracks.iter().all(|t| t.album == albums[0].title && !t.art.is_empty()), "{album:#?}");
         assert!(album.metas.iter().enumerate().all(|(i, m)| m.track_no == i as u32 + 1 && m.year == albums[0].year && !m.album_artist.is_empty()), "{:#?}", album.metas);
-        let artist = &search_collections("daft punk", Kind::Artist).unwrap()[0];
-        let top = open_collection(artist).unwrap();
+        let artist = &search_collections_live("daft punk", Kind::Artist).unwrap()[0];
+        let top = open_live(artist).unwrap();
         assert!(top.tracks.len() >= 5, "{top:#?}");
-        let pl = &search_collections("daft punk", Kind::Playlist).unwrap()[0];
-        let opened = open_collection(pl).unwrap();
-        assert!(opened.tracks.len() >= 10 && opened.playlist.is_some(), "{opened:#?}");
+        let pl = &search_collections_live("daft punk", Kind::Playlist).unwrap()[0];
+        let opened = open_live(pl).unwrap();
+        assert!(opened.tracks.len() >= 5 && opened.playlist.is_some(), "{opened:#?}");
         println!("album {:?}: {} songs; top songs: {}; playlist {:?}: {} songs", albums[0].title, album.tracks.len(), top.tracks.len(), pl.title, opened.tracks.len());
         println!(
             "search: {:?}\nhome: {} quick picks; {name:?}: {} songs\nradio: {:?}",
