@@ -79,6 +79,8 @@ static CLIENT: AtomicU32 = AtomicU32::new(0);
 static TRYING: AtomicU32 = AtomicU32::new(0);
 /// Nobody is looking: stop once nothing is being written.
 static AWAY: AtomicBool = AtomicBool::new(false);
+/// Asked to stop while a model was loading: the load, once done, gives up.
+static STOP_ASKED: AtomicBool = AtomicBool::new(false);
 
 fn server() -> std::sync::MutexGuard<'static, Option<Running>> {
     SERVER.lock().unwrap_or_else(|e| e.into_inner())
@@ -120,6 +122,8 @@ pub fn start() -> Result<String, String> {
     // Someone is asking: someone is looking.
     AWAY.store(false, Ordering::SeqCst);
     let mut running = server();
+    // A stop asked for before this start held the lock was for the one before.
+    STOP_ASKED.store(false, Ordering::SeqCst);
     if let Some(r) = running.as_mut() {
         // Held still while the processor cools, it cannot say it is well:
         // it is, and carries on once let go.
@@ -140,6 +144,11 @@ pub fn start() -> Result<String, String> {
     let _loading = crate::liveactivity::task(crate::liveactivity::Kind::Assistant, format!("Loading {}", model.name), "on-device model");
     let mut child = lm::spawn_server(&dir, model)?;
     lm::wait_ready(&mut child, START_WITHIN)?;
+    // Stopped while it loaded (another model chosen, it removed): gone.
+    if STOP_ASKED.swap(false, Ordering::SeqCst) {
+        lm::stop_server(&mut child);
+        return Err("stopped".into());
+    }
     let (pid, cpu) = (child.id(), cpu_time(child.id()));
     *running = Some(Running { child, last: Instant::now(), cpu });
     PID.store(pid, Ordering::SeqCst);
@@ -148,9 +157,19 @@ pub fn start() -> Result<String, String> {
     Ok(lm::base_url())
 }
 
-/// Stop the model now, if this shell started it: its memory back.
+/// Stop the model now, if this shell started it: its memory back. Never
+/// waits on a model loading (it is called on the UI's thread): that load
+/// is asked to give up once it is done instead.
 pub fn stop() {
-    if let Some(mut r) = server().take() {
+    let mut running = match SERVER.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            STOP_ASKED.store(true, Ordering::SeqCst);
+            return;
+        }
+    };
+    if let Some(mut r) = running.take() {
         PID.store(0, Ordering::SeqCst);
         lm::stop_server(&mut r.child);
     }

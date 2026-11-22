@@ -2845,7 +2845,9 @@ impl Shell {
         let awake = self.standby.state() == crate::standby::State::Awake;
         // Where it would go, looked at only while the key is down. Not over
         // the start, the tour, the control centre or the recent apps.
-        let in_the_way = self.intro.is_some() || self.tour.is_some() || self.switcher.is_some() || self.control.visible();
+        // Never under the lock screen or StandBy: the microphone and the
+        // assistant are past the passcode.
+        let in_the_way = self.intro.is_some() || self.tour.is_some() || self.switcher.is_some() || self.control.visible() || self.lock.covering() || self.faces.showing();
         let here = match self.stack.last() {
             Some((top, _)) if down && !in_the_way && !top.full_screen() => {
                 Some(Target { kind: top.dictation().unwrap_or(Dictation::Question), depth: self.stack.len(), title: top.title().to_owned() })
@@ -2880,6 +2882,11 @@ impl Shell {
     /// all).
     fn heard(&mut self, text: &str, target: &crate::voice::Target) {
         use crate::voice::Dictation;
+        // Locked while it was being written down (Tab held, the screen
+        // gone off): what was said goes nowhere.
+        if self.lock.covering() || self.faces.showing() {
+            return;
+        }
         let takes = self.stack.last().and_then(|(top, _)| top.dictation());
         let same_page = self.stack.len() == target.depth && self.stack.last().is_some_and(|(top, _)| top.title() == target.title);
         let at = match (takes, target.kind) {
@@ -5591,6 +5598,28 @@ pub(crate) mod tests {
         assert!(!shell.locked());
         assert_eq!(shell.message.as_ref().map(|(m, _)| m.as_str()), Some("time to queue for Q31"), "said once unlocked");
         assert_eq!(shell.lock.notices(), 0);
+    }
+
+    #[test]
+    fn push_to_talk_never_listens_or_asks_under_the_lock() {
+        let mut shell = with_passcode("2468");
+        assert!(shell.locked(), "a passcode: locked from the start");
+        // The talk key held and let go under the lock screen: no microphone,
+        // no assistant opened beneath it, still locked.
+        crate::voice::set_talk_key(true);
+        frames(&mut shell, 60, FRAME);
+        assert!(!shell.voice.listening(), "no listening under the lock");
+        crate::voice::set_talk_key(false);
+        frames(&mut shell, 120, FRAME);
+        assert!(shell.stack.iter().all(|(s, _)| s.title() != "Assistant"), "nothing asked past the passcode");
+        assert!(shell.locked());
+        // Unlocked, it listens as ever.
+        type_code(&mut shell, "2468");
+        assert!(!shell.locked());
+        crate::voice::set_talk_key(true);
+        frames(&mut shell, 60, FRAME);
+        assert!(shell.voice.listening());
+        crate::voice::set_talk_key(false);
     }
 
     #[test]
