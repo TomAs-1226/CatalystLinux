@@ -656,10 +656,13 @@ fn clean(text: &str) -> String {
     }
 }
 
-/// A reminder about the checklist opens it.
+/// A reminder about the checklist opens it; one for a briefing, that.
 fn link_for(text: &str) -> Link {
-    if text.to_lowercase().contains("checklist") {
+    let lower = text.to_lowercase();
+    if lower.contains("checklist") {
         Link::Checklist
+    } else if lower.contains("briefing") {
+        Link::Briefing
     } else {
         Link::None
     }

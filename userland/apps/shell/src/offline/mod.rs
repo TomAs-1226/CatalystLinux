@@ -357,11 +357,12 @@ fn word(m: &dyn Model, tier: model::Tier, question: &str, lib: &Library, answer:
 /// Not a question about the robot: the model's own answer, said to be
 /// that; or with no model, what offline answers are.
 fn chat(question: &str, plan: Plan, model: Option<&dyn Model>, on: &mut dyn FnMut(Event)) -> Answer {
-    let help = "Offline, I answer from the match logs on this handheld: ask what went wrong in a match, why it browned out, whether a motor ran hot, what CAN did, or to compare two matches. Ctrl R gives the newest match's report.";
+    let help = "Offline, I answer from the match logs on this handheld: ask what went wrong in a match, why it browned out, whether a motor ran hot, what CAN did, or to compare two matches. Ctrl R gives the newest match's report, and “brief me” a briefing.";
     let blank = |text: String, basis: &str| Answer { text, report: None, basis: basis.to_owned(), worded_by: None, lines: Vec::new(), plan: plan.clone(), draft: None, routed_by_model: false };
     let Some(m) = model.filter(|_| plan.intent == Intent::Chat) else { return blank(help.into(), "offline") };
     on(Event::Wording(m.name()));
-    let body = model::body(crate::ai::LOCAL_SYSTEM, &[("user", question)], 160, None);
+    // With the tiny version of what the person asked it to remember.
+    let body = model::body(&crate::ai::local_system(), &[("user", question)], 160, None);
     match m.chat(&body, 90).and_then(|v| model::reply(&v)) {
         Ok((text, ..)) if !words::clean(&text).is_empty() => {
             let mut a = blank(words::clean(&text), &format!("{}'s own knowledge, not the logs", m.name().to_lowercase()));

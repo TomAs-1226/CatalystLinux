@@ -407,6 +407,13 @@ impl TaskHandle {
         store::with(|tasks| tasks.iter_mut().filter(|t| t.id == self.id).for_each(|t| t.progress = Some(fraction.clamp(0.0, 1.0))));
     }
 
+    /// What it is doing now ("step 2 · setting a reminder"): the card's line;
+    /// the compact island takes what comes before the first " · ".
+    pub fn detail(&self, words: impl Into<String>) {
+        let words = words.into();
+        store::with(|tasks| tasks.iter_mut().filter(|t| t.id == self.id).for_each(|t| t.detail.clone_from(&words)));
+    }
+
     /// Done: it shows so, in these words, for a moment.
     pub fn done(self, words: impl Into<String>) {
         let words = words.into();
@@ -454,7 +461,7 @@ pub fn from_task(t: &Task) -> Activity {
             let elapsed = clock_text(t.began.elapsed().as_secs_f64().floor());
             let short = match t.progress {
                 Some(p) => format!("{:.0}%", p * 100.0),
-                None if t.kind == Kind::Assistant => format!("{} {elapsed}", if t.title.starts_with("Loading") { "loading" } else { t.detail.as_str() }),
+                None if t.kind == Kind::Assistant => format!("{} {elapsed}", if t.title.starts_with("Loading") { "loading" } else { t.detail.split(" · ").next().unwrap_or_default() }),
                 None => t.detail.clone(),
             };
             let mut a = Activity::new(t.kind, &id, priority, Mark::Icon(icon, Tint::Ice), t.title.clone(), t.detail.clone(), short);

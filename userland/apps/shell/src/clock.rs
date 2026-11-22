@@ -157,6 +157,21 @@ pub fn soonest() -> Option<(f64, f64, usize)> {
     })
 }
 
+/// The timers counting down (the assistant stops them): each one's id,
+/// length and seconds left.
+pub fn running_timers() -> Vec<(u32, f64, f64)> {
+    shared(|s| s.timers.iter().filter(|t| t.running()).map(|t| (t.id, t.total, t.left())).collect())
+}
+
+/// A timer stopped and taken away; whether there was one.
+pub fn remove_timer(id: u32) -> bool {
+    shared(|s| {
+        let before = s.timers.len();
+        s.timers.retain(|t| t.id != id);
+        s.timers.len() < before
+    })
+}
+
 /// The stopwatch, while it runs: its time.
 pub fn stopwatch_running() -> Option<f64> {
     shared(|s| s.stopwatch.running().then(|| s.stopwatch.elapsed()))

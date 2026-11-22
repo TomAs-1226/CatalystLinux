@@ -40,8 +40,22 @@
 //! Conversations are kept (`/data/assistant/chats`, the last 20) in the
 //! service's own form, so one reopened carries on where it stopped.
 //!
+//! It acts on the handheld too (`device`): reminders, timers, notes, music,
+//! apps, settings, downloads, several in one turn, each a row as it is
+//! done, with a live activity while it works; what could change something
+//! asks first on the confirm page. It briefs (`briefing`): the next match or
+//! the day at a glance, made by a template offline. And it remembers what it
+//! is told to (`memory`), in a short plain file the person can read and
+//! delete, never a secret.
+//!
 //! The simulator answers from a script with the demo robot, unless told to
 //! ask the real services (`CATALYST_AI_LIVE`).
+
+pub mod briefing;
+pub mod device;
+pub mod memory;
+#[cfg(not(target_arch = "aarch64"))]
+pub mod shots;
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -106,12 +120,24 @@ The team's robot runs FRC Catalyst, which publishes its telemetry under /Catalys
 
 You can search the web and read pages. Use them for anything current or outside this handheld: FRC rules and the game manual, parts and their specifications, WPILib and vendor documentation, events and results. Say where an answer came from; the handheld lists the pages under it.
 
-Actions are the team's saved shell commands on this handheld. Run one when it answers the question or the person asks for it. Some are critical because they could change something; the handheld asks the person before those run, and they may decline. Then say what it would have done and leave it. Do not run a critical Action that the person did not ask for and the question does not need.";
+Actions are the team's saved shell commands on this handheld. Run one when it answers the question or the person asks for it. Some are critical because they could change something; the handheld asks the person before those run, and they may decline. Then say what it would have done and leave it. Do not run a critical Action that the person did not ask for and the question does not need.
+
+You can act on the handheld when the person asks: set reminders (in their own words, match cues included), start or stop timers, write notes, play music or download a playlist, album or artist, open an app or a Settings page, change a setting, start a waiting download. Do everything they asked in one turn, calling the tools together when they do not depend on each other; each shows on the screen as it is done. Changes that could matter (Wi-Fi, Bluetooth, a system update, forgetting everything) are shown to the person first, and a no means leave it. Afterwards say briefly what was done and anything that is waiting, in a sentence or two.
+
+When asked to brief them, call briefing: the handheld shows its data as a card, so say only the one to three things that matter most.
+
+When the person tells you something to remember, or a lasting preference or fact about themselves or the team (\"remember our robot is called Numbers\", \"I like short answers\", \"my team is 5805\"), keep it with memory_save; \"forget that\" is memory_forget. Never keep a password, passcode, key or token, and say so if asked to.";
 
 /// For the on-device model asked something not about the robot: small,
 /// offline, with nothing to look at (questions about the robot go through
 /// `crate::offline`, which gives it the facts).
 pub(crate) const LOCAL_SYSTEM: &str = "You are a small assistant running offline on a pocket Linux handheld that an FRC robotics team uses. Answer in two or three short, plain sentences. You cannot see the robot, the web or any files: if the question needs them, say so in one sentence.";
+
+/// The on-device model's prompt, with the tiny version of what it was told
+/// to remember.
+pub(crate) fn local_system() -> String {
+    format!("{LOCAL_SYSTEM}{}", memory::tiny(&memory::load(&memory::path())))
+}
 
 /// For Browse: the page or the answer, in a form the handheld lays out.
 pub(crate) const BROWSE_SYSTEM: &str = "You are the web browser on Catalyst Linux, a pocket handheld with a 320 by 170 pixel screen and a keyboard, used by an FRC robotics team.
@@ -315,7 +341,7 @@ pub(crate) fn demo() -> bool {
 /// The tools, as (name, what it does, its input's JSON schema).
 fn tool_specs() -> Vec<(&'static str, &'static str, Value)> {
     let nothing = || json!({"type": "object", "properties": {}, "required": [], "additionalProperties": false});
-    vec![
+    let mut specs = vec![
         (
             "robot_status",
             "How the robot stands right now: whether it is linked to this handheld and how, its address and team, the round trip, and every health check firing (FRC Catalyst's alerts, worst first). Also counts the values in each group the robot publishes, to read with robot_values.",
@@ -374,7 +400,10 @@ fn tool_specs() -> Vec<(&'static str, &'static str, Value)> {
                 "reason": {"type": "string", "description": "Why you are running it, in a few words the person will read."}
             }, "required": ["name", "reason"], "additionalProperties": false}),
         ),
-    ]
+    ];
+    // Those that act on the handheld (and brief, and remember).
+    specs.extend(device::specs());
+    specs
 }
 
 /// The robot's address without a port: the robot's own, else the team's, else
@@ -632,9 +661,14 @@ enum Plan {
     /// An Action run, on a thread, with the model's reason for it; a
     /// critical one only once the person says yes.
     Run { saved: Saved, line: String, reason: String, ask: bool },
+    /// A tool that acts on the handheld (`device`).
+    Device(device::Plan),
 }
 
-fn plan(call: &Call, robot: &Robot, actions: &[Saved]) -> Plan {
+fn plan(call: &Call, robot: &Robot, actions: &[Saved], cx: &device::Ctx) -> Plan {
+    if let Some(p) = device::plan(call, cx) {
+        return Plan::Device(p);
+    }
     match call.name.as_str() {
         "robot_status" => Plan::Now(Ok(robot_status(robot).to_string())),
         "robot_values" => Plan::Now(Ok(robot_values(robot, call.input["prefix"].as_str().unwrap_or_default()).to_string())),
@@ -844,6 +878,9 @@ pub struct Chat {
     service: Service,
     mode: Mode,
     items: Vec<Value>,
+    /// Its system prompt, with what was remembered when it began: the same
+    /// for the whole conversation, so the service's cache of it holds.
+    system: String,
 }
 
 /// A page's host, for a step's words: "thebluealliance.com".
@@ -874,7 +911,20 @@ impl Chat {
     }
 
     pub fn for_mode(service: Service, mode: Mode) -> Self {
-        Chat { service, mode, items: Vec::new() }
+        Self::with_memory(service, mode, &[])
+    }
+
+    /// A conversation that knows what the person asked it to remember.
+    pub fn with_memory(service: Service, mode: Mode, remembered: &[String]) -> Self {
+        Chat { service, mode, items: Vec::new(), system: Self::system_for(service, mode, remembered) }
+    }
+
+    fn system_for(service: Service, mode: Mode, remembered: &[String]) -> String {
+        match (service, mode) {
+            (Service::Local, _) => format!("{LOCAL_SYSTEM}{}", memory::tiny(remembered)),
+            (_, Mode::Browse) => BROWSE_SYSTEM.to_owned(),
+            (_, Mode::Assistant) => format!("{SYSTEM}{}", memory::for_prompt(remembered)),
+        }
     }
 
     pub fn service(&self) -> Service {
@@ -905,16 +955,12 @@ impl Chat {
     }
 
     /// A conversation again from its kept items.
-    fn with_items(service: Service, mode: Mode, items: Vec<Value>) -> Self {
-        Chat { service, mode, items }
+    fn with_items(service: Service, mode: Mode, items: Vec<Value>, remembered: &[String]) -> Self {
+        Chat { service, mode, items, system: Self::system_for(service, mode, remembered) }
     }
 
-    fn system(&self) -> &'static str {
-        match (self.service, self.mode) {
-            (Service::Local, _) => LOCAL_SYSTEM,
-            (_, Mode::Browse) => BROWSE_SYSTEM,
-            (_, Mode::Assistant) => SYSTEM,
-        }
+    fn system(&self) -> &str {
+        &self.system
     }
 
     /// The request for the next answer.
@@ -1372,6 +1418,17 @@ fn demo_reply(service: Service, body: &Value) -> Value {
     if ["rule", "manual", "autonomous"].iter().any(|w| lower.contains(w)) {
         return demo_web(service, Some("2026 FRC REBUILT match timing autonomous"), None, DEMO_WEB_ANSWER, &[(DEMO_MANUAL_TITLE, DEMO_MANUAL_URL)]);
     }
+    // Asked to do something on the handheld, to brief, to remember: its
+    // tools (all of them in one turn), then what they said they did.
+    let system = body["system"].as_str().or_else(|| body["instructions"].as_str()).unwrap_or_default();
+    if let Some(calls) = demo_device(&question, system) {
+        let (text, calls) = match (rounds, calls) {
+            (0, Err(answer)) => (answer, Vec::new()),
+            (0, Ok(calls)) => (String::new(), calls),
+            _ => (demo_said(&demo_results(service, body)), Vec::new()),
+        };
+        return demo_shape(service, rounds, &text, &calls);
+    }
     let deploy = lower.contains("deploy");
     // Asked in Japanese (or Chinese): answered in Japanese, at once.
     let japanese = question.chars().any(bezel::lines::breaks_anywhere);
@@ -1384,6 +1441,11 @@ fn demo_reply(service: Service, body: &Value) -> Value {
         (false, 1) => ("", vec![("run_action", json!({"name": "Ping the robot", "reason": "to check the link is steady"}))]),
         (false, _) => (DEMO_ANSWER, vec![]),
     };
+    demo_shape(service, rounds, text, &calls)
+}
+
+/// A scripted reply in the service's own shape: its words, then its calls.
+fn demo_shape(service: Service, rounds: usize, text: &str, calls: &[(&str, Value)]) -> Value {
     match service {
         Service::Claude | Service::Local => {
             let mut content = Vec::new();
@@ -1405,6 +1467,125 @@ fn demo_reply(service: Service, body: &Value) -> Value {
             }
             json!({"object": "response", "status": "completed", "model": service.model(), "output": output})
         }
+    }
+}
+
+/// What the scripted service does for a question that asks the handheld to
+/// do something (to brief, to remember): the calls, all in its first turn;
+/// or, for "what do you remember", the answer at once, from its prompt.
+/// `None` for any other question.
+#[allow(clippy::type_complexity)]
+fn demo_device(question: &str, system: &str) -> Option<Result<Vec<(&'static str, Value)>, String>> {
+    let lower = question.to_lowercase();
+    // The words after `needle`, as typed (or lower case, where case changed lengths).
+    let after = |needle: &str| -> Option<String> {
+        let at = lower.find(needle)? + needle.len();
+        let from = if question.len() == lower.len() { question.get(at..) } else { lower.get(at..) };
+        from.map(|s| s.trim().to_owned())
+    };
+    let upto = |s: String, stops: &[&str]| -> String {
+        let cut = stops.iter().filter_map(|w| s.to_lowercase().find(w)).min().unwrap_or(s.len());
+        s[..cut].trim().trim_end_matches(['.', '?', '!']).to_owned()
+    };
+    match memory::command(question) {
+        Some(memory::Command::List) => {
+            let kept: Vec<&str> = system.lines().filter_map(|l| l.strip_prefix("- ")).collect();
+            return Some(Err(match kept.len() {
+                0 => "Nothing yet: tell me to remember something and I'll keep it on the handheld.".to_owned(),
+                _ => format!("I remember:\n{}", kept.iter().map(|k| format!("· {k}")).collect::<Vec<_>>().join("\n")),
+            }));
+        }
+        Some(memory::Command::Forget(what)) if what == "everything" => return Some(Ok(vec![("memory_forget", json!({"fact": "", "everything": true}))])),
+        Some(memory::Command::Forget(what)) => return Some(Ok(vec![("memory_forget", json!({"fact": if what.is_empty() { "that".to_owned() } else { what }, "everything": false}))])),
+        Some(memory::Command::Remember(fact)) => return Some(Ok(vec![("memory_save", json!({"fact": memory::as_kept(&fact), "replaces": ""}))])),
+        None => {}
+    }
+    if let Some(kind) = briefing::asked(question) {
+        return Some(Ok(vec![("briefing", json!({"kind": kind.map_or("auto", briefing::Kind::name)}))]));
+    }
+    let mut calls: Vec<(&'static str, Value)> = Vec::new();
+    if let Some(rest) = after("download ") {
+        if lower.contains("update") {
+            calls.push(("start_download", json!({"what": "update"})));
+        } else {
+            let name = upto(rest, &[" and ", ","]);
+            let kind = if name.to_lowercase().ends_with(" album") { "album" } else if lower.contains("songs by") || name.to_lowercase().ends_with(" artist") { "artist" } else { "playlist" };
+            let mut query = name.clone();
+            for cut in ["my ", "our ", "the "] {
+                if query.to_lowercase().starts_with(cut) {
+                    query = query[cut.len()..].to_owned();
+                }
+            }
+            for cut in [" playlist", " album", " artist"] {
+                if query.to_lowercase().ends_with(cut) {
+                    query.truncate(query.len() - cut.len());
+                }
+            }
+            calls.push(("music_download", json!({"query": query.trim(), "kind": kind})));
+        }
+    }
+    if let Some(rest) = after("remind me to ").or_else(|| after("remind me ")) {
+        calls.push(("reminder_add", json!({"text": rest.trim_end_matches(['.', '!'])})));
+    }
+    if lower.contains("timer") {
+        let stop = lower.contains("stop") || lower.contains("cancel");
+        let length = lower.split_whitespace().collect::<Vec<_>>().windows(2).find(|w| w[0].chars().all(|c| c.is_ascii_digit()) && w[1].starts_with("min")).map(|w| format!("{} min", w[0])).unwrap_or_default();
+        calls.push(("timer", json!({"action": if stop { "stop" } else { "start" }, "length": if length.is_empty() && !stop { "5 min".to_owned() } else { length }})));
+    }
+    if let Some(rest) = after("note that ").or_else(|| after("make a note: ")).or_else(|| after("note: ")) {
+        calls.push(("note_add", json!({"title": "", "text": rest, "append_to": ""})));
+    }
+    if let Some(rest) = after("play ").filter(|_| lower.starts_with("play ")) {
+        calls.push(("music_play", json!({"query": rest})));
+    }
+    for (words, setting) in [("battery saver", "battery_saver"), ("wi-fi", "wifi"), ("wifi", "wifi"), ("bluetooth", "bluetooth"), ("light mode", "light_mode")] {
+        if lower.contains(words) && (lower.contains(" on") || lower.contains(" off")) && !calls.iter().any(|(_, v)| v["setting"] == setting) {
+            let on = lower.contains(" on") && !lower.contains(" off");
+            calls.push(("setting_set", json!({"setting": setting, "value": if on { "on" } else { "off" }})));
+        }
+    }
+    if let Some(rest) = after("brightness to ") {
+        calls.push(("setting_set", json!({"setting": "brightness", "value": upto(rest, &[" "])})));
+    }
+    if lower.contains("next match") && calls.is_empty() {
+        calls.push(("next_match", json!({})));
+    }
+    if let Some(rest) = after("open ").filter(|_| lower.starts_with("open ")) {
+        let rest = upto(rest, &[" and "]);
+        let (app, page) = match rest.to_lowercase().strip_suffix(" settings") {
+            Some(page) => ("Settings".to_owned(), page.trim_start_matches("the ").to_owned()),
+            None => (rest.trim_start_matches("the ").to_owned(), String::new()),
+        };
+        calls.push(("open_app", json!({"app": app, "page": page})));
+    }
+    (!calls.is_empty()).then_some(Ok(calls))
+}
+
+/// What the scripted service says once its tools are done: what each said
+/// it did (a briefing's summary), and what did not happen.
+fn demo_said(results: &[String]) -> String {
+    let mut said = Vec::new();
+    for r in results {
+        match serde_json::from_str::<Value>(r) {
+            Ok(v) if v["summary"].is_string() => said.push(str_of(&v["summary"])),
+            Ok(v) if v["done"].is_string() => said.push(str_of(&v["done"])),
+            _ if r.contains("declined") => said.push("Left it as it is.".to_owned()),
+            _ => said.push(format!("That didn't work: {}.", r.trim_end_matches('.'))),
+        }
+    }
+    said.join(" ")
+}
+
+/// What the tools came back with, in the last round of the conversation.
+fn demo_results(service: Service, body: &Value) -> Vec<String> {
+    match service {
+        Service::OpenAi => {
+            let input = body["input"].as_array().cloned().unwrap_or_default();
+            let mut out: Vec<String> = input.iter().rev().take_while(|i| i["type"] == "function_call_output").map(|i| str_of(&i["output"])).collect();
+            out.reverse();
+            out
+        }
+        _ => body["messages"].as_array().and_then(|m| m.last()).and_then(|m| m["content"].as_array()).map(|c| c.iter().map(|b| str_of(&b["content"])).collect()).unwrap_or_default(),
     }
 }
 
@@ -1529,6 +1710,17 @@ enum Entry {
     /// What an offline answer rests on ("from the log of Q14"), and whether
     /// it is a model's wording that passed the check.
     Basis { words: String, checked: bool },
+    /// Something done on the handheld: its icon, what ("reminder set · swap
+    /// the battery") and under it the detail ("at queueing for Q42").
+    Did { icon: String, words: String, detail: String, state: StepState },
+    /// A briefing's card.
+    Briefing { title: String, when: String, rows: Vec<(String, String, bool)> },
+}
+
+impl Entry {
+    fn briefing(b: &briefing::Brief) -> Entry {
+        Entry::Briefing { title: b.title.clone(), when: b.when.clone(), rows: b.rows.iter().map(|r| (r.icon.clone(), r.text.clone(), r.urgent)).collect() }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1552,14 +1744,39 @@ enum Busy {
     Asking(Receiver<Result<Value, String>>),
     /// A tool at work on a thread: the call it answers, its row, and the
     /// row's words once it is done.
-    Tool { rx: Receiver<Result<String, String>>, id: String, row: usize, done: String },
-    /// A critical Action shown, waiting for yes or no.
-    Approving { id: String, saved: Saved, line: String, reason: String, row: usize },
+    Tool { rx: Receiver<Result<Worked, String>>, id: String, row: usize, done: String },
+    /// A critical Action (or a change to the handheld) shown, waiting for
+    /// yes or no.
+    Approving { id: String, pending: Pending, row: usize },
+    /// Between one thing done on the handheld and the next, a beat, so each
+    /// row lands before the next rises (until the clock reads this).
+    Beat(f32),
+    /// A briefing made offline from the template, on a thread.
+    Briefing(Receiver<briefing::Brief>),
     /// Answering offline from the match logs, on a thread: the model wording
     /// it (once it is), and the answer made from the facts (once there is
     /// one), which Esc shows at once rather than waiting for the model.
     Offline { rx: Receiver<crate::offline::Event>, wording: Option<String>, ready: Option<Box<crate::offline::Answer>>, _stop: StopWhenDropped },
 }
+
+/// What a tool on a thread came to: words for the model (the Agent, an
+/// Action), or something done on the handheld.
+enum Worked {
+    Text(String),
+    Device(device::Step),
+}
+
+/// What waits for a yes: a critical Action, or a change to the handheld.
+enum Pending {
+    Action { saved: Saved, line: String, reason: String },
+    Device(device::Act),
+}
+
+/// How long a row done on the handheld has to land before the next rises.
+/// My own tuning: about the rise's own time, a little under.
+const BEAT: f32 = 0.22;
+/// An app asked for opens this long after the answer appears, so it is read.
+const OPEN_AFTER: f32 = 0.9;
 
 /// A worker's stop flag, set once nobody waits for it (the answer came, or
 /// Esc, a new conversation, leaving): it reads no more logs and asks the
@@ -1656,6 +1873,22 @@ pub struct Assistant {
     suggested: Option<(u64, bool)>,
     /// The model that words offline answers, if one is downloaded.
     offline_model: Option<String>,
+    /// Where what it remembers is kept (tests: apart).
+    memory_file: PathBuf,
+    /// The live activity while a question is under way, and its steps:
+    /// those done so far, and the round's calls (where it began, how many).
+    activity: Option<crate::liveactivity::TaskHandle>,
+    steps: usize,
+    batch: (usize, usize),
+    /// What tools changed, for the next update to apply to the settings.
+    effects: Vec<device::Effect>,
+    /// An app or Settings page asked for: opened once the answer is in (at
+    /// this time on the page's clock).
+    open: Option<(device::Effect, Option<f32>)>,
+    /// The settings as last seen, for the tools: the clock, the saver, light.
+    h24: bool,
+    saver: bool,
+    light: bool,
 }
 
 /// A question offered offline, before anything is asked.
@@ -1682,6 +1915,8 @@ fn suggestions_for(robot: &Robot) -> Vec<Suggestion> {
         let browned = newest.digest.as_ref().is_some_and(|d| d.brownouts.unwrap_or(0) > 0);
         let q = if browned { format!("Why did we brown out in {l}?") } else { format!("What went wrong in {l}?") };
         out.push(Suggestion { name: q.clone(), value: String::new(), question: Some(q) });
+        // A briefing, made from the template: no model needed.
+        out.push(Suggestion { name: "Brief me".into(), value: String::new(), question: Some("Brief me".into()) });
         if let Some(before) = read.get(1) {
             let q = format!("What changed since {}?", label(before));
             out.push(Suggestion { name: q.clone(), value: String::new(), question: Some(q) });
@@ -1743,9 +1978,24 @@ impl Assistant {
         Self::new()
     }
 
+    /// The assistant, opened by a briefing's reminder: it briefs at once.
+    pub fn briefing() -> Self {
+        Self::asking("Brief me")
+    }
+
     fn with(prefs: Prefs, service: Option<(Service, String)>) -> Self {
+        let memory_file = memory::path();
         Assistant {
-            chat: service.as_ref().map(|(s, _)| Chat::new(*s)),
+            chat: service.as_ref().map(|(s, _)| Chat::with_memory(*s, Mode::Assistant, &memory::load(&memory_file))),
+            memory_file,
+            activity: None,
+            steps: 0,
+            batch: (0, 0),
+            effects: Vec::new(),
+            open: None,
+            h24: true,
+            saver: false,
+            light: false,
             prefs,
             service,
             entries: Vec::new(),
@@ -1859,6 +2109,11 @@ impl Assistant {
         matches!(self.busy, Busy::Idle)
     }
 
+    /// The settings the tools read, as they are now.
+    fn see_settings(&mut self, s: &crate::shell::Settings) {
+        (self.h24, self.saver, self.light) = (s.clock24, s.battery.saver, s.light);
+    }
+
     fn push(&mut self, entry: Entry) {
         self.entries.push((entry, self.clock));
         self.revision += 1;
@@ -1877,11 +2132,14 @@ impl Assistant {
     fn start_over(&mut self) {
         self.prefs = Prefs::load();
         self.service = answering(&self.prefs, &Keys::load());
-        self.chat = self.service.as_ref().map(|(s, _)| Chat::new(*s));
+        let remembered = memory::load(&self.memory_file);
+        self.chat = self.service.as_ref().map(|(s, _)| Chat::with_memory(*s, Mode::Assistant, &remembered));
         self.entries.clear();
         self.calls.clear();
         self.outcomes.clear();
         self.busy = Busy::Idle;
+        self.activity = None;
+        self.open = None;
         self.chat_id = None;
         self.countdown = None;
         self.offline = crate::offline::Context::default();
@@ -1902,7 +2160,7 @@ impl Assistant {
             s => keys.get(s.key()).ok_or_else(|| format!("it was with {}, whose key is gone", s.model_name()))?.to_owned(),
         };
         self.service = Some((kept.service, key));
-        self.chat = Some(Chat::with_items(kept.service, Mode::Assistant, kept.items));
+        self.chat = Some(Chat::with_items(kept.service, Mode::Assistant, kept.items, &memory::load(&self.memory_file)));
         self.entries = kept.entries.into_iter().map(|e| (e, -10.0)).collect();
         self.calls.clear();
         self.outcomes.clear();
@@ -1940,12 +2198,78 @@ impl Assistant {
         self.question = text.clone();
         self.rounds = 0;
         self.continuations = 0;
+        self.steps = 0;
+        self.batch = (0, 0);
+        self.open = None;
         self.actions = self.actions_given.clone().unwrap_or_else(crate::commands::all);
         self.push(Entry::You(text.clone()));
         if self.offline_mode() {
+            // Offline, with no tools: memory and briefings by rules.
+            if let Some(cmd) = memory::command(&text) {
+                return self.remember_offline(&cmd, true);
+            }
+            if let Some(kind) = briefing::asked(&text) {
+                return self.brief_offline(kind, robot);
+            }
             return self.ask_offline(Some(text), robot);
         }
+        // A live activity while it works, wherever one is shown: what it is
+        // doing, step by step, until the answer is in.
+        self.activity = Some(crate::liveactivity::task(crate::liveactivity::Kind::Assistant, "Assistant", "thinking"));
         self.ask();
+    }
+
+    /// Asked of memory offline: done there and then, by rules (kept in the
+    /// on-device conversation, `into_chat`; a service's stays as it was).
+    fn remember_offline(&mut self, cmd: &memory::Command, into_chat: bool) {
+        let said = memory::answer(&self.memory_file, cmd);
+        self.push(Entry::Said(said.clone()));
+        self.push(Entry::Basis { words: "from what it remembers · memory.md on this handheld".into(), checked: false });
+        if let Some(chat) = self.chat.as_mut().filter(|_| into_chat) {
+            chat.said(&said);
+        }
+        self.keep();
+        crate::voice::answer(&said, self.aloud);
+    }
+
+    /// A briefing made here, with no model: the template, on a thread (it
+    /// reads the newest match's log).
+    fn brief_offline(&mut self, kind: Option<briefing::Kind>, robot: &Robot) {
+        let inputs = briefing::Inputs::of(robot, self.h24, kind);
+        let (tx, rx) = mpsc::channel();
+        let started = std::thread::Builder::new().name("briefing".into()).stack_size(1024 * 1024).spawn(move || {
+            tx.send(briefing::build(&inputs)).ok();
+        });
+        if started.is_err() {
+            return self.failed("could not start the briefing".into());
+        }
+        self.busy = Busy::Briefing(rx);
+        self.waited = 0.0;
+        self.scroll.set(0.0);
+    }
+
+    /// The briefing made offline, shown: its card, what it rests on, and
+    /// said aloud when answers are.
+    fn brief_done(&mut self, b: briefing::Brief) {
+        self.busy = Busy::Idle;
+        self.push(Entry::briefing(&b));
+        self.push(Entry::Basis { words: "from the schedule, forecast, battery and logs · no model".into(), checked: false });
+        // Kept in the on-device conversation (a service's stays as it was).
+        if let Some(chat) = self.chat.as_mut().filter(|c| c.service() == Service::Local) {
+            if chat.len() == self.mark {
+                chat.ask(&self.question);
+            }
+            chat.said(&b.said);
+        }
+        self.keep();
+        crate::voice::answer(&b.said, self.aloud);
+    }
+
+    /// The live activity's line: the step under way.
+    fn note_step(&self, words: &str) {
+        if let Some(a) = &self.activity {
+            a.detail(format!("step {} · {words}", self.steps));
+        }
     }
 
     /// The conversation sent for the next answer, on a thread.
@@ -1953,15 +2277,12 @@ impl Assistant {
         let (Some(chat), Some((service, key))) = (&self.chat, &self.service) else { return };
         let body = chat.body(self.prefs.effort);
         let (service, key) = (*service, key.clone());
+        if let Some(a) = &self.activity {
+            a.detail(if self.steps == 0 { "thinking".to_owned() } else { format!("thinking · {} done", count_words(self.steps, "step")) });
+        }
         let (tx, rx) = mpsc::channel();
         let started = std::thread::Builder::new().name("assistant".into()).stack_size(512 * 1024).spawn(move || {
-            // A live activity while the answer is written, wherever one is.
-            let task = crate::liveactivity::task(crate::liveactivity::Kind::Assistant, "Assistant", "thinking");
-            let answer = request(service, &key, &body);
-            if answer.is_ok() {
-                task.done("answer ready");
-            }
-            tx.send(answer).ok();
+            tx.send(request(service, &key, &body)).ok();
         });
         if started.is_err() {
             return self.failed("could not start the request".into());
@@ -1980,6 +2301,7 @@ impl Assistant {
         self.calls.clear();
         self.outcomes.clear();
         self.busy = Busy::Idle;
+        self.activity = None;
         if self.input.is_empty() {
             self.input = std::mem::take(&mut self.question);
         }
@@ -1997,6 +2319,28 @@ impl Assistant {
         };
         let reply = match reply {
             Ok(reply) => reply,
+            // No internet, and a briefing or memory asked for: made here,
+            // by the template or the rules, saying so.
+            Err(why) if no_internet(&why) && self.rounds == 0 && (briefing::asked(&self.question).is_some() || memory::command(&self.question).is_some()) => {
+                if let Some(chat) = &mut self.chat {
+                    chat.rewind(self.mark);
+                }
+                self.calls.clear();
+                self.outcomes.clear();
+                self.activity = None;
+                let question = self.question.clone();
+                return match memory::command(&question) {
+                    Some(cmd) => {
+                        self.push(Entry::Note(format!("{why} · done on this handheld")));
+                        // The service's conversation stays as it was.
+                        self.remember_offline(&cmd, false);
+                    }
+                    None => {
+                        self.push(Entry::Note(format!("{why} · made offline, with no model")));
+                        self.brief_offline(briefing::asked(&question).flatten(), robot);
+                    }
+                };
+            }
             // No internet, and a question the logs can answer: answered
             // offline, on this handheld, saying so.
             Err(why) if no_internet(&why) && self.rounds == 0 && {
@@ -2027,6 +2371,13 @@ impl Assistant {
         match reply.stop {
             Stop::Answered => {
                 self.keep();
+                if let Some(a) = self.activity.take() {
+                    a.done(if self.steps == 0 { "answer ready".to_owned() } else { format!("{} done", count_words(self.steps, "step")) });
+                }
+                // An app asked for opens a moment after the answer appears.
+                if let Some((_, at @ None)) = &mut self.open {
+                    *at = Some(self.clock + OPEN_AFTER);
+                }
                 // Said aloud too, when answers are (Assistant › choices).
                 if !reply.text.trim().is_empty() {
                     crate::voice::answer(&plain(&reply.text), self.aloud);
@@ -2037,6 +2388,7 @@ impl Assistant {
                 // as it is, and it carries on where it stopped.
                 self.continuations += 1;
                 if self.continuations > CONTINUATIONS {
+                    self.activity = None;
                     self.push(Entry::Note("it kept on searching · ask again to carry on".into()));
                     self.keep();
                 } else {
@@ -2044,16 +2396,19 @@ impl Assistant {
                 }
             }
             Stop::Tools => {
+                self.batch = (self.steps, reply.calls.len());
                 self.calls = reply.calls.into();
                 self.next_call(robot);
             }
             Stop::Refused(why) => {
+                self.activity = None;
                 if let Some(chat) = &mut self.chat {
                     chat.rewind(self.mark);
                 }
                 self.push(Entry::Note(format!("{} would not answer: {why}", service.model_name())));
             }
             Stop::Cut => {
+                self.activity = None;
                 if let Some(chat) = &mut self.chat {
                     chat.rewind(self.mark);
                 }
@@ -2066,7 +2421,13 @@ impl Assistant {
     fn next_call(&mut self, robot: &Robot) {
         while let Some(call) = self.calls.pop_front() {
             let words = step_words(&call);
-            match plan(&call, robot, &self.actions) {
+            self.steps += 1;
+            self.note_step(&words.working);
+            let planned = {
+                let cx = device::Ctx { robot, h24: self.h24, memory: &self.memory_file, saver: self.saver, light: self.light };
+                plan(&call, robot, &self.actions, &cx)
+            };
+            match planned {
                 Plan::Now(result) => {
                     let error = result.is_err();
                     self.push(Entry::Step { words: words.done, state: if error { StepState::Failed } else { StepState::Done } });
@@ -2077,7 +2438,7 @@ impl Assistant {
                     let row = self.entries.len() - 1;
                     let (tx, rx) = mpsc::channel();
                     std::thread::spawn(move || {
-                        tx.send(ask_agent(&host)).ok();
+                        tx.send(ask_agent(&host).map(Worked::Text)).ok();
                     });
                     self.busy = Busy::Tool { rx, id: call.id, row, done: words.done };
                     return;
@@ -2089,8 +2450,13 @@ impl Assistant {
                 Plan::Run { saved, line, reason, ask: true } => {
                     self.push(Entry::Asks { name: saved.name.clone(), command: line.clone(), reason: reason.clone(), state: AskState::Waiting });
                     let row = self.entries.len() - 1;
-                    self.busy = Busy::Approving { id: call.id, saved, line, reason, row };
+                    self.busy = Busy::Approving { id: call.id, pending: Pending::Action { saved, line, reason }, row };
                     return;
+                }
+                Plan::Device(p) => {
+                    if self.device(call.id, p, &words.done) {
+                        return;
+                    }
                 }
             }
         }
@@ -2101,11 +2467,125 @@ impl Assistant {
         self.rounds += 1;
         if self.rounds >= ROUNDS {
             self.busy = Busy::Idle;
+            self.activity = None;
             self.push(Entry::Note(format!("stopped after {ROUNDS} rounds of looking · ask again to carry on")));
             self.keep();
             return;
         }
         self.ask();
+    }
+
+    /// Something to do on the handheld: done now (a beat before the next
+    /// thing, so each row lands as it happens), on a thread, or asked about
+    /// first. True while it is under way, false once it is done.
+    fn device(&mut self, id: String, p: device::Plan, failed_words: &str) -> bool {
+        match p {
+            device::Plan::Now(Ok(done)) => {
+                self.did(id, None, done);
+                self.beat()
+            }
+            device::Plan::Now(Err(why)) => {
+                self.push(Entry::Did { icon: "error".into(), words: failed_words.to_owned(), detail: why.clone(), state: StepState::Failed });
+                self.outcomes.push(Outcome { id, text: why, error: true });
+                self.beat()
+            }
+            device::Plan::Work { working, icon, job } => {
+                self.push(Entry::Did { icon: icon.into(), words: working, detail: String::new(), state: StepState::Working });
+                let row = self.entries.len() - 1;
+                let (tx, rx) = mpsc::channel();
+                let started = std::thread::Builder::new().name("assistant-tool".into()).stack_size(1024 * 1024).spawn(move || {
+                    tx.send(job().map(Worked::Device)).ok();
+                });
+                if started.is_err() {
+                    self.set_did_failed(row, "could not start".into());
+                    self.outcomes.push(Outcome { id, text: "it could not start".into(), error: true });
+                    return self.beat();
+                }
+                self.busy = Busy::Tool { rx, id, row, done: failed_words.to_owned() };
+                true
+            }
+            device::Plan::Ask(act) => {
+                self.ask_first(id, act, None);
+                true
+            }
+        }
+    }
+
+    /// A beat before the next call, if there is one: true while it waits.
+    fn beat(&mut self) -> bool {
+        if self.calls.is_empty() {
+            return false;
+        }
+        self.busy = Busy::Beat(self.clock + BEAT);
+        true
+    }
+
+    /// Something done on the handheld, in its row (`row`, where it was under
+    /// way; else a new one): a briefing as its card. What it changed is
+    /// applied at the next update; an app asked for opens after the answer.
+    fn did(&mut self, id: String, row: Option<usize>, done: device::Done) {
+        let entry = match &done.brief {
+            Some(b) => Entry::briefing(b),
+            None => Entry::Did { icon: done.icon.into(), words: done.words.clone(), detail: done.detail.clone(), state: StepState::Done },
+        };
+        match row.filter(|r| *r < self.entries.len()) {
+            Some(r) => {
+                self.entries[r].0 = entry;
+                self.revision += 1;
+            }
+            None => self.push(entry),
+        }
+        match done.effect {
+            Some(open @ device::Effect::Open { .. }) => self.open = Some((open, None)),
+            Some(other) => self.effects.push(other),
+            None => {}
+        }
+        self.outcomes.push(Outcome { id, text: done.text, error: false });
+    }
+
+    fn set_did_failed(&mut self, row: usize, why: String) {
+        if let Some((Entry::Did { icon, detail, state, .. }, _)) = self.entries.get_mut(row) {
+            *icon = "error".into();
+            *detail = why;
+            *state = StepState::Failed;
+            self.revision += 1;
+        }
+    }
+
+    /// A change shown in full before it is made: its card (in its row, when
+    /// it was found on a thread), waiting for Enter (the confirm page) or Esc.
+    fn ask_first(&mut self, id: String, act: device::Act, row: Option<usize>) {
+        let card = Entry::Asks { name: act.title.clone(), command: String::new(), reason: act.what.clone(), state: AskState::Waiting };
+        let row = match row.filter(|r| *r < self.entries.len()) {
+            Some(r) => {
+                self.entries[r].0 = card;
+                self.revision += 1;
+                r
+            }
+            None => {
+                self.push(card);
+                self.entries.len() - 1
+            }
+        };
+        self.note_step(&format!("asks: {}", act.title.to_lowercase()));
+        self.busy = Busy::Approving { id, pending: Pending::Device(act), row };
+    }
+
+    /// What the tools changed, applied to the settings (and drawn so at once).
+    fn apply_effects(&mut self, settings: &mut crate::shell::Settings) {
+        if self.effects.is_empty() {
+            return;
+        }
+        for effect in std::mem::take(&mut self.effects) {
+            match effect {
+                device::Effect::Saver(on) => settings.battery.saver = on,
+                device::Effect::Light(on) => settings.light = on,
+                device::Effect::Brightness(level) => settings.brightness = level,
+                device::Effect::Open { .. } => {}
+            }
+        }
+        crate::save_settings(settings);
+        crate::shell::settings_changed();
     }
 
     /// The pages of the newest answer that has any.
@@ -2125,23 +2605,35 @@ impl Assistant {
         std::thread::spawn(move || {
             let result = run_command(&line);
             keep_run(&dir, &name, &line, &reason, &by, approved, &result);
-            tx.send(result).ok();
+            tx.send(result.map(Worked::Text)).ok();
         });
         self.busy = Busy::Tool { rx, id, row, done: format!("ran {lower}") };
     }
 
-    /// The person's yes or no to a critical Action.
+    /// The person's yes or no to a critical Action, or to a change.
     fn approve(&mut self, yes: bool, robot: &Robot) {
-        let Busy::Approving { id, saved, line, reason, row } = std::mem::replace(&mut self.busy, Busy::Idle) else { return };
+        let Busy::Approving { id, pending, row } = std::mem::replace(&mut self.busy, Busy::Idle) else { return };
         if let Some((Entry::Asks { state, .. }, _)) = self.entries.get_mut(row) {
             *state = if yes { AskState::Yes } else { AskState::No };
             self.revision += 1;
         }
-        if yes {
-            self.run(id, &saved, line, reason, true);
-        } else {
-            self.outcomes.push(Outcome { id, text: "The person declined: the Action was not run.".into(), error: true });
-            self.next_call(robot);
+        match (yes, pending) {
+            (true, Pending::Action { saved, line, reason }) => self.run(id, &saved, line, reason, true),
+            (true, Pending::Device(act)) => {
+                let words = act.title.to_lowercase();
+                let p = act.run(&self.memory_file);
+                if !self.device(id, p, &words) {
+                    self.next_call(robot);
+                }
+            }
+            (false, pending) => {
+                let text = match pending {
+                    Pending::Action { .. } => "The person declined: the Action was not run.",
+                    Pending::Device(_) => "The person declined: nothing was changed.",
+                };
+                self.outcomes.push(Outcome { id, text: text.into(), error: true });
+                self.next_call(robot);
+            }
         }
     }
 
@@ -2149,8 +2641,11 @@ impl Assistant {
     /// The on-device model stops writing at once.
     fn stop(&mut self) {
         crate::local::cancel();
-        let running = matches!(self.busy, Busy::Tool { .. });
+        // An Action (a command) carries on by itself; a tool's thread is let go.
+        let running = matches!(&self.busy, Busy::Tool { done, .. } if done.starts_with("ran "));
         self.busy = Busy::Idle;
+        self.activity = None;
+        self.open = None;
         if let Some(chat) = &mut self.chat {
             chat.rewind(self.mark);
         }
@@ -2189,11 +2684,38 @@ impl Assistant {
                     Laid { lines, h, levels: Vec::new() }
                 }
                 Entry::Step { .. } => Laid { lines: Vec::new(), h: cap_lh, levels: Vec::new() },
-                Entry::Asks { reason, .. } => {
+                Entry::Asks { reason, command, .. } => {
                     let mut lines = crate::help::wrap(g, reason, ty.caption, W - 2.0 * PAD - 24.0);
-                    lines.truncate(3);
-                    let h = 9.0 + ty.body.size + 5.0 + lines.len() as f32 * cap_lh + cap_lh + 3.0 + cap_lh + 7.0;
+                    // An Action's reason, its command under it; a change's
+                    // words in full (they say what it does).
+                    lines.truncate(if command.is_empty() { 6 } else { 3 });
+                    let command_h = if command.is_empty() { 0.0 } else { cap_lh };
+                    let h = 9.0 + ty.body.size + 5.0 + lines.len() as f32 * cap_lh + command_h + 3.0 + cap_lh + 7.0;
                     Laid { lines, h, levels: Vec::new() }
+                }
+                Entry::Did { words, detail, .. } => {
+                    let width = W - 2.0 * PAD - 22.0;
+                    let mut lines = crate::help::wrap(g, &units_together(words), ty.caption, width);
+                    let first = lines.len();
+                    if !detail.is_empty() {
+                        lines.extend(crate::help::wrap(g, &units_together(detail), ty.caption, width));
+                    }
+                    // Its words' lines (`Some`), then the detail's.
+                    let levels = (0..lines.len()).map(|k| (k < first).then_some(crate::wpilog::Level::Fine)).collect();
+                    let h = lines.len() as f32 * cap_lh + 2.0;
+                    Laid { lines, h, levels }
+                }
+                Entry::Briefing { rows, .. } => {
+                    let (mut lines, mut levels) = (Vec::new(), Vec::new());
+                    for (_, text, urgent) in rows {
+                        for (k, line) in crate::help::wrap(g, &units_together(text), chat, W - 2.0 * PAD - 32.0).into_iter().enumerate() {
+                            let level = if *urgent { crate::wpilog::Level::Warn } else { crate::wpilog::Level::Fine };
+                            levels.push((k == 0).then_some(level));
+                            lines.push(line);
+                        }
+                    }
+                    let h = 8.0 + ty.body.size + 6.0 + lines.len() as f32 * body_lh + 6.0;
+                    Laid { lines, h, levels }
                 }
                 Entry::Note(text) => {
                     let lines = crate::help::wrap(g, text, ty.caption, W - 2.0 * PAD - 22.0);
@@ -2228,7 +2750,10 @@ impl Assistant {
         let cy = area.cy() - 4.0;
         g.icon("auto_awesome", false, W * 0.5, cy - 26.0, 22.0, t.dim);
         g.text_at(W * 0.5, cy, Align::Center, "Ask about the robot", ty.name, t.ink);
-        g.text_at(W * 0.5, cy + ty.name.size * 0.5 + 4.0 + ty.caption.size * 0.5, Align::Center, "it reads the robot, logs and actions", ty.caption, t.dim);
+        // What else it does, the longest way of saying it that fits whole.
+        let more = ["or have it set reminders, play music, brief you", "or set reminders, play music, brief you", "or set reminders · “brief me”"];
+        let more = more.iter().copied().find(|m| g.measure(m, ty.caption) <= W - 2.0 * PAD).unwrap_or(more[2]);
+        g.text_at(W * 0.5, cy + ty.name.size * 0.5 + 4.0 + ty.caption.size * 0.5, Align::Center, more, ty.caption, t.dim);
         let model = self.service.as_ref().map_or("", |(s, _)| s.label());
         let line = format!("{model} · {} · tab: choices", self.prefs.effort.name());
         g.text_at(W * 0.5, cy + ty.name.size * 0.5 + 8.0 + ty.caption.size * 1.5, Align::Center, &line, ty.caption, t.faint);
@@ -2363,7 +2888,36 @@ fn step_words(call: &Call) -> StepWords {
             let name = call.input["name"].as_str().unwrap_or_default().to_lowercase();
             StepWords { working: format!("running {name}"), done: format!("ran {name}") }
         }
+        // Those that act: what it is doing, and what did not get done.
+        "reminder_add" => StepWords { working: "setting a reminder".into(), done: "a reminder not set".into() },
+        "timer" if call.input["action"] == "stop" => StepWords { working: "stopping a timer".into(), done: "no timer stopped".into() },
+        "timer" => StepWords { working: "starting a timer".into(), done: "no timer started".into() },
+        "note_add" => StepWords { working: "writing a note".into(), done: "the note not written".into() },
+        "music_play" => StepWords { working: "finding music".into(), done: "nothing played".into() },
+        "music_download" => StepWords { working: "finding the music".into(), done: "nothing downloaded".into() },
+        "open_app" => {
+            let app = call.input["app"].as_str().unwrap_or("the app").trim();
+            StepWords { working: format!("opening {app}"), done: format!("{app} not opened") }
+        }
+        "setting_set" => {
+            let what = call.input["setting"].as_str().unwrap_or("a setting").replace('_', " ").replace("wifi", "wi-fi");
+            StepWords { working: format!("changing {what}"), done: format!("{what} not changed") }
+        }
+        "next_match" => StepWords { working: "looking at the schedule".into(), done: "the schedule not read".into() },
+        "start_download" => StepWords { working: "starting a download".into(), done: "no download started".into() },
+        "briefing" => StepWords { working: "making a briefing".into(), done: "no briefing made".into() },
+        "memory_save" => StepWords { working: "remembering".into(), done: "not remembered".into() },
+        "memory_forget" => StepWords { working: "forgetting".into(), done: "nothing forgotten".into() },
         other => same(&other.replace('_', " ")),
+    }
+}
+
+/// "1 step", "3 steps".
+fn count_words(n: usize, what: &str) -> String {
+    if n == 1 {
+        format!("1 {what}")
+    } else {
+        format!("{n} {what}s")
     }
 }
 
@@ -2497,6 +3051,7 @@ impl Screen for Assistant {
         // A question heard and about to send itself: any key stops that and
         // does what it does (Enter sends it now, Esc clears it).
         self.countdown = None;
+        self.see_settings(cx.settings);
         let line = g_line_height();
         // Offline, before anything is asked: the questions offered.
         let offering = self.offline_mode() && self.entries.is_empty() && self.input.is_empty() && self.idle() && !self.suggestions.is_empty();
@@ -2523,6 +3078,15 @@ impl Screen for Assistant {
                     *cx.say = Some("a new conversation".into());
                 }
             }
+            // A briefing, from any service (offline, from the template).
+            Key::Ctrl('b') => {
+                if self.idle() {
+                    self.input = "Brief me".into();
+                    self.send(cx.robot);
+                } else {
+                    *cx.say = Some("still answering · esc stops it".into());
+                }
+            }
             // The newest match's report, from its log alone: any service, no model.
             Key::Ctrl('r') => {
                 if self.idle() {
@@ -2543,9 +3107,12 @@ impl Screen for Assistant {
             // Esc skips it here.
             _ if matches!(self.busy, Busy::Approving { .. }) => match key {
                 Key::Enter => {
-                    if let Busy::Approving { saved, line, reason, .. } = &self.busy {
+                    if let Busy::Approving { pending, .. } = &self.busy {
                         *DECISION.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                        return Nav::Push(Box::new(Confirm::new(&saved.name, line, reason)));
+                        return Nav::Push(Box::new(match pending {
+                            Pending::Action { saved, line, reason } => Confirm::new(&saved.name, line, reason),
+                            Pending::Device(act) => Confirm::change(act),
+                        }));
                     }
                 }
                 Key::Back => self.approve(false, cx.robot),
@@ -2576,6 +3143,7 @@ impl Screen for Assistant {
     }
 
     fn update(&mut self, cx: &mut Cx) -> Nav {
+        self.see_settings(cx.settings);
         // A question from search: sent as soon as nothing else is under way
         // (with no service yet, it waits typed in the line).
         if let Some(question) = take_question() {
@@ -2620,18 +3188,51 @@ impl Screen for Assistant {
             }
             Busy::Tool { rx, .. } => match rx.try_recv() {
                 Ok(result) => {
+                    eprintln!("DBG tool result {:?}", std::time::Instant::now());
                     let Busy::Tool { id, row, done, .. } = std::mem::replace(&mut self.busy, Busy::Idle) else { return Nav::Stay };
-                    self.set_step(row, result.is_ok(), done);
-                    let error = result.is_err();
-                    self.outcomes.push(Outcome { id, text: result.unwrap_or_else(|why| why), error });
+                    let doing = matches!(self.entries.get(row), Some((Entry::Did { .. }, _)));
+                    match result {
+                        Ok(Worked::Text(text)) => {
+                            self.set_step(row, true, done);
+                            self.outcomes.push(Outcome { id, text, error: false });
+                        }
+                        Ok(Worked::Device(device::Step::Done(d))) => self.did(id, Some(row), d),
+                        Ok(Worked::Device(device::Step::Ask(act))) => {
+                            self.ask_first(id, act, Some(row));
+                            return Nav::Stay;
+                        }
+                        Err(why) if doing => {
+                            self.set_did_failed(row, why.clone());
+                            if let Some((Entry::Did { words, .. }, _)) = self.entries.get_mut(row) {
+                                *words = done;
+                            }
+                            self.outcomes.push(Outcome { id, text: why, error: true });
+                        }
+                        Err(why) => {
+                            self.set_step(row, false, done);
+                            self.outcomes.push(Outcome { id, text: why, error: true });
+                        }
+                    }
                     self.next_call(cx.robot);
                 }
                 Err(TryRecvError::Disconnected) => {
                     let Busy::Tool { id, row, done, .. } = std::mem::replace(&mut self.busy, Busy::Idle) else { return Nav::Stay };
                     self.set_step(row, false, done);
+                    self.set_did_failed(row, "it stopped without an answer".into());
                     self.outcomes.push(Outcome { id, text: "it stopped without an answer".into(), error: true });
                     self.next_call(cx.robot);
                 }
+                Err(TryRecvError::Empty) => {}
+            },
+            Busy::Beat(until) => {
+                if self.clock >= *until {
+                    self.busy = Busy::Idle;
+                    self.next_call(cx.robot);
+                }
+            }
+            Busy::Briefing(rx) => match rx.try_recv() {
+                Ok(b) => self.brief_done(b),
+                Err(TryRecvError::Disconnected) => self.failed("the briefing stopped".into()),
                 Err(TryRecvError::Empty) => {}
             },
             Busy::Offline { .. } => loop {
@@ -2664,6 +3265,23 @@ impl Screen for Assistant {
             },
             Busy::Idle | Busy::Approving { .. } => {}
         }
+        // What the tools changed: the settings, drawn so at once.
+        self.apply_effects(cx.settings);
+        // An app asked for, once the answer has been there a moment.
+        if self.idle() {
+            if let Some((_, Some(at))) = &self.open {
+                if self.clock >= *at {
+                    if let Some((device::Effect::Open { app, setting, .. }, _)) = self.open.take() {
+                        let screen = match (app, setting) {
+                            (Some(i), _) => crate::screens::open_builtin(i, cx.robot),
+                            (None, Some(i)) => crate::screens::open_setting(i),
+                            (None, None) => return Nav::Stay,
+                        };
+                        return Nav::Push(screen);
+                    }
+                }
+            }
+        }
         Nav::Stay
     }
 
@@ -2679,7 +3297,9 @@ impl Screen for Assistant {
             }
             None => false,
         };
-        moving || rising || counting || !self.idle()
+        // An app to open in a moment: frames keep coming until it does.
+        let opening = self.open.as_ref().is_some_and(|(_, at)| at.is_some());
+        moving || rising || counting || opening || !self.idle()
     }
 
     fn draw(&mut self, g: &mut Gfx, robot: &Robot) {
@@ -2736,6 +3356,14 @@ impl Screen for Assistant {
                 Busy::Asking(_) => format!("thinking · {}", self.service.as_ref().map_or("", |(s, _)| s.label())),
                 Busy::Offline { wording: Some(model), .. } => format!("wording it · {}", model.to_lowercase()),
                 Busy::Offline { .. } => "working offline".into(),
+                Busy::Briefing(_) => "making a briefing".into(),
+                // Doing what was asked, one step after another: which, of the round's.
+                Busy::Tool { .. } | Busy::Beat(_) if self.batch.1 > 1 => {
+                    // In the beat between two, the next is the one coming.
+                    let next = matches!(self.busy, Busy::Beat(_)) as usize;
+                    let k = (self.steps.saturating_sub(self.batch.0) + next).clamp(1, self.batch.1);
+                    format!("working · step {k} of {}", self.batch.1)
+                }
                 _ => "working".into(),
             };
             let words = g.text.fit(&words, &ty.caption, W - PAD - 34.0 - PAD);
@@ -2806,7 +3434,10 @@ impl Screen for Assistant {
                     g.canvas.rrect(r.offset(g.ox, 0.0), radius, t.surface1, card);
                     let mut ly = r.y + 9.0 + ty.body.size * 0.5;
                     g.icon_alpha("front_hand", *state == AskState::Waiting, r.x + 16.0, ly, 14.0, if *state == AskState::Waiting { t.signal } else { t.dim }, fade(ly));
-                    let title = g.text.fit(&format!("Run {name}?"), &ty.body, r.w - 40.0);
+                    // An Action, with its command; or a change, in words.
+                    let change = command.is_empty();
+                    let title = if change { format!("{name}?") } else { format!("Run {name}?") };
+                    let title = g.text.fit(&title, &ty.body, r.w - 40.0);
                     g.text_alpha(r.x + 29.0, ly, &title, ty.body, t.ink, fade(ly));
                     ly += ty.body.size * 0.5 + 5.0;
                     let cap_lh = ty.caption.size + 4.0;
@@ -2814,11 +3445,15 @@ impl Screen for Assistant {
                         g.text_alpha(r.x + 12.0, ly + cap_lh * 0.5, line, ty.caption, t.dim, fade(ly + cap_lh * 0.5));
                         ly += cap_lh;
                     }
-                    let command = g.text.fit(command, &ty.caption, r.w - 24.0);
-                    g.text_alpha(r.x + 12.0, ly + cap_lh * 0.5, &command, ty.caption, t.faint, fade(ly + cap_lh * 0.5));
-                    ly += cap_lh + 3.0;
+                    if !change {
+                        let command = g.text.fit(command, &ty.caption, r.w - 24.0);
+                        g.text_alpha(r.x + 12.0, ly + cap_lh * 0.5, &command, ty.caption, t.faint, fade(ly + cap_lh * 0.5));
+                        ly += cap_lh;
+                    }
+                    ly += 3.0;
                     let (words, color) = match state {
                         AskState::Waiting => ("enter: confirm · esc: skip", t.ink),
+                        AskState::Yes if change => ("you said yes", t.dim),
                         AskState::Yes => ("you said run it", t.dim),
                         AskState::No => ("you skipped it", t.dim),
                     };
@@ -2870,6 +3505,54 @@ impl Screen for Assistant {
                         }
                         let ink = if row_level == crate::wpilog::Level::Fine { t.dim } else { t.ink };
                         g.text_alpha(r.x + 24.0, cy, line, chat, ink, fade(cy));
+                        ly += lh;
+                    }
+                }
+                Entry::Did { icon, state, .. } => {
+                    // Something done on the handheld: its icon (the signal's
+                    // colour while under way, ice once done), what, and how.
+                    let cap_lh = ty.caption.size + 4.0;
+                    let icon_y = top + cap_lh * 0.5;
+                    let (icon, color, filled, alpha) = match state {
+                        StepState::Working => {
+                            let pulse = if g.calm { 1.0 } else { 0.55 + 0.45 * (0.5 + 0.5 * (self.clock * 5.0).sin()) };
+                            (icon.as_str(), t.signal, false, pulse)
+                        }
+                        StepState::Done => (icon.as_str(), g.good(), true, 1.0),
+                        StepState::Failed => ("error", g.fault(), false, 1.0),
+                    };
+                    g.icon_alpha(icon, filled, PAD + 8.0, icon_y, 13.0, color, fade(icon_y) * alpha);
+                    for (k, (line, level)) in l.lines.iter().zip(&l.levels).enumerate() {
+                        let cy = top + (k as f32 + 0.5) * cap_lh;
+                        let ink = if level.is_some() { t.ink } else { t.dim };
+                        g.text_alpha(PAD + 20.0, cy, line, ty.caption, ink, fade(cy));
+                    }
+                }
+                Entry::Briefing { title, when, rows } => {
+                    // The briefing: a card of short rows, each with its icon;
+                    // what wants doing soon marked in the signal's colour.
+                    let r = Rect::new(PAD, top, W - 2.0 * PAD, l.h);
+                    let radius = g.tile_radius().min(14.0);
+                    let card = if r.y < area.y || r.bottom() > area.bottom() { a } else { fade(r.y + 10.0).min(fade(r.bottom() - 10.0)) };
+                    g.canvas.rrect(r.offset(g.ox, 0.0), radius, t.surface1, card);
+                    let ly = r.y + 8.0 + ty.body.size * 0.5;
+                    g.icon_alpha("auto_awesome", true, r.x + 16.0, ly, 14.0, t.signal, fade(ly));
+                    let when_w = g.measure(when, ty.caption);
+                    let head = g.text.fit(title, &ty.body, r.w - 29.0 - when_w - 22.0);
+                    g.text_alpha(r.x + 29.0, ly, &head, ty.body, t.ink, fade(ly));
+                    g.text_alpha(r.right() - 12.0 - when_w, ly, when, ty.caption, t.faint, fade(ly));
+                    let mut ly = ly + ty.body.size * 0.5 + 6.0;
+                    let mut row = 0;
+                    for (line, level) in l.lines.iter().zip(&l.levels) {
+                        let cy = ly + lh * 0.5;
+                        if let Some(level) = level {
+                            let urgent = *level != crate::wpilog::Level::Fine;
+                            if let Some((icon, _, _)) = rows.get(row) {
+                                g.icon_alpha(icon, urgent, r.x + 16.0, cy, 12.0, if urgent { t.signal } else { t.dim }, fade(cy));
+                            }
+                            row += 1;
+                        }
+                        g.text_alpha(r.x + 28.0, cy, line, chat, t.ink, fade(cy));
                         ly += lh;
                     }
                 }
@@ -2935,13 +3618,40 @@ pub struct Confirm {
     session: Option<crate::terminal::Terminal>,
     /// The terminal has just taken the page's place: its rows rise in.
     swapped: bool,
+    /// A change to the handheld rather than a command: what it does, in
+    /// words, in the box; and the two answers' words.
+    change: bool,
+    yes: String,
+    no: String,
 }
 
 impl Confirm {
     fn new(name: &str, command: &str, reason: &str) -> Self {
         let mut list = ListState::default();
         list.focus = 1;
-        Confirm { name: name.to_owned(), command: command.to_owned(), reason: reason.to_owned(), list, run_here: false, critical: true, session: None, swapped: false }
+        Confirm {
+            name: name.to_owned(),
+            command: command.to_owned(),
+            reason: reason.to_owned(),
+            list,
+            run_here: false,
+            critical: true,
+            session: None,
+            swapped: false,
+            change: false,
+            yes: "Run it".into(),
+            no: "Don't run it".into(),
+        }
+    }
+
+    /// A change the assistant would make to the handheld (Wi-Fi off, an
+    /// update, memory forgotten), asked about in full: what, what it does,
+    /// and yes or no (no, unless chosen).
+    fn change(act: &device::Act) -> Self {
+        let mut page = Self::new(&act.title, &act.what, "");
+        page.change = true;
+        (page.yes, page.no) = (act.yes.clone(), act.no.clone());
+        page
     }
 
     /// An Action picked in search, asked about in full as the assistant's
@@ -3032,6 +3742,9 @@ impl Screen for Confirm {
                 }
                 return nav;
             }
+            // A change's two answers sit side by side.
+            Key::Left if self.change => self.list.focus = 0,
+            Key::Right if self.change => self.list.focus = 1,
             other => crate::screens::list_key(&mut self.list, other, 2),
         }
         Nav::Stay
@@ -3044,6 +3757,9 @@ impl Screen for Confirm {
                 g.started_moving();
             }
             return session.draw(g, robot);
+        }
+        if self.change {
+            return self.draw_change(g);
         }
         let t = g.tokens;
         let ty = g.ty;
@@ -3091,6 +3807,54 @@ impl Screen for Confirm {
     }
 }
 
+/// Where a change's page puts things: its title's centre, the box of what
+/// it does (and its lines), and the two answers' row.
+struct ChangeLayout {
+    title_y: f32,
+    words: Rect,
+    lines: Vec<String>,
+    answers: Rect,
+}
+
+impl Confirm {
+    fn change_layout(&self, g: &mut Gfx) -> ChangeLayout {
+        let ty = g.ty;
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
+        let title_y = top + 1.0 + ty.name.size * 0.5;
+        let y = top + 1.0 + ty.name.size + 6.0;
+        let lines = crate::help::wrap(g, &self.command, chat_style(g), W - 2.0 * PAD - 16.0);
+        let words = Rect::new(PAD, y, W - 2.0 * PAD, lines.len() as f32 * chat_line(g) + 8.0);
+        // The answers side by side, resting on the hint with room for the ring.
+        let answers = Rect::new(PAD, bottom - row_h - 3.0, W - 2.0 * PAD, row_h);
+        ChangeLayout { title_y, words, lines, answers }
+    }
+
+    /// A change asked about: what, what it does (whole), and the two answers
+    /// side by side, on "no" unless the other is chosen.
+    fn draw_change(&mut self, g: &mut Gfx) {
+        let t = g.tokens;
+        let ty = g.ty;
+        let at = self.change_layout(g);
+        g.icon("front_hand", true, PAD + 8.0, at.title_y, 16.0, t.signal);
+        let title = g.text.fit(&self.name, &ty.name, W - 2.0 * PAD - 24.0);
+        g.text_at(PAD + 22.0, at.title_y, Align::Left, &title, ty.name, t.ink);
+        g.surface(at.words, 8.0, t.surface2);
+        let (chat, lh) = (chat_style(g), chat_line(g));
+        for (k, line) in at.lines.iter().enumerate() {
+            g.text_at(PAD + 8.0, at.words.y + 4.0 + (k as f32 + 0.5) * lh, Align::Left, line, chat, t.ink);
+        }
+        let half = (at.answers.w - 6.0) * 0.5;
+        for i in 0..2 {
+            let r = Rect::new(at.answers.x + i as f32 * (half + 6.0), at.answers.y, half, at.answers.h);
+            let name = if i == 0 { self.yes.clone() } else { self.no.clone() };
+            g.row(r, &name, "", t.dim, i == self.list.focus);
+        }
+        g.take_foot(at.answers.y);
+        let no = format!("enter: confirm · esc: {}", self.no.to_lowercase());
+        g.hint_any(&[&no, "enter: confirm · esc: no", "enter: confirm"]);
+    }
+}
+
 // --------------------------------------------------------------- choices ---
 
 /// Which service answers, how hard it thinks, the conversations kept, and a
@@ -3101,13 +3865,36 @@ pub struct Choices {
     list: ListState,
     /// Whether answers are said aloud, and by whom (`crate::voice`).
     voice: crate::voice::Prefs,
+    /// What it remembers, and the briefings that come by themselves (the
+    /// morning's time, and one before each match).
+    memory_file: PathBuf,
+    remembered: usize,
+    briefings: (Option<String>, bool),
 }
 
-const CHOICE_ROWS: usize = 7;
+const CHOICE_ROWS: usize = 10;
 
 impl Choices {
     fn new() -> Self {
-        Choices { prefs: Prefs::load(), keys: Keys::load(), list: ListState::default(), voice: crate::voice::Prefs::load() }
+        let memory_file = memory::path();
+        Choices {
+            prefs: Prefs::load(),
+            keys: Keys::load(),
+            list: ListState::default(),
+            voice: crate::voice::Prefs::load(),
+            remembered: memory::load(&memory_file).len(),
+            memory_file,
+            briefings: briefing::schedule(),
+        }
+    }
+
+    /// The morning briefing's next time: off, then each of the times offered, then off.
+    fn next_morning(now: Option<&str>) -> Option<&'static str> {
+        match now.and_then(|t| briefing::MORNINGS.iter().position(|m| *m == t)) {
+            None if now.is_none() => Some(briefing::MORNINGS[2]),
+            None => None,
+            Some(i) => briefing::MORNINGS.get(i + 1).copied(),
+        }
     }
 }
 
@@ -3118,6 +3905,8 @@ impl Screen for Choices {
 
     fn resume(&mut self) {
         self.keys = Keys::load();
+        self.remembered = memory::load(&self.memory_file).len();
+        self.briefings = briefing::schedule();
     }
 
     fn update(&mut self, _cx: &mut Cx) -> Nav {
@@ -3173,6 +3962,24 @@ impl Screen for Choices {
                     }
                 }
             }
+            (Key::Enter | Key::Right, 7) => return Nav::Push(Box::new(MemoryPage::new(self.memory_file.clone()))),
+            // The briefings that come by themselves: reminders that open one,
+            // so Reminders lists them, and they wake the handheld to be said.
+            (Key::Enter | Key::Right, 8) => {
+                let next = Self::next_morning(self.briefings.0.as_deref());
+                briefing::set_morning(next, cx.robot);
+                self.briefings = briefing::schedule();
+                *cx.say = Some(match next {
+                    Some(t) => format!("a briefing each morning at {t}"),
+                    None => "no morning briefing".into(),
+                });
+            }
+            (Key::Enter | Key::Right, 9) => {
+                let on = !self.briefings.1;
+                briefing::set_pit(on, cx.robot);
+                self.briefings = briefing::schedule();
+                *cx.say = Some(if on { "a pit briefing before each match".into() } else { "no pit briefings".into() });
+            }
             (other, _) => crate::screens::list_key(&mut self.list, other, CHOICE_ROWS),
         }
         Nav::Stay
@@ -3193,7 +4000,10 @@ impl Screen for Choices {
                 3 => ("New conversation", String::new(), t.dim),
                 4 => ("Keys", format!("{keys} of 2 set"), t.dim),
                 5 => ("Spoken answers", self.voice.speak.words().to_owned(), t.ink),
-                _ => ("Voice", self.voice.voice.words(), if self.voice.speak == crate::voice::Speak::Off { t.dim } else { t.ink }),
+                6 => ("Voice", self.voice.voice.words(), if self.voice.speak == crate::voice::Speak::Off { t.dim } else { t.ink }),
+                7 => ("Memory", if self.remembered == 0 { "nothing yet ›".to_owned() } else { format!("{} kept ›", self.remembered) }, t.dim),
+                8 => ("Morning briefing", self.briefings.0.clone().unwrap_or_else(|| "off".into()), t.ink),
+                _ => ("Pit briefing", if self.briefings.1 { "before matches".to_owned() } else { "off".to_owned() }, t.ink),
             };
             g.row(r, name, &value, color, i == self.list.focus);
         }
@@ -3216,7 +4026,11 @@ impl Screen for Choices {
             3 => "enter: clear this one",
             4 => "openai and claude keys",
             5 => "hold alt anywhere to ask aloud",
-            _ => self.voice.voice.about(),
+            6 => self.voice.voice.about(),
+            // Longest first, whole: the first that fits.
+            7 => return g.hint_any(&["what you told it to remember · never keys", "what you told it to remember", "never keys or passwords"]),
+            8 => return g.hint_any(&["enter: a time, or off · reminders brings it", "enter: a time, or off"]),
+            _ => return g.hint_any(&["30 min before each match, 10 before queueing", "30 min before each match"]),
         });
     }
 }
@@ -3304,6 +4118,174 @@ impl Screen for Conversations {
         // Which service it was with, for the one chosen: it carries on there.
         let with = self.kept.get(self.list.focus).map_or("", |k| k.service.label());
         g.hint(&format!("enter: carry on with {with} · d: forget"));
+    }
+}
+
+// ---------------------------------------------------------------- memory ---
+
+/// What the assistant remembers, a thing to a row, each whole however long:
+/// `d` twice forgets one, Enter opens the file itself to change, and the
+/// last row forgets all of it (Enter twice).
+pub struct MemoryPage {
+    file: PathBuf,
+    facts: Vec<String>,
+    focus: usize,
+    /// Down from the top, in pixels: it glides to keep the focused row whole.
+    scroll: Animated,
+    /// Asked once: this row is forgotten on a second press.
+    deleting: Option<usize>,
+}
+
+impl MemoryPage {
+    pub fn new(file: PathBuf) -> Self {
+        MemoryPage { facts: memory::load(&file), file, focus: 0, scroll: Animated::new(0.0, role::settle()).with_rest(0.3), deleting: None }
+    }
+
+    /// Rows: each thing remembered, then forgetting everything.
+    fn rows(&self) -> usize {
+        self.facts.len() + 1
+    }
+}
+
+impl Screen for MemoryPage {
+    fn title(&self) -> &str {
+        "Memory"
+    }
+
+    fn resume(&mut self) {
+        // Back from the file, changed by hand perhaps.
+        self.facts = memory::load(&self.file);
+        self.focus = self.focus.min(self.rows() - 1);
+    }
+
+    fn tick(&mut self, dt: f32) -> bool {
+        self.scroll.tick(dt)
+    }
+
+    fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
+        let armed = self.deleting.take();
+        let at = self.focus;
+        match key {
+            Key::Back | Key::Leave => return Nav::Pop,
+            Key::Up => self.focus = self.focus.saturating_sub(1),
+            Key::Down if !self.facts.is_empty() => self.focus = (self.focus + 1).min(self.rows() - 1),
+            Key::Home => self.focus = 0,
+            Key::End if !self.facts.is_empty() => self.focus = self.rows() - 1,
+            Key::Char('d') if at < self.facts.len() => {
+                if armed == Some(at) {
+                    if let Some(gone) = memory::forget_at(&self.file, at) {
+                        *cx.say = Some(format!("forgotten: {}", short(&gone.to_lowercase(), 40)));
+                    }
+                    self.facts = memory::load(&self.file);
+                    self.focus = self.focus.min(self.rows() - 1);
+                } else {
+                    *cx.say = Some("d again forgets it".into());
+                    self.deleting = Some(at);
+                }
+            }
+            Key::Enter if at == self.facts.len() && !self.facts.is_empty() => {
+                if armed == Some(at) {
+                    let n = memory::forget_all(&self.file);
+                    self.facts.clear();
+                    self.focus = 0;
+                    *cx.say = Some(format!("forgot all {n}"));
+                } else {
+                    *cx.say = Some("enter again forgets all of it".into());
+                    self.deleting = Some(at);
+                }
+            }
+            // The file itself, to change by hand.
+            Key::Enter | Key::Right if !self.facts.is_empty() => match crate::files::Editor::open(&self.file) {
+                Ok(editor) => return Nav::Push(Box::new(editor)),
+                Err(why) => *cx.say = Some(why),
+            },
+            _ => {}
+        }
+        Nav::Stay
+    }
+
+    fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
+        let t = g.tokens;
+        let ty = g.ty;
+        if self.facts.is_empty() {
+            g.empty("push_pin", "nothing remembered yet · tell the assistant “remember …”");
+            g.hint_any(&["it never keeps passwords or keys", "never passwords or keys"]);
+            return;
+        }
+        let (top, bottom) = (g.top(), g.above_hint());
+        let (chat, lh) = (chat_style(g), chat_line(g));
+        let bezel = g.theme == crate::look::Theme::Bezel;
+        let width = W - 2.0 * PAD;
+        // Each row's place, from the top of the list: a thing whole, or the last row.
+        let mut rows: Vec<(f32, f32, Vec<String>)> = Vec::with_capacity(self.rows());
+        let mut y = 0.0;
+        for fact in &self.facts {
+            let lines = crate::help::wrap(g, &units_together(fact), chat, width - 34.0);
+            let h = lines.len() as f32 * lh + 10.0;
+            rows.push((y, h, lines));
+            y += h + 4.0;
+        }
+        rows.push((y, g.row_h(), Vec::new()));
+        // The focused row whole in view, with room for its ring.
+        let view = bottom - top - crate::gfx::RING_ROOM;
+        let (fy, fh, _) = &rows[self.focus.min(rows.len() - 1)];
+        let mut target = self.scroll.target();
+        if fy - target < 0.0 {
+            target = *fy;
+        } else if fy + fh - target > view {
+            target = fy + fh - view;
+        }
+        if target != self.scroll.target() {
+            self.scroll.set(target);
+            if g.calm {
+                self.scroll.jump(target);
+            }
+        }
+        let scroll = self.scroll.value();
+        g.canvas.set_clip(Rect::new(0.0, top - 3.0, W, bottom - top + 3.0 + crate::gfx::FOOT_AIR));
+        let fade = |cy: f32| ((bottom - cy) / EDGE).clamp(0.0, 1.0).min(((cy - top + 6.0) / EDGE).clamp(0.0, 1.0));
+        let mut ring = None;
+        for (i, (ry, h, lines)) in rows.iter().enumerate() {
+            let r = Rect::new(PAD, top + ry - scroll, width, *h);
+            if r.bottom() < top - 4.0 || r.y > bottom + 4.0 {
+                continue;
+            }
+            let focused = i == self.focus;
+            let radius = if bezel { g.radius(7.0) } else { 12.0_f32.min(r.h * 0.5) };
+            let fill = if focused { t.surface2 } else { t.surface1 };
+            g.canvas.rrect(r.offset(g.ox, 0.0), radius, fill, fade(r.y + 8.0).min(fade(r.bottom() - 8.0)).max(if focused { 1.0 } else { 0.0 }));
+            if i < self.facts.len() {
+                let first = r.y + 5.0 + lh * 0.5;
+                g.icon_alpha("push_pin", focused, r.x + 13.0, first, 12.0, if focused { t.signal } else { t.dim }, fade(first));
+                for (k, line) in lines.iter().enumerate() {
+                    let cy = first + k as f32 * lh;
+                    g.text_alpha(r.x + 26.0, cy, line, chat, t.ink, fade(cy));
+                }
+            } else {
+                // Forgetting everything: a row of its own, at the end.
+                let armed = self.deleting == Some(i);
+                let (name, value) = if armed { ("Enter again to forget", String::new()) } else { ("Forget everything", count_words(self.facts.len(), "thing")) };
+                let style = if bezel { ty.label } else { ty.body };
+                let name = if bezel { name.to_lowercase() } else { name.to_owned() };
+                g.icon_alpha("delete", false, r.x + 13.0, r.cy(), 13.0, g.fault(), fade(r.cy()));
+                g.text_alpha(r.x + 26.0, r.cy(), &name, style, t.ink, fade(r.cy()));
+                let vw = g.measure(&value, ty.caption);
+                g.text_alpha(r.right() - 10.0 - vw, r.cy(), &value, ty.caption, t.dim, fade(r.cy()));
+            }
+            if focused {
+                ring = Some((r, radius));
+            }
+        }
+        g.canvas.clear_clip();
+        if let Some((r, radius)) = ring {
+            g.focus_ring(r, radius);
+        }
+        let on_fact = self.focus < self.facts.len();
+        match (self.deleting, on_fact) {
+            (Some(_), true) => g.hint("d again forgets it"),
+            (_, true) => g.hint_any(&["d: forget · enter: edit memory.md", "d: forget · enter: edit"]),
+            (_, false) => g.hint_any(&["enter twice forgets all of it", "enter twice: all of it"]),
+        }
     }
 }
 
@@ -3405,6 +4387,8 @@ fn entry_json(entry: &Entry) -> Value {
         Entry::Sources(list) => json!({"sources": list.iter().map(|s| json!({"title": s.title, "url": s.url})).collect::<Vec<_>>()}),
         Entry::Report { label, title, rows } => json!({"report": label, "title": title, "rows": rows.iter().map(|(level, row)| json!([level_word(*level), row])).collect::<Vec<_>>()}),
         Entry::Basis { words, checked } => json!({"basis": words, "checked": checked}),
+        Entry::Did { icon, words, detail, state } => json!({"did": words, "detail": detail, "icon": icon, "ok": *state != StepState::Failed}),
+        Entry::Briefing { title, when, rows } => json!({"briefing": title, "when": when, "rows": rows.iter().map(|(icon, text, urgent)| json!([icon, text, urgent])).collect::<Vec<_>>()}),
     }
 }
 
@@ -3452,6 +4436,14 @@ fn entry_from(v: &Value) -> Option<Entry> {
     }
     if let Some(words) = text("basis") {
         return Some(Entry::Basis { words, checked: v["checked"].as_bool().unwrap_or(false) });
+    }
+    if let Some(words) = text("did") {
+        let state = if v["ok"].as_bool() == Some(false) { StepState::Failed } else { StepState::Done };
+        return Some(Entry::Did { icon: text("icon").unwrap_or_else(|| "check_circle".into()), words, detail: text("detail").unwrap_or_default(), state });
+    }
+    if let Some(title) = text("briefing") {
+        let rows = v["rows"].as_array().into_iter().flatten().filter_map(|r| Some((r[0].as_str()?.to_owned(), r[1].as_str()?.to_owned(), r[2].as_bool().unwrap_or(false)))).collect();
+        return Some(Entry::Briefing { title, when: text("when").unwrap_or_default(), rows });
     }
     let list = v["sources"].as_array()?;
     Some(Entry::Sources(list.iter().map(|s| Source { title: str_of(&s["title"]), url: str_of(&s["url"]) }).collect()))
@@ -3576,7 +4568,14 @@ mod tests {
         assert_eq!(server[1]["citations"], json!({"enabled": true}));
         assert!(!tools.iter().any(|t| t["name"] == "code_execution"));
         let names: Vec<&str> = tool_specs().iter().map(|(n, ..)| *n).collect();
-        assert_eq!(names, ["robot_status", "robot_values", "robot_agent", "match_logs", "match_facts", "event_schedule", "graph_values", "read_file", "handheld_status", "list_actions", "run_action"]);
+        assert_eq!(
+            names,
+            [
+                "robot_status", "robot_values", "robot_agent", "match_logs", "match_facts", "event_schedule", "graph_values", "read_file", "handheld_status", "list_actions", "run_action",
+                // Those that act on the handheld, brief and remember.
+                "reminder_add", "timer", "note_add", "music_play", "music_download", "open_app", "setting_set", "next_match", "start_download", "briefing", "memory_save", "memory_forget",
+            ]
+        );
         // The on-device model: OpenAI-style chat completions, its own short
         // prompt first, no tools.
         let mut chat = Chat::new(Service::Local);
@@ -3878,11 +4877,313 @@ mod tests {
         let mut page = Assistant::with(Prefs::default(), Some((service, "sk-test".into())));
         let saved = |name: &str, command: &str| Saved { name: name.into(), command: command.into(), ask: crate::commands::Ask::Auto };
         page.actions_given = Some(vec![saved("Ping the robot", "ping -c 4 {robot}"), saved("Deploy robot code", "cd /data/code/robot && ./gradlew deploy")]);
-        // Each page keeps its conversations apart from every other test's.
+        // Each page keeps its conversations and memory apart from every other test's.
         static PAGES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = PAGES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         page.chats = std::env::temp_dir().join(format!("catalyst-page-chats-{}-{n}", std::process::id()));
+        page.memory_file = std::env::temp_dir().join(format!("catalyst-page-memory-{}-{n}.md", std::process::id()));
+        std::fs::remove_file(&page.memory_file).ok();
+        page.chat = Some(Chat::with_memory(service, Mode::Assistant, &[]));
         page
+    }
+
+    /// Until the page has a thread's tool under way (or `limit` frames).
+    fn run_until_working(page: &mut Assistant, robot: &mut Robot, settings: &mut crate::shell::Settings, say: &mut Option<String>, limit: usize) -> bool {
+        for _ in 0..limit {
+            page.tick(0.1);
+            page.update(&mut Cx { robot, settings, say, at_rest: true });
+            if matches!(page.busy, Busy::Tool { .. }) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(3));
+        }
+        false
+    }
+
+    fn entries(page: &Assistant) -> Vec<Entry> {
+        page.entries.iter().map(|(e, _)| e.clone()).collect()
+    }
+
+    /// The Assistant's live activity now, if there is one (this thread's).
+    fn activity(robot: &Robot) -> Option<crate::liveactivity::Activity> {
+        let update = crate::sysupdate::Status::default();
+        let src = crate::liveactivity::Sources { robot, update: &update, unix: chrono::Utc::now().timestamp() };
+        // The newest (one done a moment ago may still show beside it).
+        crate::liveactivity::gather(&src, None).into_iter().filter(|a| a.kind == crate::liveactivity::Kind::Assistant).last()
+    }
+
+    #[test]
+    fn a_task_of_several_steps_is_done_in_one_turn_each_step_shown_as_it_is_done() {
+        crate::shell::tests::sandbox();
+        for service in [Service::Claude, Service::OpenAi] {
+            let (mut robot, mut settings, mut say) = cx_parts();
+            let mut page = page_for(service);
+            type_and_send(&mut page, "download my Pit Mix playlist and remind me to swap the battery at queueing for Q42", &mut robot, &mut settings, &mut say);
+            assert_eq!(activity(&robot).map(|a| a.detail), Some("thinking".into()), "{service:?}: a live activity from the start");
+            // The first step under way on its thread: its row, and the island's words.
+            assert!(run_until_working(&mut page, &mut robot, &mut settings, &mut say, 400), "{service:?}");
+            assert!(matches!(page.entries.last(), Some((Entry::Did { words, state: StepState::Working, .. }, _)) if words == "finding Pit Mix"), "{:?}", entries(&page));
+            assert_eq!(activity(&robot).map(|a| a.detail), Some("step 1 · finding the music".into()));
+            assert_eq!(page.batch, (0, 2), "two calls in the one turn");
+            run(&mut page, &mut robot, &mut settings, &mut say, 1500);
+            let all = entries(&page);
+            assert_eq!(all[0], Entry::You("download my Pit Mix playlist and remind me to swap the battery at queueing for Q42".into()));
+            // (The second service finds the songs asked for by the first still queued.)
+            assert!(matches!(&all[1], Entry::Did { words, detail, state: StepState::Done, icon } if words == "downloading Pit Crew Mix" && (detail.starts_with("10 songs · about 35 MB") || detail.starts_with("10 songs downloading already")) && icon == "downloading"), "{service:?}: {all:?}");
+            assert_eq!(all[2], Entry::Did { icon: "notification_add".into(), words: "reminder set · swap the battery".into(), detail: "at queueing for Q42 · waits for the schedule".into(), state: StepState::Done });
+            assert!(matches!(&all[3], Entry::Said(s) if s.contains("Pit Crew Mix") && s.contains("Reminder set: swap the battery, at queueing for Q42 (Q42 is not on the schedule yet")), "{all:?}");
+            assert_eq!(all.len(), 4);
+            assert!(page.idle());
+            // The reminder, tied to Q42's queueing until the schedule has it.
+            let kept = crate::reminders::with(|s| s.book.reminders.iter().find(|r| r.text == "swap the battery").map(|r| r.when.clone()));
+            assert_eq!(kept, Some(crate::reminders::When::Match(crate::reminders::Cue::Queue, crate::reminders::Of::One { label: "Q42".into(), key: None })));
+            // Both calls were made in one message and both answered together.
+            let items = page.chat.as_ref().unwrap().items();
+            match service {
+                Service::Claude => {
+                    let calls: Vec<&Value> = items[1]["content"].as_array().unwrap().iter().filter(|b| b["type"] == "tool_use").collect();
+                    assert_eq!(calls.iter().map(|c| c["name"].as_str().unwrap()).collect::<Vec<_>>(), ["music_download", "reminder_add"]);
+                    let results = items[2]["content"].as_array().unwrap();
+                    assert_eq!(items[2]["role"], "user");
+                    assert_eq!(results.len(), 2, "every result in a single user message");
+                    assert_eq!((results[0]["tool_use_id"].clone(), results[1]["tool_use_id"].clone()), (calls[0]["id"].clone(), calls[1]["id"].clone()));
+                    assert!(results.iter().all(|r| r["type"] == "tool_result" && r["is_error"] == false));
+                }
+                _ => {
+                    let calls: Vec<&Value> = items.iter().filter(|i| i["type"] == "function_call").collect();
+                    let outputs: Vec<&Value> = items.iter().filter(|i| i["type"] == "function_call_output").collect();
+                    assert_eq!(calls.len(), 2);
+                    assert_eq!(outputs.iter().map(|o| o["call_id"].clone()).collect::<Vec<_>>(), calls.iter().map(|c| c["call_id"].clone()).collect::<Vec<_>>());
+                }
+            }
+            // The live activity says it is done, in so many steps.
+            assert_eq!(activity(&robot).map(|a| (a.detail, a.state)), Some(("2 steps done".into(), "done".into())));
+            crate::reminders::with(|s| s.book.reminders.retain(|r| r.text != "swap the battery"));
+        }
+    }
+
+    #[test]
+    fn a_change_that_matters_waits_for_a_yes_on_its_own_page() {
+        crate::shell::tests::sandbox();
+        let (mut robot, mut settings, mut say) = cx_parts();
+        // Wi-Fi: asked about, and a no left it as it was.
+        let mut page = page_for(Service::Claude);
+        let ask = if crate::wifi::switched_on() { "turn wi-fi off" } else { "turn wi-fi on" };
+        let was = crate::wifi::switched_on();
+        type_and_send(&mut page, ask, &mut robot, &mut settings, &mut say);
+        run(&mut page, &mut robot, &mut settings, &mut say, 400);
+        assert!(matches!(page.busy, Busy::Approving { pending: Pending::Device(_), .. }), "it waits: {:?}", entries(&page));
+        assert!(matches!(page.entries.last(), Some((Entry::Asks { name, command, state: AskState::Waiting, .. }, _)) if name.starts_with("Switch Wi-Fi") && command.is_empty()));
+        {
+            let mut cx = Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true };
+            assert!(matches!(page.key(Key::Enter, &mut cx), Nav::Push(_)), "Enter: the page that asks in full");
+            page.key(Key::Back, &mut cx);
+        }
+        run(&mut page, &mut robot, &mut settings, &mut say, 400);
+        assert_eq!(crate::wifi::switched_on(), was, "a no changes nothing");
+        assert!(matches!(page.entries.last(), Some((Entry::Said(s), _)) if s == "Left it as it is."), "{:?}", entries(&page));
+        // Forgetting everything: asked, and on a yes, done.
+        let mut page = page_for(Service::OpenAi);
+        memory::save(&page.memory_file, "The robot is called Numbers", "").unwrap();
+        memory::save(&page.memory_file, "The team is 5805", "").unwrap();
+        type_and_send(&mut page, "forget everything", &mut robot, &mut settings, &mut say);
+        run(&mut page, &mut robot, &mut settings, &mut say, 400);
+        assert!(matches!(page.busy, Busy::Approving { .. }));
+        {
+            let mut cx = Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true };
+            let Busy::Approving { pending: Pending::Device(act), .. } = &page.busy else { panic!("a change") };
+            let mut confirm = Confirm::change(act);
+            assert_eq!(confirm.list.focus, 1, "on keeping them, unless chosen");
+            assert_eq!((confirm.yes.as_str(), confirm.no.as_str()), ("Forget them", "Keep them"));
+            confirm.key(Key::Left, &mut cx);
+            assert!(matches!(confirm.key(Key::Enter, &mut cx), Nav::Pop));
+            page.update(&mut cx);
+        }
+        run(&mut page, &mut robot, &mut settings, &mut say, 400);
+        assert!(memory::load(&page.memory_file).is_empty());
+        assert!(page.entries.iter().any(|(e, _)| matches!(e, Entry::Did { words, .. } if words == "forgot everything")));
+        assert!(matches!(page.entries.last(), Some((Entry::Said(s), _)) if s == "Forgot all 2 remembered things."));
+    }
+
+    #[test]
+    fn what_it_is_told_is_remembered_used_and_forgotten_and_a_secret_never_kept() {
+        crate::shell::tests::sandbox();
+        for service in [Service::Claude, Service::OpenAi] {
+            let (mut robot, mut settings, mut say) = cx_parts();
+            let mut page = page_for(service);
+            type_and_send(&mut page, "remember our robot is called Numbers", &mut robot, &mut settings, &mut say);
+            run(&mut page, &mut robot, &mut settings, &mut say, 400);
+            assert!(entries(&page).contains(&Entry::Did { icon: "push_pin".into(), words: "remembered".into(), detail: "The robot is called Numbers".into(), state: StepState::Done }), "{service:?}: {:?}", entries(&page));
+            assert_eq!(memory::load(&page.memory_file), ["The robot is called Numbers"]);
+            // A secret: refused, said so, and not written.
+            type_and_send(&mut page, "remember the wifi password is hunter22", &mut robot, &mut settings, &mut say);
+            run(&mut page, &mut robot, &mut settings, &mut say, 400);
+            assert!(page.entries.iter().any(|(e, _)| matches!(e, Entry::Did { state: StepState::Failed, detail, .. } if detail.contains("never kept"))));
+            assert!(!std::fs::read_to_string(&page.memory_file).unwrap().contains("hunter22"));
+            // A new conversation's prompt carries it, compactly.
+            page.entries.clear();
+            page.chat = Some(Chat::with_memory(service, Mode::Assistant, &memory::load(&page.memory_file)));
+            let body = page.chat.as_ref().unwrap().body(Effort::Light);
+            let system = body["system"].as_str().or_else(|| body["instructions"].as_str()).unwrap();
+            assert!(system.ends_with("follow it, and use memory_save or memory_forget to change it):\n- The robot is called Numbers"), "{system}");
+            type_and_send(&mut page, "what do you remember?", &mut robot, &mut settings, &mut say);
+            run(&mut page, &mut robot, &mut settings, &mut say, 400);
+            assert!(matches!(page.entries.last(), Some((Entry::Said(s), _)) if s.contains("· The robot is called Numbers")), "{:?}", entries(&page));
+            // "forget that".
+            type_and_send(&mut page, "forget that", &mut robot, &mut settings, &mut say);
+            run(&mut page, &mut robot, &mut settings, &mut say, 400);
+            assert!(entries(&page).contains(&Entry::Did { icon: "delete".into(), words: "forgotten".into(), detail: "The robot is called Numbers".into(), state: StepState::Done }));
+            assert!(memory::load(&page.memory_file).is_empty());
+        }
+        // Offline: the same, by rules; the on-device model sees a tiny version.
+        let (mut robot, mut settings, mut say) = cx_parts();
+        let mut page = page_for(Service::Local);
+        type_and_send(&mut page, "I like short answers", &mut robot, &mut settings, &mut say);
+        run(&mut page, &mut robot, &mut settings, &mut say, 400);
+        assert!(matches!(&entries(&page)[1], Entry::Said(s) if s == "I'll remember that: Likes short answers."), "{:?}", entries(&page));
+        assert_eq!(Chat::with_memory(Service::Local, Mode::Assistant, &memory::load(&page.memory_file)).body(Effort::Medium)["messages"][0]["content"], format!("{LOCAL_SYSTEM} Remember: Likes short answers."));
+        type_and_send(&mut page, "what do you remember", &mut robot, &mut settings, &mut say);
+        run(&mut page, &mut robot, &mut settings, &mut say, 400);
+        assert!(page.entries.iter().any(|(e, _)| matches!(e, Entry::Said(s) if s == "I remember one thing:\n· Likes short answers")));
+    }
+
+    #[test]
+    fn a_briefing_is_a_card_made_from_the_tools_online_and_from_the_template_offline() {
+        crate::shell::tests::sandbox();
+        let (mut robot, mut settings, mut say) = cx_parts();
+        // Online: the briefing tool's card, then the model's few words.
+        let mut page = page_for(Service::OpenAi);
+        type_and_send(&mut page, "brief me", &mut robot, &mut settings, &mut say);
+        run(&mut page, &mut robot, &mut settings, &mut say, 800);
+        let all = entries(&page);
+        let Entry::Briefing { title, rows, .. } = &all[1] else { panic!("a card: {all:?}") };
+        assert_eq!(title, "Pit briefing · Q31");
+        assert!(rows[0].1.starts_with("Q31 on red with 1507 5254 · queue in 8 min") && rows[0].2, "{rows:?}");
+        assert!(rows.iter().any(|r| r.0.starts_with("battery")));
+        assert!(matches!(&all[2], Entry::Said(s) if s.starts_with("Q31 is next, on red with 1507 and 5254.")), "{all:?}");
+        // Offline: the same card, worded by the template, with no model.
+        let mut page = page_for(Service::Local);
+        type_and_send(&mut page, "brief me", &mut robot, &mut settings, &mut say);
+        run(&mut page, &mut robot, &mut settings, &mut say, 800);
+        let all = entries(&page);
+        assert!(matches!(&all[1], Entry::Briefing { title, .. } if title == "Pit briefing · Q31"), "{all:?}");
+        assert_eq!(all[2], Entry::Basis { words: "from the schedule, forecast, battery and logs · no model".into(), checked: false });
+        assert_eq!(page.chat.as_ref().unwrap().len(), 2, "kept in the on-device conversation, to carry on");
+        // Online with no internet: made offline, saying so.
+        let mut page = page_for(Service::Claude);
+        page.input = "morning briefing".into();
+        page.send(&robot);
+        page.busy = Busy::Idle;
+        page.took(Err("no internet: the service's name did not resolve".into()), &robot);
+        assert!(matches!(page.busy, Busy::Briefing(_)));
+        run(&mut page, &mut robot, &mut settings, &mut say, 800);
+        assert!(entries(&page).iter().any(|e| matches!(e, Entry::Briefing { title, .. } if title.ends_with("riefing"))));
+        assert_eq!(page.chat.as_ref().unwrap().len(), 0, "the service's conversation as it was");
+    }
+
+    #[test]
+    fn a_setting_changed_reaches_the_shell_and_an_app_opens_after_the_answer() {
+        crate::shell::tests::sandbox();
+        let (mut robot, mut settings, mut say) = cx_parts();
+        let mut page = page_for(Service::Claude);
+        settings.battery.saver = false;
+        type_and_send(&mut page, "turn battery saver on", &mut robot, &mut settings, &mut say);
+        run(&mut page, &mut robot, &mut settings, &mut say, 400);
+        assert!(settings.battery.saver, "applied to the settings");
+        assert!(entries(&page).contains(&Entry::Did { icon: "bolt".into(), words: "battery saver on".into(), detail: "the control centre switches it back".into(), state: StepState::Done }));
+        type_and_send(&mut page, "open music", &mut robot, &mut settings, &mut say);
+        run(&mut page, &mut robot, &mut settings, &mut say, 400);
+        assert!(page.idle());
+        assert!(matches!(page.entries.last(), Some((Entry::Said(s), _)) if s == "Music opens once you have answered."));
+        let mut cx = Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true };
+        assert!(matches!(page.update(&mut cx), Nav::Stay), "not at once: the answer is read first");
+        page.tick(OPEN_AFTER + 0.05);
+        assert!(matches!(page.update(&mut cx), Nav::Push(_)), "then Music");
+        assert!(page.open.is_none());
+    }
+
+    #[test]
+    fn requests_carry_every_tool_strict_and_the_memory_in_a_stable_prompt() {
+        let remembered = vec!["The robot is called Numbers".to_owned()];
+        for service in [Service::OpenAi, Service::Claude] {
+            let mut chat = Chat::with_memory(service, Mode::Assistant, &remembered);
+            chat.ask("brief me");
+            let first = chat.body(Effort::Medium);
+            let tools = first["tools"].as_array().unwrap();
+            let named: Vec<&Value> = tools.iter().filter(|t| t["type"] == "function" || t.get("type").is_none()).collect();
+            assert_eq!(named.len(), tool_specs().len());
+            for t in &named {
+                let schema = if service == Service::OpenAi { &t["parameters"] } else { &t["input_schema"] };
+                assert_eq!(t["strict"], true);
+                assert_eq!(schema["additionalProperties"], false);
+                assert_eq!(schema["required"].as_array().unwrap().len(), schema["properties"].as_object().unwrap().len(), "{}", t["name"]);
+            }
+            // A recorded reply with two calls: both taken, both answered.
+            let reply = match service {
+                Service::OpenAi => json!({"status": "completed", "output": [
+                    {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "enc"},
+                    {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "timer", "arguments": "{\"action\":\"start\",\"length\":\"5 min\"}"},
+                    {"type": "function_call", "id": "fc_2", "call_id": "call_2", "name": "note_add", "arguments": "{\"title\":\"\",\"text\":\"chain\",\"append_to\":\"\"}"}
+                ]}),
+                _ => json!({"content": [
+                    {"type": "thinking", "thinking": "", "signature": "sig"},
+                    {"type": "tool_use", "id": "toolu_1", "name": "timer", "input": {"action": "start", "length": "5 min"}},
+                    {"type": "tool_use", "id": "toolu_2", "name": "note_add", "input": {"title": "", "text": "chain", "append_to": ""}}
+                ], "stop_reason": "tool_use"}),
+            };
+            let r = chat.take(&reply).unwrap();
+            assert_eq!((r.stop, r.calls.len()), (Stop::Tools, 2));
+            chat.answer(&[Outcome { id: r.calls[0].id.clone(), text: "{}".into(), error: false }, Outcome { id: r.calls[1].id.clone(), text: "no".into(), error: true }]);
+            let again = chat.body(Effort::Medium);
+            // The prompt, tools and history the same as before: the cache holds.
+            assert_eq!(again["tools"], first["tools"]);
+            assert_eq!(again["system"], first["system"]);
+            assert_eq!(again["instructions"], first["instructions"]);
+            match service {
+                Service::OpenAi => {
+                    let input = again["input"].as_array().unwrap();
+                    assert_eq!(input[input.len() - 2], json!({"type": "function_call_output", "call_id": "call_1", "output": "{}"}));
+                    assert_eq!(input[input.len() - 1], json!({"type": "function_call_output", "call_id": "call_2", "output": "no"}));
+                    assert!(again["instructions"].as_str().unwrap().contains("- The robot is called Numbers"));
+                }
+                _ => {
+                    let last = again["messages"].as_array().unwrap().last().unwrap().clone();
+                    assert_eq!(last["content"].as_array().unwrap().len(), 2, "both results in one message");
+                    assert_eq!(last["content"][1], json!({"type": "tool_result", "tool_use_id": "toolu_2", "content": "no", "is_error": true}));
+                    assert!(again["system"].as_str().unwrap().contains("- The robot is called Numbers"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_change_and_its_rows_fit_whole_at_every_size() {
+        let acts = [
+            ("Switch Wi-Fi off", "The handheld leaves its network: no internet for the assistant and no robot over Wi-Fi, until it is back on.", "Switch it off", "Leave it on"),
+            ("Switch Bluetooth on", "The radio comes on for headphones and speakers. The first time, the handheld restarts once.", "Switch it on", "Leave it off"),
+            ("Download update 0.6.2", "About 120 MB. It installs beside this system and starts on the next restart; this one is kept to go back to.", "Download it", "Not now"),
+            ("Forget everything", "All 24 things it remembers about you and the team are deleted from memory.md.", "Forget them", "Keep them"),
+            ("Download 160 songs", "Random Access Memories (Deluxe Edition), about 1.8 GB, saved to the card over a while. Music › Downloads can cancel it.", "Download it", "Don't"),
+        ];
+        let mut g = Gfx::new(bezel::Tokens::dark());
+        for theme in [crate::look::Theme::Catalyst, crate::look::Theme::Bezel] {
+            g.theme = theme;
+            for size in [crate::gfx::TextSize::Compact, crate::gfx::TextSize::Standard, crate::gfx::TextSize::Large] {
+                g.set_text_size(size);
+                for (title, what, yes, no) in acts {
+                    let act = device::Act { title: title.into(), what: what.into(), yes: yes.into(), no: no.into(), kind: device::ActKind::ForgetAll };
+                    let page = Confirm::change(&act);
+                    let at = page.change_layout(&mut g);
+                    assert!(at.words.bottom() + 4.0 <= at.answers.y, "{theme:?} {size:?} {title}: {} lines", at.lines.len());
+                    assert!(g.measure(title, g.ty.name) <= W - 2.0 * PAD - 24.0, "{theme:?} {size:?}: {title}");
+                    let half = (W - 2.0 * PAD - 6.0) * 0.5;
+                    let style = if theme == crate::look::Theme::Bezel { g.ty.label } else { g.ty.body };
+                    for answer in [yes, no] {
+                        assert!(g.measure(&answer.to_lowercase(), style).max(g.measure(answer, style)) <= half - 20.0, "{theme:?} {size:?}: {answer}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

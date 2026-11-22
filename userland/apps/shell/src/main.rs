@@ -12,6 +12,7 @@
 //! catalyst-shell --standby-shots <dir>   StandBy's faces and the lock screen, to PNG
 //! catalyst-shell --cjk-shots <dir>   Chinese, Japanese and Korean text on the screens, to PNG
 //! catalyst-shell --activity-shots <dir>  live activities, Tab held, the lock screen with a song
+//! catalyst-shell --assistant-shots <dir>  the assistant's tasks, briefings and memory, to PNG
 //!     --robot <team|ip|host>     robot to connect to (overrides the saved one)
 //!     --demo                     a scripted robot instead of a real one
 //!     --arrive <seconds>         the scripted robot, plugged in that long after start
@@ -382,6 +383,11 @@ fn main() {
     if let Some(path) = value("--offline-eval") {
         offline::eval::main(std::path::Path::new(&path));
         return;
+    }
+    // The assistant's tasks, briefings and memory, in both looks at each size.
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--assistant-shots") {
+        return ai::shots::run(std::path::Path::new(&dir));
     }
     // StandBy's and the lock screen's "next reminder": from Reminders.
     upnext::set_reminders(reminders::next_for_upnext);
