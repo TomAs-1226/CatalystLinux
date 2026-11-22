@@ -23,6 +23,8 @@ struct Shared {
     status: Mutex<String>,
     generation: AtomicU64,
     stop: AtomicBool,
+    /// The wait between asks, which a stop ends.
+    nap: crate::deep::Nap,
 }
 
 pub struct Agent {
@@ -51,12 +53,10 @@ impl Agent {
                         }
                     }
                     thread_shared.generation.fetch_add(1, Ordering::Relaxed);
-                    let mut waited = Duration::ZERO;
-                    while waited < POLL && !thread_shared.stop.load(Ordering::Relaxed) {
-                        // In deep standby, parked here: no wakeups until it wakes.
-                        crate::deep::rest();
-                        thread::sleep(Duration::from_millis(100));
-                        waited += Duration::from_millis(100);
+                    // One wait (a stop ends it; in deep standby it parks
+                    // after), where steps of 100 ms were thirty.
+                    if thread_shared.nap.nap(POLL) {
+                        break;
                     }
                 }
             })
@@ -107,6 +107,7 @@ impl Agent {
 impl Drop for Agent {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
+        self.shared.nap.stop();
     }
 }
 

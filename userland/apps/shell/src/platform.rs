@@ -485,6 +485,27 @@ pub fn panel_in(graphics: &std::path::Path) -> Option<String> {
 
 // ---------------------------------------------------------------- device ---
 
+/// The main loop's wait, ended early from another thread: an eventfd the
+/// device's poll watches beside the keyboards (-1: none, as in the
+/// simulator, whose wait is short anyway).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+static WAKER: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+/// Something for the main loop that cannot wait out its idle look (the
+/// motion sensor saw the handheld picked up): its wait ends now. This lets
+/// the shell look in seldom with the screen off.
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+pub fn wake() {
+    #[cfg(target_os = "linux")]
+    {
+        let fd = WAKER.load(std::sync::atomic::Ordering::Relaxed);
+        if fd >= 0 {
+            let one = 1u64;
+            unsafe { libc::write(fd, (&one as *const u64).cast(), 8) };
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub mod device {
     use super::*;
@@ -630,6 +651,11 @@ pub mod device {
         }
 
         pub fn open() -> std::io::Result<Self> {
+            // The wake pipe (see `wake`), made once.
+            if super::WAKER.load(std::sync::atomic::Ordering::Relaxed) < 0 {
+                let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+                super::WAKER.store(fd, std::sync::atomic::Ordering::Relaxed);
+            }
             let fb_path = panel_framebuffer()?;
             let fb = OpenOptions::new().read(true).write(true).open(&fb_path)?;
             // fb_var_screeninfo is 160 bytes, fb_fix_screeninfo 80 on arm64.
@@ -755,13 +781,23 @@ pub mod device {
             if let Some(watch) = &self.watch {
                 fds.push(libc::pollfd { fd: watch.as_raw_fd(), events: libc::POLLIN, revents: 0 });
             }
+            // Another thread's wake (see `wake`): last, and only emptied.
+            let waker = super::WAKER.load(std::sync::atomic::Ordering::Relaxed);
+            if waker >= 0 {
+                fds.push(libc::pollfd { fd: waker, events: libc::POLLIN, revents: 0 });
+            }
             // Wake in time for a held key's next repeat.
             let timeout = self.repeat.next().map_or(timeout, |at| timeout.min(at.saturating_duration_since(std::time::Instant::now())));
             unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, timeout.as_millis() as i32) };
+            if waker >= 0 && fds.last().is_some_and(|fd| fd.revents & libc::POLLIN != 0) {
+                let mut count = 0u64;
+                unsafe { libc::read(waker, (&mut count as *mut u64).cast(), 8) };
+            }
+            let watched = self.inputs.len() + usize::from(self.watch.is_some());
             let mut keys = Vec::new();
             let mut events = Vec::new();
             let mut changed = false;
-            for (i, fd) in fds.iter().enumerate() {
+            for (i, fd) in fds.iter().enumerate().take(watched) {
                 if i >= self.inputs.len() {
                     // The watch: a keyboard came or went. Empty it and look again below.
                     if fd.revents & libc::POLLIN != 0 {

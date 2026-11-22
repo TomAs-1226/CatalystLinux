@@ -55,12 +55,16 @@ mod store {
 
     static NOW: Mutex<Option<NowPlaying>> = Mutex::new(None);
     static CONTROL: Mutex<Option<fn(Control)>> = Mutex::new(None);
+    static NETWORK: Mutex<Option<fn() -> bool>> = Mutex::new(None);
 
     pub fn now() -> std::sync::MutexGuard<'static, Option<NowPlaying>> {
         NOW.lock().unwrap_or_else(|e| e.into_inner())
     }
     pub fn control() -> std::sync::MutexGuard<'static, Option<fn(Control)>> {
         CONTROL.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    pub fn network() -> std::sync::MutexGuard<'static, Option<fn() -> bool>> {
+        NETWORK.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -73,6 +77,14 @@ mod store {
     thread_local! {
         static NOW: RefCell<Option<NowPlaying>> = const { RefCell::new(None) };
         static CONTROL: RefCell<Option<fn(Control)>> = const { RefCell::new(None) };
+        static NETWORK: RefCell<Option<fn() -> bool>> = const { RefCell::new(None) };
+    }
+
+    pub fn network_get() -> Option<fn() -> bool> {
+        NETWORK.with(|n| *n.borrow())
+    }
+    pub fn network_set(f: Option<fn() -> bool>) {
+        NETWORK.with(|n| *n.borrow_mut() = f);
     }
 
     pub struct Now;
@@ -148,9 +160,43 @@ pub fn control(c: Control) {
     }
 }
 
+/// Music: how to tell whether what plays next needs the network (false
+/// once the queue ahead is downloaded, or plays from the library).
+/// Music standby asks it once a minute, and keeps Wi-Fi on while it says
+/// yes.
+#[allow(dead_code)]
+pub fn on_needs_network(f: fn() -> bool) {
+    #[cfg(not(test))]
+    {
+        *store::network() = Some(f);
+    }
+    #[cfg(test)]
+    store::network_set(Some(f));
+}
+
+/// Whether what plays next needs the network: yes until the player says
+/// otherwise (streaming is what it does unless it has said it can do
+/// without).
+pub fn needs_network() -> bool {
+    #[cfg(not(test))]
+    let f = *store::network();
+    #[cfg(test)]
+    let f = store::network_get();
+    f.is_none_or(|f| f())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_network_is_needed_until_the_player_says_otherwise() {
+        assert!(needs_network(), "streaming, unless said");
+        on_needs_network(|| false);
+        assert!(!needs_network(), "the queue ahead is here");
+        on_needs_network(|| true);
+        assert!(needs_network());
+    }
 
     #[test]
     fn a_song_moves_on_by_itself_while_playing_and_stops_at_its_end() {
