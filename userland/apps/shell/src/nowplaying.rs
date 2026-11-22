@@ -40,6 +40,7 @@ impl NowPlaying {
 }
 
 /// What a live activity can ask of the player.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Control {
     PlayPause,
