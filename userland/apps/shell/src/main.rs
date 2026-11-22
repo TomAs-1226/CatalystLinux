@@ -4216,6 +4216,7 @@ fn contact_sheets(dir: &std::path::Path, name: &str, frames: &[Vec<u32>]) {
     }
 }
 
+#[cfg(not(target_arch = "aarch64"))]
 fn activity_shots(dir: &std::path::Path) {
     use liveactivity::{Activity, Kind};
     use Key::*;
