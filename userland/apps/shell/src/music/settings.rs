@@ -6,6 +6,9 @@
 //! - **Clear played songs**: the cache emptied (Enter twice); saved songs stay.
 //! - **Downloads**: only over Wi-Fi, only while charging, your likes saved
 //!   by themselves (signed in).
+//! - **Lyrics on the island**: the line being sung on the island's card,
+//!   its lyrics asked of LRCLIB as each song starts (Music's lyrics page
+//!   asks either way).
 //! - **Look for new music**: the library's index brought up to date with
 //!   every file, for music copied in over SSH or with Files.
 
@@ -25,10 +28,11 @@ enum Row {
     WifiOnly,
     Charging,
     Auto,
+    Lyrics,
     Rescan,
 }
 
-const ROWS: [Row; 7] = [Row::Played, Row::Saved, Row::Clear, Row::WifiOnly, Row::Charging, Row::Auto, Row::Rescan];
+const ROWS: [Row; 8] = [Row::Played, Row::Saved, Row::Clear, Row::WifiOnly, Row::Charging, Row::Auto, Row::Lyrics, Row::Rescan];
 
 pub struct MusicSettings {
     list: ListState,
@@ -67,6 +71,7 @@ impl MusicSettings {
             Row::WifiOnly => ("Download only over Wi-Fi", onoff(c.wifi_only), c.wifi_only),
             Row::Charging => ("Download only while charging", onoff(c.charging_only), c.charging_only),
             Row::Auto => ("Save your likes by themselves", onoff(c.auto), c.auto),
+            Row::Lyrics => ("Lyrics on the island", onoff(c.lyrics_island), c.lyrics_island),
             Row::Rescan => ("Look for new music", (if library::refreshing() { "looking…" } else { "" }).into(), true),
         }
     }
@@ -80,6 +85,7 @@ impl MusicSettings {
             Row::WifiOnly => &["not over a computer's USB link", "enter: on or off"],
             Row::Charging => &["downloads wait for the charger", "enter: on or off"],
             Row::Auto => &["signed in, over wi-fi, twice a day", "enter: on or off"],
+            Row::Lyrics => &["the line being sung · lyrics from lrclib.net", "enter: on or off"],
             Row::Rescan => &["for music copied in over ssh or files", "enter: look"],
         }
     }
@@ -127,6 +133,13 @@ impl Screen for MusicSettings {
             Key::Enter | Key::Left | Key::Right if row == Row::Auto => {
                 c.auto = !c.auto;
                 store::set_choices(c);
+            }
+            Key::Enter | Key::Left | Key::Right if row == Row::Lyrics => {
+                c.lyrics_island = !c.lyrics_island;
+                store::set_choices(c);
+                if let Some(t) = player::now().track().filter(|_| c.lyrics_island) {
+                    super::lyrics::want(t);
+                }
             }
             Key::Enter if row == Row::Rescan => {
                 library::refresh(true);

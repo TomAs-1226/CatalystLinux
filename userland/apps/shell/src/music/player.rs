@@ -18,6 +18,12 @@
 //! through headphones that take over, and paused when the USB headphones it
 //! played through come out. The player may find them gone first (its sound
 //! stops with an error): that too is a pause, not a failure.
+//!
+//! The sleep timer (sleep.rs) is looked at as the worker wakes, which it
+//! does for the fade's start and the timer's end too: catalyst-play is
+//! asked on its standard input to fade over the last half minute, then the
+//! song pauses. catalyst-play also writes its level to `LEVEL_FILE` for
+//! the island's equalizer bars.
 
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -108,7 +114,13 @@ enum Cmd {
     Closed(u64),
     /// Sound moved: what the song does.
     Moved(crate::sound::Follow),
+    /// The sleep timer was set or cancelled (sleep.rs).
+    Sleep,
 }
+
+/// Where catalyst-play says how loud the song is, for the island's bars
+/// (its `CATALYST_PLAY_LEVEL`): memory, never the card.
+pub const LEVEL_FILE: &str = "/run/catalyst-music/level";
 
 struct Shared {
     queue: Vec<Track>,
@@ -161,7 +173,7 @@ fn player() -> &'static Player {
     PLAYER.get_or_init(|| {
         let (tx, rx) = channel::<Cmd>();
         let state = Arc::new(Mutex::new(Shared { queue: Vec::new(), at: 0, phase: Phase::Empty, offset: 0.0, anchor: None, length: None, loading: None, buffering: false, shuffle: false, repeat: Repeat::Off, unshuffled: None }));
-        let worker = Worker { tx: tx.clone(), state: state.clone(), sound: None, gen: 0, errors: Arc::new(Mutex::new(String::new())), retry_at: None, busy_tries: 0, ffmpeg_for: None, fetch_failed: None, sim_due: None, played_on: None };
+        let worker = Worker { tx: tx.clone(), state: state.clone(), sound: None, gen: 0, errors: Arc::new(Mutex::new(String::new())), retry_at: None, busy_tries: 0, ffmpeg_for: None, fetch_failed: None, sim_due: None, played_on: None, control: None, fading: false };
         std::thread::Builder::new().name("music".into()).stack_size(256 * 1024).spawn(move || worker.run(rx)).ok();
         fetch::on_event(|e| {
             if let Some(p) = PLAYER.get() {
@@ -208,6 +220,29 @@ pub fn moved(follow: crate::sound::Follow) {
     if let Some(p) = PLAYER.get() {
         p.tx.send(Cmd::Moved(follow)).ok();
     }
+}
+
+/// The sleep timer changed: the player looks at it again (if there is one).
+pub fn sleep_changed() {
+    if let Some(p) = PLAYER.get() {
+        p.tx.send(Cmd::Sleep).ok();
+    }
+}
+
+/// The song in the player's place (playing, paused or loading), by its id:
+/// cheaper than `now()` for what is asked every frame or second.
+pub fn current_id() -> Option<String> {
+    let p = PLAYER.get()?;
+    let s = p.state.lock().unwrap();
+    s.track().filter(|_| s.phase != Phase::Empty).map(|t| t.id.clone())
+}
+
+/// Seconds left in the song, while it is known.
+pub fn song_left() -> Option<f32> {
+    let p = PLAYER.get()?;
+    let s = p.state.lock().unwrap();
+    let length = s.length.or(s.track().and_then(|t| t.seconds).map(|x| x as f32))?;
+    Some((length - s.position()).max(0.0))
 }
 
 /// The song was paused a moment ago because the USB headphones it played
@@ -323,6 +358,11 @@ struct Worker {
     /// The USB headphones' card the player was started on, if they were
     /// what played.
     played_on: Option<u32>,
+    /// catalyst-play's standard input: the sleep timer's fade is asked for
+    /// there (`gain G SECONDS`). None for ffmpeg, which fades nothing.
+    control: Option<std::process::ChildStdin>,
+    /// The sound playing has been asked to fade out.
+    fading: bool,
 }
 
 impl Worker {
@@ -332,14 +372,14 @@ impl Worker {
                 Some(Sound::Silent { until }) => Some(*until),
                 _ => None,
             };
-            let deadline = [self.retry_at, self.sim_due, silent].into_iter().flatten().min();
+            let deadline = [self.retry_at, self.sim_due, silent, self.sleep_look()].into_iter().flatten().min();
             let cmd = match deadline {
                 Some(d) => rx.recv_timeout(d.saturating_duration_since(Instant::now())),
                 None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
             };
             match cmd {
                 Ok(cmd) => {
-                    if !matches!(cmd, Cmd::Fetch(_) | Cmd::Said(..) | Cmd::Closed(_) | Cmd::Radio(..) | Cmd::Moved(_)) {
+                    if !matches!(cmd, Cmd::Fetch(_) | Cmd::Said(..) | Cmd::Closed(_) | Cmd::Radio(..) | Cmd::Moved(_) | Cmd::Sleep) {
                         self.retry_at = None;
                         self.busy_tries = 0;
                     }
@@ -395,6 +435,80 @@ impl Worker {
             }
         };
         NEEDS_NETWORK.store(needs, Ordering::Relaxed);
+        self.sleep_check();
+    }
+
+    /// The song's seconds left, and whether it plays (or is about to).
+    fn song_now(&self) -> (Option<f32>, bool) {
+        let s = self.state.lock().unwrap();
+        let length = s.length.or(s.track().and_then(|t| t.seconds).map(|x| x as f32));
+        let playing = matches!(s.phase, Phase::Playing | Phase::Loading) && self.sound.is_some();
+        (length.map(|l| (l - s.position()).max(0.0)), playing)
+    }
+
+    /// When the sleep timer next needs looking at.
+    fn sleep_look(&self) -> Option<Instant> {
+        let timer = super::sleep::get()?;
+        let (left, playing) = self.song_now();
+        timer.next_look(Instant::now(), left, playing, self.fading)
+    }
+
+    /// The sleep timer, looked at: the fade asked for as it begins (and of
+    /// each song started during it, from where it has got to), and music
+    /// paused at its end. Cancelled mid-fade, the sound comes back up.
+    fn sleep_check(&mut self) {
+        let Some(timer) = super::sleep::get() else {
+            if self.fading {
+                self.fading = false;
+                self.gain(1.0, 0.8);
+            }
+            return;
+        };
+        let (left, playing) = self.song_now();
+        match timer.act(Instant::now(), left, playing, self.fading) {
+            super::sleep::Act::Stop => {
+                super::sleep::clear();
+                if playing || self.state.lock().unwrap().phase == Phase::Loading {
+                    self.pause();
+                }
+            }
+            super::sleep::Act::Fade { gain, over } => {
+                self.fading = true;
+                self.gain(gain, 0.0);
+                self.gain(0.0, over);
+            }
+            super::sleep::Act::Nothing => {}
+        }
+    }
+
+    /// catalyst-play asked to take the loudness to `to` over `over` seconds.
+    fn gain(&mut self, to: f32, over: f32) {
+        use std::io::Write;
+        if let Some(c) = self.control.as_mut() {
+            if writeln!(c, "gain {to:.3} {over:.2}").is_err() {
+                self.control = None;
+            }
+        }
+    }
+
+    /// The sleep timer waited for this song to end: on to the next, paused
+    /// at its start (Enter plays on from there in the morning).
+    fn stop_after_song(&mut self) {
+        self.stop_sound();
+        {
+            let mut s = self.state.lock().unwrap();
+            if s.at + 1 < s.queue.len() {
+                s.at += 1;
+            }
+            let length = s.track().and_then(|t| t.seconds).map(|x| x as f32);
+            s.length = length;
+            s.offset = 0.0;
+            s.anchor = None;
+            s.phase = Phase::Paused;
+            s.loading = None;
+            s.buffering = false;
+        }
+        self.publish();
     }
 
     fn handle(&mut self, cmd: Cmd) {
@@ -537,6 +651,8 @@ impl Worker {
             Cmd::Closed(gen) if gen == self.gen => self.closed(),
             Cmd::Said(..) | Cmd::Closed(_) => {}
             Cmd::Moved(follow) => self.moved(follow),
+            // Looked at once this is handled (`after`).
+            Cmd::Sleep => {}
         }
     }
 
@@ -662,6 +778,10 @@ impl Worker {
             track
         };
         self.sim_due = None;
+        // Its words, for the island's card (from the card, else asked for).
+        if store::choices().lyrics_island {
+            super::lyrics::want(&track);
+        }
         if !super::on_device() {
             // The simulator: a song from the "library" at once, else "found"
             // a moment later, as the handheld would.
@@ -765,11 +885,24 @@ impl Worker {
         let ffmpeg = self.ffmpeg_for.as_deref() == Some(track.id.as_str()) || !Path::new(library::PLAYER).exists();
         let mut cmd = if ffmpeg { ffmpeg_command(path, at) } else { player_command(path, at, size) };
         self.played_on = crate::sound::route().usb_playing();
-        let child = polite::polite(&mut cmd, Manner::Playing).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
+        // catalyst-play's taps: its level for the island's bars, and the
+        // sleep timer's fade on its standard input (an older player ignores both).
+        let stdin = if ffmpeg {
+            Stdio::null()
+        } else {
+            if let Some(dir) = Path::new(LEVEL_FILE).parent() {
+                std::fs::create_dir_all(dir).ok();
+            }
+            cmd.env("CATALYST_PLAY_LEVEL", LEVEL_FILE).env("CATALYST_PLAY_FADE", "stdin");
+            Stdio::piped()
+        };
+        let child = polite::polite(&mut cmd, Manner::Playing).stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
         let mut child = match child {
             Ok(c) => c,
             Err(_) => return self.fail("the player could not start".into()),
         };
+        self.control = child.stdin.take();
+        self.fading = false;
         let errors = Arc::new(Mutex::new(String::new()));
         self.errors = errors.clone();
         if let Some(mut err) = child.stderr.take() {
@@ -875,14 +1008,7 @@ impl Worker {
             (s.track().map(|t| t.id.clone()).unwrap_or_default(), s.position(), s.phase == Phase::Playing)
         };
         match code {
-            Some(0) => {
-                let one = self.state.lock().unwrap().repeat == Repeat::One;
-                if one {
-                    self.start(0.0);
-                } else {
-                    self.step(1, true);
-                }
-            }
+            Some(0) => self.song_ended(),
             // A song catalyst-play does not read (HE-AAC, say): ffmpeg plays it.
             Some(3) if self.ffmpeg_for.as_deref() != Some(id.as_str()) => {
                 self.ffmpeg_for = Some(id);
@@ -933,13 +1059,22 @@ impl Worker {
         if let Some(Sound::Silent { until }) = &self.sound {
             if Instant::now() >= *until {
                 self.sound = None;
-                let one = self.state.lock().unwrap().repeat == Repeat::One;
-                if one {
-                    self.start(0.0);
-                } else {
-                    self.step(1, true);
-                }
+                self.song_ended();
             }
+        }
+    }
+
+    /// The song played to its end: again (repeating one), the next, or, if
+    /// the sleep timer was waiting for it, paused there.
+    fn song_ended(&mut self) {
+        if super::sleep::take_song_end() {
+            return self.stop_after_song();
+        }
+        let one = self.state.lock().unwrap().repeat == Repeat::One;
+        if one {
+            self.start(0.0);
+        } else {
+            self.step(1, true);
         }
     }
 
@@ -961,6 +1096,8 @@ impl Worker {
     fn stop_sound(&mut self) {
         self.gen += 1;
         self.sim_due = None;
+        self.control = None;
+        self.fading = false;
         if let Some(Sound::Process(mut child)) = self.sound.take() {
             polite::end(&mut child);
         }

@@ -21,6 +21,12 @@
 //!   card for a few seconds and closes again. They never wake the screen nor
 //!   keep it on: what already wakes it (a reminder due, queue time) still
 //!   does, through the island's messages.
+//! - **Music on the island** (livemusic.rs): compact, its cover and four
+//!   equalizer bars dancing with the song while the island shows them (flat
+//!   when paused), and the sleep timer's countdown while it runs; open, the
+//!   song, its progress in its cover's colour, its keys, and the line being
+//!   sung on a row of its own. A new song rises in as the last one goes, and
+//!   the colour eases across, on Detent springs ([`Look`]).
 //!
 //! Priorities, highest first: queue now (90), a timer's last minute (85), a
 //! timer (80), the queue coming (75), a reminder or a match soon (70), music
@@ -122,6 +128,47 @@ pub struct Activity {
     /// What counts as it changing (the song, playing or paused, queue now,
     /// done): a new one opens the island to its card for a moment.
     pub state: String,
+    /// Music: the palette its cover gives it (`bezel::hues`), if any.
+    pub seed: Option<usize>,
+    /// Music: the sleep timer's seconds left, while it runs.
+    pub sleep: Option<f32>,
+    /// Music: its synced lyrics and where the song is, for the line being
+    /// sung on its card (Settings › Music › Lyrics on the island).
+    pub sung: Option<Sung>,
+}
+
+/// A song's synced lyrics, and its place in them moving on by itself.
+#[derive(Clone, Debug)]
+pub struct Sung {
+    pub lyrics: Arc<crate::music::lyrics::Lyrics>,
+    /// Seconds into the song at `at`, moving on while `playing`.
+    pub from: f32,
+    pub at: Instant,
+    pub playing: bool,
+}
+
+impl PartialEq for Sung {
+    /// The same words, playing or not: where it is moves on by itself.
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.lyrics, &other.lyrics) && self.playing == other.playing
+    }
+}
+
+impl Sung {
+    pub fn position(&self) -> f32 {
+        self.from + if self.playing { self.at.elapsed().as_secs_f32() } else { 0.0 }
+    }
+
+    /// The line being sung (`true`), or before the singing and in its
+    /// pauses, the one to come (`false`).
+    pub fn line(&self) -> Option<(&str, bool)> {
+        let lines = self.lyrics.lines()?;
+        let at = crate::music::lyrics::line_at(lines, self.position());
+        if let Some(l) = at.map(|i| &lines[i]).filter(|l| !l.text.is_empty()) {
+            return Some((&l.text, true));
+        }
+        lines[at.map_or(0, |i| i + 1)..].iter().find(|l| !l.text.is_empty()).map(|l| (l.text.as_str(), false))
+    }
 }
 
 impl Activity {
@@ -139,6 +186,9 @@ impl Activity {
             playing: None,
             urgent: false,
             state: String::new(),
+            seed: None,
+            sleep: None,
+            sung: None,
         }
     }
 }
@@ -180,6 +230,24 @@ pub fn music(np: Option<&crate::nowplaying::NowPlaying>) -> Option<Activity> {
     a.playing = Some(np.playing);
     a.state = format!("{}\u{1f}{}\u{1f}{}", np.title, np.artist, np.playing);
     Some(a)
+}
+
+/// Music with what else the island shows of it: its cover's colour, the
+/// sleep timer counting down (the compact island's few characters while it
+/// runs), and its lyrics for the card.
+pub fn music_now(np: Option<&crate::nowplaying::NowPlaying>) -> Option<Activity> {
+    let mut a = music(np)?;
+    let np = np?;
+    a.seed = np.cover.as_deref().and_then(crate::livemusic::cover_seed).flatten();
+    with_sleep(&mut a, crate::music::sleep_left());
+    a.sung = crate::music::sung_now().map(|lyrics| Sung { lyrics, from: np.position_now(), at: Instant::now(), playing: np.playing });
+    Some(a)
+}
+
+/// The sleep timer's seconds left, on music's activity.
+pub fn with_sleep(a: &mut Activity, left: Option<f32>) {
+    a.sleep = left;
+    a.short = left.map_or_else(String::new, |l| clock_text(l as f64));
 }
 
 /// Clock: the timer that runs out soonest (seconds left, its length, how
@@ -492,7 +560,7 @@ pub struct Sources<'a> {
 /// Every activity there is now, most important first.
 pub fn gather(src: &Sources, update_ready: Option<Instant>) -> Vec<Activity> {
     let mut all: Vec<Activity> = Vec::new();
-    all.extend(music(crate::nowplaying::get().as_ref()));
+    all.extend(music_now(crate::nowplaying::get().as_ref()));
     all.extend(timers(crate::clock::soonest(), crate::clock::stopwatch_running()));
     all.extend(next_match(src.robot.schedule.view().as_ref(), src.unix));
     all.extend(reminder(crate::upnext::next_reminder(src.unix).as_ref(), src.unix));
@@ -532,6 +600,44 @@ pub struct Activities {
     /// What the screen in front already shows itself (Music, a song): a
     /// change to it does not open the island over that screen.
     pub quiet: Option<Kind>,
+    /// Music's equalizer bars (livemusic.rs), and whether the island showed
+    /// them at its last frame (the shell says, as it draws): they run only
+    /// while it does.
+    pub bars: crate::livemusic::Bars,
+    pub bars_seen: bool,
+    /// A new song coming in: 0 as it changes, springing to 1; and the song
+    /// before, going.
+    pub song: Animated,
+    previous: Option<Activity>,
+    /// The cover's palette, easing from the last song's to this one's.
+    tint: Animated,
+    tint_from: Option<usize>,
+    tint_to: Option<usize>,
+    /// The open card's row for the line being sung, growing and going as a
+    /// song with synced lyrics comes and goes.
+    lyric: Animated,
+}
+
+/// How the island draws an activity beyond its data: music's bars and
+/// level, its cover's colour as it eases, the song going as the next comes
+/// in, and the lyric line (the island's card alone has room for it).
+#[derive(Clone, Copy)]
+pub struct Look<'a> {
+    /// The bars' heights (`None`: standing still, risen by `level`).
+    pub bars: Option<[f32; crate::livemusic::BARS]>,
+    pub level: f32,
+    pub accent: Option<Color>,
+    pub previous: Option<&'a Activity>,
+    /// The song's change, 0 to 1 (1: settled on the new one).
+    pub change: f32,
+    pub lyrics: bool,
+}
+
+impl Look<'_> {
+    /// Still, as the lock screen and StandBy draw a card.
+    pub fn still(level: f32) -> Look<'static> {
+        Look { bars: None, level, accent: None, previous: None, change: 1.0, lyrics: false }
+    }
 }
 
 impl Default for Activities {
@@ -555,7 +661,31 @@ impl Activities {
             first: true,
             pinned: false,
             quiet: None,
+            bars: crate::livemusic::Bars::new(),
+            bars_seen: false,
+            song: Animated::new(1.0, role::smooth()).with_rest(0.004),
+            previous: None,
+            tint: Animated::new(1.0, role::effect()).with_rest(0.004),
+            tint_from: None,
+            tint_to: None,
+            lyric: Animated::new(0.0, role::smooth()).with_rest(0.004),
         }
+    }
+
+    /// The island open: its height. Music with the line being sung has a
+    /// row more for it, springing in and out.
+    pub fn open_h(&self, g: &Gfx) -> f32 {
+        OPEN_H + lyric_row(g) * self.lyric.value().clamp(0.0, 1.0)
+    }
+
+    /// How the island draws music now: its bars (still, calm), its cover's
+    /// colour, the song going as the next comes in.
+    pub fn look(&self, g: &Gfx, calm: bool) -> Look<'_> {
+        let level = self.level.value();
+        let mix = self.tint.value().clamp(0.0, 1.0);
+        let accent = crate::livemusic::signal_of(g, self.tint_from).mix(crate::livemusic::signal_of(g, self.tint_to), mix);
+        let change = self.song.value().clamp(0.0, 1.0);
+        Look { bars: (!calm).then(|| self.bars.heights()), level, accent: Some(accent), previous: self.previous.as_ref().filter(|_| change < 1.0), change, lyrics: true }
     }
 
     pub fn list(&self) -> &[Activity] {
@@ -640,11 +770,54 @@ impl Activities {
                 self.level.set(level);
             }
         }
-        let moving = self.open.tick(md) | self.level.tick(md);
+        // Music's bars: dancing while it plays and the island shows them
+        // (never calm), settling flat otherwise and then costing nothing.
+        let music = self.list.iter().find(|a| a.kind == Kind::Music);
+        let seed = music.map_or(0, |a| crate::livemusic::song_seed(&a.title));
+        let bars = self.bars.tick(dt, md, playing && self.bars_seen && !calm, seed);
+        let row = if self.opened().is_some_and(|a| a.sung.is_some()) { 1.0 } else { 0.0 };
+        if self.lyric.target() != row {
+            if calm {
+                self.lyric.jump(row);
+            } else {
+                self.lyric.set(row);
+            }
+        }
+        let moving = self.open.tick(md) | self.level.tick(md) | self.song.tick(md) | self.tint.tick(md) | self.lyric.tick(md) | bars;
         // A meter moving by itself, or a clock counting: a frame now and then
         // (the main loop looks in four times a second at rest).
         let live = self.list.iter().any(|a| a.meter.is_some_and(|m| m.moving()));
         (moving, changed || moving || live)
+    }
+
+    /// Music's song changed (another one, not paused or played): the one
+    /// going is kept to fade as the new one comes in; its cover's colour
+    /// eases to the new one's on the effects spring.
+    fn music_changed(&mut self, list: &[Activity], calm: bool) {
+        let was = self.list.iter().find(|a| a.kind == Kind::Music);
+        let now = list.iter().find(|a| a.kind == Kind::Music);
+        if let (Some(was), Some(now)) = (was, now) {
+            if (was.title.as_str(), was.detail.as_str()) != (now.title.as_str(), now.detail.as_str()) {
+                self.previous = Some(was.clone());
+                self.song.jump(0.0);
+                if calm {
+                    self.song.jump(1.0);
+                } else {
+                    self.song.set(1.0);
+                }
+            }
+        }
+        let seed = now.and_then(|a| a.seed);
+        if seed != self.tint_to {
+            self.tint_from = if self.tint.value() >= 0.5 { self.tint_to } else { self.tint_from };
+            self.tint_to = seed;
+            self.tint.jump(0.0);
+            if calm {
+                self.tint.jump(1.0);
+            } else {
+                self.tint.set(1.0);
+            }
+        }
     }
 
     /// A new list: any that appeared or changed opens the island on it.
@@ -657,6 +830,7 @@ impl Activities {
             }
         }
         self.seen = list.iter().map(|a| (a.id.clone(), a.state.clone())).collect();
+        self.music_changed(&list, calm);
         self.list = list;
         self.first = false;
         if let Some(id) = opened {
@@ -788,7 +962,21 @@ pub const OPEN_RADIUS: f32 = 18.0;
 /// trailing meter.
 pub fn compact_w(g: &mut Gfx, a: &Activity) -> f32 {
     let words = g.text.fit(&a.short, &g.ty.caption, COMPACT_WORDS);
-    (g.measure(&words, g.ty.caption) + COMPACT_PAD + trailing_w(a)).max(70.0).ceil()
+    (g.measure(&words, g.ty.caption) + COMPACT_PAD + lead_w(g, a) + trailing_w(a)).max(70.0).ceil()
+}
+
+/// Before the words: the sleep timer's moon, while it counts down.
+fn lead_w(g: &Gfx, a: &Activity) -> f32 {
+    if a.sleep.is_some() {
+        g.ty.caption.size + 4.0
+    } else {
+        0.0
+    }
+}
+
+/// The lyric line's row on music's card.
+fn lyric_row(g: &Gfx) -> f32 {
+    (g.ty.body.size + 7.0).round()
 }
 
 /// The compact island's words in `room`: all of them where they fit; else
@@ -850,16 +1038,12 @@ pub fn draw_mark(g: &mut Gfx, cx: f32, cy: f32, size: f32, mark: &Mark, alpha: f
     }
 }
 
-/// Music's level: three bars, risen while it plays, laid low when paused
-/// (they spring between; they do not dance, which would keep every frame
-/// coming while music plays).
-fn draw_level(g: &mut Gfx, cx: f32, cy: f32, h: f32, level: f32, color: Color, alpha: f32) {
-    let up = [0.55, 1.0, 0.75];
-    for (i, k) in up.iter().enumerate() {
-        let bar_h = (h * (0.18 + (k - 0.18) * level.clamp(0.0, 1.2))).max(2.0);
-        let x = cx + (i as f32 - 1.0) * 4.0;
-        g.canvas.rrect(Rect::new(x - 1.25, cy + h * 0.5 - bar_h, 2.5, bar_h), 1.25, color, alpha);
-    }
+/// Music's level at the compact island's end: its bars dancing with the
+/// song (livemusic.rs), or standing still (calm), risen by `level` while it
+/// plays and laid flat as it pauses.
+fn draw_level(g: &mut Gfx, cx: f32, cy: f32, h: f32, look: &Look, color: Color, alpha: f32) {
+    let heights = look.bars.unwrap_or_else(|| crate::livemusic::STILL.map(|k| k * look.level.clamp(0.0, 1.2)));
+    crate::livemusic::draw_bars(g, cx, cy, h, heights, color, alpha);
 }
 
 /// A ring round a point: a meter at its size.
@@ -873,17 +1057,31 @@ fn draw_ring(g: &mut Gfx, cx: f32, cy: f32, r: f32, fraction: f32, color: Color,
 
 /// The compact island (`r`, the island itself, glass already drawn): the
 /// mark, the few words, a meter or music's level at the end.
-pub fn draw_compact(g: &mut Gfx, r: Rect, a: &Activity, level: f32, alpha: f32) {
+pub fn draw_compact(g: &mut Gfx, r: Rect, a: &Activity, look: &Look, alpha: f32) {
     let t = g.tokens;
     let ty = g.ty;
     let mark = r.h - 8.0;
-    draw_mark(g, r.x + 6.0 + mark * 0.5, r.cy(), mark, &a.mark, alpha);
+    let mark_x = r.x + 6.0 + mark * 0.5;
+    // A new song: its cover comes up into place as the last one's goes up
+    // and out.
+    let change = look.change.clamp(0.0, 1.0);
+    if let Some(prev) = look.previous.filter(|_| change < 1.0) {
+        draw_mark(g, mark_x, r.cy() - change * 5.0, mark, &prev.mark, alpha * (1.0 - change));
+    }
+    draw_mark(g, mark_x, r.cy() + (1.0 - change) * 5.0, mark, &a.mark, alpha * change);
     let ink = if a.urgent { t.signal } else { t.ink };
-    let words = compact_words(g, a, (r.w - COMPACT_PAD - trailing_w(a) + 2.0).clamp(0.0, COMPACT_WORDS));
-    g.text.draw(&mut g.canvas, r.x + 12.0 + mark, (r.cy() + ty.caption.size * 0.36).round(), &words, &ty.caption, ink, alpha);
+    let mut x = r.x + 12.0 + mark;
+    if a.sleep.is_some() {
+        let size = ty.caption.size;
+        g.icon_alpha("bedtime", true, x + size * 0.5, r.cy(), size, t.dim, alpha);
+        x += lead_w(g, a);
+    }
+    let words = compact_words(g, a, (r.w - COMPACT_PAD - lead_w(g, a) - trailing_w(a) + 2.0).clamp(0.0, COMPACT_WORDS));
+    g.text.draw(&mut g.canvas, x, (r.cy() + ty.caption.size * 0.36).round(), &words, &ty.caption, ink, alpha);
     let end = r.right() - 11.0;
     if a.playing.is_some() {
-        draw_level(g, end, r.cy(), r.h - 9.0, level, t.signal, alpha);
+        let color = look.accent.unwrap_or(t.signal);
+        draw_level(g, end, r.cy(), r.h - 8.0, look, color, alpha);
     } else if let Some(m) = a.meter {
         draw_ring(g, end, r.cy(), (r.h - 9.0) * 0.5, m.now(), if a.urgent { t.signal } else { g.good() }, alpha);
     }
@@ -934,13 +1132,30 @@ fn fitting_detail<'a>(g: &mut Gfx, detail: &'a str, style: bezel::TextStyle, roo
 /// glass, drawn by whoever places it). Large (56 px and up): the mark big,
 /// the title and the line under it, the value or music's keys at the right,
 /// the meter along the foot. Small: one band.
-pub fn draw_card(g: &mut Gfx, r: Rect, a: &Activity, _level: f32, alpha: f32) {
+pub fn draw_card(g: &mut Gfx, r: Rect, a: &Activity, level: f32, alpha: f32) {
+    draw_card_look(g, r, a, &Look::still(level), alpha);
+}
+
+/// A card, as the island draws it (`look`): music's cover colouring its
+/// progress, the song going up and out as the next comes in, the sleep
+/// timer at the end of its progress, and the line being sung along its foot.
+pub fn draw_card_look(g: &mut Gfx, r: Rect, a: &Activity, look: &Look, alpha: f32) {
     let t = g.tokens;
     let ty = g.ty;
+    // The lyric line's row comes in as the island opens past its usual height.
+    let full = r;
+    let row = lyric_row(g);
+    let lyric_h = if a.sung.is_some() && look.lyrics { (r.h - (OPEN_H - 8.0)).clamp(0.0, row) } else { 0.0 };
+    let r = Rect::new(r.x, r.y, r.w, r.h - lyric_h);
     let large = r.h >= 50.0;
     let pad = if large { 8.0 } else { 6.0 };
     let mark = if large { (r.h - 2.0 * pad).min(56.0) } else { r.h - 2.0 * pad };
-    draw_mark(g, r.x + pad + mark * 0.5, r.cy(), mark, &a.mark, alpha);
+    let change = look.change.clamp(0.0, 1.0);
+    let previous = look.previous.filter(|p| change < 1.0 && p.kind == a.kind);
+    if let Some(p) = previous {
+        draw_mark(g, r.x + pad + mark * 0.5, r.cy(), mark, &p.mark, alpha * (1.0 - change));
+    }
+    draw_mark(g, r.x + pad + mark * 0.5, r.cy(), mark, &a.mark, alpha * if previous.is_some() { change } else { 1.0 });
     let x = r.x + pad + mark + 9.0;
     let accent = if a.urgent { t.signal } else { t.ink };
     // At the right: music's keys, or the value.
@@ -973,19 +1188,35 @@ pub fn draw_card(g: &mut Gfx, r: Rect, a: &Activity, _level: f32, alpha: f32) {
         (false, _) => 0.0,
     };
     let (title_style, line) = if large { (ty.name, ty.caption) } else { (ty.body, ty.caption) };
-    let title = g.text.fit(&a.title, &title_style, room);
-    let detail = fitting_detail(g, &a.detail, line, room);
-    let detail = g.text.fit(detail, &line, room);
     let block = title_style.size + 4.0 + line.size;
     let top = r.cy() - (block + meter_h) * 0.5;
-    g.text.draw(&mut g.canvas, x, (top + title_style.size * 0.8).round(), &title, &title_style, t.ink, alpha);
-    if !detail.is_empty() {
-        g.text.draw(&mut g.canvas, x, (top + title_style.size + 4.0 + line.size * 0.8).round(), &detail, &line, t.dim, alpha);
+    // The title and the line under it; a new song's rise into place as the
+    // last one's rise up and out (Bezel's smooth spring, `look.change`).
+    // The old words are gone before the new are much in, so the two never
+    // read over each other.
+    if let Some(p) = previous {
+        card_words(g, p, x, top - change * 10.0, room, (title_style, line), false, alpha * (1.0 - ease(change / 0.5)));
     }
+    // The sleep timer: at the end of the lyric row if there is one, else
+    // after the artist if both fit whole, else at the end of the progress.
+    let sleep = a.sleep.filter(|_| a.kind == Kind::Music && large).map(|l| clock_text(l as f64));
+    let sleep_w = sleep.as_ref().map_or(0.0, |s| line.size + 3.0 + g.measure(s, line));
+    let sleep_on_lyrics = sleep.is_some() && lyric_h > 0.5;
+    let sleep_on_line = sleep.is_some() && !sleep_on_lyrics && g.measure(&a.detail, line) + sleep_w + 18.0 <= room;
+    let (rise, into) = if previous.is_some() { ((1.0 - change) * 10.0, ease((change - 0.35) / 0.65)) } else { (0.0, 1.0) };
+    card_words(g, a, x, top + rise, room, (title_style, line), sleep_on_line, alpha * into);
     if let Some(m) = a.meter {
-        let fill = if a.urgent { t.signal } else if a.kind == Kind::Music { t.signal } else { g.good() };
+        let music = a.kind == Kind::Music;
+        let fill = if a.urgent { t.signal } else if music { look.accent.unwrap_or(t.signal) } else { g.good() };
         if large {
-            let bar = Rect::new(x, (top + block + 6.0).round(), room.max(20.0), 3.0);
+            let mut bar = Rect::new(x, (top + block + 6.0).round(), room.max(20.0), 3.0);
+            if let Some(words) = sleep.as_ref().filter(|_| !sleep_on_line && !sleep_on_lyrics) {
+                let size = line.size;
+                let end = x + room - 10.0;
+                bar.w = (bar.w - sleep_w - 18.0).max(20.0);
+                g.icon_alpha("bedtime", true, end - sleep_w + size * 0.5, bar.cy(), size, t.dim, alpha);
+                g.text.draw_aligned(&mut g.canvas, end, (bar.cy() + size * 0.36).round(), Align::Right, words, &line, t.dim, alpha);
+            }
             g.canvas.rrect(bar, 1.5, t.meter, alpha);
             let w = (bar.w * m.now()).max(3.0);
             g.canvas.rrect_clipped(Rect::new(bar.x, bar.y, w, bar.h), 1.5, bar, 1.5, fill, alpha);
@@ -995,6 +1226,56 @@ pub fn draw_card(g: &mut Gfx, r: Rect, a: &Activity, _level: f32, alpha: f32) {
             g.canvas.rrect(bar, 1.0, t.meter, alpha * 0.8);
             g.canvas.rrect_clipped(Rect::new(bar.x, bar.y, (bar.w * m.now()).max(2.0), bar.h), 1.0, bar, 1.0, fill, alpha);
         }
+    }
+    // The line being sung, in ink; before the singing and in its pauses,
+    // the one to come, quieter.
+    if lyric_h > 0.5 {
+        let style = ty.body;
+        let cy = r.bottom() + lyric_h * 0.5 - 2.0;
+        let shown = alpha * (lyric_h / row).clamp(0.0, 1.0);
+        let mut width = full.w - 2.0 * pad;
+        if let Some(words) = sleep.as_ref().filter(|_| sleep_on_lyrics) {
+            let end = full.right() - pad - 2.0;
+            g.icon_alpha("bedtime", true, end - sleep_w + line.size * 0.5, cy, line.size, t.dim, shown);
+            g.text.draw_aligned(&mut g.canvas, end, (cy + line.size * 0.36).round(), Align::Right, words, &line, t.dim, shown);
+            width -= sleep_w + 14.0;
+        }
+        if let Some((words, sung)) = a.sung.as_ref().and_then(Sung::line) {
+            let words = g.text.fit(words, &style, width);
+            g.text.draw(&mut g.canvas, full.x + pad, (cy + style.size * 0.36).round(), &words, &style, if sung { t.ink } else { t.dim }, shown);
+        }
+    }
+}
+
+/// 0 below 0, 1 above 1, smoothly between.
+fn ease(x: f32) -> f32 {
+    let t = x.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// A card's title and the line under it, from `top`; music's sleep timer
+/// at that line's end, the moon before it.
+#[allow(clippy::too_many_arguments)]
+fn card_words(g: &mut Gfx, a: &Activity, x: f32, top: f32, room: f32, (title_style, line): (bezel::TextStyle, bezel::TextStyle), sleep: bool, alpha: f32) {
+    let t = g.tokens;
+    let title = g.text.fit(&a.title, &title_style, room);
+    let baseline = (top + title_style.size + 4.0 + line.size * 0.8).round();
+    let mut detail_room = room;
+    if let Some(left) = a.sleep.filter(|_| sleep) {
+        let words = clock_text(left as f64);
+        let size = line.size;
+        let w = size + 3.0 + g.measure(&words, line);
+        // Clear of the keys' letters to the right.
+        let end = x + room - 8.0;
+        g.icon_alpha("bedtime", true, end - w + size * 0.5, baseline - line.size * 0.36, size, t.dim, alpha);
+        g.text.draw_aligned(&mut g.canvas, end, baseline, Align::Right, &words, &line, t.dim, alpha);
+        detail_room = (room - w - 18.0).max(0.0);
+    }
+    let detail = fitting_detail(g, &a.detail, line, detail_room);
+    let detail = g.text.fit(detail, &line, detail_room);
+    g.text.draw(&mut g.canvas, x, (top + title_style.size * 0.8).round(), &title, &title_style, t.ink, alpha);
+    if !detail.is_empty() {
+        g.text.draw(&mut g.canvas, x, baseline, &detail, &line, t.dim, alpha);
     }
 }
 

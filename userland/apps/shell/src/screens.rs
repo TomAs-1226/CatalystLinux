@@ -3098,7 +3098,7 @@ fn nearest_hue(accent: bezel::Accent) -> u8 {
 
 /// Where everything in Settings is, for search: what it is called, the
 /// section it is in, and its place there (none: the section itself).
-const SETTING_PLACES: [(&str, Item, Option<usize>); 82] = [
+const SETTING_PLACES: [(&str, Item, Option<usize>); 83] = [
     ("Robot settings", Item::RobotSection, None),
     ("Open Robot on link", Item::RobotSection, Some(0)),
     ("Match report after a match", Item::RobotSection, Some(1)),
@@ -3156,6 +3156,7 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 82] = [
     ("Played songs kept offline", Item::MusicSection, Some(0)),
     ("Clear played songs", Item::MusicSection, Some(2)),
     ("Music downloads", Item::MusicSection, Some(3)),
+    ("Lyrics on the island", Item::MusicSection, Some(6)),
     ("Name & time", Item::NameSection, None),
     ("Handheld name", Item::NameSection, Some(0)),
     ("Time zone", Item::NameSection, Some(1)),

@@ -83,17 +83,20 @@ pub struct Choices {
     pub auto: bool,
     /// Every download paused.
     pub paused: bool,
+    /// The line being sung, on the island's card (its lyrics asked for as
+    /// each song starts).
+    pub lyrics_island: bool,
 }
 
 impl Default for Choices {
     fn default() -> Self {
-        Choices { cache_gb: 4, wifi_only: true, charging_only: false, auto: true, paused: false }
+        Choices { cache_gb: 4, wifi_only: true, charging_only: false, auto: true, paused: false, lyrics_island: true }
     }
 }
 
 impl Choices {
     pub fn to_text(self) -> String {
-        format!("cache_gb={}\nwifi_only={}\ncharging_only={}\nauto={}\npaused={}\n", self.cache_gb, self.wifi_only, self.charging_only, self.auto, self.paused)
+        format!("cache_gb={}\nwifi_only={}\ncharging_only={}\nauto={}\npaused={}\nlyrics_island={}\n", self.cache_gb, self.wifi_only, self.charging_only, self.auto, self.paused, self.lyrics_island)
     }
 
     pub fn from_text(text: &str) -> Choices {
@@ -106,6 +109,7 @@ impl Choices {
                 "charging_only" => c.charging_only = on,
                 "auto" => c.auto = on,
                 "paused" => c.paused = on,
+                "lyrics_island" => c.lyrics_island = on,
                 _ => {}
             }
         }
@@ -282,6 +286,7 @@ fn remove_files(p: &Played) {
     let id = safe_id(&p.track.id);
     std::fs::remove_file(cache_dir().join(format!("{id}.jpg"))).ok();
     std::fs::remove_file(cache_dir().join(format!("{id}-small.jpg"))).ok();
+    super::lyrics::forget_cached(&p.track.id);
 }
 
 /// Past the limit: the songs played longest ago let go.
@@ -349,7 +354,7 @@ mod tests {
 
     #[test]
     fn choices_and_entries_survive_a_restart() {
-        let c = Choices { cache_gb: 16, wifi_only: false, charging_only: true, auto: false, paused: true };
+        let c = Choices { cache_gb: 16, wifi_only: false, charging_only: true, auto: false, paused: true, lyrics_island: false };
         assert_eq!(Choices::from_text(&c.to_text()), c);
         assert_eq!(Choices::from_text("cache_gb=3\n"), Choices::default(), "a limit not offered: the default");
         let mut e = p("xukbqwRuN5w", 4_115_008, 1_700_000_000);
