@@ -215,7 +215,10 @@ pub fn level_for(percent: u32, max: u32) -> u32 {
 /// `level_for` gives back the same level for, so a brightness read and
 /// written again (standby dimming and coming back) never drifts.
 pub fn percent_for(level: u32, max: u32) -> u32 {
-    if max == 0 {
+    // Dark is dark: the panel's start (and standby) ask whether the light is
+    // off, and 0 must say so. Read as the least step instead, the first
+    // picture never brought the light up and 0.6.0 started black.
+    if max == 0 || level == 0 {
         return 0;
     }
     let guess = ((level as f32 / max as f32).sqrt() * 100.0).round() as u32;
@@ -238,6 +241,10 @@ mod brightness_tests {
             assert_eq!(level_for(100, max), max);
             // Never dark, never less than the least share.
             assert!(level_for(0, max) >= 1);
+            // A dark panel reads as dark (the start brings the light up only
+            // from 0), and anything lit reads as lit.
+            assert_eq!(percent_for(0, max), 0, "max {max}");
+            assert!(percent_for(1, max) >= LEAST_PERCENT, "max {max}");
             // Read and written again: the same level, every one reachable.
             for p in 0..=100 {
                 let level = level_for(p, max);

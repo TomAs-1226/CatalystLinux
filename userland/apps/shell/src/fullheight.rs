@@ -64,6 +64,7 @@ pub fn stops() -> Vec<Stop> {
         stop("settings-about-licences", Open::Setting("About this handheld"), &vec![Down; licences].into_iter().chain([Enter]).collect::<Vec<_>>()),
         stop("settings-update-whats-new", Open::Setting("System update"), &[Down, Down, Enter]),
         stop("over-control-centre", Open::Over(|shell| shell.key(Key::Ctrl(' '))), &[]),
+        stop("over-notifications", Open::Over(|shell| shell.key(Key::Ctrl(crate::platform::NOTIFICATIONS))), &[]),
         stop("over-spotlight", Open::Over(|shell| shell.key(Key::Ctrl('\n'))), &[Char('s')]),
         stop("over-recent-apps", Open::Over(recents), &[]),
         stop("over-setup", Open::Over(Shell::start_setup), &[]),
@@ -156,8 +157,6 @@ mod tests {
     #[test]
     fn every_list_runs_to_the_foot_of_the_panel_or_to_what_is_drawn_there() {
         crate::shell::tests::sandbox();
-        // Its shells tick for a while: they would take a timer's announcement.
-        let _timers = crate::clock::TIMERS_ANNOUNCED.lock().unwrap_or_else(|e| e.into_inner());
         let mut wrong = Vec::new();
         let mut lists = 0;
         for size in [TextSize::Compact, TextSize::Standard, TextSize::Large] {

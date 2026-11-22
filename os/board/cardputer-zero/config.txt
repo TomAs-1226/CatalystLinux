@@ -53,3 +53,13 @@ dtoverlay=bq27220_v5
 # empty key map, so no remote in the room is ever taken for a keyboard.
 dtoverlay=gpio-ir,gpio_pin=13,gpio_pull=up,rc-map-name=rc-empty
 dtoverlay=gpio-ir-tx,gpio_pin=12
+
+# The panel's SPI clock is the core clock over a divider chosen once, at
+# boot. Left free, the firmware moves the core between 250 and 400 MHz and
+# the link ran at 31 MHz most of the time; held at 250 (where it idles
+# anyway), the panel's driver picks the divider for it: 62.5 MHz, the
+# panel's own limit. catalyst-power puts this block back if it is missing.
+# catalyst-power: the core clock held, so the panel's link holds 62.5 MHz
+core_freq=250
+core_freq_min=250
+# catalyst-power: end

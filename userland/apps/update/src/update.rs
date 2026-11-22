@@ -217,6 +217,7 @@ fn reporter<'a>(dev: &'a Device, stage: &'a str, version: &'a str) -> impl FnMut
 
 pub fn install(dev: &Device) -> Result<(), String> {
     let _lock = Lock::take(dev)?;
+    gentle();
     let result = install_locked(dev);
     if let Err(why) = &result {
         status::update(dev, |s| {
@@ -226,6 +227,19 @@ pub fn install(dev: &Device) -> Result<(), String> {
         });
     }
     result
+}
+
+/// An install runs behind whatever the handheld is doing: at the lowest
+/// processor priority and the card's idle class (curl, started for the
+/// download, takes both too), so the screen never waits on it. It takes a
+/// little longer; nobody sees it.
+fn gentle() {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, 0, 19);
+        // IOPRIO_WHO_PROCESS (1), this process (0), IOPRIO_CLASS_IDLE (3 << 13).
+        libc::syscall(libc::SYS_ioprio_set, 1, 0, 3 << 13);
+    }
 }
 
 fn install_locked(dev: &Device) -> Result<(), String> {

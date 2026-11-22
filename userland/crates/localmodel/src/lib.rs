@@ -537,6 +537,16 @@ pub fn spawn_server(dir: &Path, model: &Model) -> Result<std::process::Child, St
         unsafe {
             command.pre_exec(|| {
                 libc::setpriority(libc::PRIO_PROCESS as _, 0, 10);
+                // SCHED_BATCH (3), which every thread it starts inherits: its
+                // threads never preempt a frame on waking, and the frames
+                // preempt them. The system call itself, as musl's
+                // sched_setscheduler only reports ENOSYS; the nice is kept.
+                #[cfg(target_os = "linux")]
+                {
+                    // The kernel's sched_param is one int, the priority (0).
+                    let priority: libc::c_int = 0;
+                    libc::syscall(libc::SYS_sched_setscheduler, 0, 3, &priority as *const libc::c_int);
+                }
                 let fd = libc::open(c"/proc/self/oom_score_adj".as_ptr(), libc::O_WRONLY);
                 if fd >= 0 {
                     let value = b"800";

@@ -274,6 +274,14 @@ fn report() {
         }
     } else if let Some(h) = task.take() {
         h.done(if s.failed > 0 { format!("{} saved · {} failed", s.done, s.failed) } else { format!("{} saved", s.done) });
+        // And a notification, kept (unsaid if Music is in front).
+        let songs = |n: usize| if n == 1 { "1 song".to_owned() } else { format!("{n} songs") };
+        let n = if s.failed > 0 {
+            crate::notify::Notification::new("Music", "error", format!("{} not saved", songs(s.failed))).body(format!("{} saved to the library", songs(s.done)))
+        } else {
+            crate::notify::Notification::new("Music", "download_done", format!("{} saved", songs(s.done))).body("in the library, to play offline")
+        };
+        crate::notify::post(n.tag("music:downloads").action("builtin:Music"));
     }
 }
 
