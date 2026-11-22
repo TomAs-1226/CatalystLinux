@@ -53,19 +53,22 @@ pub struct Model {
 
 /// The models offered, fastest first.
 pub const MODELS: [Model; 3] = [
+    // 0.5.4's model, now at 4 bits: as right as at 8 (5 of 15 either way),
+    // 11% quicker to write and 48 MB lighter. The same id, so a handheld
+    // that chose it still has it chosen.
     Model {
         id: "smollm2-135m",
         label: "Fastest",
         name: "SmolLM2 135M",
-        file: "SmolLM2-135M-Instruct-Q8_0.gguf",
-        url: "https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q8_0.gguf",
-        sha256: "5a1395716f7913741cc51d98581b9b1228d80987a9f7d3664106742eb06bba83",
-        size: 144_811_360,
+        file: "SmolLM2-135M-Instruct-Q4_0.gguf",
+        url: "https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q4_0.gguf",
+        sha256: "bcc3af2849ad6095af57e9b5cd43775256efdc66e306acb529172f92d0c04b03",
+        size: 91_893_088,
         context: 2048,
-        peak_mb: 200,
+        peak_mb: 170,
         about: "Quick, but often wrong",
-        writes_per_s: 9.9,
-        reads_per_s: 18.8,
+        writes_per_s: 11.0,
+        reads_per_s: 19.8,
         tools: false,
         licence: "Apache-2.0",
     },
@@ -78,10 +81,10 @@ pub const MODELS: [Model; 3] = [
         sha256: "430fbec5b1b355e9bb12cd0638c9f2a8f21fedd6eafb4103e42c7e88887daa73",
         size: 149_080_928,
         context: 2048,
-        peak_mb: 200,
+        peak_mb: 210,
         about: "Follows instructions; JSON and tools",
-        writes_per_s: 8.0,
-        reads_per_s: 13.0,
+        writes_per_s: 8.1,
+        reads_per_s: 16.2,
         tools: true,
         licence: "LFM Open License v1.0",
     },
@@ -97,7 +100,7 @@ pub const MODELS: [Model; 3] = [
         peak_mb: 280,
         about: "The best answers; slower",
         writes_per_s: 5.9,
-        reads_per_s: 9.6,
+        reads_per_s: 9.5,
         tools: true,
         licence: "LFM Open License v1.0",
     },
@@ -107,8 +110,8 @@ pub const MODELS: [Model; 3] = [
 pub const DEFAULT: usize = 1;
 
 /// Files of models no longer offered, taken off the card when Settings
-/// opens on the models (SmolLM2 360M, offered until 0.5.4).
-pub const RETIRED: [&str; 1] = ["SmolLM2-360M-Instruct-Q4_K_M.gguf"];
+/// opens on the models: 0.5.4's two (SmolLM2 135M at 8 bits, 360M at 4).
+pub const RETIRED: [&str; 2] = ["SmolLM2-135M-Instruct-Q8_0.gguf", "SmolLM2-360M-Instruct-Q4_K_M.gguf"];
 
 /// Where llama-server listens: this handheld only.
 pub const HOST: &str = "127.0.0.1";

@@ -1673,7 +1673,9 @@ the handheld itself (`127.0.0.1` only; curl is held to `http` there), in
 OpenAI's chat-completions shape (`POST /chat/completions`, at most 400
 tokens back). It answers from what it knows, with no tools and no web, and
 its server is started when it is first asked and stopped when the service
-is changed away from it.
+is changed away from it, two minutes after its last answer, or when the
+screen goes off (see On-device model). Esc, or leaving the Assistant while
+it writes, stops the answer at once.
 
 - OpenAI: the Responses API, `store: false`, so nothing is kept on OpenAI's
   side between turns; every turn sends the conversation back, reasoning
