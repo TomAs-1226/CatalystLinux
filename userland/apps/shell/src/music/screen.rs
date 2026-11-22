@@ -177,7 +177,7 @@ impl MusicScreen {
     pub fn new() -> Self {
         let playing = player::now().track().is_some();
         // Offline, with nothing playing: straight to what is on the card.
-        let offline = super::on_device() && !polite::online();
+        let offline = !polite::online();
         let page = if playing {
             Page::Playing
         } else if offline {
@@ -226,7 +226,7 @@ impl MusicScreen {
         self.armed = false;
         self.narrow.clear();
         match &self.page {
-            Page::Start => self.list.focus = if player::now().track().is_some() { 0 } else { 1 },
+            Page::Start => self.list.focus = 0,
             Page::Queue => self.list.focus = player::now().at,
             Page::Account => {
                 if self.version_seen.is_none() && self.version.is_none() {
@@ -307,14 +307,20 @@ impl MusicScreen {
 
     fn dl_rows(&self) -> Vec<DlRow> {
         let items = downloads::items();
-        let mut rows = vec![DlRow::Pause, DlRow::WifiOnly, DlRow::Charging];
+        let under_way = items.iter().any(|i| matches!(i.state, State::Waiting | State::Active));
+        let mut rows = Vec::new();
+        if under_way || store::choices().paused {
+            rows.push(DlRow::Pause);
+        }
+        rows.extend((0..items.len()).map(DlRow::Item));
         if items.iter().any(|i| matches!(i.state, State::Failed(_))) {
             rows.push(DlRow::RetryFailed);
         }
         if items.iter().any(|i| matches!(i.state, State::Done(_))) {
             rows.push(DlRow::ClearSaved);
         }
-        rows.extend((0..items.len()).map(DlRow::Item));
+        rows.push(DlRow::WifiOnly);
+        rows.push(DlRow::Charging);
         rows
     }
 
@@ -328,7 +334,7 @@ impl MusicScreen {
         self.collections.clear();
         self.list = ListState::default();
         // Offline: what is on the card.
-        if super::on_device() && !polite::online() {
+        if !polite::online() {
             self.searched_card = true;
             self.results = card_search(&q);
             self.changed = true;
@@ -514,9 +520,16 @@ impl Screen for MusicScreen {
                         self.filter = Filter::ALL[(Filter::ALL.iter().position(|f| *f == self.filter).unwrap_or(0) + 1) % 4];
                         self.run_search();
                     }
-                    Key::Enter | Key::Right if self.filter == Filter::Songs || self.searched_card => {
+                    Key::Enter | Key::Right if self.searched_card => {
+                        if self.list.focus < self.results.len() {
+                            // On the card: what was found, in order, from this one.
+                            player::play(self.results.clone(), self.list.focus, false);
+                            self.go(Page::Playing);
+                        }
+                    }
+                    Key::Enter | Key::Right if self.filter == Filter::Songs => {
                         if let Some(t) = self.results.get(self.list.focus) {
-                            // A song alone: its radio after it (online).
+                            // A song alone: its radio after it.
                             player::play(vec![t.clone()], 0, true);
                             self.go(Page::Playing);
                         }
@@ -685,7 +698,7 @@ impl Screen for MusicScreen {
                         Some(ListRow::Download) if armed => {
                             let songs: Vec<(Track, Meta)> = list.songs.iter().cloned().zip(list.metas.iter().cloned()).collect();
                             let added = downloads::add(songs, &list.title, list.playlist.as_deref());
-                            *cx.say = Some(if added == 0 { "all of it is saved already".into() } else { format!("{} to download · Downloads shows them", count_words(added, "song")) });
+                            *cx.say = Some(if added == 0 { "all of it is saved already".into() } else { format!("downloading {}", count_words(added, "song")) });
                             if added > 0 {
                                 self.push(Page::Downloads);
                             }
@@ -902,6 +915,15 @@ impl Screen for MusicScreen {
     }
 }
 
+/// A line made lower case as hints are, its sizes' units kept ("3.1 MB").
+fn lower_keeping_units(s: &str) -> String {
+    let mut out = s.to_lowercase();
+    for (lower, unit) in [(" kb", " KB"), (" mb", " MB"), (" gb", " GB")] {
+        out = out.replace(lower, unit);
+    }
+    out
+}
+
 fn narrowed(narrow: &str, hay: &str) -> bool {
     narrow.is_empty() || hay.to_lowercase().contains(&narrow.to_lowercase())
 }
@@ -981,8 +1003,8 @@ impl MusicScreen {
             g.icon(icon, true, mid + dx, cy, if primary { 20.0 } else { 17.0 }, if primary { t.on_signal } else { t.ink });
         }
         let repeat_icon = if n.repeat == Repeat::One { "repeat_one" } else { "repeat" };
-        g.icon("shuffle", false, x + 8.0, cy, 15.0, if n.shuffle { t.ink } else { t.faint });
-        g.icon(repeat_icon, false, W - PAD - 8.0, cy, 15.0, if n.repeat != Repeat::Off { t.ink } else { t.faint });
+        g.icon("shuffle", false, x + 8.0, cy, 15.0, if n.shuffle { t.signal } else { t.faint });
+        g.icon(repeat_icon, false, W - PAD - 8.0, cy, 15.0, if n.repeat != Repeat::Off { t.signal } else { t.faint });
         let status = if n.buffering {
             Some("buffering…".to_owned())
         } else if n.phase == Phase::Loading {
@@ -1099,6 +1121,8 @@ impl MusicScreen {
         self.list.scrollbar(g, count, list_top, bottom);
         if self.typing {
             g.hint_any(&["enter: search · tab: songs, albums, artists", "enter: search · tab: kind", "enter: search"]);
+        } else if count > 0 && self.searched_card {
+            g.hint_any(&["offline · searched what is on the card", "on the card · enter: play", "enter: play"]);
         } else if count > 0 && songs {
             g.hint_any(&["enter: play, then its radio · d: save", "enter: play · d: save", "enter: play"]);
         } else if count > 0 {
@@ -1159,6 +1183,7 @@ impl MusicScreen {
             Some(LibRow::Played) => &["every song played, kept to play offline", "kept to play offline"],
             Some(LibRow::Shuffle) => &["the library and played songs, shuffled", "all, shuffled"],
             _ if library::refreshing() => &["looking for new music on the card…", "looking for new music…"],
+            _ if !polite::online() => &["offline · what is on the card still plays", "offline"],
             _ if songs == 0 => &["save songs from search, or copy your own in", "nothing saved yet"],
             _ => &["on the card · plays without the internet", "on the card"],
         };
@@ -1234,7 +1259,7 @@ impl MusicScreen {
             return;
         }
         let bytes = match list.kind {
-            ListKind::Played => list.songs.iter().filter_map(|s| store::cached(&s.id)).map(|p| p.bytes).sum(),
+            ListKind::Played => store::played().iter().filter(|p| list.songs.iter().any(|s| s.id == p.track.id)).map(|p| p.bytes).sum(),
             _ => downloads::estimate(&list.songs),
         };
         let saved = list.songs.iter().filter(|s| s.local.is_some() || library::by_youtube(&s.id).is_some()).count();
@@ -1260,7 +1285,7 @@ impl MusicScreen {
             }
         }
         self.list.scrollbar(g, rows.len(), top, bottom);
-        let byline = list.byline.to_lowercase();
+        let byline = lower_keeping_units(&list.byline);
         match rows.get(self.list.focus) {
             Some(ListRow::Download) if self.armed => g.hint_any(&["enter again: download · esc: not now", "enter again: download"]),
             Some(ListRow::Download) => g.hint_any(&["into the library, over wi-fi, one at a time", "into the library"]),
@@ -1297,8 +1322,8 @@ impl MusicScreen {
                 DlRow::Pause => crate::bluetooth::icon_row(g, r, if c.paused { "play_arrow" } else { "pause" }, false, if c.paused { "Resume all" } else { "Pause all" }, "", t.dim, f),
                 DlRow::WifiOnly => g.row(r, "Only over Wi-Fi", if c.wifi_only { "on" } else { "off" }, if c.wifi_only { t.ink } else { t.dim }, f),
                 DlRow::Charging => g.row(r, "Only while charging", if c.charging_only { "on" } else { "off" }, if c.charging_only { t.ink } else { t.dim }, f),
-                DlRow::RetryFailed => crate::bluetooth::icon_row(g, r, "sync", false, "Try the failed again", &s.failed.to_string(), t.dim, f),
-                DlRow::ClearSaved => crate::bluetooth::icon_row(g, r, "check_circle", false, "Clear the saved", &s.done.to_string(), t.dim, f),
+                DlRow::RetryFailed => crate::bluetooth::icon_row(g, r, "sync", false, "Try failed again", &s.failed.to_string(), t.dim, f),
+                DlRow::ClearSaved => crate::bluetooth::icon_row(g, r, "check_circle", false, "Clear finished", &s.done.to_string(), t.dim, f),
                 DlRow::Item(k) => {
                     let item = &items[k];
                     let value = match &item.state {
@@ -1317,9 +1342,9 @@ impl MusicScreen {
                     }
                     let x = art.right() + 7.0;
                     let room = r.right() - 14.0 - g.measure(&value, if g.theme == crate::look::Theme::Bezel { ty.body } else { ty.label }) - x;
-                    g.text_fit(x, r.cy() - if item.state == State::Active { 2.0 } else { 0.0 }, &item.track.title, ty.body, t.ink, room);
+                    g.text_fit(x, r.cy() - if item.state == State::Active { 4.0 } else { 0.0 }, &item.track.title, ty.body, t.ink, room);
                     if item.state == State::Active {
-                        g.meter(Rect::new(x, r.bottom() - 6.0, room, 2.5), (item.have as f32 / item.total.max(1) as f32).min(1.0), t.ice);
+                        g.meter(Rect::new(x, r.bottom() - 4.5, room, 2.0), (item.have as f32 / item.total.max(1) as f32).min(1.0), t.ice);
                     }
                 }
             }

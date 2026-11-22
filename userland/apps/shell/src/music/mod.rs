@@ -57,6 +57,18 @@ use crate::robot::Robot;
 use crate::shell::{Cx, Screen};
 
 pub use player::{media_key, playing, tile};
+
+/// The tour: nothing playing (to show what Music opens on then).
+#[cfg(not(target_arch = "aarch64"))]
+pub fn stop_for_shots() {
+    player::clear();
+    for _ in 0..50 {
+        if player::now().track().is_none() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
 pub use screen::MusicScreen;
 pub use settings::{summary, MusicSettings};
 

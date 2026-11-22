@@ -758,11 +758,13 @@ fn demo_index() -> Index {
     let root = store::library_dir();
     let mut songs = Vec::new();
     for (i, t) in super::demo_catalogue().into_iter().enumerate() {
-        if !matches!(t.album.as_str(), "Low Water" | "Orbit Songs" | "Night Bus" | "Copper Season") {
+        if !matches!(t.album.as_str(), "Low Water" | "Orbit Songs" | "Night Bus" | "Copper Season" | "Match Day") {
             continue;
         }
-        let rel = format!("{}/{}/{:02} {}.opus", t.artist, t.album, i % 4 + 1, t.title);
-        songs.push(Song { path: root.join(&rel), rel, mtime: 0, size: 3_400_000 + i as u64 * 91_000, title: t.title.clone(), artist: t.artist.clone(), album: t.album.clone(), album_artist: t.artist.clone(), track: (i % 4 + 1) as u32, year: 2024, seconds: t.seconds.unwrap_or(0), youtube: t.id.clone() });
+        // Match Day is one of your own, copied in (no YouTube id, no cover).
+        let own = t.album == "Match Day";
+        let rel = format!("{}/{}/{:02} {}.{}", t.artist, t.album, i % 4 + 1, t.title, if own { "flac" } else { "opus" });
+        songs.push(Song { path: root.join(&rel), rel, mtime: 0, size: if own { 28_000_000 } else { 3_400_000 + i as u64 * 91_000 }, title: t.title.clone(), artist: t.artist.clone(), album: t.album.clone(), album_artist: t.artist.clone(), track: (i % 4 + 1) as u32, year: 2024, seconds: t.seconds.unwrap_or(0), youtube: if own { String::new() } else { t.id.clone() } });
     }
     Index { songs, dirs: HashMap::new() }
 }

@@ -91,6 +91,8 @@ enum Cmd {
     /// After the song playing now.
     PlayNext(Track),
     Remove(usize),
+    /// Everything stopped and the queue emptied.
+    Clear,
     Shuffle,
     Repeat,
     /// A song's radio arrived: added after it, if it is still the one.
@@ -211,6 +213,11 @@ pub fn jump(i: usize) {
 }
 pub fn play_next(t: Track) {
     send(Cmd::PlayNext(t));
+}
+/// The queue emptied, nothing playing.
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+pub fn clear() {
+    send(Cmd::Clear);
 }
 pub fn remove(i: usize) {
     send(Cmd::Remove(i));
@@ -462,6 +469,16 @@ impl Worker {
                 }
             }
             Cmd::Remove(i) => self.remove(i),
+            Cmd::Clear => {
+                self.stop_sound();
+                let mut s = self.state.lock().unwrap();
+                s.queue.clear();
+                s.at = 0;
+                s.phase = Phase::Empty;
+                s.offset = 0.0;
+                drop(s);
+                crate::nowplaying::set(None);
+            }
             Cmd::Shuffle => {
                 let mut s = self.state.lock().unwrap();
                 if s.shuffle {
@@ -631,6 +648,12 @@ impl Worker {
     }
 
     fn silent(&mut self, at: f32) {
+        // The simulator keeps what it plays too, as the handheld does.
+        let playing = self.state.lock().unwrap().track().filter(|t| t.local.is_none() && !cfg!(test)).cloned();
+        if let Some(t) = playing {
+            store::note(&t, "webm", store::estimate_bytes(t.seconds), true);
+            store::played_now(&t.id);
+        }
         let length = self.state.lock().unwrap().length.unwrap_or(200.0);
         self.sound = Some(Sound::Silent { until: Instant::now() + Duration::from_secs_f32((length - at).max(0.5)) });
         {

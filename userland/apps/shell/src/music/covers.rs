@@ -303,8 +303,10 @@ pub fn cover(track: &Track) -> Option<Arc<Picture>> {
     if let Some(p) = c.ready.get(&key) {
         return Some(p.clone());
     }
-    if !super::on_device() && track.local.is_none() {
-        let p = Arc::new(super::demo_cover(track));
+    // The simulator's songs from YouTube (saved ones too, by their album)
+    // have made-up covers; its own-music album gets one drawn, as here.
+    if !super::on_device() && !track.id.starts_with("lib:") {
+        let p = Arc::new(if track.local.is_some() { super::demo_cover(&Track { title: format!("{}{}", track.album, track.artist), ..Track::default() }) } else { super::demo_cover(track) });
         c.ready.insert(key.clone(), p.clone());
         c.order.push_back(key);
         return Some(p);

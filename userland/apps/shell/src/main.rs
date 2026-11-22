@@ -1258,6 +1258,27 @@ fn shots(mut shell: Shell, dir: &std::path::Path) {
     if std::env::var("CATALYST_SHOTS_ONLY").as_deref() == Ok("spotlight") {
         return spotlight_shots(dir);
     }
+    // Or only Music's.
+    if std::env::var("CATALYST_SHOTS_ONLY").as_deref() == Ok("music") {
+        let settle = |shell: &mut Shell, frames: usize| {
+            for _ in 0..frames {
+                if shell.tick(1.0 / 60.0) {
+                    shell.draw();
+                }
+            }
+        };
+        let save = |shell: &mut Shell, name: &str| {
+            shell.draw();
+            platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}.png")), 3);
+        };
+        let press = |shell: &mut Shell, keys: &[Key], frames: usize| {
+            for key in keys {
+                shell.key(*key);
+                settle(shell, frames);
+            }
+        };
+        return music_shots(&mut shell, &press, &save, &settle);
+    }
     // From Files to Settings, however many apps lie between.
     let files_to_settings: Vec<Key> =
         [Ctrl('q'), Back].into_iter().chain(std::iter::repeat_n(Right, steps_to("Settings") - steps_to("Files"))).chain([Enter]).collect();
@@ -2922,7 +2943,84 @@ fn music_shots(shell: &mut Shell, press: &dyn Fn(&mut Shell, &[Key], usize), sav
     real_time(&mut light, 0.4);
     settle(&mut light, 40);
     save(&mut light, "143l-music-account-bezel-light-large");
-    for missing in [light.gfx.missing_icons(), shell.gfx.missing_icons()] {
+    // The library on the card: from the song playing, L.
+    shell.show(Box::new(music::MusicScreen::new()));
+    settle(shell, 60);
+    press(shell, &[Char('s'), Char('r')], 20);
+    save(shell, "143m-music-shuffle-repeat");
+    press(shell, &[Char('s'), Char('r'), Char('r'), Char('l')], 30);
+    real_time(shell, 0.4);
+    settle(shell, 30);
+    save(shell, "143n-music-library");
+    press(shell, &[Enter], 40);
+    save(shell, "143o-music-artists");
+    press(shell, &[Back, Down, Enter], 40);
+    real_time(shell, 0.4);
+    settle(shell, 30);
+    save(shell, "143p-music-albums");
+    // Your own album (no cover of its own: one drawn from its name).
+    press(shell, &[Down, Down], 20);
+    real_time(shell, 0.4);
+    settle(shell, 30);
+    save(shell, "143q-music-albums-own");
+    press(shell, &[Up, Up, Enter], 40);
+    real_time(shell, 0.3);
+    settle(shell, 30);
+    save(shell, "143r-music-album");
+    press(shell, &[Back, Back, Down, Down, Enter], 40);
+    real_time(shell, 0.3);
+    settle(shell, 30);
+    save(shell, "143s-music-played");
+    // An album found on YouTube Music: Download all, its size, then the downloads.
+    press(shell, &[Back, Back, Char('/')], 30);
+    for c in "orbit".chars() {
+        shell.key(Char(c));
+    }
+    press(shell, &[Tab], 20);
+    save(shell, "143t-music-search-albums-typing");
+    press(shell, &[Enter], 20);
+    real_time(shell, 0.8);
+    settle(shell, 40);
+    save(shell, "143u-music-search-albums");
+    press(shell, &[Enter], 20);
+    real_time(shell, 0.7);
+    settle(shell, 40);
+    save(shell, "143v-music-album-from-youtube");
+    press(shell, &[Down, Down, Enter], 20);
+    save(shell, "143w-music-download-confirm");
+    press(shell, &[Enter], 40);
+    real_time(shell, 0.5);
+    settle(shell, 20);
+    save(shell, "143x-music-downloading");
+    real_time(shell, 4.5);
+    settle(shell, 30);
+    save(shell, "143y-music-downloads-done");
+    // Settings › Music.
+    let mut settings = Shell::new(Robot::demo());
+    settings.apply_settings();
+    settle(&mut settings, 100);
+    press(&mut settings, &vec![Right; steps_to("Settings")], 12);
+    press(&mut settings, &[Enter], 60);
+    press(&mut settings, &vec![Down; screens::settings_row("Music")], 12);
+    press(&mut settings, &[Enter], 60);
+    save(&mut settings, "143z-settings-music");
+    // Offline, Music opens on the library.
+    music::polite::OFFLINE_FOR_TESTS.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut offline = Shell::new(Robot::demo());
+    offline.apply_settings();
+    settle(&mut offline, 100);
+    music::stop_for_shots();
+    offline.show(Box::new(music::MusicScreen::new()));
+    settle(&mut offline, 60);
+    save(&mut offline, "143za-music-offline-library");
+    press(&mut offline, &[Back], 30);
+    for c in "night".chars() {
+        offline.key(Char(c));
+    }
+    press(&mut offline, &[Enter], 40);
+    save(&mut offline, "143zb-music-offline-search");
+    music::polite::OFFLINE_FOR_TESTS.store(false, std::sync::atomic::Ordering::Relaxed);
+    for missing in [light.gfx.missing_icons(), shell.gfx.missing_icons(), settings.gfx.missing_icons(), offline.gfx.missing_icons()] {
         if !missing.is_empty() {
             eprintln!("icons asked for that are not built in: {}", missing.iter().cloned().collect::<Vec<_>>().join(", "));
             std::process::exit(1);
