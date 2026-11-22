@@ -372,6 +372,28 @@ fn main() {
     let flag = |name: &str| args.iter().any(|a| a == name);
     let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     // What making and checking the lock screen's passcode takes here.
+    // A demo event's match logs (seven matches with known faults: brownouts,
+    // a hot elevator, loop overruns, CAN spikes), written where Logs reads
+    // them, to try Logs, Trends and the offline Assistant without a robot.
+    // `catalyst-shell --demo-logs` on the handheld; a folder may be given.
+    if flag("--demo-logs") {
+        let dir = value("--demo-logs").filter(|v| !v.starts_with("--")).map(std::path::PathBuf::from).unwrap_or_else(logs::kept_dir);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            eprintln!("catalyst-shell: making {}: {e}", dir.display());
+            std::process::exit(1);
+        }
+        for spec in offline::synth::demo_event() {
+            let path = dir.join(&spec.name);
+            match std::fs::write(&path, offline::synth::write(&spec)) {
+                Ok(()) => println!("{}", path.display()),
+                Err(e) => {
+                    eprintln!("catalyst-shell: writing {}: {e}", path.display());
+                    std::process::exit(1);
+                }
+            }
+        }
+        return;
+    }
     if flag("--passcode-bench") {
         println!("{}", passcode::bench());
         return;

@@ -1777,6 +1777,12 @@ impl Assistant {
         }
     }
 
+    /// The question under way is one the match logs answer (not a chat).
+    fn about_logs(&self) -> bool {
+        let plan = crate::offline::route::rules(&self.question, &crate::offline::tools::Library::default(), None);
+        plan.sure && plan.intent != crate::offline::route::Intent::Chat
+    }
+
     /// Answering on this handheld, from the match logs.
     fn offline_mode(&self) -> bool {
         self.service.as_ref().is_some_and(|(s, _)| *s == Service::Local)
@@ -1997,18 +2003,17 @@ impl Assistant {
         };
         let reply = match reply {
             Ok(reply) => reply,
-            // No internet, and a question the logs can answer: answered
-            // offline, on this handheld, saying so.
-            Err(why) if no_internet(&why) && self.rounds == 0 && {
-                let plan = crate::offline::route::rules(&self.question, &crate::offline::tools::Library::default(), None);
-                plan.sure && plan.intent != crate::offline::route::Intent::Chat
-            } => {
+            // No internet: a question the logs can answer, or any question
+            // when a model is on this handheld, is answered offline, on this
+            // handheld, saying so.
+            Err(why) if no_internet(&why) && self.rounds == 0 && (self.about_logs() || crate::local::ready()) => {
                 if let Some(chat) = &mut self.chat {
                     chat.rewind(self.mark);
                 }
                 self.calls.clear();
                 self.outcomes.clear();
-                self.push(Entry::Note(format!("{why} · answered offline, from the match logs")));
+                let from = if self.about_logs() { "answered offline, from the match logs" } else { "answered on this handheld" };
+                self.push(Entry::Note(format!("{why} · {from}")));
                 let question = self.question.clone();
                 return self.ask_offline(Some(question), robot);
             }
