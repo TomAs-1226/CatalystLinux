@@ -81,6 +81,7 @@ mod monitor;
 mod music;
 mod nettools;
 mod notes;
+mod nowplaying;
 mod object3d;
 mod offline;
 
