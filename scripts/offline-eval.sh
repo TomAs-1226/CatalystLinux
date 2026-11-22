@@ -72,11 +72,18 @@ run() {
         if [ -n "$wanted" ] && ! echo " $wanted " | grep -qi " ${file%%-*}\| $file "; then
             continue
         fi
+        # Another server on the port would answer for this model.
+        if curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+            echo "something already answers on port $PORT: stop it, or set PORT" >&2
+            exit 1
+        fi
         # As the handheld runs it: a 2048 context, one conversation, an
         # 8-bit cache; three threads here too, so prompt sizes compare.
         "$bin" -m "$TOOLS/models/$file" --host 127.0.0.1 --port "$PORT" -c 2048 -t 3 -np 1 \
             -b 256 -ub 128 -fa on -ctk q8_0 -ctv q8_0 --no-warmup >"$TOOLS/results/${file%.gguf}.server.log" 2>&1 &
         pid=$!
+        # Stopped part way: the server goes too.
+        trap 'kill "$pid" 2>/dev/null; exit 130' INT TERM HUP
         for _ in $(seq 1 120); do
             curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
             sleep 1
