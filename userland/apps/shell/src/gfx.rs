@@ -160,6 +160,9 @@ pub struct Gfx {
     pub pager: Option<(usize, usize, f32)>,
     /// The width a screen title may take before it meets the island.
     pub title_room: f32,
+    /// How much of the title shows: 1, or less while an island grown wide
+    /// (a message, push-to-talk) passes over it.
+    pub title_alpha: f32,
     /// The focus ring, which glides to whatever is focused.
     focus: Focus,
     /// Where the ring was last drawn (its stroke's outer rectangle's middle
@@ -339,6 +342,7 @@ impl Gfx {
             columns: 3,
             pager: None,
             title_room: 96.0,
+            title_alpha: 1.0,
             focus: Focus::new(),
             last_ring: Rect::default(),
             focus_static: false,

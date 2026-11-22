@@ -4,8 +4,9 @@
 //!
 //! It is a sheet of glass that drops from the top on a spring and can be
 //! turned back at any point. The switches' knobs slide, and the brightness
-//! bar glides to its level. Along its foot, two actions: the recent apps,
-//! and a screenshot of the screen beneath (R and S while it is down).
+//! and volume bars glide to their levels. Along its foot, two actions: the
+//! recent apps, and a screenshot of the screen beneath (R and S while it is
+//! down).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -28,29 +29,22 @@ enum Item {
     /// The battery saver (Settings › Battery has the rest of its choices).
     Saver,
     Brightness,
+    Volume,
     Recents,
     Screenshot,
 }
 
-/// In rows: two switches, two switches, the brightness bar, two actions.
-const ITEMS: [Item; 7] = [Item::Wifi, Item::Ssh, Item::Light, Item::Saver, Item::Brightness, Item::Recents, Item::Screenshot];
+/// In rows: two switches, two switches, the brightness and volume bars, two actions.
+const ITEMS: [Item; 8] = [Item::Wifi, Item::Ssh, Item::Light, Item::Saver, Item::Brightness, Item::Volume, Item::Recents, Item::Screenshot];
 
-/// Each item's row and column.
+/// Each item's row and column: two to a row.
 fn place(at: usize) -> (usize, usize) {
-    match at {
-        0..=3 => (at / 2, at % 2),
-        4 => (2, 0),
-        _ => (3, at - 5),
-    }
+    (at / 2, at % 2)
 }
 
-/// The item at a row and column (the brightness bar spans its row).
+/// The item at a row and column.
 fn at(row: usize, col: usize) -> usize {
-    match row {
-        0 | 1 => row * 2 + col,
-        2 => 4,
-        _ => 5 + col,
-    }
+    row * 2 + col
 }
 
 /// The actions along the sheet's foot: icon, name, and the key for each.
@@ -76,9 +70,11 @@ pub struct Control {
     wifi: bool,
     ssh: bool,
     level: u32,
-    /// Each switch's knob, 0 (off) to 1 (on), and the brightness bar's fill.
+    /// Each switch's knob, 0 (off) to 1 (on), and the brightness and volume
+    /// bars' fills.
     knobs: [Animated; 4],
     bar: Animated,
+    volume: Animated,
     /// Its own focus ring (x, y, width, height), gliding between switches.
     /// The screen underneath keeps its ring where it was.
     ring: [Animated; 4],
@@ -108,6 +104,7 @@ impl Control {
             level: 70,
             knobs: [knob(), knob(), knob(), knob()],
             bar: Animated::new(0.7, role::hold()).with_rest(0.003),
+            volume: Animated::new(0.65, role::hold()).with_rest(0.003),
             ring: std::array::from_fn(|_| Animated::new(0.0, role::hold()).with_rest(0.05)),
             ring_placed: false,
         }
@@ -135,6 +132,7 @@ impl Control {
                 knob.jump(if on { 1.0 } else { 0.0 });
             }
             self.bar.jump(self.level as f32 / 100.0);
+            self.volume.jump(crate::sound::level().heard() as f32 / 100.0);
             self.ring_placed = false;
         }
         let target = if open { 1.0 } else { 0.0 };
@@ -177,6 +175,16 @@ impl Control {
                 }
                 self.bar.set(self.level as f32 / 100.0);
             }
+            // The volume, as the volume keys move it; Enter mutes.
+            Key::Left | Key::Right if item == Item::Volume => {
+                let step = crate::sound::STEP as i32;
+                let level = crate::sound::step(if key == Key::Left { -step } else { step });
+                self.volume.set(level.heard() as f32 / 100.0);
+            }
+            Key::Enter | Key::Char(' ') if item == Item::Volume => {
+                let level = crate::sound::toggle_mute();
+                self.volume.set(level.heard() as f32 / 100.0);
+            }
             Key::Left if col == 1 => self.focus -= 1,
             Key::Right if col == 0 => self.focus += 1,
             Key::Tab => self.focus = (self.focus + 1) % ITEMS.len(),
@@ -212,7 +220,7 @@ impl Control {
                 settings.battery.saver = !settings.battery.saver;
                 Outcome::Settings
             }
-            Item::Brightness | Item::Recents | Item::Screenshot => Outcome::Nothing,
+            Item::Brightness | Item::Volume | Item::Recents | Item::Screenshot => Outcome::Nothing,
         };
         let states = self.states(settings);
             for (knob, on) in self.knobs.iter_mut().zip(states) {
@@ -229,7 +237,12 @@ impl Control {
     /// Advance its springs. True while anything is still moving.
     pub fn tick(&mut self, dt: f32) -> bool {
         // Each spring must be advanced, so no short-circuit.
-        let mut moving = self.shown.tick(dt) | self.bar.tick(dt);
+        // The volume keys work while the sheet is down too: the bar follows.
+        let heard = crate::sound::level().heard() as f32 / 100.0;
+        if self.volume.target() != heard {
+            self.volume.set(heard);
+        }
+        let mut moving = self.shown.tick(dt) | self.bar.tick(dt) | self.volume.tick(dt);
         for spring in self.knobs.iter_mut().chain(&mut self.ring) {
             moving |= spring.tick(dt);
         }
@@ -269,15 +282,22 @@ impl Control {
                 focus_rect = Some((r, 12.0));
             }
         }
-        let r = Rect::new(inner.x, inner.y + 2.0 * (th + gap), inner.w, th);
-        g.canvas.rrect(r, 12.0, t.surface1, 0.72);
-        g.icon("lightbulb", true, r.x + 16.0, r.cy(), 16.0, t.dim);
-        let value = format!("{}%", self.level);
+        // The brightness and the volume, side by side: an icon, the bar, the value.
+        let sound = crate::sound::level();
+        let bars = [
+            ("lightbulb", format!("{}%", self.level), self.bar.value(), t.ice),
+            (sound.icon(), if sound.muted { "off".into() } else { format!("{}%", sound.volume) }, self.volume.value(), if sound.muted { t.faint } else { t.ice }),
+        ];
         let value_w = g.measure("100%", ty.label);
-        g.text_at(r.right() - 10.0, r.cy(), Align::Right, &value, ty.label, t.ink);
-        g.meter(Rect::new(r.x + 32.0, r.cy() - 3.0, r.w - 50.0 - value_w, 6.0), self.bar.value(), t.ice);
-        if self.focus == 4 {
-            focus_rect = Some((r, 12.0));
+        for (i, (icon, value, fill, color)) in bars.into_iter().enumerate() {
+            let r = Rect::new(inner.x + i as f32 * (tw + gap), inner.y + 2.0 * (th + gap), tw, th);
+            g.canvas.rrect(r, 12.0, t.surface1, 0.72);
+            g.icon(icon, true, r.x + 15.0, r.cy(), 15.0, t.dim);
+            g.text_at(r.right() - 9.0, r.cy(), Align::Right, &value, ty.label, t.ink);
+            g.meter(Rect::new(r.x + 28.0, r.cy() - 3.0, r.w - 43.0 - value_w, 6.0), fill, color);
+            if self.focus == 4 + i {
+                focus_rect = Some((r, 12.0));
+            }
         }
         // The two actions, each with the key that does it while the sheet is down.
         for (i, (icon, name, key)) in ACTIONS.iter().enumerate() {
@@ -288,7 +308,7 @@ impl Control {
             let cap = Rect::new(r.right() - 22.0, r.cy() - 7.5, 14.0, 15.0);
             g.canvas.rrect(cap, 4.0, t.surface2, 0.9);
             g.text_at(cap.cx(), r.cy(), Align::Center, key, ty.caption, t.dim);
-            if self.focus == 5 + i {
+            if self.focus == 6 + i {
                 focus_rect = Some((r, 12.0));
             }
         }
@@ -386,14 +406,44 @@ mod tests {
         assert!(matches!(c.key(Key::Enter, &mut s), Some(Outcome::Recents)));
         c.key(Key::Right, &mut s);
         assert!(matches!(c.key(Key::Enter, &mut s), Some(Outcome::Screenshot)));
-        // Up from there: the bar, then the switches.
+        // Up from there: the volume bar above it, then the switch above that.
         c.key(Key::Up, &mut s);
-        assert_eq!(c.focus, 4);
+        assert_eq!(ITEMS[c.focus], Item::Volume);
         c.key(Key::Up, &mut s);
-        assert_eq!(c.focus, 2);
+        assert_eq!(ITEMS[c.focus], Item::Saver);
         // Their keys work from anywhere on the sheet.
         assert!(matches!(c.key(Key::Char('r'), &mut s), Some(Outcome::Recents)));
         assert!(matches!(c.key(Key::Char('s'), &mut s), Some(Outcome::Screenshot)));
+    }
+
+    #[test]
+    fn the_volume_bar_sits_beside_the_brightness_and_moves_with_the_keys() {
+        let _one_at_a_time = crate::sound::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = settings();
+        let mut c = Control::new();
+        crate::sound::set_level(crate::sound::Level { volume: 50, muted: false });
+        c.set_open(true, &s);
+        // Down from Saver, the right-hand switch, to the volume beside the brightness.
+        for key in [Key::Right, Key::Down, Key::Down] {
+            c.key(key, &mut s);
+        }
+        assert_eq!(ITEMS[c.focus], Item::Volume);
+        c.key(Key::Right, &mut s);
+        assert_eq!(crate::sound::level().volume, 55);
+        c.key(Key::Left, &mut s);
+        c.key(Key::Left, &mut s);
+        assert_eq!(crate::sound::level().volume, 45);
+        // Enter mutes, and the bar empties as it glides.
+        c.key(Key::Enter, &mut s);
+        assert!(crate::sound::level().muted);
+        c.tick(1.0 / 60.0);
+        assert!(c.volume.value() < 0.45 && c.volume.target() == 0.0);
+        c.key(Key::Enter, &mut s);
+        assert!(!crate::sound::level().muted);
+        // Left from the volume is the brightness; Down, Recents' neighbour.
+        assert_eq!(place(c.focus), (2, 1));
+        c.key(Key::Down, &mut s);
+        assert_eq!(ITEMS[c.focus], Item::Screenshot);
     }
 
     #[test]

@@ -326,6 +326,8 @@ pub struct Busy {
     pub timer: bool,
     /// A screenshot is being saved, or the battery is running out.
     pub saving: bool,
+    /// Music is playing (it streams over Wi-Fi, which deep standby stops).
+    pub music: bool,
 }
 
 /// Why not, if anything stops it.
@@ -337,6 +339,7 @@ pub fn blocker(b: Busy) -> Option<&'static str> {
         (b.update, "an update is under way"),
         (b.timer, "a timer is running"),
         (b.saving, "something is being saved"),
+        (b.music, "music is playing"),
     ]
     .into_iter()
     .find_map(|(busy, why)| busy.then_some(why))
@@ -663,6 +666,7 @@ mod tests {
         assert_eq!(blocker(Busy { update: true, ..Busy::default() }), Some("an update is under way"));
         assert_eq!(blocker(Busy { timer: true, ..Busy::default() }), Some("a timer is running"));
         assert_eq!(blocker(Busy { saving: true, ..Busy::default() }), Some("something is being saved"));
+        assert_eq!(blocker(Busy { music: true, ..Busy::default() }), Some("music is playing"));
     }
 
     #[test]

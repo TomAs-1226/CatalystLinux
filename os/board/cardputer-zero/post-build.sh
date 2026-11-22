@@ -54,10 +54,19 @@ for f in etc/init.d/catalyst-early etc/init.d/catalyst-shell etc/init.d/catalyst
 	usr/sbin/catalyst-ssh-toggle usr/sbin/catalyst-net usr/sbin/catalyst-grow-data usr/sbin/catalyst-wifi-toggle \
 	usr/sbin/catalyst-usb usr/sbin/catalyst-power usr/sbin/catalyst-time usr/share/udhcpc/default.script.d/50-catalyst-time \
 	usr/libexec/catalyst/git-credential etc/init.d/catalyst-tailscale usr/sbin/catalyst-tailscale \
-	etc/init.d/catalyst-zram; do
+	etc/init.d/catalyst-zram etc/init.d/catalyst-audio usr/sbin/catalyst-audio etc/init.d/catalyst-bluetooth usr/sbin/catalyst-bluetooth; do
 	chmod 0755 "$TARGET_DIR/$f"
 done
 mkdir -p "$TARGET_DIR/data"
+
+# Sound: ALSA's configuration is written at boot by catalyst-audio (the
+# speaker's, or Bluetooth headphones in front of it while they are the
+# output), so /etc/asound.conf leads to where it is written.
+ln -sfn /run/catalyst-audio/asound.conf "$TARGET_DIR/etc/asound.conf"
+# Bluetooth's pairings live on the data partition, since / is read-only.
+mkdir -p "$TARGET_DIR/var/lib"
+rm -rf "$TARGET_DIR/var/lib/bluetooth"
+ln -sfn /data/bluetooth "$TARGET_DIR/var/lib/bluetooth"
 
 # The time zone: /etc/localtime leads to the one chosen in setup or Settings,
 # a link on /data to its rules (none chosen: no file there, and the time is
@@ -82,7 +91,8 @@ done
 #
 #   sysinit   /sys and /dev
 #   boot      catalyst-early (panel and key drivers, storage), catalyst-shell
-#   default   catalyst-late (clock, hotplug, log), network, Wi-Fi, SSH, USB, Tailscale, serial login
+#   default   catalyst-late (clock, hotplug, log), sound, network, Wi-Fi, SSH, USB, Tailscale,
+#             Bluetooth, serial login
 #
 # The shell is on screen before anything in "default" starts. Buildroot's
 # stock set (two dozen services meant for a general machine, several of which
@@ -96,6 +106,7 @@ link sysinit devfs
 link boot catalyst-early
 link boot catalyst-shell
 link default catalyst-late
+link default catalyst-audio
 link default catalyst-net
 link default catalyst-wifi
 link default catalyst-ssh
@@ -103,6 +114,7 @@ link default catalyst-update
 link default catalyst-usb
 link default catalyst-tailscale
 link default catalyst-zram
+link default catalyst-bluetooth
 link default agetty.ttyAMA0
 link shutdown killprocs
 link shutdown mount-ro
@@ -111,12 +123,15 @@ link shutdown mount-ro
 # boot to work out the order, so the unused ones are pure delay. Among them
 # are the Dropbear and cron scripts that would start those at every boot
 # (SSH is only ever started by catalyst-ssh, when it is switched on).
+# What a runlevel above links is kept (so a service added there is never
+# taken out by mistake), with agetty, which agetty.ttyAMA0 is a link to.
 for script in "$TARGET_DIR"/etc/init.d/*; do
-	case "$(basename "$script")" in
-	catalyst-early | catalyst-shell | catalyst-late | catalyst-net | catalyst-wifi | catalyst-ssh | catalyst-update | catalyst-usb | catalyst-tailscale) ;;
-	sysfs | devfs | agetty | agetty.ttyAMA0 | killprocs | mount-ro | functions.sh) ;;
-	*) rm -f "$script" ;;
+	name=$(basename "$script")
+	case "$name" in
+	agetty | functions.sh) continue ;;
 	esac
+	[ -n "$(find "$R" -name "$name" 2>/dev/null)" ] && continue
+	rm -f "$script"
 done
 
 # Libraries the toolchain and packages bring along that no program here

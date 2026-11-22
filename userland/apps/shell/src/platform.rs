@@ -28,12 +28,26 @@ pub enum Key {
     /// Fn + U and Fn + I on the handheld.
     BrightnessDown,
     BrightnessUp,
+    /// The sound and music keys: Fn + A, S, D and Fn + Q, W, E on the
+    /// handheld, and a USB keyboard's own.
+    Media(Media),
     Char(char),
     /// A letter with Ctrl held.
     Ctrl(char),
     /// Esc held for a second: leave whatever has the screen, even a program
     /// that takes every other key for itself. (A short Esc is still `Back`.)
     Leave,
+}
+
+/// The keys for sound and music, by what they do.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Media {
+    Mute,
+    VolumeDown,
+    VolumeUp,
+    PlayPause,
+    Previous,
+    Next,
 }
 
 impl Key {
@@ -95,8 +109,10 @@ pub fn sym_char(code: u16) -> Option<char> {
 }
 
 /// The keys of the Fn layer the shell has a use for, by key code: Delete,
-/// Home and End, F1 to F12, and the brightness keys. (The arrows and Page Up
-/// and Down are ordinary key codes, read with the rest.)
+/// Home and End, F1 to F12, the brightness keys, and the sound and music
+/// keys (Fn + A, S, D: mute, quieter, louder; Fn + Q, W, E: play or pause,
+/// previous, next). (The arrows and Page Up and Down are ordinary key
+/// codes, read with the rest.)
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn fn_key(code: u16) -> Option<Key> {
     Some(match code {
@@ -108,6 +124,12 @@ pub fn fn_key(code: u16) -> Option<Key> {
         88 => Key::F(12),
         224 => Key::BrightnessDown,
         225 => Key::BrightnessUp,
+        113 => Key::Media(Media::Mute),
+        114 => Key::Media(Media::VolumeDown),
+        115 => Key::Media(Media::VolumeUp),
+        164 => Key::Media(Media::PlayPause),
+        165 => Key::Media(Media::Previous),
+        163 => Key::Media(Media::Next),
         _ => return None,
     })
 }
@@ -183,7 +205,18 @@ impl<Id: PartialEq + Copy> Repeat<Id> {
     pub fn press(&mut self, id: Id, key: Key, now: std::time::Instant) {
         let repeats = matches!(
             key,
-            Key::Up | Key::Down | Key::Left | Key::Right | Key::PageUp | Key::PageDown | Key::Backspace | Key::Delete | Key::BrightnessDown | Key::BrightnessUp | Key::Char(_)
+            Key::Up
+                | Key::Down
+                | Key::Left
+                | Key::Right
+                | Key::PageUp
+                | Key::PageDown
+                | Key::Backspace
+                | Key::Delete
+                | Key::BrightnessDown
+                | Key::BrightnessUp
+                | Key::Media(Media::VolumeDown | Media::VolumeUp)
+                | Key::Char(_)
         ) || (key == Key::Enter && ENTER_REPEATS.load(std::sync::atomic::Ordering::Relaxed));
         self.held = repeats.then_some((id, key, now + REPEAT_AFTER));
         if key == Key::Enter {
@@ -428,6 +461,28 @@ pub fn picture_from_framebuffer(bytes: &[u8], (width, height, stride): (usize, u
     Some(picture)
 }
 
+/// How long the shell waits at start for the panel's framebuffer to appear
+/// (its driver loads at boot, beside the shell's own start).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub const PANEL_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The panel's framebuffer among those under `graphics` (the kernel's
+/// `/sys/class/graphics`): the one with the panel's size, 320 × 170, or
+/// 170 × 320 in the tear-free mode. Another framebuffer (the Pi's HDMI one)
+/// is never the panel.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn panel_in(graphics: &std::path::Path) -> Option<String> {
+    let mut found: Vec<String> = std::fs::read_dir(graphics)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| std::fs::read_to_string(e.path().join("virtual_size")).is_ok_and(|size| matches!(size.trim(), "320,170" | "170,320")))
+        .map(|e| format!("/dev/{}", e.file_name().to_string_lossy()))
+        .collect();
+    found.sort();
+    found.into_iter().next()
+}
+
 // ---------------------------------------------------------------- device ---
 
 #[cfg(target_os = "linux")]
@@ -515,23 +570,27 @@ pub mod device {
         }
     }
 
-    /// The panel's framebuffer device. Usually `/dev/fb0`, but another
-    /// framebuffer (the Pi's HDMI one) can take that name first, so the one
-    /// with the panel's size is picked: 320 × 170, or 170 × 320 in the
-    /// tear-free mode.
-    fn panel_framebuffer() -> String {
+    /// The panel's framebuffer device, waited for while its driver loads
+    /// (`CATALYST_FB` names one outright). Never another framebuffer: drawn
+    /// into the Pi's HDMI one, the shell would run, and say it is well, with
+    /// the panel dark, and a system tried after an update would be kept so
+    /// (0.5.5's panel driver failed to load and that is what happened). With
+    /// no panel it fails instead, and the update's check sends it back to the
+    /// system before.
+    fn panel_framebuffer() -> std::io::Result<String> {
         if let Ok(path) = std::env::var("CATALYST_FB") {
-            return path;
+            return Ok(path);
         }
-        let mut found: Vec<String> = std::fs::read_dir("/sys/class/graphics")
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|e| std::fs::read_to_string(e.path().join("virtual_size")).is_ok_and(|size| matches!(size.trim(), "320,170" | "170,320")))
-            .map(|e| format!("/dev/{}", e.file_name().to_string_lossy()))
-            .collect();
-        found.sort();
-        found.into_iter().next().unwrap_or_else(|| "/dev/fb0".into())
+        let deadline = std::time::Instant::now() + super::PANEL_WAIT;
+        loop {
+            if let Some(path) = super::panel_in(std::path::Path::new("/sys/class/graphics")) {
+                return Ok(path);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no panel (no 320 × 170 framebuffer): its driver did not load"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
     }
 
     /// A watch on `/dev/input`, readable whenever a keyboard comes or goes.
@@ -571,7 +630,7 @@ pub mod device {
         }
 
         pub fn open() -> std::io::Result<Self> {
-            let fb_path = panel_framebuffer();
+            let fb_path = panel_framebuffer()?;
             let fb = OpenOptions::new().read(true).write(true).open(&fb_path)?;
             // fb_var_screeninfo is 160 bytes, fb_fix_screeninfo 80 on arm64.
             let mut var = [0u32; 40];
@@ -623,6 +682,12 @@ pub mod device {
                 (30, "asdfghjkl;'`", "ASDFGHJKL:\"~"),
                 (44, "zxcvbnm,./", "ZXCVBNM<>?"),
             ];
+            // Alt is the talk key (`crate::voice`): held, the shell listens.
+            // It types nothing, here or in a terminal.
+            if crate::voice::is_talk_code(code) {
+                crate::voice::set_talk_key(value != 0);
+                return None;
+            }
             if code == 42 || code == 54 {
                 self.shift = value != 0;
                 return None;
@@ -957,6 +1022,10 @@ pub mod sim {
                 K::F10 => Key::F(10),
                 K::F11 => Key::F(11),
                 K::F12 => Key::F(12),
+                // The handheld's sound keys (Fn + A, S, D), on the keypad.
+                K::NumPadPlus => Key::Media(Media::VolumeUp),
+                K::NumPadMinus => Key::Media(Media::VolumeDown),
+                K::NumPadAsterisk => Key::Media(Media::Mute),
                 K::Space if ctrl => Key::Ctrl(' '),
                 K::Space => Key::Char(' '),
                 K::Period => Key::Char('.'),
@@ -997,6 +1066,8 @@ pub mod sim {
             let shift = self.window.is_key_down(K::LeftShift) || self.window.is_key_down(K::RightShift);
             let ctrl = self.window.is_key_down(K::LeftCtrl) || self.window.is_key_down(K::RightCtrl);
             let leave = self.esc.update(self.window.is_key_down(K::Escape));
+            // Alt held is the talk key, as on the handheld (`crate::voice`).
+            crate::voice::set_talk_key(self.window.is_key_down(K::LeftAlt) || self.window.is_key_down(K::RightAlt));
             let down = self.window.get_keys();
             for gone in self.down.iter().filter(|k| !down.contains(k)) {
                 self.repeat.release(*gone);
@@ -1090,6 +1161,28 @@ mod tests {
     use std::time::Instant;
 
     #[test]
+    fn only_a_framebuffer_the_panels_size_is_the_panel() {
+        let root = std::env::temp_dir().join(format!("catalyst-graphics-{}", std::process::id()));
+        let fb = |name: &str, size: &str| {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+            std::fs::write(root.join(name).join("virtual_size"), format!("{size}\n")).unwrap();
+        };
+        // The Pi's firmware (HDMI) framebuffer alone, as when the panel's
+        // driver failed to load: no panel, rather than drawing into that.
+        fb("fb0", "1920,1080");
+        assert_eq!(panel_in(&root), None);
+        // The panel beside it, under whatever number it was given.
+        fb("fb1", "320,170");
+        assert_eq!(panel_in(&root).as_deref(), Some("/dev/fb1"));
+        // Turned upright for the tear-free mode, still the panel.
+        std::fs::remove_dir_all(&root).unwrap();
+        fb("fb0", "170,320");
+        assert_eq!(panel_in(&root).as_deref(), Some("/dev/fb0"));
+        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(panel_in(&root), None, "no framebuffers at all");
+    }
+
+    #[test]
     fn the_sym_layer_types_what_its_keys_say() {
         // Sym + 1 … 0 along the number row, as printed.
         let row: String = [26, 27, 39, 40, 41, 43, 51, 52, 53, 94].iter().map(|c| sym_char(*c).unwrap()).collect();
@@ -1115,6 +1208,20 @@ mod tests {
         assert_eq!((fn_key(59), fn_key(68), fn_key(88)), (Some(Key::F(1)), Some(Key::F(10)), Some(Key::F(12))));
         assert_eq!(fn_key(225), Some(Key::BrightnessUp));
         assert_eq!(fn_key(103), None, "the arrows are read with the rest");
+    }
+
+    #[test]
+    fn the_fn_layer_gives_the_sound_and_music_keys() {
+        // As M5Stack's keymap has them: Fn + A, S, D and Fn + Q, W, E.
+        assert_eq!((fn_key(113), fn_key(114), fn_key(115)), (Some(Key::Media(Media::Mute)), Some(Key::Media(Media::VolumeDown)), Some(Key::Media(Media::VolumeUp))));
+        assert_eq!((fn_key(164), fn_key(165), fn_key(163)), (Some(Key::Media(Media::PlayPause)), Some(Key::Media(Media::Previous)), Some(Key::Media(Media::Next))));
+        // Held, the volume keys run on as the arrows do; the others count once.
+        let t0 = Instant::now();
+        let mut held = Repeat::default();
+        held.press(1u16, Key::Media(Media::VolumeUp), t0);
+        assert!(held.next().is_some());
+        held.press(2u16, Key::Media(Media::PlayPause), t0);
+        assert!(held.next().is_none());
     }
 
     #[test]

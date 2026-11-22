@@ -26,7 +26,9 @@ camera_auto_detect=0
 dtoverlay=imx219
 
 # Serial console on GPIO14/15 (the Grove port). This takes the PL011 from
-# Bluetooth, which nothing uses yet.
+# Bluetooth. Switched on in Settings > Bluetooth, the radio gets the mini
+# UART instead (catalyst-bt, added below the board's lines with the core
+# clock held for it), and the console stays here, on ttyAMA0.
 enable_uart=1
 dtoverlay=disable-bt
 
@@ -34,7 +36,9 @@ dtoverlay=disable-bt
 dtoverlay=dwc2
 
 # The speaker's amplifier (enabled by GPIO24) held off from the first
-# instant: nothing plays sound yet, and idle it draws about 9 mA.
+# instant: idle it hisses and draws about 9 mA. Once the sound drivers load
+# (catalyst-late), the kernel switches it on only while something plays,
+# and off again five seconds after the last sound.
 gpio=24=op,dl
 
 # The board: I/O expander, panel, backlight, keyboard, fuel gauge.

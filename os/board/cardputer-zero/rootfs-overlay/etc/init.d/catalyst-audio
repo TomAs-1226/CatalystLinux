@@ -1,0 +1,19 @@
+#!/sbin/openrc-run
+# Sound: the codec's drivers, the volume and microphone as they were left,
+# and ALSA's "default" for every program (catalyst-audio). Nothing of it
+# runs between sounds: the speaker's amplifier is on only while something
+# plays, which the kernel sees to.
+
+description="Sound: volume, microphone and the default output"
+
+depend() {
+	need catalyst-early
+	after catalyst-late
+}
+
+start() {
+	ebegin "Setting up sound"
+	# Waiting for the card would hold up Wi-Fi and the rest behind it.
+	/usr/sbin/catalyst-audio start >/dev/null 2>&1 &
+	eend 0
+}

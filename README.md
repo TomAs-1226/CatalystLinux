@@ -15,7 +15,7 @@ windows that grow out of tiles whenever it is there.
 | `userland/crates/bezel` | Bezel on the CPU: tonal surfaces, the two type voices, Material Symbols, and the full glass pass (refraction, frost, edge light, groups, shadow). |
 | `userland/crates/nt4` | A NetworkTables 4.1 client: one thread, read-only, reconnects on its own. |
 | `userland/crates/apriltag` | AprilTag detection: AprilRobotics' C library (3.4.5, BSD 2-Clause, vendored with the 36h11 family FRC uses) behind a small flat shim, with each tag's pose. |
-| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, Camera, Photos, AprilTag, Graphs, Pit, Remote, Level, Compass, Weather, Calculator, Clock, Notes, Units, HTTP, Share, Browse, Assistant, Web, Settings) and the launcher for external ones. |
+| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, Camera, Photos, AprilTag, Graphs, Pit, Remote, Level, Compass, Weather, Calculator, Clock, Notes, Units, HTTP, Share, Browse, Assistant, Web, Music, Settings) and the launcher for external ones. |
 | `userland/apps/update` | `catalyst-update`: system updates on the handheld (A/B, tried once, rolled back if it does not come up), and the release tool that makes and signs them. |
 | `userland/apps/flasher` | Catalyst Flasher: the newest release onto an SD card in one go. |
 | `userland/assets/app-icon` | Catalyst's icon (the FrcCatalyst bolt) at each size Windows uses, built into the simulator; `assets/` holds it for Raspberry Pi Imager's listing. |
@@ -349,8 +349,9 @@ two together: no robot at first, then the demo one, back from a match.
 
 The **control centre** is a sheet of glass that drops from the top over
 whatever is showing: Wi-Fi, SSH, light or dark, the battery saver, and
-brightness, with two actions along its foot, Recents and Screenshot (R and S
-while it is down). Ctrl-Space brings it down from any screen, a terminal
+brightness and volume side by side (Left and Right set them; Enter on the
+volume mutes), with two actions along its foot, Recents and Screenshot (R and
+S while it is down). Ctrl-Space brings it down from any screen, a terminal
 included (so does the Opt key, if the keyboard reports one), and Up from the
 top of Home pulls it down too. Esc, Ctrl-Space again, or Up from its top row
 puts it away. The screen behind is held still while it is out, so the glass
@@ -1314,6 +1315,148 @@ shared with the `tailscale` command, given back under pressure), so about
 page's Memory row reads the real figure on the handheld. On a PC, a made-up
 tailnet stands in and signs in by itself a few seconds after its code shows.
 
+## Sound
+
+The CardputerZero's codec is an Everest ES8389 on I2C1 at 0x10, with the
+CM0's I2S on GPIO18 (bit clock), 19 (frame clock), 20 (into the CM0) and 21
+(out of it). The board has no master clock: the codec's MCLK pin is wired to
+the I2S data line (R160), so the codec takes its clock from the bit clock.
+The left output drives the AW8737A speaker amplifier (enabled by GPIO24) and
+the headphone jack's left; the right goes to the jack alone. The jack is a
+TRRS with detection on GPIO17 (high while a plug is in, which also cuts the
+amplifier in hardware). The handheld's own microphone is an analog MEMS one
+on MIC1 (MIC1P, against its ground on MIC1N); a headset's comes in on MIC2.
+
+- **Drivers:** M5Stack's codec driver (`es8389_m5stack`, which clocks the
+  codec from the bit clock), their amplifier switch and their board's
+  machine driver, from `m5stack-linux-dtoverlays` (`cardputerzero-v5-overlay`
+  already describes it all). Two patches of ours: without headphones the
+  right channel is mixed into the left for the speaker (6 dB down, so the
+  sum does not clip), and the jack no longer switches the microphone, since
+  plain headphones would leave every recording silent.
+- **The amplifier** is on only while something plays: the kernel switches
+  GPIO24 with the playback path and off again five seconds after the last
+  sound. Idle it would draw 9 mA and hiss. A program that keeps the device
+  open while silent keeps it on, so players close it when they pause.
+- **`default`** (ALSA) is what every program uses: playback at any rate and
+  format, mixed (dmix) at the system volume and played at 48 kHz, 16-bit,
+  stereo; capture from the microphone, shared (dsnoop). The configuration is
+  `/usr/share/catalyst/asound.conf`; `catalyst-audio` writes it to
+  `/run/catalyst-audio/asound.conf` at boot, where `/etc/asound.conf` leads,
+  with Bluetooth headphones in front while they are the output.
+- **Volume:** Fn + S and Fn + D (quieter, louder) and Fn + A (mute) over any
+  screen, the bar beside the brightness in the control centre, and Settings ›
+  Sound. One volume for everything ("Master" on the card, a software volume
+  from -50 dB to 0 dB, linear in decibels), kept on `/data/catalyst`.
+- **Settings › Sound:** the volume, mute, where sound is playing (speaker,
+  headphones, or Bluetooth), a test chime, the microphone (the handheld's or
+  a headset's) with its level live while the row is chosen, and its gain.
+- **Reminders** chime through it as they come due; the pit's have a
+  brighter, quicker sound of their own. Muted, nothing plays.
+
+`catalyst-audio status|volume|mute|test-tone|mic|mic-gain|output|route|amp`
+does the same from the Terminal; `amixer -c ES8389Audio` shows every control.
+
+### Recording, for programs that listen
+
+Open ALSA's `default` for capture. Ask for what the program wants: 16 kHz,
+16-bit, mono is fine and is what speech recognisers expect.
+
+- **Underneath:** the codec records at 48 kHz, 16-bit, stereo, in 1024-frame
+  periods (21 ms), shared, so several programs (a wake word and a recorder)
+  can listen at once. The microphone is on the left channel; `default` gives
+  it on every channel a program asks for. Other rates are converted by
+  ALSA's own (linear) resampler; for the best quality at other rates, take
+  48 kHz and resample in the program.
+- **Gain:** the microphone's amplifier is at setting 8, 18.5 dB by the
+  ES8389's datasheet (the driver's own scale calls it 24 dB), then the ADC
+  at 0 dB. `catalyst-audio mic-gain 0..14` changes it (4 and 5 are not
+  allowed: 6 is 12.5 dB, each step after about 3 dB, 14 is 36.5 dB), kept
+  across restarts. The codec's automatic level control is off.
+- **Which microphone:** the handheld's own unless `catalyst-audio mic
+  headset` (or Settings › Sound) chooses the jack's; the choice stays when
+  headphones come and go.
+- Recording runs the codec's input side only: the speaker's amplifier stays
+  off while nothing plays.
+
+## Bluetooth
+
+Settings › Bluetooth plays to Bluetooth headphones and speakers (A2DP, SBC
+at its high quality). It is off until switched on there, and while it is
+off the radio is not powered and nothing of it runs.
+
+- **The radio and the console.** The CM0's radio (a CYW43439) is wired to
+  the processor's PL011 UART, which the serial console uses on GPIO14/15
+  (`ttyAMA0`, the Grove port and the EXT header), so the image starts with
+  `disable-bt`. Switching Bluetooth on adds a block to `config.txt` (as the
+  developer options' trials do) with our `catalyst-bt` overlay, which moves
+  the radio to the mini UART (`ttyS0`) at 921600 baud with its flow control,
+  and `core_freq=250`: the mini UART's baud rate is divided from the VPU's
+  clock, which must not change under it. The console stays on `ttyAMA0`:
+  `cmdline.txt` and the serial login do not change. This takes one restart
+  (the page offers it); switching off takes the block out again.
+- **The software:** BlueZ (`bluetoothd`, driven through `bluetoothctl` by
+  `catalyst-bluetooth`), bluez-alsa (A2DP straight to ALSA) and D-Bus's
+  system bus, started by the `catalyst-bluetooth` service only while
+  Bluetooth is on. Pairings are kept in `/data/bluetooth`.
+- **Pairing** asks nothing ("just works", as headphones do it); paired
+  devices are trusted, so they connect again by themselves. While the device
+  chosen is connected, `default` plays to it at the same system volume;
+  when it goes (switched off, out of range), sound comes back to the
+  speaker by itself (a watcher on bluealsa's streams rewrites `default`).
+  One program at a time plays to Bluetooth (bluez-alsa 4.3 does not mix):
+  Music waits a moment and tries again if a chime has it.
+- **Why not PipeWire:** for the same headphones PipeWire needs WirePlumber
+  (and its Lua) beside BlueZ and D-Bus: about 20 to 25 MB resident against
+  about 7 MB for bluez-alsa, BlueZ and D-Bus together, and the speaker is
+  already shared by ALSA's dmix.
+
+## Music
+
+Music plays YouTube Music: search, the start page (the home page's quick
+picks, or its first playlist; your likes when signed in), a song and its
+radio after it, the queue (play next, take out, jump to), and a now-playing
+page with the cover, where the song is, and the transport. It plays on
+behind every other app and with the screen off: Fn + Q (play or pause),
+Fn + W and Fn + E (previous, next) work from anywhere, Home's tile says what
+is playing, and the volume keys and Bluetooth headphones apply as for
+anything else. While music plays the handheld does not go into deep
+standby (which would switch its Wi-Fi off). Spotlight finds the songs Music
+has listed, and offers a search of YouTube Music for anything typed.
+
+- **Finding songs:** YouTube Music's own web API (InnerTube, as its web
+  page, `WEB_REMIX`), through curl.
+- **Playing:** yt-dlp (`/usr/libexec/catalyst/yt-dlp`, its single-file
+  release) finds the audio-only stream, Opus where there is one (else AAC),
+  answering YouTube's player challenge in QuickJS (`qjs`); ffmpeg fetches it
+  over HTTPS, decodes it, resamples it to 48 kHz and plays it to ALSA's
+  `default`. Pausing stops ffmpeg, so the speaker's amplifier goes off;
+  playing again starts it where it was. The next song's stream is found
+  while one plays. Account › Stream finder brings the newest yt-dlp to
+  `/data/music` when YouTube changes under the one in the image.
+- **Signed out by default:** nothing is sent but searches and the songs
+  asked for. To sign in, put a browser's `cookies.txt` for
+  music.youtube.com at `/data/music/cookies.txt`; the page says that
+  third-party players like this one can break YouTube's terms. The cookies
+  go to curl and yt-dlp in files, never on a command line, and Sign out
+  deletes them.
+- **What it costs:** nothing at rest. While a song plays, ffmpeg is about
+  10 to 15 MB (most of it its libraries' pages, shared and given back under
+  pressure) and a few per cent of one core: Opus at 128 to 160 kbit/s
+  decodes in well under 5%, and the HTTPS stream is 16 to 20 KB/s, which
+  OpenSSL's NEON code deciphers without the AES instructions the CM0 lacks.
+  Finding a stream is the costly part: YouTube's player challenge is its
+  2.5 MB player script run in QuickJS. On a PC (WSL) yt-dlp takes about 6 s
+  for a song, 3 s of it QuickJS, and QuickJS peaks at about 200 MB
+  (Python alone, 70 MB); on the A53, an estimated 15 to 25 s. So streams
+  are found one at a time (never two QuickJS at once), the next song's
+  while one plays (a song ends into the next without that wait), and each
+  is kept for four hours. The first song after opening the app waits for
+  its own ("finding it…").
+
+On a computer (the simulator) a made-up catalogue stands in, with covers
+drawn from each song's name, and songs play silently.
+
 ## Match logs
 
 The handheld pulls `.wpilog` files from the robot over the Ethernet cable,
@@ -2259,3 +2402,11 @@ Sudoku from sudokuzero (dbrhspyjkf-code), Battleship from Battleship
 (yutacar), Typing from taM5CZTyping / key-dash (yuk1-kondo; its English and
 code word lists), Orbits from AstroBox (eggfly, kur1k0). Each app's
 `LICENSE` carries the original's copyright line beside Catalyst's.
+
+Sound, Bluetooth and Music use, from the image: ALSA's library and tools
+(LGPL-2.1 and GPL-2.0), BlueZ (GPL-2.0 and LGPL-2.1), bluez-alsa (MIT),
+D-Bus (AFL-2.1 or GPL-2.0), FFmpeg built without its GPL parts (LGPL-2.1),
+QuickJS (MIT) and yt-dlp's release (Unlicense, with astring (MIT) and
+meriyah (ISC) inside). The codec, amplifier and machine drivers are
+M5Stack's (GPL-2.0), with our patches. The shell signs YouTube requests
+with sha1 (RustCrypto, MIT or Apache 2.0).

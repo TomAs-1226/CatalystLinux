@@ -328,7 +328,7 @@ def main():
 
 
 # Home's built-in apps, and Terminal's place among them (screens.rs, APPS).
-BUILT_IN = 34
+BUILT_IN = 35
 TERMINAL = 8
 
 
@@ -398,6 +398,14 @@ def tools(vm):
     check("the cable is watched from the interface's flags (the adapter can sleep)", out.strip() == "1", out)
     out = vm.run("grep -c '^gpio=24=op,dl' /boot/config.txt 2>/dev/null || (mkdir -p /run/b && mount -o ro /dev/mmcblk0p1 /run/b && grep -c '^gpio=24=op,dl' /run/b/config.txt; umount /run/b)")
     check("the speaker's amplifier is held off", out.strip().endswith("1"), out)
+    # The board's own drivers (M5Stack's: the panel, keyboard, battery,
+    # sound), built apart from the kernel, load against this kernel. 0.5.5's
+    # panel driver had been built for the kernel before, the kernel would not
+    # take it, and the panel stayed dark on the handheld.
+    out = vm.run("cd /lib/modules/$(uname -r)/updates && for m in *.ko*; do modprobe ${m%%.ko*} 2>/dev/null; done; "
+                 "dmesg | grep -c -E 'disagrees about version|Unknown symbol|Exec format error|invalid module format'; ls | wc -l", 180)
+    f = out.split()
+    check("the board's own drivers all load against this kernel", f[:1] == ["0"] and len(f) == 2 and f[1].isdigit() and int(f[1]) >= 8, " ".join(f))
     # Compressed swap in memory (zram, lz4), half the RAM; never the card.
     out = vm.run("grep -c '^/dev/zram0 ' /proc/swaps; cat /sys/block/zram0/comp_algorithm; cat /proc/sys/vm/swappiness; grep -c mmcblk /proc/swaps")
     f = out.split()
@@ -470,9 +478,9 @@ def tour(vm, folder):
     time.sleep(8)
     check("Home draws", shot("1-home") > 50)
 
-    # Left and Right go through the apps in order: thirty-four built in,
-    # Settings last; then the image's Processes (34) and the user's own by
-    # name: hello (35) and Paint (36).
+    # Left and Right go through the apps in order: thirty-five built in,
+    # Settings last; then the image's Processes (35) and the user's own by
+    # name: hello (36) and Paint (37).
     for key in ["right"] * BUILT_IN:
         vm.key(key)
     time.sleep(6)
