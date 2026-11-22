@@ -44,6 +44,12 @@ pub fn polite(cmd: &mut Command, manner: Manner) -> &mut Command {
                 Manner::Playing => -10,
             };
             libc::setpriority(libc::PRIO_PROCESS, 0, nice);
+            // Downloads and lookups wait for the card behind everything else
+            // (IOPRIO_WHO_PROCESS 1, this process, IOPRIO_CLASS_IDLE 3 << 13):
+            // the screen never queues behind a song being saved.
+            if manner != Manner::Playing {
+                libc::syscall(libc::SYS_ioprio_set, 1, 0, 3 << 13);
+            }
             let fd = libc::open(c"/proc/self/oom_score_adj".as_ptr(), libc::O_WRONLY);
             if fd >= 0 {
                 libc::write(fd, b"800".as_ptr().cast(), 3);
