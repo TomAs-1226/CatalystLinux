@@ -697,14 +697,14 @@ impl Beat {
 
 #[cfg(target_arch = "aarch64")]
 fn open_platform(_sim: bool) -> Box<dyn Platform> {
-    Box::new(platform::device::Device::open().expect("open /dev/fb0"))
+    Box::new(platform::device::Device::open().expect("the panel"))
 }
 
 #[cfg(not(target_arch = "aarch64"))]
 fn open_platform(sim: bool) -> Box<dyn Platform> {
     #[cfg(target_os = "linux")]
     if !sim {
-        return Box::new(platform::device::Device::open().expect("open /dev/fb0"));
+        return Box::new(platform::device::Device::open().expect("the panel"));
     }
     let _ = sim;
     Box::new(platform::sim::Sim::open(gfx::W as usize, gfx::H as usize))

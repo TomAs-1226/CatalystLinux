@@ -25,5 +25,15 @@ if [ ! -f "$CATALYST_BUILD/output/.config" ] || [ "${1:-}" = "reconfigure" ]; th
 	"${BR[@]}" catalyst_cardputer_zero_defconfig
 	[ "${1:-}" = "reconfigure" ] && shift
 fi
-"${BR[@]}" "${@:-all}"
+# M5Stack's drivers are built apart from the kernel, against it: a kernel
+# rebuilt leaves them refused at load (0.5.5's panel stayed dark so), so
+# they are built again with it.
+targets=()
+for target in "${@:-all}"; do
+	targets+=("$target")
+	case "$target" in
+	linux-reconfigure | linux-rebuild | linux-dirclean) targets+=(m5stack-cardputer-zero-dirclean) ;;
+	esac
+done
+"${BR[@]}" "${targets[@]}"
 ls -lh "$CATALYST_BUILD/output/images/" 2>/dev/null | grep -E "sdcard|rootfs|boot" || true

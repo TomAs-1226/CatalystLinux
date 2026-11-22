@@ -461,6 +461,28 @@ pub fn picture_from_framebuffer(bytes: &[u8], (width, height, stride): (usize, u
     Some(picture)
 }
 
+/// How long the shell waits at start for the panel's framebuffer to appear
+/// (its driver loads at boot, beside the shell's own start).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub const PANEL_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The panel's framebuffer among those under `graphics` (the kernel's
+/// `/sys/class/graphics`): the one with the panel's size, 320 × 170, or
+/// 170 × 320 in the tear-free mode. Another framebuffer (the Pi's HDMI one)
+/// is never the panel.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn panel_in(graphics: &std::path::Path) -> Option<String> {
+    let mut found: Vec<String> = std::fs::read_dir(graphics)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| std::fs::read_to_string(e.path().join("virtual_size")).is_ok_and(|size| matches!(size.trim(), "320,170" | "170,320")))
+        .map(|e| format!("/dev/{}", e.file_name().to_string_lossy()))
+        .collect();
+    found.sort();
+    found.into_iter().next()
+}
+
 // ---------------------------------------------------------------- device ---
 
 #[cfg(target_os = "linux")]
@@ -548,23 +570,27 @@ pub mod device {
         }
     }
 
-    /// The panel's framebuffer device. Usually `/dev/fb0`, but another
-    /// framebuffer (the Pi's HDMI one) can take that name first, so the one
-    /// with the panel's size is picked: 320 × 170, or 170 × 320 in the
-    /// tear-free mode.
-    fn panel_framebuffer() -> String {
+    /// The panel's framebuffer device, waited for while its driver loads
+    /// (`CATALYST_FB` names one outright). Never another framebuffer: drawn
+    /// into the Pi's HDMI one, the shell would run, and say it is well, with
+    /// the panel dark, and a system tried after an update would be kept so
+    /// (0.5.5's panel driver failed to load and that is what happened). With
+    /// no panel it fails instead, and the update's check sends it back to the
+    /// system before.
+    fn panel_framebuffer() -> std::io::Result<String> {
         if let Ok(path) = std::env::var("CATALYST_FB") {
-            return path;
+            return Ok(path);
         }
-        let mut found: Vec<String> = std::fs::read_dir("/sys/class/graphics")
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|e| std::fs::read_to_string(e.path().join("virtual_size")).is_ok_and(|size| matches!(size.trim(), "320,170" | "170,320")))
-            .map(|e| format!("/dev/{}", e.file_name().to_string_lossy()))
-            .collect();
-        found.sort();
-        found.into_iter().next().unwrap_or_else(|| "/dev/fb0".into())
+        let deadline = std::time::Instant::now() + super::PANEL_WAIT;
+        loop {
+            if let Some(path) = super::panel_in(std::path::Path::new("/sys/class/graphics")) {
+                return Ok(path);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no panel (no 320 × 170 framebuffer): its driver did not load"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
     }
 
     /// A watch on `/dev/input`, readable whenever a keyboard comes or goes.
@@ -604,7 +630,7 @@ pub mod device {
         }
 
         pub fn open() -> std::io::Result<Self> {
-            let fb_path = panel_framebuffer();
+            let fb_path = panel_framebuffer()?;
             let fb = OpenOptions::new().read(true).write(true).open(&fb_path)?;
             // fb_var_screeninfo is 160 bytes, fb_fix_screeninfo 80 on arm64.
             let mut var = [0u32; 40];
@@ -1133,6 +1159,28 @@ pub mod sim {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn only_a_framebuffer_the_panels_size_is_the_panel() {
+        let root = std::env::temp_dir().join(format!("catalyst-graphics-{}", std::process::id()));
+        let fb = |name: &str, size: &str| {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+            std::fs::write(root.join(name).join("virtual_size"), format!("{size}\n")).unwrap();
+        };
+        // The Pi's firmware (HDMI) framebuffer alone, as when the panel's
+        // driver failed to load: no panel, rather than drawing into that.
+        fb("fb0", "1920,1080");
+        assert_eq!(panel_in(&root), None);
+        // The panel beside it, under whatever number it was given.
+        fb("fb1", "320,170");
+        assert_eq!(panel_in(&root).as_deref(), Some("/dev/fb1"));
+        // Turned upright for the tear-free mode, still the panel.
+        std::fs::remove_dir_all(&root).unwrap();
+        fb("fb0", "170,320");
+        assert_eq!(panel_in(&root).as_deref(), Some("/dev/fb0"));
+        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(panel_in(&root), None, "no framebuffers at all");
+    }
 
     #[test]
     fn the_sym_layer_types_what_its_keys_say() {
