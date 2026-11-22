@@ -14,7 +14,7 @@ use bezel::{Align, Rect};
 use detent::{role, Animated};
 use serde_json::{json, Value};
 
-use crate::gfx::{Gfx, ListState, H, PAD, W};
+use crate::gfx::{Gfx, ListState, PAD, W};
 use crate::platform::Key;
 use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
@@ -298,7 +298,7 @@ impl Screen for Http {
         if let Some((field, _)) = &self.typing {
             return field.draw(g, "enter: done · esc: cancel");
         }
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         let style = g.ty.label;
         for (i, y) in self.list.layout(g, ROWS, top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
@@ -368,7 +368,7 @@ impl Screen for History {
             g.empty("history", "nothing sent yet");
             return;
         }
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         let all = self.all.clone();
         for (i, y) in self.list.layout(g, all.len(), top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
@@ -482,7 +482,7 @@ impl Screen for ResponseView {
         g.text_at(W - PAD - 2.0, cy, Align::Right, &meta, ty.caption, t.dim);
         // The body, or the headers, in mono, scrolled.
         let style = ty.caption;
-        let area = Rect::new(PAD, top + ty.name.size + 6.0, W - 2.0 * PAD, H - PAD - g.hint_h() - (top + ty.name.size + 6.0));
+        let area = Rect::new(PAD, top + ty.name.size + 6.0, W - 2.0 * PAD, g.above_hint() - (top + ty.name.size + 6.0));
         g.surface(area, 10.0, t.surface1);
         let char_w = g.measure("0000000000", style) / 10.0;
         let columns = ((area.w - 16.0) / char_w).floor() as usize;

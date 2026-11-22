@@ -23,7 +23,7 @@ use std::time::Instant;
 use bezel::{Align, Rect};
 use serde_json::Value;
 
-use crate::gfx::{Gfx, ListState, H, PAD, W};
+use crate::gfx::{Gfx, ListState, PAD, W};
 use crate::git::Job;
 use crate::platform::Key;
 use crate::robot::Robot;
@@ -532,14 +532,14 @@ impl Screen for TailscaleScreen {
         let ty = g.ty;
         let phase = self.phase();
         let rows = self.rows(phase);
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         // The sign-in code takes the right of the page, as tall as it has room for.
         let code = if phase == Phase::SignIn { self.qr.as_ref().map(|(_, qr)| qr) } else { None };
         let side = if code.is_some() { (bottom - top).min(124.0) } else { 0.0 };
         let width = W - 2.0 * PAD - 5.0 - if side > 0.0 { side + 8.0 } else { 0.0 };
         let value_style = if g.theme == crate::look::Theme::Bezel { ty.body } else { ty.label };
         let mut below = top;
-        for (i, y) in self.list.layout(g, rows.len(), top, row_h, 3.0, bottom + 2.0) {
+        for (i, y) in self.list.layout(g, rows.len(), top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, y, width, row_h);
             let (name, value, lit) = self.describe(rows[i], phase);
             let room = r.w - g.measure(&name, ty.body) - 34.0;

@@ -491,7 +491,7 @@ impl Album {
     /// Rows that fit between the title and the line along the bottom.
     fn rows_in_sight(g: &Gfx) -> usize {
         let (_, ch) = Self::cell();
-        let room = H - PAD - g.hint_h() - g.top();
+        let room = g.above_hint() + crate::gfx::FOOT_AIR - crate::gfx::RING_ROOM - g.top();
         (((room + GAP) / (ch + GAP)).floor() as usize).max(1)
     }
 
@@ -581,26 +581,30 @@ impl Screen for Album {
         }
         let (cw, ch) = Self::cell();
         let top = g.top();
-        let bottom = H - PAD - g.hint_h();
+        let bottom = g.above_hint();
         let first = self.scroll.value();
         // Those in sight (and a row each side) are the thumbnails wanted.
         let from = ((first.floor() as usize).saturating_sub(1)) * COLS;
         let to = ((first.ceil() as usize + rows + 1) * COLS).min(self.photos.len());
         self.thumbs.want(&self.photos[from..to]);
         let radius = g.radius(8.0).min(ch * 0.25);
-        g.canvas.set_clip(Rect::new(0.0, top - 2.0, W, bottom - top + 4.0));
+        // Under the whole rows, the next one fades out above the line along the bottom.
+        let foot = bottom + crate::gfx::FOOT_AIR;
+        g.canvas.set_clip(Rect::new(0.0, top - 2.0, W, foot - top + 2.0));
+        let mut fade = crate::gfx::Fade::default();
+        fade.take(g, top + rows as f32 * (ch + GAP) - GAP + crate::gfx::RING_ROOM, foot);
         let mut focused_cell = None;
         for (i, photo) in self.photos.iter().enumerate().take(to).skip(from) {
             let (row, col) = (i / COLS, i % COLS);
             let y = top + (row as f32 - first) * (ch + GAP);
-            if y + ch < top - 2.0 || y > bottom + 2.0 {
+            if y + ch < top - 2.0 || y > foot {
                 continue;
             }
             let r = Rect::new(PAD + col as f32 * (cw + GAP), y, cw, ch);
             match self.thumbs.get(&photo.name) {
                 Some(thumb) => {
-                    // Fade out at the top and bottom edges rather than cut.
-                    let edge = ((r.bottom() - top) / 8.0).clamp(0.0, 1.0) * ((bottom - r.y) / 8.0).clamp(0.0, 1.0);
+                    // Fade out at the top edge rather than cut (at the foot, the band does).
+                    let edge = ((r.bottom() - top) / 8.0).clamp(0.0, 1.0);
                     draw_picture(g, r, &thumb, whole(&thumb), radius, edge);
                 }
                 None => {
@@ -614,6 +618,7 @@ impl Screen for Album {
             }
         }
         g.canvas.clear_clip();
+        fade.apply(g);
         if let Some(r) = focused_cell {
             g.focus_ring(r, radius);
         }

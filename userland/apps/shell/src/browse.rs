@@ -614,6 +614,7 @@ impl Screen for Browse {
         let bar_h = chat.size + 13.0;
         let bar = Rect::new(PAD, H - PAD - bar_h, W - 2.0 * PAD, bar_h);
         let area = Rect::new(0.0, g.top(), W, bar.y - 4.0 - g.top());
+        g.take_foot(area.bottom());
         VIEW.with(|v| v.set(area.h));
         LINE.with(|l| l.set(ai::chat_line(g)));
         // Reading or searching: what it is doing, gently pulsing.

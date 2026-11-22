@@ -236,12 +236,12 @@ impl Screen for Files {
             g.hint("enter: make it · esc: cancel");
             return;
         }
-        let bottom = H - PAD - g.hint_h();
+        let bottom = g.above_hint();
         if self.entries.is_empty() {
             g.empty("folder", "nothing in this folder");
         }
         let entries = self.entries.clone();
-        for (i, y) in self.list.layout(g, entries.len(), top, row_h, 3.0, bottom + 2.0) {
+        for (i, y) in self.list.layout(g, entries.len(), top, row_h, 3.0, bottom) {
             let entry = &entries[i];
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let (name, value) = if entry.dir { (format!("{}/", entry.name), "›".to_owned()) } else { (entry.name.clone(), size(entry.bytes)) };

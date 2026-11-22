@@ -14,7 +14,7 @@ use bezel::{Align, Rect};
 use detent::{role, Animated};
 use serde_json::{json, Value};
 
-use crate::gfx::{Gfx, ListState, H, PAD, W};
+use crate::gfx::{Gfx, ListState, PAD, W};
 use crate::ir::{self, Learned, Protocol};
 use crate::platform::Key;
 use crate::robot::Robot;
@@ -238,7 +238,7 @@ impl Screen for Remotes {
         if let Some((field, _)) = &self.naming {
             return field.draw(g, "enter: done · esc: cancel");
         }
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         let len = self.remotes.len() + 1;
         let mut end = top;
         for (i, y) in self.list.layout(g, len, top, row_h, 3.0, bottom) {
@@ -408,7 +408,7 @@ impl Screen for Buttons {
         if let Some(field) = &self.naming {
             return field.draw(g, "enter: done · esc: cancel");
         }
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         let buttons = self.buttons().to_vec();
         let len = buttons.len() + 1;
         let mut end = top;
@@ -585,7 +585,7 @@ impl Screen for Learn {
         if g.calm {
             self.arrived.jump(self.arrived.target());
         }
-        let (top, bottom) = (g.top(), H - PAD - g.hint_h());
+        let (top, bottom) = (g.top(), g.above_hint());
         let arrived = self.arrived.value().clamp(0.0, 1.0);
         // The lower part: what was heard, drawn out as it arrives.
         let wave = Rect::new(PAD, bottom - 30.0, W - 2.0 * PAD, 30.0);

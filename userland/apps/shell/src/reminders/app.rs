@@ -9,7 +9,7 @@ use detent::{role, Animated};
 use super::parse::{self, Parsed};
 use super::plan::{clock_text, when_text, Here, Now, LEAD, MORNING};
 use super::{now, with, Link, List, Page, Reminder, Repeat, Row, When};
-use crate::gfx::{Gfx, ListState, H, PAD, W};
+use crate::gfx::{Gfx, ListState, PAD, W};
 use crate::platform::Key;
 use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
@@ -382,7 +382,7 @@ impl Screen for Reminders {
         }
 
         let list_top = top + head_h + 3.0;
-        let bottom = H - PAD - g.hint_h();
+        let bottom = g.above_hint();
         let base = g.ox;
         for (p, rows) in all.iter().enumerate() {
             let ox = ((p as f32 - self.turn.value()) * W).round();
@@ -436,7 +436,7 @@ impl Reminders {
         };
         let indent = indent(g);
         let indent_w = g.measure(indent, name_style);
-        for (i, y) in self.lists[p].layout(g, len, top, row_h, 3.0, bottom + 2.0) {
+        for (i, y) in self.lists[p].layout(g, len, top, row_h, 3.0, bottom) {
             let y = match shift {
                 Some((at, by)) if i >= at => y + by,
                 _ => y,
@@ -693,7 +693,7 @@ impl Screen for Compose {
         let ty = g.ty;
         let h24 = g.clock.0;
         self.field.draw_at(g, true);
-        let card = Rect::new(PAD, g.top() + Field::height(g) + 6.0, W - 2.0 * PAD, H - PAD - g.hint_h() - 4.0 - (g.top() + Field::height(g) + 6.0));
+        let card = Rect::new(PAD, g.top() + Field::height(g) + 6.0, W - 2.0 * PAD, g.above_hint() - (g.top() + Field::height(g) + 6.0));
         g.surface(card, g.radius(12.0), t.surface1);
         let line = |k: f32| card.y + 11.0 + k * (ty.caption.size + 5.0);
         let room = card.w - 40.0;
@@ -884,7 +884,7 @@ impl Screen for Routine {
         let t = g.tokens;
         let top = g.top();
         let row_h = g.row_h();
-        let bottom = H - PAD - g.hint_h();
+        let bottom = g.above_hint();
         let view = with(|s| {
             s.sync(&robot.schedule);
             s.view.clone()

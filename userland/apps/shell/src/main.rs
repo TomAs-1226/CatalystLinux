@@ -53,6 +53,7 @@ mod deep;
 mod device;
 mod faces;
 mod files;
+mod fullheight;
 mod gfx;
 mod git;
 mod github;
@@ -420,6 +421,14 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--shots") {
         return shots(shell, std::path::Path::new(&dir));
+    }
+    // Every screen at the panel's whole height, in a look at a text size.
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--full-height") {
+        tour_fixtures();
+        let size = value("--text").and_then(|name| gfx::TextSize::from_name(&name)).unwrap_or(gfx::TextSize::Standard);
+        let look = value("--look").unwrap_or_else(|| "catalyst".into());
+        return fullheight::gallery(std::path::Path::new(&dir), &look, size);
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--standby-shots") {

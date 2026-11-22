@@ -687,7 +687,7 @@ impl Screen for History {
             g.empty("history", "no update history in this system");
             return;
         }
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD + 2.0);
+        let (top, row_h, bottom) = (g.top(), g.row_h(), H);
         for (i, y) in self.list.layout(g, self.releases.len(), top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let release = &self.releases[i];

@@ -27,7 +27,7 @@ use bezel::{Align, Rect};
 use serde_json::Value;
 
 use crate::git::Job;
-use crate::gfx::{Gfx, ListState, H, PAD, W};
+use crate::gfx::{Gfx, ListState, PAD, W};
 use crate::platform::Key;
 use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
@@ -468,11 +468,11 @@ impl Screen for CatalogueScreen {
             return;
         }
         let dir = apps_dir();
-        let bottom = H - PAD - g.hint_h();
+        let bottom = g.above_hint();
         // Two lines a row: the name, and the line under it.
         let row_h = (ty.name.size + ty.caption.size + 11.0).round();
         let mut updates = 0;
-        for (i, y) in self.list.layout(g, apps.len(), top, row_h, 3.0, bottom + 2.0) {
+        for (i, y) in self.list.layout(g, apps.len(), top, row_h, 3.0, bottom) {
             let app = &apps[i];
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let focused = i == self.list.focus;
@@ -655,9 +655,9 @@ impl Screen for AppPage {
         let standing = self.state.borrow().standing(&app, &dir);
         let more = if matches!(standing, Standing::Update(_)) { self.more_used(&app) } else { Vec::new() };
         let list_top = tile.bottom() + 6.0;
-        let bottom = H - PAD - g.hint_h();
+        let bottom = g.above_hint();
         let row_h = g.row_h();
-        for (i, y) in self.list.layout(g, rows.len(), list_top, row_h, 3.0, bottom + 2.0) {
+        for (i, y) in self.list.layout(g, rows.len(), list_top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
             let focused = i == self.list.focus;
             let radius = r.h * 0.5;
@@ -779,7 +779,7 @@ impl Screen for AboutApp {
 
     fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
         let (t, ty) = (g.tokens, g.ty);
-        let (top, bottom) = (g.top() + 2.0, H - PAD - g.hint_h() + 2.0);
+        let (top, bottom) = (g.top() + 2.0, g.above_hint());
         let lines = wrap(g, &self.text, ty.body, W - 2.0 * PAD - 12.0);
         let pitch = (ty.body.size * 1.32).round();
         self.lines = lines.len();

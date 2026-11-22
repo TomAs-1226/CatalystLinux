@@ -475,7 +475,7 @@ impl Screen for Shortcuts {
         let t = g.tokens;
         let ty = g.ty;
         let (top, row_h) = (g.top(), g.row_h());
-        let bottom = H - PAD + 2.0;
+        let bottom = H;
         for (i, y) in self.list.layout(g, SHORTCUTS.len(), top, row_h, 3.0, bottom) {
             match SHORTCUTS[i] {
                 Line::Head(name) => {
@@ -484,8 +484,14 @@ impl Screen for Shortcuts {
                 Line::Keys(what, keys) => {
                     let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
                     let focused = i == self.list.focus;
-                    g.row(r, what, "", t.ink, focused);
-                    keycaps(g, r.right() - 8.0, r.cy(), keys, focused);
+                    // The words give way to the keys: cut short, never run
+                    // under them (Bezel's lowercase mono is the wider).
+                    let caps_left = keycaps(g, r.right() - 8.0, r.cy(), keys, focused, false);
+                    let bezel = g.theme == crate::look::Theme::Bezel;
+                    let (words, style) = if bezel { (what.to_lowercase(), ty.label) } else { (what.to_owned(), ty.body) };
+                    let words = g.text.fit(&words, &style, caps_left - 8.0 - (r.x + 10.0));
+                    g.row(r, &words, "", t.ink, focused);
+                    keycaps(g, r.right() - 8.0, r.cy(), keys, focused, true);
                 }
             }
         }
@@ -495,7 +501,8 @@ impl Screen for Shortcuts {
 
 /// Keys as keycaps, right-aligned at `right`: each key on its own cap, a dot
 /// between two ways of doing the same thing, plain words as they are.
-fn keycaps(g: &mut Gfx, right: f32, cy: f32, keys: &str, focused: bool) {
+/// Where they begin on the left; with `draw` false, only that.
+fn keycaps(g: &mut Gfx, right: f32, cy: f32, keys: &str, focused: bool, draw: bool) -> f32 {
     let t = g.tokens;
     let style = g.ty.caption;
     let cap_h = style.size + 5.0;
@@ -508,21 +515,28 @@ fn keycaps(g: &mut Gfx, right: f32, cy: f32, keys: &str, focused: bool) {
             let w = g.measure(word, style);
             if is_key {
                 let cap = Rect::new(x - w - 8.0, cy - cap_h * 0.5, w + 8.0, cap_h);
-                let fill = if focused { t.surface3 } else { t.surface2 };
-                g.canvas.rrect(cap, 3.5, fill, 1.0);
-                g.canvas.rrect(Rect::new(cap.x, cap.bottom() - 1.0, cap.w, 1.0), 0.5, Color::BLACK, 0.18);
-                g.text_at(cap.cx(), cy, Align::Center, word, style, t.ink);
+                if draw {
+                    let fill = if focused { t.surface3 } else { t.surface2 };
+                    g.canvas.rrect(cap, 3.5, fill, 1.0);
+                    g.canvas.rrect(Rect::new(cap.x, cap.bottom() - 1.0, cap.w, 1.0), 0.5, Color::BLACK, 0.18);
+                    g.text_at(cap.cx(), cy, Align::Center, word, style, t.ink);
+                }
                 x = cap.x - 3.0;
             } else {
-                g.text_at(x, cy, Align::Right, word, style, t.dim);
+                if draw {
+                    g.text_at(x, cy, Align::Right, word, style, t.dim);
+                }
                 x -= w + 4.0;
             }
         }
         if gi > 0 {
-            g.text_at(x - 1.0, cy, Align::Right, "·", style, t.faint);
+            if draw {
+                g.text_at(x - 1.0, cy, Align::Right, "·", style, t.faint);
+            }
             x -= g.measure("·", style) + 6.0;
         }
     }
+    x
 }
 
 /// Whether a word in a shortcut is a key (drawn on a cap) or a plain word

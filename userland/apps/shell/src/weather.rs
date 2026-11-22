@@ -27,7 +27,7 @@ use chrono::{NaiveDate, NaiveDateTime, Timelike};
 use detent::{role, Animated};
 use serde_json::{json, Value};
 
-use crate::gfx::{Gfx, ListState, GAP, H, PAD, W};
+use crate::gfx::{Gfx, ListState, GAP, PAD, W};
 use crate::platform::Key;
 use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
@@ -757,7 +757,7 @@ fn temp_style(g: &Gfx) -> TextStyle {
 
 /// Where a page's content ends: above the line along the bottom.
 fn bottom(g: &Gfx) -> f32 {
-    H - g.hint_h() - 2.0
+    g.above_hint()
 }
 
 /// The hero's height at this text size.
@@ -1332,7 +1332,7 @@ impl Screen for Weather {
         let row_h = g.row_h();
         if !days.is_empty() && (bottom - list_top >= row_h || fold > 0.0) {
             let rows = self.days.layout(g, days.len(), list_top, row_h, 3.0, bottom);
-            g.canvas.set_clip(Rect::new(0.0, list_top - 4.0, W, (bottom - list_top + 8.0).max(0.0)));
+            g.canvas.set_clip(Rect::new(0.0, list_top - 4.0, W, (bottom - list_top + 4.0).max(0.0)));
             let r0 = Rect::new(PAD, 0.0, W - 2.0 * PAD - 5.0, row_h);
             let cols = day_cols(g, r0);
             for (i, y) in rows {

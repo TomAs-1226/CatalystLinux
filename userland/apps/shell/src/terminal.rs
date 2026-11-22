@@ -100,10 +100,12 @@ impl Terminal {
     fn layout(g: &mut Gfx) -> (usize, usize, f32, f32, Rect) {
         let style = g.ty.caption;
         let cell_w = g.measure("0", style);
-        let cell_h = style.size + 2.0;
+        // Lines a pixel apart (a terminal's own spacing): a row more at
+        // every text size than with the page's looser leading.
+        let cell_h = style.size + 1.0;
         let panel = Rect::new(4.0, g.top() - 3.0, W - 8.0, H - g.top() - 1.0);
         let cols = ((panel.w - 8.0) / cell_w).floor().max(2.0) as usize;
-        let rows = ((panel.h - 6.0) / cell_h).floor().max(2.0) as usize;
+        let rows = ((panel.h - 4.0) / cell_h).floor().max(2.0) as usize;
         (cols, rows, cell_w, cell_h, panel)
     }
 }
@@ -284,7 +286,8 @@ impl Screen for Terminal {
             }
         }
         let back = self.back.min(term.history());
-        let (x0, y0) = (panel.x + 4.0, panel.y + 3.0);
+        // The rows sit in the middle of the panel, as much room above as below.
+        let (x0, y0) = (panel.x + 4.0, panel.y + ((panel.h - rows as f32 * cell_h) * 0.5).round());
         let bold = TextStyle { wght: 700.0, ..style };
         let mut utf8 = [0u8; 4];
         for row in 0..rows {

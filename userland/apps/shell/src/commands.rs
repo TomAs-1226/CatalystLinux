@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use bezel::Rect;
 
-use crate::gfx::{Gfx, ListState, H, PAD, W};
+use crate::gfx::{Gfx, ListState, PAD, W};
 use crate::platform::Key;
 use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
@@ -351,7 +351,7 @@ impl Screen for Commands {
 
     fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
         let t = g.tokens;
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         let len = self.len();
         for (i, y) in self.list.layout(g, len, top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
@@ -469,7 +469,7 @@ impl Screen for Edit {
         if let Some((field, _)) = &self.field {
             return field.draw(g, "enter: done · esc: cancel");
         }
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         let style = if g.theme == crate::look::Theme::Bezel { g.ty.body } else { g.ty.label };
         for (i, y) in self.list.layout(g, EDIT_ROWS, top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);

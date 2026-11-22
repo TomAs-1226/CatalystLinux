@@ -2623,7 +2623,14 @@ impl Shell {
             let title = g.text.fit(&shown_title(g.theme, screen.title()), &ty.title, room.max(0.0));
             g.text_alpha(PAD + 2.0, bar_cy, &title, ty.title, t.ink, g.title_alpha);
         }
+        // What this screen draws along the foot, and its lists, start afresh.
+        g.foot = H;
+        g.viewports.clear();
         screen.draw(g, robot);
+        // Page dots asked for sit on their glass along the foot (`draw_chrome`).
+        if g.pager.is_some() {
+            g.take_foot(H - 16.0);
+        }
     }
 }
 

@@ -280,7 +280,7 @@ impl Screen for NetTools {
         let t = g.tokens;
         let (top, row_h) = (g.top(), g.row_h());
         let team = crate::tools::team(robot);
-        for (i, y) in self.list.layout(g, TOOLS.len(), top, row_h, 3.0, H - PAD + 2.0) {
+        for (i, y) in self.list.layout(g, TOOLS.len(), top, row_h, 3.0, H) {
             let (tool, name, about) = TOOLS[i];
             let value = match (tool, team) {
                 (Tool::Finder, Some(team)) => format!("team {team} ›"),
@@ -288,7 +288,7 @@ impl Screen for NetTools {
             };
             g.row(Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h), name, &value, t.dim, i == self.list.focus);
         }
-        self.list.scrollbar(g, TOOLS.len(), top, H - PAD);
+        self.list.scrollbar(g, TOOLS.len(), top, H);
     }
 }
 
@@ -438,7 +438,7 @@ impl Screen for Finder {
             return field.draw(g, "enter: look for it · esc: back");
         }
         let places = self.job.as_ref().map(Job::get).unwrap_or_default();
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         for (i, y) in self.list.layout(g, places.len(), top, row_h, 3.0, bottom) {
             let p = &places[i];
             let value = match (p.done, p.services.is_empty(), p.ping) {
@@ -592,7 +592,7 @@ impl Screen for Ping {
             None => ping_summary(&pings.replies),
         };
         // The replies as bars: the last forty, the slow ones taller, a lost one a red mark.
-        let plot = Rect::new(PAD, head.bottom() + 5.0, W - 2.0 * PAD, H - PAD - g.hint_h() - head.bottom() - 5.0);
+        let plot = Rect::new(PAD, head.bottom() + 5.0, W - 2.0 * PAD, g.above_hint() - head.bottom() - 5.0);
         g.surface(plot, g.tile_radius(), t.surface1);
         let inner = Rect::new(plot.x + 9.0, plot.y + 8.0 + ty.caption.size, plot.w - 18.0, plot.h - 14.0 - ty.caption.size);
         g.text_fit(plot.x + 9.0, plot.y + 5.0 + ty.caption.size * 0.5, &summary, ty.caption, t.dim, plot.w - 18.0);
@@ -729,7 +729,7 @@ impl Screen for Ports {
         let line = format!("{} · {}", self.host, if asking { "checking…".to_owned() } else { format!("{open} of {} open", found.len()) });
         let head_h = ty.caption.size + 6.0;
         g.text_fit(PAD + 4.0, top + head_h * 0.5 - 1.0, &line, ty.caption, t.dim, W - 2.0 * PAD - 8.0);
-        let (list_top, row_h, bottom) = (top + head_h + 2.0, g.row_h(), H - PAD - g.hint_h());
+        let (list_top, row_h, bottom) = (top + head_h + 2.0, g.row_h(), g.above_hint());
         for (i, y) in self.list.layout(g, found.len(), list_top, row_h, 3.0, bottom) {
             let (port, state) = found[i];
             let name = match port_name(port) {
@@ -844,7 +844,7 @@ impl Screen for Lookup {
             (None, true) => format!("{} · {:.0} ms", self.name, answer.took),
         };
         g.text_fit(PAD + 4.0, top + head_h * 0.5 - 1.0, &line, ty.caption, t.dim, W - 2.0 * PAD - 8.0);
-        let (list_top, row_h, bottom) = (top + head_h + 2.0, g.row_h(), H - PAD - g.hint_h());
+        let (list_top, row_h, bottom) = (top + head_h + 2.0, g.row_h(), g.above_hint());
         for (i, y) in self.list.layout(g, answer.addresses.len(), list_top, row_h, 3.0, bottom) {
             let ip = answer.addresses[i];
             let kind = if ip.is_ipv4() { "ipv4" } else { "ipv6" };
@@ -924,7 +924,7 @@ impl Screen for Survey {
             return;
         }
         let networks = self.networks();
-        let (top, row_h, bottom) = (g.top(), g.row_h(), H - PAD - g.hint_h());
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
         for (i, y) in self.list.layout(g, networks.len(), top, row_h, 3.0, bottom) {
             let n = &networks[i];
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
