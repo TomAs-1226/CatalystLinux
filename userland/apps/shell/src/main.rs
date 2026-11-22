@@ -79,6 +79,7 @@ mod monitor;
 mod music;
 mod nettools;
 mod notes;
+mod nowplaying;
 mod panel;
 mod passcode;
 mod photos;
