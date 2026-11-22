@@ -447,6 +447,7 @@ huge pages this kernel does not have).
 |---|---|---|
 | Screen on, Home, nothing moving | 20.8/s → 5.4/s | 23.3 → 13.7 ms/s |
 | Screen off (standby) | 21.0/s → 1.3/s | 15.8 → 3.2 ms/s |
+| Deep standby (the whole machine) | 34.7/s → 29.2/s | the shell: 0.1 → 0.06 ms/s |
 
 Emulated time is not the handheld's: the processor figures compare one
 build with the other, not milliseconds on the device. With the screen on
