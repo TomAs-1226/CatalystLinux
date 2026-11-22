@@ -893,6 +893,9 @@ struct Beat {
     level: usize,
     /// Frames in a row that would have fitted the next faster beat.
     roomy: u32,
+    /// The most any of those frames needed: its work with a margin, or the
+    /// panel's time.
+    roomy_need: Duration,
     /// Frames since one ran late.
     since_late: u32,
     /// No faster than this (the battery saver), or zero.
@@ -910,10 +913,12 @@ struct Beat {
 /// page's opening, at 60 a second.
 const WARM_FRAMES: u32 = 24;
 
-/// Frames in a row with room to spare before the beat quickens a step (at
-/// rest): long enough not to hunt, short enough that one heavy moment does
-/// not hold a page at a slower beat long after it.
-const ROOMY_RUN: u32 = 24;
+/// Frames in a row with room to spare before the beat quickens (at rest),
+/// straight to the fastest beat they fitted: long enough not to hunt, short
+/// enough that one key's motion (about 14 frames) brings a page back from a
+/// heavy moment (measured on the handheld: Music's opening held it at 30 a
+/// second for several presses, its frames 6 ms, a step back taking 24).
+const ROOMY_RUN: u32 = 12;
 
 impl Beat {
     /// The handheld's beat: 25 ms, or `CATALYST_FRAME_MS`.
@@ -945,7 +950,7 @@ impl Beat {
     /// A beat whose fastest rate is a frame every `ms`.
     fn every(ms: f32) -> Beat {
         let base = Duration::from_secs_f32(ms.clamp(4.0, 100.0) / 1000.0);
-        Beat { steps: [base, base.mul_f32(4.0 / 3.0), base * 2, base * 4], level: 0, roomy: 0, since_late: u32::MAX, floor: Duration::ZERO, warming: WARM_FRAMES }
+        Beat { steps: [base, base.mul_f32(4.0 / 3.0), base * 2, base * 4], level: 0, roomy: 0, roomy_need: Duration::ZERO, since_late: u32::MAX, floor: Duration::ZERO, warming: WARM_FRAMES }
     }
 
     /// The battery saver: no faster than a frame every `ms` (none: as fast
@@ -987,6 +992,7 @@ impl Beat {
         }
         if needed > self.interval() {
             self.roomy = 0;
+            self.roomy_need = Duration::ZERO;
             if self.since_late < 8 && self.level + 1 < self.steps.len() {
                 // The second late frame in a short while: this beat is too fast.
                 self.level += 1;
@@ -998,8 +1004,10 @@ impl Beat {
             self.since_late = self.since_late.saturating_add(1);
             if self.level > 0 && work.mul_f32(1.15) < self.steps[self.level - 1] && panel < self.steps[self.level - 1] {
                 self.roomy += 1;
+                self.roomy_need = self.roomy_need.max(work.mul_f32(1.15).max(panel));
             } else {
                 self.roomy = 0;
+                self.roomy_need = Duration::ZERO;
             }
         }
         (needed.as_secs_f32() / self.interval().as_secs_f32()).ceil().max(1.0) as u32
@@ -1009,9 +1017,12 @@ impl Beat {
     /// changes pace in the middle of an animation.
     fn rest(&mut self) {
         self.warming = WARM_FRAMES;
-        if self.roomy >= ROOMY_RUN && self.level > 0 && self.steps[self.level - 1] >= self.floor {
-            self.level -= 1;
+        if self.roomy >= ROOMY_RUN {
+            while self.level > 0 && self.steps[self.level - 1] >= self.floor && self.roomy_need < self.steps[self.level - 1] {
+                self.level -= 1;
+            }
             self.roomy = 0;
+            self.roomy_need = Duration::ZERO;
         }
     }
 }
@@ -4995,14 +5006,15 @@ mod tests {
             beat.frame_took(ms(60.0));
         }
         assert_eq!(beat.level, 3);
-        // Only a long run with real room to spare brings it back up, a step at a time.
+        // Only a run with real room to spare brings it back up, to the
+        // fastest beat its frames fitted (30 ms frames: 50, not 33).
         for _ in 0..ROOMY_RUN - 1 {
-            beat.frame_took(ms(20.0));
+            beat.frame_took(ms(30.0));
         }
         beat.rest();
         assert_eq!(beat.level, 3);
         // And never mid-animation: only once motion has stopped.
-        beat.frame_took(ms(20.0));
+        beat.frame_took(ms(30.0));
         assert_eq!(beat.level, 3);
         beat.rest();
         assert_eq!(beat.level, 2);
@@ -5065,6 +5077,20 @@ mod tests {
         beat.frame_and_panel_took(ms(24.0), ms(14.9));
         beat.frame_and_panel_took(ms(24.0), ms(14.9));
         assert_eq!(beat.level, 1);
+        // An opening longer than the warm-up, late past it (the handheld:
+        // 31 frames, 13 late, down to 30 a second), then one key's motion of
+        // 6 ms frames: back to 60 at the next rest, not a step per long run.
+        beat.rest();
+        for _ in 0..WARM_FRAMES + 2 {
+            beat.frame_and_panel_took(ms(40.0), ms(14.9));
+        }
+        assert_eq!(beat.level, 2);
+        beat.rest();
+        for _ in 0..14 {
+            beat.frame_and_panel_took(ms(6.0), ms(14.9));
+        }
+        beat.rest();
+        assert_eq!(beat.level, 0, "60 a second from the next key on");
     }
 
     #[test]
