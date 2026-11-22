@@ -559,6 +559,11 @@ mod tests {
     #[test]
     fn a_briefing_is_made_from_the_schedule_the_reminders_the_battery_and_the_logs() {
         crate::shell::tests::sandbox();
+        // At midday: the demo's match, 23 minutes on, never falls on tomorrow
+        // (late in the evening its reminder was tomorrow's, not today's).
+        let here = chrono::Local::now();
+        let noon = here.date_naive().and_hms_opt(12, 0, 0).unwrap().and_local_timezone(chrono::Local).earliest().unwrap();
+        crate::reminders::later((noon.timestamp() - here.timestamp()).rem_euclid(86_400));
         let robot = crate::robot::Robot::demo();
         crate::reminders::remind("swap the battery at queueing for Q31");
         let b = build(&Inputs::of(&robot, true, None));

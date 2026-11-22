@@ -233,7 +233,8 @@ impl Drop for Schedule {
 }
 
 fn now() -> i64 {
-    chrono::Utc::now().timestamp()
+    // The reminders' clock: the same as the system's, but a test can move it.
+    crate::reminders::now()
 }
 
 fn cache_file() -> std::path::PathBuf {
