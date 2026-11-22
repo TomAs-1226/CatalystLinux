@@ -10,6 +10,13 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.6.1
+
+### Fixed
+- The screen stays dark no more after a restart: 0.6.0's new brightness curve read a dark backlight as lit, so the first picture never turned it on.
+- Installing an update no longer slows the handheld down: it runs at the lowest priority and writes to the card in small steps, so the screen never waits on it.
+- Everything new in 0.6.0 comes with this update too: Flow, the hold-Tab lock, live activities, the new Music, offline answers, Numbers in 3D and more.
+
 ## 0.6.0
 
 ### Home and the lock screen
