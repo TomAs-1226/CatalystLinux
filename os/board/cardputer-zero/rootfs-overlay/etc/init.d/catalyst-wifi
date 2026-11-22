@@ -47,8 +47,10 @@ start() {
 	chmod 600 /data/wifi/wpa_supplicant.conf
 	ip link set wlan0 up 2>/dev/null
 	wpa_supplicant -B -P /run/wpa_supplicant.pid -i wlan0 -c /data/wifi/wpa_supplicant.conf >/dev/null
+	# -M: the kernel says when the link comes and goes (netlink), so joining
+	# is heard at once and the poll (-t) is a backstop every 30 s, not 2 s.
 	start-stop-daemon -S -b -m -p /run/ifplugd.wlan0.pid -x /usr/sbin/ifplugd -- \
-		-n -i wlan0 -I -u 0 -d 2 -t 2 -r /usr/sbin/catalyst-net -x dhcp-only
+		-n -i wlan0 -M -I -u 0 -d 2 -t 30 -r /usr/sbin/catalyst-net -x dhcp-only
 	# The first look round at once, so networks are listed by the time
 	# anyone opens the page.
 	wpa_cli -p /run/wpa_supplicant -i wlan0 scan >/dev/null 2>&1

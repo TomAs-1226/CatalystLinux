@@ -27,6 +27,22 @@
 //! Left long (12 hours) or low (10%) on battery, the red light blinks once a
 //! minute, short: still on, slide the switch off. The kernel's timer trigger
 //! blinks it, so nothing in the shell wakes for that.
+//!
+//! **Music standby.** Music keeps deep standby away (it would cut the sound
+//! off), but not the rest of it: half a minute after the screen goes dark
+//! with music playing, the same steps are taken with the sound left alone.
+//! catalyst-power keeps the radios (Bluetooth headphones may be what plays)
+//! and Wi-Fi while what plays next comes over the network (Music says, by
+//! `nowplaying::needs_network`); the USB host, the 5 V outputs and every
+//! light go off, the motion sensor stops, the shell's polling parks and it
+//! looks in once a minute. I2S, the codec and the amplifier belong to what
+//! plays, and the processor stays at its slowest, which decodes with room to
+//! spare. The music keys (Fn + Q, W, E; A, S, D) work without waking it.
+//! Any other key wakes it with every step undone, as from deep standby.
+//! Once the music has stopped for as long as the screen takes to go off, it
+//! moves on: to deep standby in place if its wait is over (Wi-Fi and the
+//! radios go too, nothing else is taken twice), or back to plain standby,
+//! from which deep standby comes when its time does.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -54,6 +70,10 @@ const SLACK_NS: libc::c_ulong = 1_000_000_000;
 
 /// How often, at most, the shell asks whether something stops it going deep.
 const LOOK_EVERY: f32 = 10.0;
+
+/// Music playing, the screen dark this long: music standby. Not at once, so
+/// a screen put out and woken again straight away costs nothing.
+pub const MUSIC_AFTER: f32 = 30.0;
 
 /// The red light's reminder: after this long in deep standby, or at this
 /// charge, on battery.
@@ -140,6 +160,37 @@ static GATE: Gate = Gate::new();
 /// here until the handheld wakes; otherwise it returns at once.
 pub fn rest() {
     GATE.rest();
+}
+
+/// A background loop's wait between rounds, and its stop signal: one
+/// wakeup a round, where a loop that slept in short steps to see whether it
+/// had been stopped woke five or ten times a second; stopped, it ends at
+/// once all the same. In deep standby the loop then parks (`rest`).
+#[derive(Default)]
+pub struct Nap {
+    stopped: Mutex<bool>,
+    woken: Condvar,
+}
+
+impl Nap {
+    /// Stop the loop: a wait under way ends now.
+    pub fn stop(&self) {
+        *self.stopped.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.woken.notify_all();
+    }
+
+    /// Wait `round`, or until stopped; then, in deep standby, until it
+    /// wakes. True if the loop is stopped.
+    pub fn nap(&self, round: Duration) -> bool {
+        let guard = self.stopped.lock().unwrap_or_else(PoisonError::into_inner);
+        let (guard, _) = self.woken.wait_timeout_while(guard, round, |stopped| !*stopped).unwrap_or_else(PoisonError::into_inner);
+        let stopped = *guard;
+        drop(guard);
+        if !stopped {
+            rest();
+        }
+        stopped
+    }
 }
 
 /// Park background work (or let it go on). The tests run many shells side
@@ -398,24 +449,29 @@ pub fn take(step: Step, deep: bool, deep_state: &mut Deep) {
 /// "off" sent while an "on" is still running waits its turn.
 #[derive(Default)]
 struct Worker {
-    tx: Option<Sender<bool>>,
-    done: Option<Receiver<bool>>,
+    tx: Option<Sender<Vec<&'static str>>>,
+    done: Option<Receiver<()>>,
     pending: usize,
+    /// What was asked of catalyst-power, in order, for the tests.
+    #[cfg(test)]
+    asked: Vec<Vec<&'static str>>,
 }
 
 impl Worker {
-    fn send(&mut self, deep: bool) {
+    fn send(&mut self, args: Vec<&'static str>) {
+        #[cfg(test)]
+        self.asked.push(args.clone());
         let script = crate::power::SCRIPT;
         if !Path::new(script).exists() {
             return;
         }
         if self.tx.is_none() {
-            let (tx, rx) = mpsc::channel::<bool>();
+            let (tx, rx) = mpsc::channel::<Vec<&'static str>>();
             let (done_tx, done_rx) = mpsc::channel();
             let spawned = std::thread::Builder::new().name("deep standby".into()).stack_size(64 * 1024).spawn(move || {
-                for deep in rx {
-                    std::process::Command::new(script).args(["deep", if deep { "on" } else { "off" }]).status().ok();
-                    done_tx.send(deep).ok();
+                for args in rx {
+                    std::process::Command::new(script).args(args).status().ok();
+                    done_tx.send(()).ok();
                 }
             });
             if spawned.is_err() {
@@ -423,7 +479,7 @@ impl Worker {
             }
             (self.tx, self.done) = (Some(tx), Some(done_rx));
         }
-        if self.tx.as_ref().is_some_and(|tx| tx.send(deep).is_ok()) {
+        if self.tx.as_ref().is_some_and(|tx| tx.send(args).is_ok()) {
             self.pending += 1;
         }
     }
@@ -455,12 +511,51 @@ struct Asleep {
     slept: f32,
     last_tick: Instant,
     meter: Meter,
+    /// Seconds in music standby before this (deep standby's own time
+    /// starts when it deepens): the screen's idle time, all of it.
+    listened: f32,
+}
+
+/// Which standby: deep, or music standby (the sound left playing).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Kind {
+    #[default]
+    Deep,
+    /// Music playing; Wi-Fi kept while what plays next needs the network.
+    Music { wifi: bool },
+}
+
+/// What music standby does next, after a minute's look.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MusicNext {
+    /// Playing on, as it is.
+    Stay,
+    /// What plays next is all here now: Wi-Fi off too.
+    WifiOff,
+    /// Back to plain standby (the screen stays dark): the music needs the
+    /// network that music standby took away, or it stopped before deep
+    /// standby's wait was over.
+    Leave,
+    /// The music stopped, and deep standby's wait is over: deep, in place.
+    Deepen,
+}
+
+/// Waking: what the island says, if anything, and what to undo first.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Woke {
+    /// Deep standby's figures (none from music standby).
+    pub slept: Option<Slept>,
+    /// The red light was reminding: put it out first.
+    pub reminding: bool,
+    /// Seconds the screen was dark in here, for standby's idle time.
+    pub seconds: f32,
 }
 
 /// Where deep standby stands, ticked by the shell.
 #[derive(Default)]
 pub struct Deep {
     asleep: Option<Asleep>,
+    kind: Kind,
     /// Woken, and waiting for catalyst-power to bring the system back
     /// before the last steps are undone.
     waking: bool,
@@ -468,6 +563,12 @@ pub struct Deep {
     reminding: bool,
     /// Seconds until it next asks whether anything stops it going deep.
     look: f32,
+    /// Seconds the screen has been dark with music playing, and until the
+    /// next look at whether music standby can begin.
+    dark_with_music: f32,
+    music_look: f32,
+    /// In music standby: seconds since the music stopped.
+    stopped: f32,
     /// The steps taken, in order, for the tests.
     #[cfg(test)]
     pub log: Vec<(Step, bool)>,
@@ -506,8 +607,98 @@ impl Deep {
 
     /// Going deep: the time starts, with the gauge's reading as it does.
     pub fn begin(&mut self, r: Option<&Reading>) {
-        self.asleep = Some(Asleep { slept: 0.0, last_tick: Instant::now(), meter: Meter::begin(r) });
+        self.asleep = Some(Asleep { slept: 0.0, last_tick: Instant::now(), meter: Meter::begin(r), listened: 0.0 });
+        self.kind = Kind::Deep;
         self.reminding = false;
+    }
+
+    /// In music standby (a kind of deep standby: `on` is true in it too).
+    pub fn music(&self) -> bool {
+        self.on() && matches!(self.kind, Kind::Music { .. })
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn kind(&self) -> Kind {
+        self.kind
+    }
+
+    /// Whether music standby should begin: asked every tick with whether
+    /// the screen is dark and music playing; true once both have held for
+    /// `MUSIC_AFTER`.
+    pub fn music_due(&mut self, dark: bool, playing: bool, dt: f32) -> bool {
+        if self.on() || self.waking || !dark || !playing {
+            self.dark_with_music = 0.0;
+            self.music_look = 0.0;
+            return false;
+        }
+        self.dark_with_music += dt;
+        if self.dark_with_music < MUSIC_AFTER {
+            return false;
+        }
+        // Then at most every ten seconds (something may be stopping it).
+        self.music_look -= dt;
+        if self.music_look > 0.0 {
+            return false;
+        }
+        self.music_look = LOOK_EVERY;
+        true
+    }
+
+    /// Into music standby: Wi-Fi kept if what plays next needs it.
+    pub fn begin_music(&mut self, wifi: bool) {
+        self.asleep = Some(Asleep { slept: 0.0, last_tick: Instant::now(), meter: Meter::default(), listened: 0.0 });
+        self.kind = Kind::Music { wifi };
+        self.stopped = 0.0;
+        self.reminding = false;
+    }
+
+    /// A minute's look in music standby: whether the music plays, whether
+    /// it needs the network, how long the screen takes to go off (the
+    /// wait once it stops), and whether deep standby could begin now.
+    pub fn music_next(&mut self, playing: bool, needs_network: bool, linger: f32, deep_ok: bool, dt: f32) -> MusicNext {
+        let Kind::Music { wifi } = self.kind else { return MusicNext::Stay };
+        if !self.on() {
+            return MusicNext::Stay;
+        }
+        if playing {
+            self.stopped = 0.0;
+            return match (wifi, needs_network) {
+                // Read ahead or from the library: the radio can rest.
+                (true, false) => {
+                    self.kind = Kind::Music { wifi: false };
+                    MusicNext::WifiOff
+                }
+                // Streaming again with Wi-Fi off: back, and in again with it.
+                (false, true) => MusicNext::Leave,
+                _ => MusicNext::Stay,
+            };
+        }
+        self.stopped += dt;
+        if self.stopped < linger {
+            MusicNext::Stay
+        } else if deep_ok {
+            MusicNext::Deepen
+        } else {
+            MusicNext::Leave
+        }
+    }
+
+    /// Music standby becomes deep standby, in place: deep's own time (and
+    /// what it draws) is counted from now.
+    pub fn deepen(&mut self, r: Option<&Reading>) {
+        if let Some(a) = &mut self.asleep {
+            a.listened += a.slept + a.last_tick.elapsed().as_secs_f32();
+            a.slept = 0.0;
+            a.last_tick = Instant::now();
+            a.meter = Meter::begin(r);
+        }
+        self.kind = Kind::Deep;
+        self.reminding = false;
+    }
+
+    /// Seconds the screen has been dark in here so far.
+    pub fn dark_for(&self) -> f32 {
+        self.asleep.as_ref().map_or(0.0, |a| a.listened + a.slept + a.last_tick.elapsed().as_secs_f32())
     }
 
     /// Time passing in deep standby, with the reading taken meanwhile.
@@ -521,8 +712,12 @@ impl Deep {
     }
 
     /// The red light's reminder: Some(on or off) when it should change.
-    /// On battery, after twelve hours or at 10%; never on the charger.
+    /// On battery, after twelve hours or at 10%; never on the charger, and
+    /// not while music plays (whoever listens knows it is on).
     pub fn reminder(&mut self, r: Option<&Reading>) -> Option<bool> {
+        if self.kind != Kind::Deep {
+            return None;
+        }
         let a = self.asleep.as_ref()?;
         let on_battery = r.is_none_or(|r| r.flow.on_battery());
         let low = r.is_some_and(|r| r.flow.on_battery() && r.percent <= REMIND_AT);
@@ -533,25 +728,41 @@ impl Deep {
         })
     }
 
-    /// Woken: how long it slept and what it drew (kept for the Battery
-    /// page); whether the red light was reminding (to be put out first).
-    pub fn end(&mut self, r: Option<&Reading>) -> Option<(Slept, bool)> {
+    /// Woken (or, from music standby, back to plain standby): how long it
+    /// slept and what it drew (kept for the Battery page; deep standby
+    /// only), and whether the red light was reminding (to be put out first).
+    pub fn end(&mut self, r: Option<&Reading>) -> Option<Woke> {
         let a = self.asleep.take()?;
         let slept = a.slept + a.last_tick.elapsed().as_secs_f32();
-        let record = Slept {
+        let record = (self.kind == Kind::Deep).then(|| Slept {
             woke: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64),
             seconds: slept as u64,
             watts: a.meter.watts(r, slept),
             charging: a.meter.charged() || r.is_some_and(|r| !r.flow.on_battery()),
-        };
-        keep(&record);
+        });
+        if let Some(record) = &record {
+            keep(record);
+        }
         self.waking = true;
-        Some((record, std::mem::take(&mut self.reminding)))
+        self.dark_with_music = 0.0;
+        Some(Woke { slept: record, reminding: std::mem::take(&mut self.reminding), seconds: a.listened + slept })
     }
 
-    /// catalyst-power's part, on its thread.
+    /// catalyst-power's part, on its thread: what this kind keeps on.
     fn system(&mut self, deep: bool) {
-        self.worker.send(deep);
+        let args = match (deep, self.kind) {
+            (false, _) => vec!["deep", "off"],
+            (true, Kind::Deep) => vec!["deep", "on"],
+            (true, Kind::Music { wifi: true }) => vec!["deep", "on", "keep-wifi", "keep-radios"],
+            (true, Kind::Music { wifi: false }) => vec!["deep", "on", "keep-radios"],
+        };
+        self.worker.send(args);
+    }
+
+    /// What was asked of catalyst-power, in order (the tests').
+    #[cfg(test)]
+    pub fn asked(&self) -> &[Vec<&'static str>] {
+        &self.worker.asked
     }
 
     /// Waking, and catalyst-power is done: the last steps can be undone.
@@ -679,6 +890,69 @@ mod tests {
     }
 
     #[test]
+    fn music_standby_comes_half_a_minute_into_the_dark_and_asks_only_now_and_then() {
+        let mut d = Deep::new();
+        assert!(!d.music_due(true, true, 29.0));
+        assert!(d.music_due(true, true, 1.0), "half a minute dark with music");
+        assert!(!d.music_due(true, true, 1.0), "asked again a second later: not yet");
+        assert!(d.music_due(true, true, 10.0), "ten seconds on");
+        assert!(!d.music_due(false, true, 1.0), "the screen lit: the count starts again");
+        assert!(!d.music_due(true, true, 20.0));
+        assert!(!d.music_due(true, false, 20.0), "paused: not while nothing plays");
+        d.begin_music(true);
+        assert!(d.on() && d.music());
+        assert!(!d.music_due(true, true, 60.0), "in it already");
+        assert!(!d.due(1e9, 10, 100.0), "and not deep standby");
+    }
+
+    #[test]
+    fn music_standby_keeps_what_plays_and_moves_on_once_the_music_stops() {
+        crate::shell::tests::sandbox();
+        let mut d = Deep::new();
+        d.begin_music(true);
+        d.system(true);
+        assert_eq!(d.asked(), [vec!["deep", "on", "keep-wifi", "keep-radios"]]);
+        // Streaming: as it is. Then all read ahead: Wi-Fi off.
+        assert_eq!(d.music_next(true, true, 60.0, true, 60.0), MusicNext::Stay);
+        assert_eq!(d.music_next(true, false, 60.0, true, 60.0), MusicNext::WifiOff);
+        assert_eq!(d.kind(), Kind::Music { wifi: false });
+        d.system(true);
+        assert_eq!(d.asked()[1], vec!["deep", "on", "keep-radios"]);
+        // Streaming again with Wi-Fi off: back out (and in again, with it).
+        assert_eq!(d.music_next(true, true, 60.0, true, 60.0), MusicNext::Leave);
+        // Stopped: a while (as long as the screen takes to go off), then on.
+        let mut d = Deep::new();
+        d.begin_music(true);
+        d.sample(None, 1800.0);
+        assert_eq!(d.music_next(false, true, 60.0, true, 30.0), MusicNext::Stay, "paused for a moment");
+        assert_eq!(d.music_next(true, true, 60.0, true, 60.0), MusicNext::Stay, "and playing again");
+        assert_eq!(d.music_next(false, true, 60.0, false, 60.0), MusicNext::Leave, "stopped, deep standby's wait not over");
+        let mut d = Deep::new();
+        d.begin_music(true);
+        d.sample(None, 1800.0);
+        assert_eq!(d.music_next(false, true, 60.0, true, 60.0), MusicNext::Deepen, "stopped, and deep standby's time");
+        d.deepen(None);
+        assert_eq!(d.kind(), Kind::Deep);
+        assert!(d.dark_for() >= 1800.0, "the music's time counts as the screen's dark time");
+        d.system(true);
+        assert_eq!(d.asked().last().unwrap(), &vec!["deep", "on"], "the rest: catalyst-power takes only what is left");
+        d.sample(None, 600.0);
+        let woke = d.end(None).unwrap();
+        assert_eq!(woke.slept.map(|s| s.seconds), Some(600), "deep standby's own ten minutes");
+        assert!(woke.seconds >= 2400.0);
+        // From music standby: nothing to say, the time given back.
+        let mut d = Deep::new();
+        d.begin_music(false);
+        d.sample(None, 900.0);
+        assert_eq!(d.reminder(Some(&on_battery(5, 100.0, 3.5, 50.0))), None, "no reminder while music plays");
+        let woke = d.end(None).unwrap();
+        assert_eq!(woke.slept, None);
+        assert!((woke.seconds - 900.0).abs() < 1.0);
+        d.system(false);
+        assert_eq!(d.asked().last().unwrap(), &vec!["deep", "off"]);
+    }
+
+    #[test]
     fn the_draw_is_the_readings_weighted_by_time() {
         let start = on_battery(80, 200.0, 3.9, 1400.0);
         let mut m = Meter::begin(Some(&start));
@@ -736,8 +1010,8 @@ mod tests {
         d.sample(Some(&fine), 60.0);
         assert_eq!(d.reminder(Some(&on_battery(11, 150.0, 3.6, 190.0))), None);
         assert_eq!(d.reminder(Some(&on_battery(10, 150.0, 3.6, 170.0))), Some(true), "at 10%");
-        let (_, reminding) = d.end(None).unwrap();
-        assert!(reminding, "waking puts it out first");
+        let woke = d.end(None).unwrap();
+        assert!(woke.reminding, "waking puts it out first");
     }
 
     #[test]

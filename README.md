@@ -419,7 +419,10 @@ and dark (and, half an hour on, deep standby goes further: see below):
 - the panel itself sleeps: the framebuffer is blanked, and a patch to
   M5Stack's panel driver sends the ST7789 display-off and sleep-in (enabling
   it again runs its whole init sequence, as at boot);
-- the shell stops keeping a frame beat and looks in four times a second;
+- the shell stops keeping a frame beat and looks in every two seconds (four
+  times a second with the screen on); a key ends the wait at once, and so
+  does a lift: the motion sensor's thread wakes the main loop through an
+  eventfd (`platform::wake`);
 - after ten minutes Wi-Fi goes off (the choice to have it is kept, and it
   comes back with the screen), unless an update is downloading or someone is
   logged in over SSH. Settings › Battery › Wi-Fi in standby turns this off.
@@ -428,9 +431,32 @@ Some savings run all the time. The Ethernet chip (an SR9900A, driven by
 r8152) and the USB hub suspend whenever they are idle. M5Stack's community
 measured that as the largest draw after the screen: about 90 mA. The driver
 wakes on a cable or a packet. ifplugd reads the link from the interface's
-own flags (`-m iff`), so it never wakes the chip to ask. The speaker
-amplifier is held off from the first instant (`gpio=24=op,dl`). Wi-Fi's
-own power save is on, which is brcmfmac's default.
+own flags (`-m iff`), so it never wakes the chip to ask, and hears of a
+link coming or going from the kernel (`-M`, netlink), so its own poll is a
+backstop every 30 s (it was every 2 s). The speaker amplifier is held off
+from the first instant (`gpio=24=op,dl`). Wi-Fi's own power save is on,
+which is brcmfmac's default (`CONFIG_CFG80211_DEFAULT_PS`).
+
+**What wakes, idle.** Counted in the emulator with `scripts/vm-wakeups.py`
+(a team's robot set but not there, as off the field): the shell's threads
+that look in on something wait out each round in one sleep, ended at once
+when they are stopped (`deep::Nap`), where they slept in steps of 100 or
+200 ms to see whether they had been: the robot's logs (every 15 s), the
+event schedule (every 10 s), the agent page (every 3 s). The robot's link
+tries again after a second, then every three once nothing has answered for
+a while, in one wait each. The kernel's memory compaction ahead of need is
+off (`vm.compaction_proactiveness=0`: kcompactd woke twice a second, for
+huge pages this kernel does not have).
+
+| The shell, in the emulator (0.5.6, then this) | Wakeups | Processor |
+|---|---|---|
+| Screen on, Home, nothing moving | 20.8/s → 5.4/s | 23.3 → 13.7 ms/s |
+| Screen off (standby) | 21.0/s → 1.3/s | 15.8 → 3.2 ms/s |
+| Deep standby (the whole machine) | 34.7/s → 29.2/s | the shell: 0.1 → 0.06 ms/s |
+
+Emulated time is not the handheld's: the processor figures compare one
+build with the other, not milliseconds on the device. With the screen on
+the main loop still looks in four times a second (4.7/s of the 5.4).
 
 ## Deep standby
 
@@ -511,6 +537,45 @@ the measured figure after the first one):
 What deep standby still draws is mostly the processor idling (it has no
 suspend), its memory, and the 5 V boost converter feeding the board. For
 days, slide the switch off.
+
+### Music standby
+
+Music keeps deep standby away, since it would cut the sound off, but not
+the rest of it. Half a minute after the screen goes dark with music
+playing (Music tells `nowplaying`), the same steps are taken with the sound
+left alone (`catalyst-power deep on keep-radios [keep-wifi]`):
+
+- **off:** the USB host (dwc2 unbound: the hub and the Ethernet chip; not
+  while a computer has the handheld as its device), the Grove and HAT 5 V
+  outputs, the keyboard's lights and the red light, the motion sensor's
+  polling, and the shell's own polling (the robot's link let go, its
+  threads parked); the shell looks in once a minute, with a second of timer
+  slack, and draws nothing;
+- **Wi-Fi** stays while what plays next needs the network, and goes once it
+  does not (the queue ahead downloaded, or the library): Music says so
+  through `nowplaying::on_needs_network`, asked once a minute. Streaming
+  again with Wi-Fi off, music standby steps out (the screen stays dark) and
+  back in with it;
+- **kept:** I2S, the ES8389 and the speaker's amplifier (they belong to
+  what plays), and the radios: Bluetooth headphones stay connected;
+- **the processor** stays at its slowest (`powersave`, 600 MHz), which
+  decodes with room to spare: Opus at YouTube's 160 kb/s took 0.15% of one
+  core of a Ryzen 7 9800X3D (ffmpeg's own decoder, resampled to 48 kHz
+  16-bit as Music plays it; AAC 0.06%), which on the A53 at 600 MHz comes to
+  something like 5 to 10% of one of its four cores (an estimate: 35 to 60
+  times slower per core).
+
+The music keys work without waking it: Fn + Q, W, E (play or pause,
+previous, next) and Fn + A, S, D (mute, quieter, louder). Any other key
+wakes it with every step undone in the reverse order, and nothing is said
+(the lock screen shows what plays). Once the music has stopped for as long
+as the screen takes to go off, it moves on: to deep standby in place if
+its wait is over (the time listened counts: Wi-Fi and the radios go, and
+nothing else is taken twice), or back to plain standby, from which deep
+standby comes when its time does. A robot linked, an update under way, a
+Clock timer running or a screenshot being saved keeps it out, as it does
+deep standby (and SSH, if Wi-Fi would go); so does music streaming over a
+cable, since the Ethernet adapter is on the USB host it stops.
 
 ## StandBy and the lock screen
 

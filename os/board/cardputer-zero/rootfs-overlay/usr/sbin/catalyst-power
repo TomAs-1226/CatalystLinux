@@ -7,9 +7,10 @@
 #   catalyst-power wifi-wake      and back, if it is switched on
 #   catalyst-power undervolt try|on|off|status|confirm
 #   catalyst-power panel try|on|off|status|confirm|revert
-#   catalyst-power deep on|off|status
+#   catalyst-power deep on [keep-wifi] [keep-radios]|off|status
 #                                 deep standby: everything a key need not
-#                                 have off, and back (see deep_on)
+#                                 have off, and back (see deep_on); music
+#                                 standby keeps the radios (and Wi-Fi)
 #   catalyst-power boot           at start: a trial that never held is undone
 #
 # Both trials are lines in config.txt, above the system block, tried before
@@ -201,40 +202,67 @@ boot_trial() {
 # to its least and paused its own polling; this does the rest, in this order:
 #
 #   1. Wi-Fi off, its driver unloaded (if it was running);
-#   2. any other radio blocked (Bluetooth is off from the start: disable-bt);
+#   2. any other radio blocked (Bluetooth too, while it is on);
 #   3. the USB host stopped: the dwc2 controller unbound, so the hub and the
 #      Ethernet chip on it go quiet. Not while the handheld is a computer's
 #      device (USB mode serial, network or drive);
 #   4. the Grove and HAT 5 V outputs off;
 #   5. the red light dark.
 #
+# Music standby (music playing with the screen off) is the same with
+# `keep-radios` (Bluetooth headphones may be what plays) and, while what
+# plays next comes over the network, `keep-wifi`. The sound itself is never
+# touched: I2S, the codec and the amplifier belong to whatever plays.
+#
 # What each step switched off is noted in $DEEP, and `deep off` brings back
-# just that, in the reverse order. Wi-Fi comes back last, in the background:
-# it takes a few seconds, and nothing before it waits.
+# just that, in the reverse order. `deep on` again takes only the steps not
+# yet taken (the music stopped: Wi-Fi and the radios go too), noted after the
+# others, so they come back first. Wi-Fi comes back in the background: it
+# takes a few seconds, and nothing waits for it.
 DEEP=$RUN/catalyst-deep
 
+# A step this deep standby has already taken (by its kind: wifi, radio...).
+noted() {
+	grep -q "^$1\( \|$\)" "$DEEP" 2>/dev/null
+}
+
 deep_on() {
-	# Already deep: what is noted is what to bring back, not what is off now.
-	[ -e "$DEEP" ] && return 0
-	mkdir -p "$RUN"
-	: >"$DEEP.new"
-	case "$(cat "$RUN/catalyst-wifi.status" 2>/dev/null)" in
-	running | starting)
-		rc-service catalyst-wifi stop >/dev/null 2>&1
-		echo wifi >>"$DEEP.new"
-		;;
-	esac
-	for r in "$SYS"/class/rfkill/rfkill*; do
-		[ -e "$r/soft" ] || continue
-		if [ "$(cat "$r/soft")" = 0 ] && echo 1 >"$r/soft"; then
-			echo "radio ${r##*/}" >>"$DEEP.new"
-		fi
+	keep_wifi=no
+	keep_radios=no
+	for keep in "$@"; do
+		case "$keep" in
+		keep-wifi) keep_wifi=yes ;;
+		keep-radios) keep_radios=yes ;;
+		*)
+			echo "catalyst-power deep on: keep-wifi or keep-radios, not $keep" >&2
+			return 2
+			;;
+		esac
 	done
+	mkdir -p "$RUN"
+	cp "$DEEP" "$DEEP.new" 2>/dev/null || : >"$DEEP.new"
+	if [ $keep_wifi = no ] && ! noted wifi; then
+		case "$(cat "$RUN/catalyst-wifi.status" 2>/dev/null)" in
+		running | starting)
+			rc-service catalyst-wifi stop >/dev/null 2>&1
+			echo wifi >>"$DEEP.new"
+			;;
+		esac
+	fi
+	if [ $keep_radios = no ] && ! noted radio; then
+		for r in "$SYS"/class/rfkill/rfkill*; do
+			[ -e "$r/soft" ] || continue
+			if [ "$(cat "$r/soft")" = 0 ] && echo 1 >"$r/soft"; then
+				echo "radio ${r##*/}" >>"$DEEP.new"
+			fi
+		done
+	fi
 	peripheral=no
 	for m in "$SYS"/firmware/devicetree/base/soc/usb@*/dr_mode; do
-		[ "$(tr -d '\000' <"$m" 2>/dev/null)" = peripheral ] && peripheral=yes
+		[ -e "$m" ] || continue
+		[ "$(tr -d '\000' <"$m")" = peripheral ] && peripheral=yes
 	done
-	if [ $peripheral = no ]; then
+	if [ $peripheral = no ] && ! noted usb; then
 		for d in "$SYS"/bus/platform/drivers/dwc2/*.usb; do
 			[ -e "$d" ] || continue
 			name=${d##*/}
@@ -245,25 +273,29 @@ deep_on() {
 			fi
 		done
 	fi
-	for led in grove_5v_out ext_5v_out; do
-		b=$SYS/class/leds/$led/brightness
-		[ -e "$b" ] || continue
-		level=$(cat "$b")
-		if [ "$level" != 0 ] && echo 0 >"$b"; then
-			echo "out $led $level" >>"$DEEP.new"
-		fi
-	done
-	for led in ACT led0; do
-		d=$SYS/class/leds/$led
-		[ -e "$d/trigger" ] || continue
-		trigger=$(sed -n 's/.*\[\([^]]*\)\].*/\1/p' "$d/trigger")
-		echo "red $led ${trigger:-none} $(cat "$d/brightness")" >>"$DEEP.new"
-		# Brightness 0 first: it lets go of any trigger (a card access
-		# could light it between the two writes otherwise).
-		echo 0 >"$d/brightness"
-		echo none >"$d/trigger"
-		break
-	done
+	if ! noted out; then
+		for led in grove_5v_out ext_5v_out; do
+			b=$SYS/class/leds/$led/brightness
+			[ -e "$b" ] || continue
+			level=$(cat "$b")
+			if [ "$level" != 0 ] && echo 0 >"$b"; then
+				echo "out $led $level" >>"$DEEP.new"
+			fi
+		done
+	fi
+	if ! noted red; then
+		for led in ACT led0; do
+			d=$SYS/class/leds/$led
+			[ -e "$d/trigger" ] || continue
+			trigger=$(sed -n 's/.*\[\([^]]*\)\].*/\1/p' "$d/trigger")
+			echo "red $led ${trigger:-none} $(cat "$d/brightness")" >>"$DEEP.new"
+			# Brightness 0 first: it lets go of any trigger (a card access
+			# could light it between the two writes otherwise).
+			echo 0 >"$d/brightness"
+			echo none >"$d/trigger"
+			break
+		done
+	fi
 	mv "$DEEP.new" "$DEEP"
 }
 
@@ -293,11 +325,14 @@ deep_off() {
 case "$1" in
 deep)
 	case "$2" in
-	on) deep_on ;;
+	on)
+		shift 2
+		deep_on "$@" || exit 2
+		;;
 	off) deep_off ;;
 	status) if [ -e "$DEEP" ]; then echo on; else echo off; fi ;;
 	*)
-		echo "usage: $0 deep on|off|status" >&2
+		echo "usage: $0 deep on [keep-wifi] [keep-radios]|off|status" >&2
 		exit 2
 		;;
 	esac

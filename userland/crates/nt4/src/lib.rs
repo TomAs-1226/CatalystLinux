@@ -126,6 +126,8 @@ struct Shared {
 pub struct Client {
     shared: Arc<Shared>,
     address: String,
+    /// The client's thread, woken from its wait between tries when dropped.
+    thread: thread::Thread,
 }
 
 impl Client {
@@ -139,12 +141,12 @@ impl Client {
         let thread_shared = shared.clone();
         let (addr, name) = (address.clone(), client_name.to_owned());
         let prefixes: Vec<String> = prefixes.iter().map(|s| s.to_string()).collect();
-        thread::Builder::new()
+        let handle = thread::Builder::new()
             .name("nt4".into())
             .stack_size(256 * 1024)
             .spawn(move || run(thread_shared, addr, name, prefixes))
             .expect("spawn nt4 thread");
-        Client { shared, address }
+        Client { shared, address, thread: handle.thread().clone() }
     }
 
     pub fn address(&self) -> &str {
@@ -213,6 +215,18 @@ impl Client {
 impl Drop for Client {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
+        self.thread.unpark();
+    }
+}
+
+/// The wait before trying again after `failures` tries in a row: a second
+/// at first, then three once it has been away a while (a handheld off the
+/// field tries for hours). One wakeup per try either way.
+fn retry_after(failures: u32) -> Duration {
+    if failures <= 5 {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_secs(3)
     }
 }
 
@@ -223,22 +237,28 @@ fn set_status(shared: &Shared, status: impl Into<String>) {
 
 fn run(shared: Arc<Shared>, address: String, name: String, prefixes: Vec<String>) {
     let epoch = Instant::now();
+    let mut failures = 0u32;
     while !shared.stop.load(Ordering::Relaxed) {
+        let started = Instant::now();
         match session(&shared, &address, &name, &prefixes, epoch) {
             Ok(()) => return,
             Err(why) => {
+                // A link that held a while counts as a fresh start.
+                failures = if started.elapsed() > Duration::from_secs(10) { 1 } else { failures + 1 };
                 shared.connected.store(false, Ordering::Relaxed);
                 shared.table.lock().unwrap().clear();
                 shared.rtt_us.store(0, Ordering::Relaxed);
                 set_status(&shared, why);
             }
         }
-        // Retry, but stay quick to stop.
-        for _ in 0..10 {
-            if shared.stop.load(Ordering::Relaxed) {
-                return;
+        // Retry after one wait, which dropping the client ends at once.
+        let until = Instant::now() + retry_after(failures);
+        while !shared.stop.load(Ordering::Relaxed) {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
             }
-            thread::sleep(Duration::from_millis(100));
+            thread::park_timeout(left);
         }
     }
 }
@@ -403,4 +423,29 @@ fn decode(type_id: u64, v: &rmpv::Value) -> Option<Value> {
         20 => Value::StringArray(v.as_array()?.iter().map(|x| x.as_str().map(str::to_owned)).collect::<Option<_>>()?),
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tries_slow_down_while_nothing_answers_and_a_drop_ends_the_wait() {
+        assert_eq!(retry_after(1), Duration::from_secs(1));
+        assert_eq!(retry_after(5), Duration::from_secs(1));
+        assert_eq!(retry_after(6), Duration::from_secs(3), "away a while: every three seconds");
+        // Nothing listening there: it tries, waits, and is dropped meanwhile.
+        let client = Client::connect("127.0.0.1:9", "test", &["/Catalyst/"]);
+        let shared = client.shared.clone();
+        thread::sleep(Duration::from_millis(2500));
+        assert!(!client.connected());
+        let dropped = Instant::now();
+        drop(client);
+        while Arc::strong_count(&shared) > 1 && dropped.elapsed() < Duration::from_secs(5) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(Arc::strong_count(&shared), 1, "its thread has ended");
+        // At most one connection attempt still under way (1.5 s), not a wait.
+        assert!(dropped.elapsed() < Duration::from_millis(2000), "{:?}", dropped.elapsed());
+    }
 }

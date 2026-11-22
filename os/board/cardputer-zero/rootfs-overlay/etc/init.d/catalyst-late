@@ -35,6 +35,11 @@ start() {
 	# Looking through /sys above left the kernel remembering thousands of file
 	# names it will not need again; hand that memory back.
 	echo 2 >/proc/sys/vm/drop_caches
+
+	# No compacting memory ahead of need: kcompactd otherwise wakes twice a
+	# second to see whether it should, for huge pages this kernel does not
+	# have. Memory is still compacted when an allocation asks for it.
+	echo 0 >/proc/sys/vm/compaction_proactiveness 2>/dev/null
 	eend 0
 }
 
