@@ -62,6 +62,7 @@ mod fullheight;
 mod gfx;
 mod git;
 mod github;
+mod flow;
 mod glance;
 mod gpu;
 mod graphs;
@@ -466,6 +467,15 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--motion") {
         return motion(std::path::Path::new(&dir));
+    }
+    // Flow's previews (Home's album covers): stills, strips and clips.
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--flow-shots") {
+        return flow::gallery::shots(std::path::Path::new(&dir));
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    if flag("--flow-bench") {
+        return flow::gallery::bench();
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--objects") {
@@ -3686,6 +3696,12 @@ fn smooth(mut shell: Shell) {
         shell.apply_settings();
         settle(&mut shell);
         measure(&mut shell, &mut beat, &speed, "carousel turns", Right, Left, false);
+        // And Flow: a card on, and one turned over.
+        shell.settings.home = shell::HomeStyle::Flow;
+        shell.apply_settings();
+        settle(&mut shell);
+        measure(&mut shell, &mut beat, &speed, "flow turns", Right, Left, false);
+        measure(&mut shell, &mut beat, &speed, "flow turns over", Enter, Back, false);
         // Back to the grid, on the first tile, for the next speed.
         shell.settings.home = shell::HomeStyle::Grid;
         shell.apply_settings();

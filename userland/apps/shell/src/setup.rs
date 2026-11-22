@@ -854,6 +854,27 @@ impl Setup {
                     }
                 }
             }
+            HomeStyle::Flow => {
+                // Covers turned either side of the one in the middle, in
+                // their own colours, over a glow of the middle one's.
+                let (cx, cy) = (frame.cx(), frame.y + 40.0);
+                let (_, mid, _, glow) = crate::flow::art::colours(crate::flow::hue_of("Robot", ""));
+                g.canvas.glow(cx, cy, 44.0, glow, 0.35 * a);
+                for side in [-1.0f32, 1.0] {
+                    for (k, hue) in [(2.0f32, "Logs"), (1.0, "Health")] {
+                        let hue = crate::flow::hue_of(if side < 0.0 { hue } else if k > 1.5 { "Tables" } else { "Schedule" }, "");
+                        let x = cx + side * (19.0 + k * 9.0);
+                        let (near, far) = (34.0 - 3.0 * k, 26.0 - 3.0 * k);
+                        let (xo, xi) = (x + side * 4.0, x - side * 4.0);
+                        let pts = [(xi, cy - far * 0.5), (xo, cy - near * 0.5), (xo, cy + near * 0.5), (xi, cy + far * 0.5)];
+                        g.canvas.polygon(&pts, crate::flow::art::colours(hue).1, a * (0.95 - 0.2 * (k - 1.0)));
+                    }
+                }
+                let card = Rect::new(cx - 17.0, cy - 17.0, 34.0, 34.0);
+                g.canvas.rrect(card, 4.0, mid, a);
+                g.canvas.rrect(card.offset(0.0, 34.5), 4.0, mid, 0.18 * a);
+                g.canvas.circle(card.x + 10.0, card.y + 10.0, 5.0, Color::WHITE, 0.9 * a);
+            }
             HomeStyle::Carousel => {
                 for (i, (w, h)) in [(24.0, 38.0), (44.0, 50.0), (24.0, 38.0)].into_iter().enumerate() {
                     let cx = frame.cx() + (i as f32 - 1.0) * 37.0;

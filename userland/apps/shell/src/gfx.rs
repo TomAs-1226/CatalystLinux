@@ -165,6 +165,9 @@ pub struct Gfx {
     /// The lists that screen drew: each one's top and where its viewport
     /// ends, which is the foot (the tests hold every list to it).
     pub viewports: Vec<(f32, f32)>,
+    /// Where along a pager too long for dots the screen is, 0 to 1, between
+    /// stops as it moves (Flow's cards); otherwise the current stop's place.
+    pub pager_at: Option<f32>,
     /// The width a screen title may take before it meets the island.
     pub title_room: f32,
     /// How much of the title shows: 1, or less while an island grown wide
@@ -350,6 +353,7 @@ impl Gfx {
             pager: None,
             foot: H,
             viewports: Vec::new(),
+            pager_at: None,
             title_room: 96.0,
             title_alpha: 1.0,
             focus: Focus::new(),
@@ -819,6 +823,20 @@ impl Gfx {
             }
         }
         self.glass.render(&mut self.canvas, shapes, &self.tokens, bezel::LIGHT_REST, self.calm);
+    }
+
+    /// Draw a frame of Flow (Home's album covers) over the whole of the
+    /// strip it is on: on the GPU when it is drawing and quicker at it,
+    /// otherwise (or if it fails) on the processor, to the same picture.
+    pub fn flow(&mut self, scene: &crate::flow::Scene, atlases: [&crate::flow::art::Atlas; 2]) {
+        if let Some(gpu) = &mut self.gpu {
+            match gpu.flow(&mut self.canvas, scene, atlases) {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(why) => self.gpu_failed(why),
+            }
+        }
+        crate::flow::render::render(&mut self.canvas.px, scene, atlases);
     }
 
     /// Whether the GPU should draw (Settings › Display › Graphics). Opening

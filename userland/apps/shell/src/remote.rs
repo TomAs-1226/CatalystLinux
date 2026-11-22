@@ -496,7 +496,7 @@ const FORM: &str = r#"
       <label>Accent<select name="accent">{{accents}}</select></label>
       <label>Mode<select name="mode"><option value="dark">dark</option><option value="light">light</option></select></label>
       <label>Text<select name="text"><option value="standard">standard</option><option value="compact">compact</option><option value="large">large</option></select></label>
-      <label>Home<select name="home"><option value="grid">grid</option><option value="carousel">carousel</option></select></label>
+      <label>Home<select name="home"><option value="grid">grid</option><option value="carousel">carousel</option><option value="flow">flow</option></select></label>
     </div>
   </section>
   <button type="submit">Send to the handheld</button>
