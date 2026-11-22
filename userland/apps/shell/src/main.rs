@@ -16,6 +16,7 @@
 //! catalyst-shell --activity-shots <dir>  live activities, Tab held, the lock screen with a song
 //! catalyst-shell --notify-shots <dir>    notifications: the centre, Quiet, the island, the lock screen
 //! catalyst-shell --usb-audio-shots <dir> USB headphones: the island, Settings › Sound, its USB page
+//! catalyst-shell --audio-shots <dir>   music's sound: spatial, AirPods, the equalizer, bit-perfect USB
 //! catalyst-shell --clip-shots <dir>   the clipboard's history, quick capture, copy mode, to PNG
 //! catalyst-shell clip …           the clipboard for scripts (`catalyst-clip`, a link to this)
 //! catalyst-shell --widget-shots <dir>    every widget at each size, and Home showing them
@@ -44,6 +45,7 @@
 #![cfg_attr(all(windows, feature = "packed"), windows_subsystem = "windows")]
 
 mod about;
+mod airpods;
 mod agent;
 mod ai;
 mod bluetooth;
@@ -71,6 +73,7 @@ mod files;
 #[cfg(not(target_arch = "aarch64"))]
 mod gallery3d;
 mod fullheight;
+mod equalizer;
 mod gfx;
 mod git;
 mod github;
@@ -613,6 +616,10 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--usb-audio-shots") {
         return usb_audio_shots(std::path::Path::new(&dir));
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--audio-shots") {
+        return audio_shots(std::path::Path::new(&dir));
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--standby-shots") {
@@ -4369,6 +4376,135 @@ fn usb_audio_shots(dir: &std::path::Path) {
         std::process::exit(1);
     }
     println!("USB headphone shots in {}", dir.display());
+}
+
+/// Music's sound, to PNG: the island as AirPods connect; Settings › Sound
+/// with spatial sound head tracked, the AirPods' noise control, how a song
+/// plays (bit-perfect to USB headphones); the equalizer; and Settings ›
+/// Bluetooth with the AirPods' codec and battery. Both looks, every text
+/// size.
+#[cfg(not(target_arch = "aarch64"))]
+fn audio_shots(dir: &std::path::Path) {
+    use gfx::TextSize::{Compact, Large, Standard};
+    use Key::*;
+    std::fs::create_dir_all(dir).expect("create the screenshot folder");
+    tour_fixtures();
+    let settle = |shell: &mut Shell, frames: usize| {
+        for _ in 0..frames {
+            if shell.tick(1.0 / 60.0) {
+                shell.draw();
+            }
+        }
+    };
+    let real_time = |shell: &mut Shell, seconds: f32| {
+        let until = Instant::now() + Duration::from_secs_f32(seconds);
+        while Instant::now() < until {
+            settle(shell, 6);
+            std::thread::sleep(Duration::from_millis(40));
+        }
+    };
+    let save = |shell: &mut Shell, name: &str| {
+        shell.draw();
+        platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}.png")), 3);
+        println!("{name}");
+    };
+    let fresh = |light: bool, bezel: bool, text: gfx::TextSize, robot: bool| {
+        let mut shell = Shell::new(if robot { Robot::demo() } else { Robot::none() });
+        shell.settings.light = light;
+        if bezel {
+            (shell.settings.theme, shell.settings.wallpaper, shell.settings.accent) = (look::Theme::Bezel, look::Wallpaper::Glow, bezel::Accent::Orange);
+        }
+        shell.settings.text = text;
+        shell.apply_settings();
+        settle(&mut shell, 100);
+        shell
+    };
+    let bluetooth_stream = sound::Stream { codec: "opus".into(), rate: 48_000, bits: 16, out_rate: 48_000, bit_perfect: false, processing: vec!["spatial".into(), "loudness".into()], tracking: true };
+    let usb_stream = sound::Stream { codec: "flac".into(), rate: 44_100, bits: 16, out_rate: 44_100, bit_perfect: true, processing: Vec::new(), tracking: false };
+    sound::demo_plug(None);
+    sound::set_level(sound::Level { volume: 45, muted: false });
+    sound::set_fx(|f| {
+        f.spatial = true;
+        f.loudness = true;
+        f.crossfade = 4;
+        f.eq = audiofx::eq::Preset::Custom;
+        f.bands = [5, 2, 0, -2, 3];
+    });
+    bluetooth::demo_reset();
+    bluetooth::demo_airpods();
+    sound::take_said();
+
+    // The AirPods connecting, over Home: their battery in the island.
+    let mut shell = fresh(false, false, Standard, true);
+    airpods::demo_connecting();
+    settle(&mut shell, 70);
+    save(&mut shell, "a01-island-airpods-connected");
+    let mut missing = shell.gfx.missing_icons().clone();
+
+    let looks = [("catalyst", false, false), ("bezel-light", true, true)];
+    for (look_name, light, bezel) in looks {
+        for (size_name, size) in [("compact", Compact), ("standard", Standard), ("large", Large)] {
+            let tag = format!("{look_name}-{size_name}");
+            airpods::demo(true);
+            sound::demo_plug(None);
+            sound::demo_stream(Some(bluetooth_stream.clone()));
+            let mut shell = fresh(light, bezel, size, false);
+            sound::take_said();
+            shell.show(Box::new(sound::SoundScreen::new().at(sound::SPATIAL_ROW)));
+            real_time(&mut shell, 0.5);
+            settle(&mut shell, 60);
+            save(&mut shell, &format!("s1-sound-spatial-airpods-{tag}"));
+            shell.key(Down);
+            settle(&mut shell, 40);
+            save(&mut shell, &format!("s2-sound-noise-control-{tag}"));
+            shell.key(Down);
+            shell.key(Down);
+            shell.key(Down);
+            settle(&mut shell, 40);
+            save(&mut shell, &format!("s3-sound-crossfade-{tag}"));
+            // USB headphones, a CD's FLAC played bit for bit.
+            airpods::demo(false);
+            sound::demo_plug(Some(sound::demo_usb()));
+            sound::demo_stream(Some(usb_stream.clone()));
+            sound::take_said();
+            shell.show(Box::new(sound::SoundScreen::new().at(sound::USB_ROW + 1)));
+            real_time(&mut shell, 0.5);
+            settle(&mut shell, 60);
+            save(&mut shell, &format!("s4-sound-bit-perfect-usb-{tag}"));
+            sound::demo_plug(None);
+            sound::demo_stream(None);
+            sound::take_said();
+            shell.show(Box::new(equalizer::EqualizerPage::new()));
+            settle(&mut shell, 40);
+            save(&mut shell, &format!("s5-equalizer-preset-{tag}"));
+            shell.key(Down);
+            shell.key(Right);
+            settle(&mut shell, 60);
+            save(&mut shell, &format!("s6-equalizer-band-{tag}"));
+            airpods::demo(true);
+            shell.show(Box::new(bluetooth::BluetoothScreen::new()));
+            real_time(&mut shell, 2.6);
+            settle(&mut shell, 60);
+            shell.key(Down);
+            shell.key(Down);
+            settle(&mut shell, 40);
+            save(&mut shell, &format!("s7-bluetooth-airpods-{tag}"));
+            for _ in 0..4 {
+                shell.key(Down);
+            }
+            settle(&mut shell, 40);
+            save(&mut shell, &format!("s8-bluetooth-airpods-case-{tag}"));
+            missing.extend(shell.gfx.missing_icons().iter().cloned());
+        }
+    }
+    airpods::demo(false);
+    sound::demo_stream(None);
+    sound::set_fx(|f| *f = audiofx::settings::Fx::default());
+    if !missing.is_empty() {
+        eprintln!("icons asked for that are not built in: {}", missing.iter().cloned().collect::<Vec<_>>().join(", "));
+        std::process::exit(1);
+    }
+    println!("Music's sound shots in {}", dir.display());
 }
 
 /// Notifications, to PNG: the notification centre (both tones, the Bezel

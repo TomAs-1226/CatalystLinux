@@ -12,6 +12,9 @@
 #   catalyst-bluetooth connect ADDRESS
 #   catalyst-bluetooth disconnect ADDRESS
 #   catalyst-bluetooth forget ADDRESS
+#   catalyst-bluetooth codec ADDRESS [NAME]
+#                                      the codec it plays with (and could);
+#                                      with NAME, that one chosen
 #   catalyst-bluetooth watch           sound to the headphones as they come and go
 #
 # `devices` prints ADDRESS, paired|new, connected|-, the kind (BlueZ's icon:
@@ -81,6 +84,34 @@ bluealsa_bin() {
 	command -v bluealsa 2>/dev/null || command -v bluealsad 2>/dev/null
 }
 
+# bluealsa's AAC options, if it was built with AAC (an older image's was
+# not, and would refuse them).
+aac_options() {
+	if "$(bluealsa_bin)" --help 2>&1 | grep -q -- '--aac-vbr'; then
+		echo "--aac-bitrate=256000 --aac-vbr"
+	fi
+}
+
+# The A2DP stream bluealsa has for a device, by its D-Bus path.
+a2dp_pcm() {
+	bluealsa-cli list-pcms 2>/dev/null | grep -i "/dev_$(echo "$1" | tr ':' '_')/a2dp" | head -n1
+}
+
+# The codec a device plays with and the ones it could, as name=value
+# lines; with a NAME, that one chosen (as `bluealsa-cli codec` does).
+codec() {
+	pcm=$(a2dp_pcm "$1")
+	[ -n "$pcm" ] || { echo "not playing" >&2; return 1; }
+	if [ -n "$2" ]; then
+		bluealsa-cli codec "$pcm" "$2" >/dev/null 2>&1 || { echo "the headphones would not take $2" >&2; return 1; }
+		catalyst-audio route >/dev/null 2>&1
+	fi
+	info=$(bluealsa-cli info "$pcm" 2>/dev/null)
+	echo "selected=$(echo "$info" | sed -n 's/^Selected codec: *\([^ :]*\).*/\1/p' | head -n1)"
+	echo "available=$(echo "$info" | sed -n 's/^Available codecs: *//p' | head -n1 | sed 's/:[0-9a-fA-F]*//g')"
+	echo "rate=$(echo "$info" | sed -n 's/^Sampling: *\([0-9]*\).*/\1/p' | head -n1)"
+}
+
 # Wait up to $2 tenths of a second for "$1" to succeed.
 wait_for() {
 	i=0
@@ -107,8 +138,12 @@ start_daemons() {
 	wait_for "[ -S $DBUS_SOCKET ]" 50 || { echo "D-Bus did not start" >&2; return 1; }
 	start-stop-daemon -S -q -b -m -p /run/catalyst-bluetoothd.pid -x "$BLUETOOTHD" -- -n
 	wait_for "bluetoothctl show >/dev/null" 50 || { echo "bluetoothd did not start" >&2; return 1; }
-	# A2DP to headphones and speakers (the handheld is the source). Logs to syslog.
-	start-stop-daemon -S -q -b -m -p /run/catalyst-bluealsa.pid -x "$(bluealsa_bin)" -- -S -p a2dp-source
+	# A2DP to headphones and speakers (the handheld is the source). Logs to
+	# syslog. AAC, where bluealsa has it (fdk-aac), goes before SBC: what
+	# AirPods and most headphones take, at 256 kb/s variable, as an iPhone
+	# sends it.
+	# shellcheck disable=SC2046
+	start-stop-daemon -S -q -b -m -p /run/catalyst-bluealsa.pid -x "$(bluealsa_bin)" -- -S -p a2dp-source $(aac_options)
 	bluetoothctl power on >/dev/null 2>&1
 	# Sound follows the headphones: to them as they connect (at boot too,
 	# when they come back by themselves), and back to the speaker as they
@@ -286,8 +321,13 @@ forget)
 	esac
 	catalyst-audio route >/dev/null
 	;;
+codec)
+	need_running
+	valid_address "$2" || exit 2
+	codec "$2" "$3"
+	;;
 *)
-	echo "usage: $0 on|off|start|stop|status|scan|devices|pair|connect|disconnect|forget|watch" >&2
+	echo "usage: $0 on|off|start|stop|status|scan|devices|pair|connect|disconnect|forget|codec|watch" >&2
 	exit 2
 	;;
 esac

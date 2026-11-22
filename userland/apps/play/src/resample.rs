@@ -1,5 +1,5 @@
 //! A song at another rate than the codec's 48 kHz (CDs' 44.1 kHz, mostly),
-//! brought to it: a polyphase windowed-sinc filter, 32 taps, one table row
+//! brought to the rate the device plays at (48 kHz, mostly): a polyphase windowed-sinc filter, 32 taps, one table row
 //! per output phase (160 rows for 44.1 kHz, which is 147:160). About three
 //! million multiply-adds a second for stereo: well under one percent of an
 //! A53. Opus is 48 kHz already and passes straight through.
@@ -67,9 +67,9 @@ impl Resampler {
         self.up == self.down
     }
 
-    /// Interleaved stereo in, at the song's rate; out at 48 kHz.
-    pub fn process(&mut self, input: &[i16], out: &mut Vec<i16>) {
-        self.buf.extend(input.chunks_exact(2).map(|f| [f[0] as f32, f[1] as f32]));
+    /// Interleaved stereo in, at the song's rate (full scale ±1); out at the device's.
+    pub fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
+        self.buf.extend(input.chunks_exact(2).map(|f| [f[0], f[1]]));
         loop {
             let at = (self.t / self.up) as usize;
             if at + 2 * HALF > self.buf.len() {
@@ -83,8 +83,8 @@ impl Resampler {
                 l += tap * s[0];
                 r += tap * s[1];
             }
-            out.push(l.round().clamp(-32768.0, 32767.0) as i16);
-            out.push(r.round().clamp(-32768.0, 32767.0) as i16);
+            out.push(l);
+            out.push(r);
             self.t += self.down;
         }
         // What no output needs any more, let go.
@@ -97,9 +97,9 @@ impl Resampler {
     }
 
     /// The song's last moments, through the filter.
-    pub fn finish(&mut self, out: &mut Vec<i16>) {
+    pub fn finish(&mut self, out: &mut Vec<f32>) {
         if !self.passes_through() {
-            self.process(&[0i16; 2 * HALF * 2], out);
+            self.process(&[0.0; 2 * HALF * 2], out);
         }
     }
 }
@@ -113,8 +113,8 @@ mod tests {
         let mut r = Resampler::new(44_100, 48_000);
         assert!(!r.passes_through());
         // One second of a 1 kHz tone at half scale, in blocks as packets come.
-        let tone: Vec<i16> = (0..44_100).flat_map(|n| {
-            let v = ((2.0 * std::f64::consts::PI * 1000.0 * n as f64 / 44_100.0).sin() * 16_000.0) as i16;
+        let tone: Vec<f32> = (0..44_100).flat_map(|n| {
+            let v = ((2.0 * std::f64::consts::PI * 1000.0 * n as f64 / 44_100.0).sin() * 0.5) as f32;
             [v, v]
         }).collect();
         let mut out = Vec::new();
@@ -126,11 +126,11 @@ mod tests {
         // A second, and the filter's half-length of tail.
         assert!((47_990..=48_030).contains(&frames), "{frames} frames");
         // Its zero crossings: 2000 a second, as before.
-        let left: Vec<i16> = out.iter().step_by(2).copied().collect();
-        let crossings = left.windows(2).skip(100).take(47_000).filter(|w| (w[0] < 0) != (w[1] < 0)).count();
+        let left: Vec<f32> = out.iter().step_by(2).copied().collect();
+        let crossings = left.windows(2).skip(100).take(47_000).filter(|w| (w[0] < 0.0) != (w[1] < 0.0)).count();
         assert!((1950..=1970).contains(&crossings), "{crossings}");
-        let peak = left[1000..40_000].iter().map(|s| s.unsigned_abs()).max().unwrap();
-        assert!((15_600..=16_400).contains(&peak), "{peak}");
+        let peak = left[1000..40_000].iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!((0.487..=0.513).contains(&peak), "{peak}");
     }
 
     #[test]
@@ -138,7 +138,7 @@ mod tests {
         assert!(Resampler::new(48_000, 48_000).passes_through());
         let mut r = Resampler::new(96_000, 48_000);
         let mut out = Vec::new();
-        r.process(&vec![0i16; 9600 * 2], &mut out);
+        r.process(&vec![0.0; 9600 * 2], &mut out);
         assert!((4780..=4800).contains(&(out.len() / 2)), "half as many");
     }
 }

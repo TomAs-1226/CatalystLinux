@@ -23,6 +23,11 @@ localmodel = { workspace = true }
 catalyst-appkg = { workspace = true }
 # The microphone and the speaker, speech to text and text to speech (push-to-talk).
 speech = { workspace = true }
+# Music's sound settings (spatial, the equalizer, loudness, crossfade) and
+# the head pose handed to the player; AirPods' own protocol (battery, noise
+# control, ear detection, head tracking).
+audiofx = { workspace = true }
+aap = { workspace = true }
 serde_json = "1"
 # Checking a downloaded on-device model against its pinned sum.
 sha2 = "0.10"

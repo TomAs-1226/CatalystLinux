@@ -1,0 +1,9 @@
+[package]
+name = "aap"
+description = "Apple's accessory protocol (AAP) with AirPods over Bluetooth L2CAP: battery, ear detection, noise control and head tracking, as the LibrePods project worked it out."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

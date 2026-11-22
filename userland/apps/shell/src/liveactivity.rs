@@ -49,6 +49,8 @@ pub enum Kind {
     Download,
     Assistant,
     Robot,
+    /// AirPods connecting: their battery, for a moment (airpods.rs).
+    Headphones,
 }
 
 /// What leads an activity: an icon in its tint, a cover, or a coloured dot.
@@ -499,6 +501,7 @@ pub fn gather(src: &Sources, update_ready: Option<Instant>) -> Vec<Activity> {
     all.extend(update(src.update, update_ready));
     all.extend(tasks().iter().map(from_task));
     all.extend(robot(src.robot));
+    all.extend(crate::airpods::activity());
     rank(&mut all);
     all
 }

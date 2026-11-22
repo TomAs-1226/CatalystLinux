@@ -16,11 +16,13 @@ use crate::Fail;
 pub struct OpusHead {
     pub channels: u8,
     pub pre_skip: u16,
+    /// The gain every decoder applies (Q7.8 dB, RFC 7845).
+    pub gain: i16,
 }
 
 impl OpusHead {
     pub fn parse(b: &[u8]) -> Option<OpusHead> {
-        (b.len() >= 19 && &b[..8] == b"OpusHead").then(|| OpusHead { channels: b[9].max(1), pre_skip: u16::from_le_bytes([b[10], b[11]]) })
+        (b.len() >= 19 && &b[..8] == b"OpusHead").then(|| OpusHead { channels: b[9].max(1), pre_skip: u16::from_le_bytes([b[10], b[11]]), gain: i16::from_le_bytes([b[16], b[17]]) })
     }
 
     /// One made up, for a container that did not carry it.
@@ -30,7 +32,7 @@ impl OpusHead {
         b.push(self.channels);
         b.extend(self.pre_skip.to_le_bytes());
         b.extend(48_000u32.to_le_bytes());
-        b.extend(0i16.to_le_bytes());
+        b.extend(self.gain.to_le_bytes());
         b.push(0);
         b
     }
@@ -256,7 +258,7 @@ pub fn remux(input: &Path, output: &Path, tags: &[(String, String)]) -> Result<(
     if params.codec != CODEC_TYPE_OPUS {
         return Err(Fail::Unreadable("only Opus goes into Ogg Opus".into()));
     }
-    let head = params.extra_data.as_deref().filter(|b| OpusHead::parse(b).is_some()).map(<[u8]>::to_vec).unwrap_or_else(|| OpusHead { channels: params.channels.map_or(2, |c| c.count() as u8), pre_skip: 312 }.bytes());
+    let head = params.extra_data.as_deref().filter(|b| OpusHead::parse(b).is_some()).map(<[u8]>::to_vec).unwrap_or_else(|| OpusHead { channels: params.channels.map_or(2, |c| c.count() as u8), pre_skip: 312, gain: 0 }.bytes());
     let file = std::fs::File::create(output).map_err(|e| Fail::Other(format!("{}: {e}", output.display())))?;
     let serial = std::process::id() ^ std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
     let mut w = Writer::new(std::io::BufWriter::with_capacity(64 * 1024, file), serial);
@@ -293,7 +295,7 @@ mod tests {
         // The CRC Ogg uses (polynomial 0x04C11DB7, no reflection): "123456789".
         assert_eq!(crc(b"123456789"), 0x89A1_897F);
         let mut w = Writer::new(Vec::new(), 7);
-        w.packet(&OpusHead { channels: 2, pre_skip: 312 }.bytes(), 0).unwrap();
+        w.packet(&OpusHead { channels: 2, pre_skip: 312, gain: 0 }.bytes(), 0).unwrap();
         w.end_header(false).unwrap();
         // A comment header with a 70 KB cover: more than one page holds.
         w.packet(&vec![b'x'; 70_000], 0).unwrap();

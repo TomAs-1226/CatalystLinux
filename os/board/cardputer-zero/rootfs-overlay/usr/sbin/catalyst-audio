@@ -42,14 +42,18 @@
 # Volume" on the codec's card). The codec plays nothing meanwhile, so the
 # speaker's amplifier stays off. They need the USB port to run the internal
 # hub (Settings › USB on "charging only", the USB switch to the hub's side)
-# and plug into USB-C1 or the USB-A port.
+# and plug into USB-C1 or the USB-A port. Music plays past the dmix when
+# they have a volume of their own: catalyst-play opens their hw device at
+# the song's own rate and depth, bit for bit, while it plays (a chime
+# meanwhile finds the device busy).
 #
 # The choices are kept in /data/catalyst (audio-volume, audio-volume-usb,
 # audio-muted, audio-mic, audio-mic-gain, audio-output) and set again at
 # every start. Where sound goes is in $RUN: output (local, bluetooth, or
 # "usb N" for card N, replaced only when it changes, so the shell can watch
-# it), usb (the USB card there, as name=value lines), and what was there at
-# the last look, to tell which came last.
+# it), usb (the USB card there, as name=value lines), bluetooth (the
+# Bluetooth stream's codec and rate, and the device's kind), and what was
+# there at the last look, to tell which came last.
 
 CARD=${CATALYST_AUDIO_CARD:-ES8389Audio}
 STATE=${CATALYST_AUDIO_STATE:-/data/catalyst}
@@ -165,6 +169,26 @@ bluetooth_connected() {
 	[ -n "$1" ] || return 1
 	dev=dev_$(echo "$1" | tr ':' '_')
 	bluealsa-cli list-pcms 2>/dev/null | grep -qi "/$dev/a2dp"
+}
+
+# The Bluetooth stream there, in $RUN/bluetooth (or nothing): its codec
+# and rate as bluealsa runs it (AAC to AirPods, SBC to the rest; the
+# player opens the stream at that rate, so nothing is resampled twice),
+# and BlueZ's icon for the device (spatial sound is for headphones, not
+# a speaker).
+describe_bluetooth() {
+	if [ -z "$1" ]; then
+		rm -f "$RUN/bluetooth"
+		return
+	fi
+	dev=dev_$(echo "$1" | tr ':' '_')
+	pcm=$(bluealsa-cli list-pcms 2>/dev/null | grep -i "/$dev/a2dp" | head -n1)
+	info=$(bluealsa-cli info "$pcm" 2>/dev/null)
+	codec=$(echo "$info" | sed -n 's/^Selected codec: *\([^ :]*\).*/\1/p' | head -n1)
+	rate=$(echo "$info" | sed -n 's/^Sampling: *\([0-9]*\).*/\1/p' | head -n1)
+	icon=$(bluetoothctl info "$1" 2>/dev/null | sed -n 's/^[[:space:]]*Icon: //p' | head -n1)
+	printf 'address=%s\ncodec=%s\nrate=%s\nicon=%s\n' "$1" "$codec" "$rate" "$icon" >"$RUN/bluetooth.$$"
+	replace "$RUN/bluetooth.$$" "$RUN/bluetooth"
 }
 
 # --- USB headphones -------------------------------------------------------
@@ -292,6 +316,7 @@ route_now() {
 	[ -n "$latest" ] && echo "$latest" >"$RUN/latest"
 
 	describe_usb "$usb_n" "$usb_id" "$usb_dev" "$usb_key"
+	describe_bluetooth "$bt"
 	# USB headphones with no control of their own need the codec's card for
 	# theirs (until it loads at boot, the speaker plays).
 	usb_ok=
@@ -500,6 +525,10 @@ status() {
 		else
 			echo "bluetooth_connected=no"
 		fi
+		codec=$(sed -n 's/^codec=//p' "$RUN/bluetooth" 2>/dev/null)
+		[ -n "$codec" ] && echo "bluetooth_codec=$codec"
+		rate=$(sed -n 's/^rate=//p' "$RUN/bluetooth" 2>/dev/null)
+		[ -n "$rate" ] && echo "bluetooth_rate=$rate"
 	fi
 	# The USB headphones there, whether or not they play.
 	n=$(usb_field card)

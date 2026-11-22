@@ -3098,7 +3098,7 @@ fn nearest_hue(accent: bezel::Accent) -> u8 {
 
 /// Where everything in Settings is, for search: what it is called, the
 /// section it is in, and its place there (none: the section itself).
-const SETTING_PLACES: [(&str, Item, Option<usize>); 82] = [
+const SETTING_PLACES: [(&str, Item, Option<usize>); 86] = [
     ("Robot settings", Item::RobotSection, None),
     ("Open Robot on link", Item::RobotSection, Some(0)),
     ("Match report after a match", Item::RobotSection, Some(1)),
@@ -3148,8 +3148,12 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 82] = [
     ("Sound", Item::SoundSection, None),
     ("Volume", Item::SoundSection, Some(0)),
     ("USB headphones", Item::SoundSection, Some(crate::sound::USB_ROW)),
-    ("Test sound", Item::SoundSection, Some(crate::sound::USB_ROW + 1)),
-    ("Microphone", Item::SoundSection, Some(crate::sound::USB_ROW + 2)),
+    ("Spatial sound", Item::SoundSection, Some(crate::sound::SPATIAL_ROW)),
+    ("Equalizer", Item::SoundSection, Some(crate::sound::EQ_ROW)),
+    ("Loudness match", Item::SoundSection, Some(crate::sound::LOUDNESS_ROW)),
+    ("Crossfade", Item::SoundSection, Some(crate::sound::CROSSFADE_ROW)),
+    ("Test sound", Item::SoundSection, Some(crate::sound::TEST_ROW)),
+    ("Microphone", Item::SoundSection, Some(crate::sound::MIC_ROW)),
     ("Bluetooth", Item::BluetoothSection, None),
     ("Bluetooth headphones and speakers", Item::BluetoothSection, Some(0)),
     ("Music", Item::MusicSection, None),

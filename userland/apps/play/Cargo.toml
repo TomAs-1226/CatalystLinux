@@ -10,6 +10,10 @@ name = "catalyst-play"
 path = "src/main.rs"
 
 [dependencies]
+# Spatial sound, the equalizer, loudness matching, crossfades and gapless
+# trimming, and the settings the shell writes (pure Rust, no allocation
+# while a song plays).
+audiofx = { workspace = true }
 # Pure Rust demuxers and decoders (no Opus: libopus does that, loaded at run
 # time like libasound, so nothing C is linked at build time).
 symphonia = { version = "0.5", default-features = false, features = ["aac", "alac", "flac", "mp3", "pcm", "vorbis", "wav", "isomp4", "mkv", "ogg"] }

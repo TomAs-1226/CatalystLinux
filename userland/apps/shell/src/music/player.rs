@@ -161,7 +161,7 @@ fn player() -> &'static Player {
     PLAYER.get_or_init(|| {
         let (tx, rx) = channel::<Cmd>();
         let state = Arc::new(Mutex::new(Shared { queue: Vec::new(), at: 0, phase: Phase::Empty, offset: 0.0, anchor: None, length: None, loading: None, buffering: false, shuffle: false, repeat: Repeat::Off, unshuffled: None }));
-        let worker = Worker { tx: tx.clone(), state: state.clone(), sound: None, gen: 0, errors: Arc::new(Mutex::new(String::new())), retry_at: None, busy_tries: 0, ffmpeg_for: None, fetch_failed: None, sim_due: None, played_on: None };
+        let worker = Worker { tx: tx.clone(), state: state.clone(), sound: None, gen: 0, errors: Arc::new(Mutex::new(String::new())), retry_at: None, busy_tries: 0, ffmpeg_for: None, fetch_failed: None, sim_due: None, played_on: None, feed: None, fed: None };
         std::thread::Builder::new().name("music".into()).stack_size(256 * 1024).spawn(move || worker.run(rx)).ok();
         fetch::on_event(|e| {
             if let Some(p) = PLAYER.get() {
@@ -323,6 +323,11 @@ struct Worker {
     /// The USB headphones' card the player was started on, if they were
     /// what played.
     played_on: Option<u32>,
+    /// catalyst-play's standard input, and the song after this one told to
+    /// it (its id, and the line said), so it runs on into it without a gap
+    /// (or crossfades, as Settings › Sound says).
+    feed: Option<std::process::ChildStdin>,
+    fed: Option<(String, String)>,
 }
 
 impl Worker {
@@ -360,8 +365,38 @@ impl Worker {
         self.stop_sound();
     }
 
+    /// The song after this one, told to catalyst-play once it is on the
+    /// card (and told again if the queue changes under it).
+    fn feed_next(&mut self) {
+        if self.feed.is_none() {
+            return;
+        }
+        let next = {
+            let s = self.state.lock().unwrap();
+            let i = match s.repeat {
+                Repeat::One => Some(s.at),
+                Repeat::All if !s.queue.is_empty() => Some((s.at + 1) % s.queue.len()),
+                _ => Some(s.at + 1).filter(|&i| i < s.queue.len()),
+            };
+            i.and_then(|i| s.queue.get(i).cloned())
+        };
+        let line = next.as_ref().and_then(|t| on_card(t).map(|p| (t.id.clone(), format!("next\t{}\talbum={}\n", p.display(), album_key(t)))));
+        if line.as_ref().map(|l| &l.1) == self.fed.as_ref().map(|f| &f.1) {
+            return;
+        }
+        let words = line.as_ref().map_or("next\n", |l| l.1.as_str()).to_owned();
+        if let Some(feed) = self.feed.as_mut() {
+            use std::io::Write;
+            if feed.write_all(words.as_bytes()).and_then(|_| feed.flush()).is_err() {
+                self.feed = None;
+            }
+        }
+        self.fed = line;
+    }
+
     /// After anything: what to fetch, whether the network is needed.
     fn after(&mut self) {
+        self.feed_next();
         let (current, ahead) = {
             let s = self.state.lock().unwrap();
             let current = s.track().cloned();
@@ -764,12 +799,19 @@ impl Worker {
         let gen = self.gen;
         let ffmpeg = self.ffmpeg_for.as_deref() == Some(track.id.as_str()) || !Path::new(library::PLAYER).exists();
         let mut cmd = if ffmpeg { ffmpeg_command(path, at) } else { player_command(path, at, size) };
+        let album = album_key(track);
+        if !ffmpeg && !album.is_empty() {
+            cmd.arg("--album").arg(album);
+        }
         self.played_on = crate::sound::route().usb_playing();
-        let child = polite::polite(&mut cmd, Manner::Playing).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
+        // catalyst-play is told the song after this one on its standard input.
+        let child = polite::polite(&mut cmd, Manner::Playing).stdin(if ffmpeg { Stdio::null() } else { Stdio::piped() }).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
         let mut child = match child {
             Ok(c) => c,
             Err(_) => return self.fail("the player could not start".into()),
         };
+        self.feed = child.stdin.take();
+        self.fed = None;
         let errors = Arc::new(Mutex::new(String::new()));
         self.errors = errors.clone();
         if let Some(mut err) = child.stderr.take() {
@@ -815,6 +857,27 @@ impl Worker {
 
     /// A line from the player.
     fn said(&mut self, line: &str) {
+        // It ran on into the song told to it: that one is playing now.
+        if line.starts_with("track ") {
+            if let Some((id, _)) = self.fed.take() {
+                let mut s = self.state.lock().unwrap();
+                let after = (s.at + 1).min(s.queue.len());
+                let found = s.queue[after..].iter().position(|t| t.id == id).map(|i| i + after).or_else(|| s.queue.iter().position(|t| t.id == id));
+                if let Some(i) = found {
+                    s.at = i;
+                    s.offset = 0.0;
+                    s.anchor = Some(Instant::now());
+                    s.length = s.queue[i].seconds.map(|x| x as f32);
+                    let t = s.queue[i].clone();
+                    drop(s);
+                    if !t.id.starts_with("lib:") && t.local.is_none() {
+                        store::played_now(&t.id);
+                    }
+                }
+            }
+            self.publish();
+            return;
+        }
         let mut publish = false;
         {
             let mut s = self.state.lock().unwrap();
@@ -961,6 +1024,8 @@ impl Worker {
     fn stop_sound(&mut self) {
         self.gen += 1;
         self.sim_due = None;
+        self.feed = None;
+        self.fed = None;
         if let Some(Sound::Process(mut child)) = self.sound.take() {
             polite::end(&mut child);
         }
@@ -999,6 +1064,13 @@ impl Worker {
 fn start_bytes(total: u64, seconds: Option<u32>) -> u64 {
     let per_second = seconds.filter(|&s| s > 0).map_or(20_000, |s| total / s as u64);
     (per_second * START_SECONDS).max(START_BYTES_MIN).min(total)
+}
+
+/// A song's album, as catalyst-play compares them (a crossfade is never
+/// made within one): its name alone, so a compilation's songs by their
+/// several artists (a DJ mix, a live album) still run on into each other.
+fn album_key(t: &Track) -> String {
+    t.album.trim().to_lowercase().replace(['\t', '\n'], " ")
 }
 
 fn player_command(path: &Path, at: f32, size: Option<u64>) -> Command {
