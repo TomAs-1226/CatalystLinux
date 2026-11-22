@@ -12,7 +12,21 @@ the first section (this introduction) is not shown.
 
 ## 0.6.1
 
+### Smoother
+- Everything moves at up to 60 frames a second, up from 30: a whole picture reaches the screen in 15 ms instead of 33. The screen's link runs at its full 62.5 MHz now, and the picture no longer waits 11 ms in slow memory before it is sent. Full speed from the second start after updating.
+- The processor speeds up the moment you press a key or something starts to move, and slows again as soon as it stops; downloads, indexing, updates and Music's helpers make way for the screen.
+- A change on screen only one line tall (a thin progress bar) always shows now; it could be missed before.
+- If the graphics chip runs out of memory, the picture is finished on the processor rather than shown half-drawn, and the chip is tried again later.
+- Secure connections use the cipher this processor is fastest at.
+
+### Notifications
+- Reminders, timers, downloads, installs, updates, the robot (linked, match summary, brownout), queueing, long Assistant answers and battery warnings are kept until you've seen them.
+- The notification centre: Ctrl+Backspace, or Notifications on the control centre. Enter goes where one leads, Fn+Backspace removes one, Clear all removes everything.
+- The island shows how many are new, and the lock screen the newest ones; their words only if you choose. Fn+F or Fn+X picks one, and it opens once unlocked.
+- Quiet on the control centre: notifications collect silently, while reminders, timers and "time to queue" still come through.
+
 ### Fixed
+- On the lock screen, the charging chip no longer runs into the music card: the chips sit under the date and the cards start below them, at every text size.
 - The screen stays dark no more after a restart: 0.6.0's new brightness curve read a dark backlight as lit, so the first picture never turned it on.
 - Installing an update no longer slows the handheld down: it runs at the lowest priority and writes to the card in small steps, so the screen never waits on it.
 - Music in the background no longer makes everything lag: saving songs waits for the card behind everything else, the card writes a little at a time, and the graphics chip has twice the memory it ran out of.
