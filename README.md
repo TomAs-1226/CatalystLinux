@@ -1821,7 +1821,15 @@ in a folder outside the repository; `scripts/offline-eval.sh run` asks
 each of them 40 pit questions, and 26 more asked other ways, about an
 event of made-up match logs with faults put in at known times
 (`offline::eval`, `--offline-eval` in the simulator). The answers made from
-the facts alone are right for all of them (a test holds them to it).
+the facts alone are right for all of them (a test holds them to it). Run
+against nine models (November 2026, b8117 on a PC): every answer shown was
+right for every model, on both sets; a model's wording passed the check for
+15–45% of the questions (the rest showed the facts' answer), and the check
+caught something made up in 8–61% of drafts. The rules routed all 40
+questions and 23 of the 26 asked other ways; the models, held by the
+grammar, 8–45%, so the rules stay first. Gemma 3 270M made up least of the
+models that fit beside the shell (10% of drafts) and its wording was shown
+a third of the time; Qwen3.5 0.8B crashed this llama-server.
 
 ## Browse
 
