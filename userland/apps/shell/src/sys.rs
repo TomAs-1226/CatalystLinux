@@ -180,20 +180,73 @@ fn backlight() -> Option<std::path::PathBuf> {
     fs::read_dir("/sys/class/backlight").ok()?.flatten().next().map(|e| e.path())
 }
 
-/// Backlight brightness, 0–100.
+/// Backlight brightness, 0–100, as the eye sees it (see `level_for`).
 pub fn brightness() -> Option<u32> {
     let dir = backlight()?;
     let now: u32 = read(&dir.join("brightness").to_string_lossy())?.parse().ok()?;
     let max: u32 = read(&dir.join("max_brightness").to_string_lossy())?.parse().ok()?;
-    (max > 0).then(|| (now * 100 + max / 2) / max)
+    (max > 0).then(|| percent_for(now, max))
 }
 
 /// Set the backlight; never fully off, so the screen cannot be lost.
 pub fn set_brightness(percent: u32) -> bool {
     let Some(dir) = backlight() else { return false };
     let Some(max) = read(&dir.join("max_brightness").to_string_lossy()).and_then(|m| m.parse::<u32>().ok()) else { return false };
-    let value = (percent.clamp(5, 100) * max / 100).max(1);
-    fs::write(dir.join("brightness"), value.to_string()).is_ok()
+    fs::write(dir.join("brightness"), level_for(percent, max).to_string()).is_ok()
+}
+
+/// The lowest brightness offered, in percent, and the least of the
+/// backlight's levels it may come to (so it stays readable indoors).
+const LEAST_PERCENT: u32 = 5;
+const LEAST_SHARE: f32 = 0.012;
+
+/// The backlight's level for a brightness in percent: on a perceptual
+/// curve (the square, close to how the eye sees light), as phones do. Even
+/// steps on the slider look even, and the light it takes falls away fast:
+/// 70% is half the light the straight line gave, so about 40% less of the
+/// backlight's power at the usual setting.
+pub fn level_for(percent: u32, max: u32) -> u32 {
+    let p = percent.clamp(LEAST_PERCENT, 100) as f32 / 100.0;
+    let share = (p * p).max(LEAST_SHARE);
+    ((share * max as f32).round() as u32).clamp(1, max.max(1))
+}
+
+/// The brightness in percent a backlight level is, the curve undone: what
+/// `level_for` gives back the same level for, so a brightness read and
+/// written again (standby dimming and coming back) never drifts.
+pub fn percent_for(level: u32, max: u32) -> u32 {
+    if max == 0 {
+        return 0;
+    }
+    let guess = ((level as f32 / max as f32).sqrt() * 100.0).round() as u32;
+    // The nearest percent whose level is this level, else the nearest level.
+    (LEAST_PERCENT..=100)
+        .min_by_key(|&p| (level_for(p, max).abs_diff(level), p.abs_diff(guess)))
+        .unwrap_or(guess)
+        .clamp(LEAST_PERCENT, 100)
+}
+
+#[cfg(test)]
+mod brightness_tests {
+    use super::*;
+
+    #[test]
+    fn the_curve_saves_light_and_reads_back_what_it_set() {
+        for max in [100, 255, 1023, 4095] {
+            // Half the light at 70%, and full at 100%.
+            assert!((level_for(70, max) as f32 / max as f32 - 0.49).abs() < 0.02, "max {max}");
+            assert_eq!(level_for(100, max), max);
+            // Never dark, never less than the least share.
+            assert!(level_for(0, max) >= 1);
+            // Read and written again: the same level, every one reachable.
+            for p in 0..=100 {
+                let level = level_for(p, max);
+                assert_eq!(level_for(percent_for(level, max), max), level, "max {max}, {p}%");
+            }
+            // Brighter is never dimmer.
+            assert!((LEAST_PERCENT..100).all(|p| level_for(p + 1, max) >= level_for(p, max)));
+        }
+    }
 }
 
 /// The backlight switched on or off (`bl_power`), its brightness kept for
