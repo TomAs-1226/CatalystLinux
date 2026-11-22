@@ -80,6 +80,7 @@ mod monitor;
 mod music;
 mod nettools;
 mod notes;
+mod nowplaying;
 mod panel;
 mod passcode;
 mod photos;
@@ -498,6 +499,9 @@ fn main() {
         return;
     }
 
+    if !flag("--sim") {
+        keep_in_memory();
+    }
     let mut platform: Box<dyn Platform> = open_platform(flag("--sim"));
     // The time zone chosen, in use for every clock this draws (on the handheld).
     device::apply_saved();
@@ -703,6 +707,22 @@ impl Beat {
         }
     }
 }
+
+/// The shell's own memory stays in RAM, as it is touched and from then on.
+/// Under memory pressure (a model loading, Music finding a song) the kernel
+/// would otherwise swap the shell out to zram, and every frame would wait
+/// for its pages to come back: the handheld ran at about 10 frames a second
+/// so. Its own memory is about 30 MB; other programs swap instead (a lock is
+/// not passed on to the programs it starts).
+#[cfg(target_arch = "aarch64")]
+fn keep_in_memory() {
+    if unsafe { libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE | libc::MCL_ONFAULT) } != 0 {
+        eprintln!("catalyst-shell: could not keep its memory in RAM: {}", std::io::Error::last_os_error());
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn keep_in_memory() {}
 
 #[cfg(target_arch = "aarch64")]
 fn open_platform(_sim: bool) -> Box<dyn Platform> {
