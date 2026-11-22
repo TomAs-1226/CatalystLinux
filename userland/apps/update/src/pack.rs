@@ -56,41 +56,83 @@ pub fn hash_file(path: &Path) -> Result<String, String> {
     hash_prefix(path, size, &mut |_| {})
 }
 
-fn open_target(path: &Path) -> Result<File, String> {
-    // A partition already exists; an image file (tests) may not.
-    OpenOptions::new().write(true).create(!path.starts_with("/dev")).truncate(false).open(path).map_err(io("opening the spare system"))
-}
-
 /// Written to the card in steps of this much, each flushed before the next:
 /// a whole system held back in memory and written at once filled it and
 /// left everything else waiting on the card (the handheld lagged while an
 /// update installed).
 const FLUSH_EVERY: usize = 4 << 20;
 
+/// The spare system as it is written: each piece compared with what the
+/// partition holds there already, and written only where it differs. Most
+/// of a system is the same from one release to the next, and the rest of
+/// its partition empty; the card reads quickly and writes slowly (most of
+/// all at the idle priority an update has), and an update wrote the whole
+/// 1 GB, about 15 minutes on the handheld.
+struct Spare {
+    file: File,
+    at: u64,
+    unflushed: usize,
+    have: Vec<u8>,
+    written: u64,
+}
+
+impl Spare {
+    fn open(path: &Path) -> Result<Spare, String> {
+        // A partition already exists; an image file (tests) may not.
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(!path.starts_with("/dev"))
+            .truncate(false)
+            .open(path)
+            .map_err(io("opening the spare system"))?;
+        Ok(Spare { file, at: 0, unflushed: 0, have: Vec::new(), written: 0 })
+    }
+
+    /// The next piece of the system.
+    fn put(&mut self, data: &[u8]) -> Result<(), String> {
+        self.have.resize(data.len(), 0);
+        let same = self.file.seek(SeekFrom::Start(self.at)).is_ok() && self.file.read_exact(&mut self.have).is_ok() && self.have == data;
+        if !same {
+            self.file.seek(SeekFrom::Start(self.at)).map_err(io("writing the spare system"))?;
+            self.file.write_all(data).map_err(io("writing the spare system"))?;
+            self.unflushed += data.len();
+            self.written += data.len() as u64;
+            if self.unflushed >= FLUSH_EVERY {
+                self.file.sync_data().map_err(io("writing the spare system"))?;
+                self.unflushed = 0;
+            }
+        }
+        self.at += data.len() as u64;
+        Ok(())
+    }
+
+    /// All of it on the card; how much had to be written.
+    fn finish(self) -> Result<u64, String> {
+        self.file.sync_all().map_err(io("writing the spare system"))?;
+        Ok(self.written)
+    }
+}
+
 /// Write a whole system: `gz` decompressed into `target`. Returns its hash.
 pub fn write_full(gz: &Path, target: &Path, size: u64, progress: Progress) -> Result<String, String> {
     let mut input = GzDecoder::new(std::io::BufReader::new(File::open(gz).map_err(io("reading the download"))?));
-    let mut out = open_target(target)?;
+    let mut out = Spare::open(target)?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     let mut done = 0u64;
-    let mut unflushed = 0usize;
     loop {
         let n = input.read(&mut buf).map_err(io("unpacking the system"))?;
         if n == 0 {
             break;
         }
-        out.write_all(&buf[..n]).map_err(io("writing the spare system"))?;
-        unflushed += n;
-        if unflushed >= FLUSH_EVERY {
-            out.sync_data().map_err(io("writing the spare system"))?;
-            unflushed = 0;
-        }
+        out.put(&buf[..n])?;
         hasher.update(&buf[..n]);
         done += n as u64;
         progress(done as f32 / size.max(1) as f32);
     }
-    out.sync_all().map_err(io("writing the spare system"))?;
+    let written = out.finish()?;
+    eprintln!("catalyst-update: {} MB of {} MB written, the rest already there", written >> 20, done >> 20);
     if done != size {
         return Err(format!("the system came to {done} bytes, not {size}"));
     }
@@ -166,7 +208,7 @@ pub fn write_delta(delta: &Path, base: &Path, target: &Path, progress: Progress)
     }
     let mut z = ZlibDecoder::new(f);
     let mut src = File::open(base).map_err(io("reading the running system"))?;
-    let mut out = open_target(target)?;
+    let mut out = Spare::open(target)?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; block];
     let blocks = (size as usize).div_ceil(block);
@@ -180,16 +222,14 @@ pub fn write_delta(delta: &Path, base: &Path, target: &Path, progress: Progress)
             src.seek(SeekFrom::Start((i * block) as u64)).map_err(io("reading the running system"))?;
             src.read_exact(&mut buf[..n]).map_err(io("reading the running system"))?;
         }
-        out.write_all(&buf[..n]).map_err(io("writing the spare system"))?;
-        if (i + 1) % (FLUSH_EVERY / block).max(1) == 0 {
-            out.sync_data().map_err(io("writing the spare system"))?;
-        }
+        out.put(&buf[..n])?;
         hasher.update(&buf[..n]);
         if i % 32 == 0 {
             progress(i as f32 / blocks as f32);
         }
     }
-    out.sync_all().map_err(io("writing the spare system"))?;
+    let written = out.finish()?;
+    eprintln!("catalyst-update: {} MB of {} MB written, the rest already there", written >> 20, size >> 20);
     progress(1.0);
     Ok(hex(&hasher.finalize()))
 }
@@ -300,6 +340,31 @@ mod tests {
         let hash = write_delta(&dir.join("p.cdelta"), &dir.join("old.img"), &dir.join("out.img"), &mut |_| {}).unwrap();
         assert_eq!(std::fs::read(dir.join("out.img")).unwrap(), new);
         assert_eq!(hash, hex(&Sha256::digest(&new)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn only_what_the_spare_system_does_not_hold_already_is_written() {
+        let dir = scratch("spare");
+        let old = system(1, 8 * BLOCK);
+        let mut new = old.clone();
+        new[3 * BLOCK + 5] ^= 0xff;
+        // The spare partition holds the old system: one block to write.
+        std::fs::write(dir.join("spare.img"), &old).unwrap();
+        let mut spare = Spare::open(&dir.join("spare.img")).unwrap();
+        for block in new.chunks(BLOCK) {
+            spare.put(block).unwrap();
+        }
+        assert_eq!(spare.finish().unwrap(), BLOCK as u64);
+        assert_eq!(std::fs::read(dir.join("spare.img")).unwrap(), new);
+        // Again: nothing to write. And into a new, empty image: all of it.
+        let mut spare = Spare::open(&dir.join("spare.img")).unwrap();
+        new.chunks(BLOCK).for_each(|b| spare.put(b).unwrap());
+        assert_eq!(spare.finish().unwrap(), 0);
+        let mut fresh = Spare::open(&dir.join("fresh.img")).unwrap();
+        new.chunks(BLOCK).for_each(|b| fresh.put(b).unwrap());
+        assert_eq!(fresh.finish().unwrap(), new.len() as u64);
+        assert_eq!(std::fs::read(dir.join("fresh.img")).unwrap(), new);
         std::fs::remove_dir_all(&dir).ok();
     }
 
