@@ -388,6 +388,12 @@ impl Canvas {
                     continue;
                 }
                 let dst = &mut self.px[d + xx as usize];
+                // Whole and not faded: the picture's own pixel (most of a
+                // photo), as the sum below would make it.
+                if keep == 0 && a == 256 {
+                    *dst = p & 0x00ff_ffff;
+                    continue;
+                }
                 let q = *dst;
                 // What is left of the pixel under it: all of it where the
                 // picture is faded out, `keep` where it is whole.

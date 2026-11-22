@@ -318,11 +318,6 @@ pub fn minutes_text(minutes: u64) -> String {
     }
 }
 
-/// The time of day in hours and minutes, on the 24-hour clock or the 12-hour.
-pub fn clock(h24: bool) -> String {
-    chrono::Local::now().format(if h24 { "%H:%M" } else { "%-I:%M" }).to_string()
-}
-
 /// Battery charge alone, 0–100.
 pub fn battery_percent() -> Option<u32> {
     fs::read_dir("/sys/class/power_supply").ok()?.flatten().find_map(|e| read(&e.path().join("capacity").to_string_lossy())?.parse().ok())

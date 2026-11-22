@@ -125,8 +125,9 @@ pub struct Gfx {
     pub open_robot: bool,
     /// Whether a match's summary opens once its log is pulled.
     pub match_report: bool,
-    /// The glance page's cards, and the value pinned to it.
-    pub glance: Vec<crate::shell::Widget>,
+    /// The widgets on the glance page and on Home, and the value pinned to
+    /// the glance page.
+    pub widgets: crate::widgets::Layout,
     pub pinned: Option<String>,
     /// Home's arrangement (apps in order, apps hidden), and the clock's
     /// settings (24-hour, seconds).
@@ -145,6 +146,9 @@ pub struct Gfx {
     pub power: crate::standby::Power,
     /// Settings › Battery's choices, for the rows that show them.
     pub battery: crate::power::Choices,
+    /// The shell's battery reading, as the island and the lock screen have
+    /// it: what Home's battery widget shows.
+    pub charge: Option<crate::power::Reading>,
     /// Lift to wake and face down to sleep.
     pub lift_wake: bool,
     pub face_down: bool,
@@ -344,7 +348,7 @@ impl Gfx {
             home: crate::shell::HomeStyle::Grid,
             open_robot: true,
             match_report: true,
-            glance: crate::shell::Settings::default().glance,
+            widgets: crate::widgets::Layout::starting(),
             pinned: None,
             arrangement: crate::shell::Arrangement::default(),
             clock: (true, false),
@@ -356,6 +360,7 @@ impl Gfx {
             screen_off: 60,
             power: crate::standby::Power::Balanced,
             battery: crate::power::Choices::default(),
+            charge: None,
             lift_wake: true,
             face_down: true,
             lock: crate::lock::Choices::default(),

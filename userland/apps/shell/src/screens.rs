@@ -12,7 +12,9 @@ use crate::gfx::{Gfx, ListState, TextSize, GAP, H, PAD, W};
 use crate::logs::Digest;
 use crate::platform::Key;
 use crate::robot::Robot;
-use crate::shell::{Cx, HomeStyle, Nav, Screen, Widget};
+use crate::shell::{Cx, HomeStyle, Nav, Screen};
+use crate::widgets::edit::{app_key, widget_key, Dir, Editing, Glides};
+use crate::widgets::{Act, Board, Cell, Grid, Kind, Layout, Packed, Placed, Slot};
 use crate::wifi::Wifi;
 use crate::wpilog::Level;
 
@@ -135,6 +137,9 @@ enum Tile {
     External(usize),
 }
 
+/// The glance page's board: two cells across.
+const GLANCE_COLUMNS: usize = 2;
+
 pub struct Home {
     focus: usize,
     /// Which page of the grid is in view; turns on the page spring.
@@ -146,18 +151,18 @@ pub struct Home {
     /// their left), 2 with the next one left of that, and so on.
     glance: Animated,
     glance_page: usize,
-    /// The glance card in focus: its place in the glance list.
+    /// The glance widget in focus: its place on the glance page's board.
     card: usize,
-    /// Each glance card where it was last drawn: Enter opens out of it.
+    /// Each glance widget where it was last drawn: Enter opens out of it.
     cards: Vec<Rect>,
-    /// Which glance card is the robot's, as last drawn.
-    robot_card: Option<usize>,
     /// Which Home this is drawn as, as last seen in the settings.
     style: HomeStyle,
     /// Columns in the grid: fewer, larger tiles at the large text size.
     columns: usize,
     /// Where each tile was last drawn: an app opens out of its tile.
     rects: Vec<Rect>,
+    /// Where each of Home's own widgets was last drawn.
+    widget_rects: Vec<Rect>,
     /// The carousel's middle card.
     middle: Rect,
     /// Seconds since Home arrived, for the launcher cascade.
@@ -170,11 +175,6 @@ pub struct Home {
     arranged_by: crate::shell::Arrangement,
     /// The hardware the tiles were laid out for (`hardware()`).
     arranged_for: (bool, bool),
-    /// What the glance page says about this device, re-read now and then.
-    device: DeviceFacts,
-    device_age: f32,
-    /// The clock setting the facts were read with.
-    h24: bool,
     /// Enter pressed on a tile: how long it has been pressed in. The app
     /// grows out of it once it has been, `PRESS_IN` later.
     opening: Option<f32>,
@@ -185,6 +185,25 @@ pub struct Home {
     seen: Vec<Option<String>>,
     /// Flow, the third style: album covers turning (flow.rs).
     flow: crate::flow::Flow,
+    /// The widgets on both boards, as last seen in the settings.
+    layout: Layout,
+    /// The widget in focus among the grid's apps, by its place on Home's
+    /// board; none while an app has it (`focus`).
+    widget: Option<usize>,
+    /// What the widgets show, read only while they are in sight.
+    facts: crate::widgets::Facts,
+    /// Every tile's and widget's place, gliding as a board is rearranged.
+    glides: Glides,
+    /// A board being edited.
+    editing: Option<Editing>,
+    /// When a widget in sight next changes by itself, and whether a frame
+    /// has been asked for it (once: with the screen off, nothing more).
+    next_change: Option<std::time::Instant>,
+    asked: bool,
+    /// A board was rearranged: its tiles glide until they settle.
+    gliding: bool,
+    /// Each board's measures as last drawn: Home's grid, the glance page.
+    grids: (Option<Grid>, Option<Grid>),
 }
 
 /// The focused tile lifts on Bezel's detent spring: a touch larger and
@@ -256,34 +275,13 @@ const PRESS_IN: f32 = 0.07;
 const CASCADE_SPREAD: f32 = 0.28;
 const CASCADE_OVER: f32 = CASCADE_SPREAD + 0.9;
 
-/// The handheld's own vital signs, as the glance page shows them.
-#[derive(Clone, Default, PartialEq)]
-struct DeviceFacts {
-    clock: String,
-    date: String,
-    rows: Vec<(&'static str, String)>,
-}
+/// How far the widget chosen while editing lifts: past a focused tile's.
+/// (My own tuning.)
+const EDIT_LIFT: f32 = 1.6;
 
-impl DeviceFacts {
-    fn read(h24: bool) -> Self {
-        use crate::sys;
-        let now = chrono::Local::now();
-        // Off the handheld there is nothing to read: show what it would look like.
-        let stand_in = |real: Option<String>, sample: &str| if cfg!(target_os = "linux") { dash(real) } else { sample.to_owned() };
-        let wired = sys::address("eth0").filter(|a| a.contains('.'));
-        let wireless = sys::address("wlan0").filter(|a| a.contains('.'));
-        DeviceFacts {
-            clock: sys::clock(h24),
-            date: now.format("%a %-d %b").to_string().to_lowercase(),
-            rows: vec![
-                ("battery", stand_in(sys::battery_percent().map(|p| format!("{p}%")), "82%")),
-                ("memory", stand_in(sys::memory(), "31 of 432 mb")),
-                ("disk", stand_in(sys::storage(), "1.2 of 29 gb")),
-                (if wired.is_none() && wireless.is_some() { "wi-fi" } else { "wired" }, stand_in(wired.or(wireless), "10.58.5.77")),
-            ],
-        }
-    }
-}
+/// What the keys do while editing, along the foot: the longest that fits.
+const EDIT_HINTS: [&str; 3] = ["arrows move · r size · a add · d remove · enter done", "arrows move · r size · a add · d remove", "r size · a add · d remove"];
+const PICK_HINTS: [&str; 3] = ["← → widget · ↑ ↓ size · enter adds · esc back", "← → widget · ↑ ↓ size · enter adds", "← → · ↑ ↓ · enter"];
 
 impl Home {
     pub fn new() -> Self {
@@ -296,24 +294,30 @@ impl Home {
             glance_page: 0,
             card: 0,
             cards: Vec::new(),
-            robot_card: None,
             style: HomeStyle::Grid,
             columns: 3,
             rects: Vec::new(),
+            widget_rects: Vec::new(),
             middle: Rect::default(),
             arrived: 0.0,
             external: crate::apps::find(),
             tiles: Vec::new(),
             arranged_by: crate::shell::Arrangement::default(),
             arranged_for: (false, false),
-            device: DeviceFacts::read(true),
-            device_age: 0.0,
-            h24: true,
             opening: None,
             lift: Vec::new(),
             pulse: Vec::new(),
             seen: Vec::new(),
             flow: crate::flow::Flow::new(),
+            layout: Layout::starting(),
+            widget: None,
+            facts: crate::widgets::Facts::default(),
+            glides: Glides::default(),
+            editing: None,
+            next_change: None,
+            asked: false,
+            gliding: false,
+            grids: (None, None),
         }
         .arranged(&crate::shell::Arrangement::default())
     }
@@ -365,17 +369,22 @@ impl Home {
         tiles.retain(|t| self.tile_name(*t) == "Settings" || !hidden.iter().any(|n| n == self.tile_name(*t)));
         // Apps for hardware this handheld does not have are not offered.
         tiles.retain(|t| !matches!(t, Tile::Builtin(i) if !offered(APPS[*i].name)));
+        let changed = tiles != self.tiles;
         self.tiles = tiles;
         self.arranged_by = arrangement.clone();
         self.arranged_for = hardware();
         self.lift.clear();
         self.pulse.clear();
         self.seen.clear();
+        // The tiles are counted afresh: each is placed at once.
+        if changed {
+            self.glides.forget();
+        }
         let found = focused.and_then(|name| self.tiles.iter().position(|t| self.tile_name(*t) == name));
         let at = found.unwrap_or(self.focus).min(self.tiles.len().saturating_sub(1));
         if at != self.focus {
             self.focus = at;
-            self.page.jump((at / self.per_page()) as f32);
+            self.page.jump(self.page_of(Slot::App(at)) as f32);
             self.turn.jump(at as f32);
             self.flow.place(at);
         }
@@ -386,6 +395,22 @@ impl Home {
     fn follow_arrangement(&mut self, arrangement: &crate::shell::Arrangement) {
         if self.arranged_by != *arrangement || self.arranged_for != hardware() {
             self.arrange(arrangement);
+        }
+    }
+
+    /// Take the widgets as the settings have them now. Changed from
+    /// elsewhere (a value pinned in Tables, Start over), they glide there.
+    fn follow_layout(&mut self, layout: &Layout) {
+        if self.layout == *layout {
+            return;
+        }
+        self.layout = layout.clone();
+        self.card = self.card.min(self.layout.glance.len().saturating_sub(1));
+        if self.widget.is_some_and(|j| j >= self.layout.home.len()) {
+            self.widget = None;
+        }
+        if self.editing.is_none() {
+            self.gliding = true;
         }
     }
 
@@ -401,8 +426,64 @@ impl Home {
         self.tiles.len()
     }
 
+    #[cfg(test)]
     fn per_page(&self) -> usize {
         self.columns * 2
+    }
+
+    // ---- the boards ----
+
+    /// A board's widgets: as edited while it is being edited, else as kept.
+    fn board(&self, board: Board) -> &[Placed] {
+        match &self.editing {
+            Some(e) if e.board == board => &e.list,
+            _ => self.layout.board(board),
+        }
+    }
+
+    /// Home's grid packed: its apps, and (in the grid style) its widgets
+    /// among them.
+    fn grid(&self) -> Packed {
+        let widgets: &[Placed] = if self.style == HomeStyle::Grid { self.board(Board::Home) } else { &[] };
+        Packed::of(self.count(), widgets, self.columns)
+    }
+
+    /// The glance page's board packed.
+    fn glance_board(&self) -> Packed {
+        Packed::of(0, self.board(Board::Glance), GLANCE_COLUMNS)
+    }
+
+    /// The glance pages there are.
+    fn glance_pages(&self) -> usize {
+        self.glance_board().pages.max(1)
+    }
+
+    /// What has the focus on the grid: a widget, or an app.
+    fn slot(&self) -> Slot {
+        match self.widget {
+            Some(j) if self.style == HomeStyle::Grid && j < self.board(Board::Home).len() => Slot::Widget(j),
+            _ => Slot::App(self.focus),
+        }
+    }
+
+    fn focus_slot(&mut self, slot: Slot) {
+        match slot {
+            Slot::App(i) => {
+                self.focus = i;
+                self.widget = None;
+            }
+            Slot::Widget(j) => self.widget = Some(j),
+        }
+    }
+
+    /// The grid's page something is on.
+    fn page_of(&self, slot: Slot) -> usize {
+        self.grid().cell(slot).map_or(0, |c| c.page)
+    }
+
+    /// The grid's page the focus is on.
+    fn grid_page(&self) -> usize {
+        self.page_of(self.slot())
     }
 
     fn icon_and_name(&self, index: usize) -> (String, String) {
@@ -499,11 +580,14 @@ impl Home {
         self.glance_page > 0
     }
 
-    /// Bring the glance page in (its first page, its nearest card in focus),
-    /// or send it back out.
+    /// Bring the glance page in (its first page, the widget nearest Home in
+    /// focus), or send it back out.
     fn show_glance(&mut self, show: bool, calm: bool) {
         if show {
-            self.card = 1;
+            let packed = self.glance_board();
+            if let Some(Slot::Widget(j)) = edge_of(&packed, 0, 0, true) {
+                self.card = j;
+            }
         }
         self.glance_to(if show { 1 } else { 0 }, calm);
     }
@@ -516,10 +600,6 @@ impl Home {
         } else {
             self.glance.set(page as f32);
         }
-        if page > 0 {
-            self.device = DeviceFacts::read(self.h24);
-            self.device_age = 0.0;
-        }
     }
 
     /// Home's start: the first app in focus on the first page (the glance
@@ -530,6 +610,7 @@ impl Home {
             self.show_glance(false, calm);
         }
         self.focus = 0;
+        self.widget = None;
         if calm {
             self.page.jump(0.0);
             self.turn.jump(0.0);
@@ -541,46 +622,70 @@ impl Home {
         self.flow.turn_to(&mut self.focus, 0, calm);
     }
 
-    /// Keys on the glance page. Its pages run leftward from Home, two cards
-    /// to a page: Left moves to the card on the left and on to the next page,
-    /// Right back toward Home.
+    /// Keys on the glance page. Its pages run leftward from Home, two cells
+    /// across and two down: Left goes to the widget on the left and on to
+    /// the next page, Right back toward Home, Up and Down between its rows.
     fn glance_key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let calm = cx.settings.calm;
-        let count = cx.settings.glance.len();
-        let pages = count.div_ceil(2).max(1);
-        self.card = self.card.min(count.saturating_sub(1));
-        let page = self.glance_page;
-        match key {
+        let packed = self.glance_board();
+        let count = self.board(Board::Glance).len();
+        if count == 0 {
+            match key {
+                Key::Right | Key::Tab => self.show_glance(false, calm),
+                // Nothing here yet: Enter adds one.
+                Key::Enter => return self.begin_edit(Board::Glance, cx),
+                Key::Left if !calm => self.glance.nudge(1.6),
+                _ => {}
+            }
+            return Nav::Stay;
+        }
+        self.card = self.card.min(count - 1);
+        let here = Slot::Widget(self.card);
+        let Some(cell) = packed.cell(here) else { return Nav::Stay };
+        let to = match key {
             // (Esc is Home's own: back to the first app, see `to_start`.)
-            Key::Left if self.card % 2 == 1 => self.card -= 1,
-            Key::Left if page < pages => {
-                self.card = (2 * page + 1).min(count - 1);
-                self.glance_to(page + 1, calm);
-            }
-            // Nothing further left: the page gives a little and comes back.
-            Key::Left if !calm => self.glance.nudge(1.6),
-            Key::Right if self.card % 2 == 0 && self.card + 1 < count && self.card / 2 + 1 == page => self.card += 1,
-            Key::Right if page > 1 => {
-                self.card = 2 * (page - 2);
-                self.glance_to(page - 1, calm);
-            }
-            Key::Right => self.show_glance(false, calm),
-            Key::Enter => {
-                let Some(&widget) = cx.settings.glance.get(self.card) else { return Nav::Stay };
-                let from = self.cards.get(self.card).copied().filter(|r| r.w > 0.0);
-                return match (crate::glance::open(widget, cx), from) {
-                    (Some(screen), Some(from)) => Nav::Open(screen, from),
-                    (Some(screen), None) => Nav::Push(screen),
-                    (None, _) => Nav::Stay,
-                };
-            }
-            _ => {}
+            Key::Left => match (cell.col > 0).then(|| packed.at(cell.page, cell.col - 1, cell.row)).flatten() {
+                Some(s) => Some(s),
+                None if cell.page + 1 < packed.pages => edge_of(&packed, cell.page + 1, cell.row, true),
+                // Nothing further left: the page gives a little and comes back.
+                None => {
+                    if !calm {
+                        self.glance.nudge(1.6);
+                    }
+                    None
+                }
+            },
+            Key::Right => match (cell.col + cell.w < GLANCE_COLUMNS).then(|| packed.at(cell.page, cell.col + cell.w, cell.row)).flatten() {
+                Some(s) => Some(s),
+                None if cell.page > 0 => edge_of(&packed, cell.page - 1, cell.row, false),
+                None => {
+                    self.show_glance(false, calm);
+                    return Nav::Stay;
+                }
+            },
+            Key::Up => packed.vertical(here, false),
+            Key::Down => packed.vertical(here, true),
+            Key::Tab => packed.beside(here, 1).or_else(|| packed.reading().first().map(|(s, _)| *s)),
+            Key::Enter => return self.enter_widget(Board::Glance, self.card, cx),
+            _ => None,
+        };
+        if let Some(Slot::Widget(j)) = to {
+            self.card = j;
+        }
+        // The page follows the focus.
+        let page = packed.cell(Slot::Widget(self.card)).map_or(0, |c| c.page) + 1;
+        if page != self.glance_page {
+            self.glance_to(page, calm);
         }
         Nav::Stay
     }
 
-    /// Open the focused app out of the tile (or card) it is drawn in.
-    fn open(&self, cx: &mut Cx) -> Nav {
+    /// Open the focused app out of the tile (or card) it is drawn in, or do
+    /// what the focused widget does.
+    fn open(&mut self, cx: &mut Cx) -> Nav {
+        if let Slot::Widget(j) = self.slot() {
+            return self.enter_widget(Board::Home, j, cx);
+        }
         let screen = match self.tiles.get(self.focus) {
             Some(Tile::Builtin(i)) => (APPS[*i].open)(cx.robot),
             Some(Tile::External(i)) => self.external[*i].open(),
@@ -595,6 +700,32 @@ impl Home {
         match from {
             Some(tile) if tile.w > 0.0 => Nav::Open(screen, tile),
             _ => Nav::Push(screen),
+        }
+    }
+
+    /// Enter on a widget: its app grows out of it, or it acts in place.
+    fn enter_widget(&mut self, board: Board, j: usize, cx: &mut Cx) -> Nav {
+        let Some(w) = self.board(board).get(j).copied() else { return Nav::Stay };
+        let from = match board {
+            Board::Home => self.widget_rects.get(j),
+            Board::Glance => self.cards.get(j),
+        }
+        .copied()
+        .filter(|r| r.w > 0.0);
+        match crate::widgets::enter(w.kind, cx, &self.facts) {
+            Act::Open(screen) => match from {
+                Some(r) => Nav::Open(screen, r),
+                None => Nav::Push(screen),
+            },
+            Act::Done => {
+                // It changed: read again, and drawn again in a moment, as
+                // whatever it asked settles (a song pausing).
+                self.facts.changed(w.kind);
+                self.next_change = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+                self.asked = false;
+                Nav::Stay
+            }
+            Act::Spotlight => Nav::Spotlight,
         }
     }
 
@@ -629,7 +760,7 @@ impl Home {
             self.show_glance(true, calm);
         }
         self.turn.jump(self.focus as f32);
-        self.page.jump((self.focus / self.per_page()) as f32);
+        self.page.jump(self.page_of(Slot::App(self.focus)) as f32);
     }
 
     /// Flow's frame: the cards, made for these apps; the enlarged one's
@@ -713,26 +844,35 @@ impl Home {
         }
     }
 
-    /// Keys on the grid of tiles. True if the key pushed against an edge.
+    /// Keys on the grid of tiles and widgets. True if the key pushed
+    /// against an edge.
     fn grid_key(&mut self, key: Key, calm: bool) -> bool {
-        let (columns, per_page, count) = (self.columns, self.per_page(), self.count());
-        let page = self.focus / per_page;
-        let row = (self.focus % per_page) / columns;
-        let page_end = ((page + 1) * per_page).min(count);
-        match key {
-            // Left and Right go through the apps in order: past a row's end to
-            // the next row, past a page's last tile to the next page (which
-            // turns), and before the first app to the glance page.
-            Key::Left if self.focus > 0 => self.focus -= 1,
-            Key::Left => self.show_glance(true, calm),
-            Key::Right if self.focus + 1 < count => self.focus += 1,
-            Key::Right => return true,
-            Key::Up if row > 0 => self.focus -= columns,
-            Key::Down if self.focus + columns < page_end => self.focus += columns,
-            // A short last row: down from above its end lands on its last tile.
-            Key::Down if page * per_page + (row + 1) * columns < page_end => self.focus = page_end - 1,
-            Key::Tab => self.focus = (self.focus + 1) % count,
-            _ => {}
+        let packed = self.grid();
+        let here = self.slot();
+        let to = match key {
+            // Left and Right go through the grid in reading order: past a
+            // row's end to the next row, past a page's last tile to the next
+            // page (which turns), and before the first to the glance page.
+            Key::Left => match packed.beside(here, -1) {
+                Some(s) => Some(s),
+                None => {
+                    self.show_glance(true, calm);
+                    None
+                }
+            },
+            Key::Right => match packed.beside(here, 1) {
+                Some(s) => Some(s),
+                None => return true,
+            },
+            // Up and Down stay within the page, column by column; a short
+            // last row, down from above its end, lands on its last tile.
+            Key::Up => packed.vertical(here, false),
+            Key::Down => packed.vertical(here, true),
+            Key::Tab => packed.beside(here, 1).or_else(|| packed.reading().first().map(|(s, _)| *s)),
+            _ => None,
+        };
+        if let Some(slot) = to {
+            self.focus_slot(slot);
         }
         false
     }
@@ -753,15 +893,20 @@ impl Home {
         false
     }
 
-    fn draw_grid(&mut self, g: &mut Gfx, robot: &Robot) {
+    /// Whether the boards' tiles glide to their places just now (editing, or
+    /// a moment after), rather than being there at once.
+    fn glide(&self, g: &Gfx) -> bool {
+        !g.calm && !g.focus_static && (self.editing.is_some() || self.gliding)
+    }
+
+    /// Home's grid: its app tiles and its widgets, on pages a panel's width
+    /// apart. When a widget in sight next changes by itself.
+    fn draw_grid(&mut self, g: &mut Gfx, robot: &Robot) -> Option<std::time::Instant> {
         let t = g.tokens;
-        let ty = g.ty;
-        let (columns, per_page, count) = (self.columns, self.per_page(), self.count());
-        // The grid ends above where the pager rests.
-        let bottom = H - 16.0;
-        let top = g.top();
-        let tw = (W - 2.0 * PAD - GAP * (columns - 1) as f32) / columns as f32;
-        let th = (bottom - top - GAP) / 2.0;
+        let count = self.count();
+        let packed = self.grid();
+        let grid = Grid::of(g, self.columns);
+        self.grids.0 = Some(grid);
         if self.rects.len() != count {
             self.rects.resize(count, Rect::default());
         }
@@ -770,101 +915,125 @@ impl Home {
             self.pulse = (0..count).map(|_| pulse_spring()).collect();
             self.seen = vec![None; count];
         }
+        let widgets: Vec<Placed> = self.board(Board::Home).to_vec();
+        self.widget_rects.resize(widgets.len(), Rect::default());
         let press = g.press();
+        let animate = self.glide(g);
+        let editing = self.editing.as_ref().is_some_and(|e| e.board == Board::Home);
         // The pages are one strip, turned by `page`: the ring rides it. It is
         // drawn last, over every tile, as on its way it crosses others.
         let strip = -self.page.value() * W;
+        let current = self.slot();
         let mut focus_ring = None;
-        for i in 0..count {
-            let (icon, name) = self.icon_and_name(i);
-            let local = i % per_page;
-            let slide = ((i / per_page) as f32 - self.page.value()) * W;
-            if slide.abs() >= W {
+        let mut next = None;
+        // The widget chosen while editing is lifted over the rest: drawn last.
+        let lifted = self.editing.as_ref().filter(|e| e.board == Board::Home).and_then(|e| e.selected);
+        let mut held = None;
+        for &(slot, cell) in &packed.slots {
+            let along = grid.rect(&cell).offset(cell.page as f32 * W, 0.0);
+            let key = match slot {
+                Slot::App(i) => app_key(i),
+                Slot::Widget(j) => widget_key(widgets[j].id),
+            };
+            let at = self.glides.place(key, along, animate).offset(strip, 0.0);
+            // Where it rests on screen: what it opens out of.
+            let resting = along.offset(strip, 0.0);
+            match slot {
+                Slot::App(i) => self.rects[i] = resting,
+                Slot::Widget(j) => self.widget_rects[j] = resting,
+            }
+            if at.right() + g.ox <= 0.0 || at.x + g.ox >= W {
                 continue;
             }
-            let r = Rect::new(PAD + (local % columns) as f32 * (tw + GAP) + slide, top + (local / columns) as f32 * (th + GAP), tw, th);
-            self.rects[i] = r;
             // The cascade: each tile arrives a little after the one before it,
             // nearest the top left first, and springs up into its place.
-            let r = if g.calm || self.arrived >= CASCADE_OVER {
-                r
+            let at = if g.calm || self.arrived >= CASCADE_OVER {
+                at
             } else {
-                let order = (local % columns) as f32 + (local / columns) as f32 * 1.5;
-                let since = self.arrived - CASCADE_SPREAD * order / (columns as f32 + 0.5);
+                let order = cell.col as f32 + cell.row as f32 * 1.5;
+                let since = self.arrived - CASCADE_SPREAD * order / (self.columns as f32 + 0.5);
                 if since < 0.0 {
                     continue;
                 }
-                r.offset(0.0, 14.0 * role::release().solve(1.0, 0.0, since).0)
+                at.offset(0.0, 14.0 * role::release().solve(1.0, 0.0, since).0)
             };
-            let focused = i == self.focus;
-            let (status, attention) = self.status(i, robot);
-            // The focused tile lifts: a touch larger and lighter. Calm, or
-            // drawn as a still picture, it is simply where it ends up.
-            let lifted = focused && !self.on_glance();
-            let want = if lifted { 1.0 } else { 0.0 };
-            if self.lift[i].target() != want {
-                if g.calm || g.focus_static {
-                    self.lift[i].jump(want);
-                } else {
-                    self.lift[i].set(want);
-                    g.started_moving();
+            let focused = slot == current && !self.on_glance();
+            match slot {
+                Slot::App(i) => {
+                    let ring = self.draw_tile(g, i, at, focused && !editing, press, robot);
+                    if editing {
+                        // While widgets are edited the apps step back.
+                        g.canvas.rrect(at.offset(g.ox, 0.0), g.tile_radius(), t.ground, 0.55);
+                    }
+                    if let Some(ring) = ring {
+                        focus_ring = Some(ring);
+                    }
+                }
+                Slot::Widget(j) if lifted == Some(j) => held = Some((j, at)),
+                Slot::Widget(j) => {
+                    let (ring, when) = self.draw_widget(g, Board::Home, &widgets[j], at, grid.size_of(widgets[j].size), focused && !editing, press, robot);
+                    next = earlier(next, when);
+                    if let Some(ring) = ring {
+                        focus_ring = Some(ring);
+                    }
                 }
             }
-            // What it reports turned worse, or better: it pulses once in the
-            // colour of what it now says.
-            let news = self.news(i, &status, attention, robot);
-            if self.seen[i].as_ref().is_some_and(|before| *before != news) && !g.calm {
-                self.pulse[i].jump(1.0);
-                self.pulse[i].set(0.0);
+        }
+        self.draw_leaving(g, Board::Home, strip);
+        if let Some((j, at)) = held {
+            let (ring, when) = self.draw_widget(g, Board::Home, &widgets[j], at, grid.size_of(widgets[j].size), true, press, robot);
+            next = earlier(next, when);
+            focus_ring = ring.or(focus_ring);
+        }
+        if let Some(ring) = focus_ring {
+            ring_on(g, ring, Some(strip), editing);
+        }
+        next
+    }
+
+    /// One app's tile at `r`: lifted while focused, pulsing when what it
+    /// says turns. The ring's place, if it has the focus.
+    fn draw_tile(&mut self, g: &mut Gfx, i: usize, r: Rect, focused: bool, press: f32, robot: &Robot) -> Option<Rect> {
+        let t = g.tokens;
+        let ty = g.ty;
+        let (icon, name) = self.icon_and_name(i);
+        let (status, attention) = self.status(i, robot);
+        // The focused tile lifts: a touch larger and lighter. Calm, or
+        // drawn as a still picture, it is simply where it ends up.
+        let want = if focused { 1.0 } else { 0.0 };
+        if self.lift[i].target() != want {
+            if g.calm || g.focus_static {
+                self.lift[i].jump(want);
+            } else {
+                self.lift[i].set(want);
                 g.started_moving();
             }
-            self.seen[i] = Some(news);
-            let (lift, pulse) = (self.lift[i].value(), self.pulse[i].value().clamp(0.0, 1.0));
-            let pressed = if lifted { press } else { 0.0 };
-            // The ring goes straight to where the lifted tile rests.
-            let ring = r.inset(-1.5).offset(0.0, -1.0);
-            let r = r.inset(-1.5 * lift + 2.0 * pressed).offset(0.0, -lift);
-            let radius = (g.tile_radius() + 1.5 * lift - 2.0 * pressed).max(0.0);
-            let tint = attention.map_or(t.ice, |severity| severity_color(g, severity));
-            let fill = t.surface1.mix(t.surface2, lift * 0.7).mix(tint, 0.3 * pulse).mix(t.ink, 0.12 * pressed);
-            // A lifted tile casts a soft shadow.
-            g.shadow(r, radius, lift);
-            g.surface(r, radius, fill);
-            // Bezel's wall-panel tiles: the name small, lowercase and mono at
-            // the top, what the app reports large below it.
-            if g.theme == crate::look::Theme::Bezel {
-                let corner_taken = attention.is_some() || self.favourite(i);
-                bezel_tile(g, r, &icon, &name, &status, focused, corner_taken);
-                if let Some(severity) = attention {
-                    let c = severity_color(g, severity);
-                    g.dot(r.right() - 12.0, r.y + 12.0, 3.5 + 1.5 * pulse, c);
-                }
-                if self.favourite(i) {
-                    let x = r.right() - if attention.is_some() { 25.0 } else { 12.0 };
-                    g.icon("star", true, x, r.y + 12.0, 11.0, t.dim);
-                }
-                if lifted {
-                    focus_ring = Some(ring);
-                }
-                continue;
-            }
-            // A selected item's icon fills in.
-            let icon_color = if focused { t.ink } else { t.dim };
-            let (text_x, name_cy, status_cy, text_w);
-            if tw > 120.0 {
-                // A wide tile: the icon beside two lines.
-                g.icon(&icon, focused, r.x + 23.0, r.cy(), 24.0, icon_color);
-                text_x = r.x + 44.0;
-                text_w = r.w - 52.0;
-                name_cy = r.cy() - ty.caption.size * 0.5 - 1.0;
-                status_cy = r.cy() + ty.name.size * 0.5 + 1.0;
-            } else {
-                g.icon(&icon, focused, r.x + 18.0, r.y + 15.0, 18.0, icon_color);
-                text_x = r.x + 10.0;
-                text_w = r.w - 16.0;
-                status_cy = r.bottom() - 6.0 - ty.caption.size * 0.5;
-                name_cy = status_cy - ty.caption.size * 0.5 - 2.0 - ty.name.size * 0.5;
-            }
+        }
+        // What it reports turned worse, or better: it pulses once in the
+        // colour of what it now says.
+        let news = self.news(i, &status, attention, robot);
+        if self.seen[i].as_ref().is_some_and(|before| *before != news) && !g.calm {
+            self.pulse[i].jump(1.0);
+            self.pulse[i].set(0.0);
+            g.started_moving();
+        }
+        self.seen[i] = Some(news);
+        let (lift, pulse) = (self.lift[i].value(), self.pulse[i].value().clamp(0.0, 1.0));
+        let pressed = if focused { press } else { 0.0 };
+        // The ring goes straight to where the lifted tile rests.
+        let ring = r.inset(-1.5).offset(0.0, -1.0);
+        let r = r.inset(-1.5 * lift + 2.0 * pressed).offset(0.0, -lift);
+        let radius = (g.tile_radius() + 1.5 * lift - 2.0 * pressed).max(0.0);
+        let tint = attention.map_or(t.ice, |severity| severity_color(g, severity));
+        let fill = t.surface1.mix(t.surface2, lift * 0.7).mix(tint, 0.3 * pulse).mix(t.ink, 0.12 * pressed);
+        // A lifted tile casts a soft shadow.
+        g.shadow(r, radius, lift);
+        g.surface(r, radius, fill);
+        // Bezel's wall-panel tiles: the name small, lowercase and mono at
+        // the top, what the app reports large below it.
+        if g.theme == crate::look::Theme::Bezel {
+            let corner_taken = attention.is_some() || self.favourite(i);
+            bezel_tile(g, r, &icon, &name, &status, focused, corner_taken);
             if let Some(severity) = attention {
                 let c = severity_color(g, severity);
                 g.dot(r.right() - 12.0, r.y + 12.0, 3.5 + 1.5 * pulse, c);
@@ -873,14 +1042,113 @@ impl Home {
                 let x = r.right() - if attention.is_some() { 25.0 } else { 12.0 };
                 g.icon("star", true, x, r.y + 12.0, 11.0, t.dim);
             }
-            g.text_fit(text_x, name_cy, &name, ty.name, t.ink, text_w);
-            g.text_fit(text_x, status_cy, &status, ty.caption, t.dim, text_w);
-            if lifted {
-                focus_ring = Some(ring);
-            }
+            return focused.then_some(ring);
         }
-        if let Some(ring) = focus_ring {
-            g.focus_ring_on(ring, g.tile_radius() + 1.5, strip);
+        // A selected item's icon fills in.
+        let icon_color = if focused { t.ink } else { t.dim };
+        let (text_x, name_cy, status_cy, text_w);
+        if r.w > 120.0 {
+            // A wide tile: the icon beside two lines.
+            g.icon(&icon, focused, r.x + 23.0, r.cy(), 24.0, icon_color);
+            text_x = r.x + 44.0;
+            text_w = r.w - 52.0;
+            name_cy = r.cy() - ty.caption.size * 0.5 - 1.0;
+            status_cy = r.cy() + ty.name.size * 0.5 + 1.0;
+        } else {
+            g.icon(&icon, focused, r.x + 18.0, r.y + 15.0, 18.0, icon_color);
+            text_x = r.x + 10.0;
+            text_w = r.w - 16.0;
+            status_cy = r.bottom() - 6.0 - ty.caption.size * 0.5;
+            name_cy = status_cy - ty.caption.size * 0.5 - 2.0 - ty.name.size * 0.5;
+        }
+        if let Some(severity) = attention {
+            let c = severity_color(g, severity);
+            g.dot(r.right() - 12.0, r.y + 12.0, 3.5 + 1.5 * pulse, c);
+        }
+        if self.favourite(i) {
+            let x = r.right() - if attention.is_some() { 25.0 } else { 12.0 };
+            g.icon("star", true, x, r.y + 12.0, 11.0, t.dim);
+        }
+        g.text_fit(text_x, name_cy, &name, ty.name, t.ink, text_w);
+        g.text_fit(text_x, status_cy, &status, ty.caption, t.dim, text_w);
+        focused.then_some(ring)
+    }
+
+    /// One widget at `at` (where its motion has it), laid out for `size`
+    /// (its cells' size on this board): its tile, lifted when `chosen`, and
+    /// what it shows. The ring's place if it has the focus, and when it next
+    /// changes by itself.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_widget(&mut self, g: &mut Gfx, board: Board, w: &Placed, at: Rect, size: (f32, f32), chosen: bool, press: f32, robot: &Robot) -> (Option<Rect>, Option<std::time::Instant>) {
+        let t = g.tokens;
+        let editing = self.editing.as_ref().filter(|e| e.board == board);
+        let in_edit = editing.is_some();
+        let armed = editing.is_some_and(|e| e.armed) && chosen;
+        let picking = editing.and_then(|e| e.picker.as_ref().filter(|_| chosen).map(|p| (p.from, p.dir, p.slide.value())));
+        let animate = self.glide(g) || !g.calm && !g.focus_static;
+        let lift_to = match (chosen, in_edit) {
+            (true, true) => EDIT_LIFT,
+            (true, false) => 1.0,
+            _ => 0.0,
+        };
+        let lift = self.glides.lift(widget_key(w.id), lift_to, animate);
+        if !self.glides.get(widget_key(w.id)).lift.is_settled() {
+            g.started_moving();
+        }
+        let pressed = if chosen && !in_edit { press } else { 0.0 };
+        let ring = at.inset(-1.5).offset(0.0, -1.0);
+        let r = at.inset(-1.5 * lift + 2.0 * pressed).offset(0.0, -lift);
+        let radius = (g.tile_radius() + 1.5 * lift - 2.0 * pressed).max(0.0);
+        let fill = t.surface1.mix(t.surface2, (lift * 0.7).min(1.0)).mix(t.ink, 0.12 * pressed).mix(g.fault(), if armed { 0.22 } else { 0.0 });
+        g.shadow(r, radius, lift.min(1.0));
+        g.surface(r, radius, fill);
+        // Read only now that it shows, and only what is due.
+        let h24 = g.clock.0;
+        let turn = !g.battery.saver;
+        let kind = w.kind;
+        let want = (size.0.round() as usize, size.1.round() as usize);
+        self.facts.prepare(kind, robot, h24, want, turn);
+        if let Some((from, _, _)) = picking {
+            self.facts.prepare(from, robot, h24, want, false);
+        }
+        let pinned = g.pinned.clone();
+        let ctx = crate::widgets::Ctx { facts: &self.facts, robot, pinned: pinned.as_deref(), now: chrono::Local::now(), focused: chosen, radius, laid: size };
+        // Laid out for its size, at its top left; clipped to where it is
+        // while it grows or shrinks to that. A photo fills its tile as it
+        // glides, rising with the lift but not growing with it (the photo is
+        // kept as a picture of that size): the lifted tile shows round it.
+        let frame = |x: f32, kind: Kind| {
+            if kind == Kind::Photos {
+                Rect::new(x + at.x - r.x, at.y - lift, at.w, at.h)
+            } else {
+                Rect::new(x, r.y, size.0.max(r.w), size.1.max(r.h))
+            }
+        };
+        g.canvas.set_clip(r.offset(g.ox, 0.0));
+        let next = match picking {
+            // The picker turning: the new kind slides in, the last one out.
+            Some((from, dir, slide)) if slide.abs() > 0.002 => {
+                let old = crate::widgets::content(g, frame(r.x + (slide - dir) * r.w, from), from, w.size, &ctx);
+                let new = crate::widgets::content(g, frame(r.x + slide * r.w, kind), kind, w.size, &ctx);
+                earlier(old, new)
+            }
+            _ => crate::widgets::content(g, frame(r.x, kind), kind, w.size, &ctx),
+        };
+        g.canvas.clear_clip();
+        let next = earlier(next, self.facts.due(kind));
+        (chosen.then_some(ring), next)
+    }
+
+    /// Widgets taken off, closing where they were.
+    fn draw_leaving(&mut self, g: &mut Gfx, board: Board, strip: f32) {
+        let t = g.tokens;
+        let fault = g.fault();
+        for l in self.glides.leaving.iter().filter(|l| l.board == board) {
+            let k = l.left.value().clamp(0.0, 1.0);
+            let r = l.rect.offset(strip, 0.0);
+            let s = 0.55 + 0.45 * k;
+            let shrunk = Rect::new(r.cx() - r.w * s * 0.5, r.cy() - r.h * s * 0.5, r.w * s, r.h * s);
+            g.canvas.rrect(shrunk.offset(g.ox, 0.0), g.tile_radius() * s, t.surface1.mix(fault, 0.18), k);
         }
     }
 
@@ -935,71 +1203,430 @@ impl Home {
         }
     }
 
-    /// The status line of a built-in app, by name.
-    fn status_of(&self, name: &str, robot: &Robot) -> (String, Option<&'static str>) {
-        match self.tiles.iter().position(|t| matches!(t, Tile::Builtin(i) if APPS[*i].name == name)) {
-            Some(at) => self.status(at, robot),
-            None => ("–".into(), None),
+    /// The glance pages: the widgets chosen for them, two cells across and
+    /// two down a page, to be read without opening anything. Drawn with
+    /// `g.ox` at the first glance page; each further page is a panel's
+    /// width to its left. When a widget in sight next changes by itself.
+    fn draw_glance(&mut self, g: &mut Gfx, robot: &Robot) -> Option<std::time::Instant> {
+        let widgets: Vec<Placed> = self.board(Board::Glance).to_vec();
+        self.cards.resize(widgets.len(), Rect::default());
+        if widgets.is_empty() {
+            g.empty("apps", "no widgets yet · e adds one");
+            return None;
+        }
+        let packed = self.glance_board();
+        let grid = Grid::of(g, GLANCE_COLUMNS);
+        self.grids.1 = Some(grid);
+        let animate = self.glide(g);
+        let press = g.press();
+        let editing = self.editing.as_ref().is_some_and(|e| e.board == Board::Glance);
+        let mut next = None;
+        let mut ring = None;
+        // The widget chosen while editing is lifted over the rest: drawn last.
+        let lifted = self.editing.as_ref().filter(|e| e.board == Board::Glance).and_then(|e| e.selected);
+        let mut held = None;
+        for &(slot, cell) in &packed.slots {
+            let Slot::Widget(j) = slot else { continue };
+            // Pages run leftward: the second is a panel's width left of the first.
+            let along = grid.rect(&cell).offset(-(cell.page as f32) * W, 0.0);
+            let at = self.glides.place(widget_key(widgets[j].id), along, animate);
+            self.cards[j] = along.offset(g.ox, 0.0);
+            if at.right() + g.ox <= 0.0 || at.x + g.ox >= W {
+                continue;
+            }
+            if lifted == Some(j) {
+                held = Some((j, at));
+                continue;
+            }
+            let chosen = !editing && self.on_glance() && self.card == j;
+            let (r, when) = self.draw_widget(g, Board::Glance, &widgets[j], at, grid.size_of(widgets[j].size), chosen, press, robot);
+            next = earlier(next, when);
+            if r.is_some() {
+                ring = r;
+            }
+        }
+        self.draw_leaving(g, Board::Glance, 0.0);
+        if let Some((j, at)) = held {
+            let (r, when) = self.draw_widget(g, Board::Glance, &widgets[j], at, grid.size_of(widgets[j].size), true, press, robot);
+            next = earlier(next, when);
+            ring = r.or(ring);
+        }
+        if let Some(r) = ring {
+            ring_on(g, r, None, editing);
+        }
+        next
+    }
+
+    // ---- editing (widgets::edit has the keys) ----
+
+    /// Columns on a board.
+    fn board_columns(&self, board: Board) -> usize {
+        match board {
+            Board::Glance => GLANCE_COLUMNS,
+            Board::Home => self.columns,
         }
     }
 
-    /// One glance page: two cards side by side, from the cards chosen in
-    /// Settings, to be read without opening anything.
-    fn draw_glance(&mut self, g: &mut Gfx, robot: &Robot, page: usize) {
-        let widgets = g.glance.clone();
-        self.cards.resize(widgets.len(), Rect::default());
-        self.robot_card = widgets.iter().position(|w| *w == Widget::Robot);
-        let (top, bottom) = (g.top(), if g.pager.is_some() { H - 16.0 } else { H - PAD });
-        let w = (W - 2.0 * PAD - GAP) * 0.5;
-        if widgets.is_empty() {
-            g.empty("insights", "choose cards in Settings › Home");
-            return;
-        }
-        for slot in 0..2 {
-            let i = 2 * (page - 1) + slot;
-            let Some(&widget) = widgets.get(i) else { break };
-            let r = Rect::new(PAD + slot as f32 * (w + GAP), top, w, bottom - top);
-            self.cards[i] = r.offset(g.ox, 0.0);
-            let card = match widget {
-                Widget::Device => crate::glance::Card {
-                    big: self.device.clock.clone(),
-                    unit: None,
-                    under: self.device.date.clone(),
-                    dot: None,
-                    rows: self.device.rows.iter().map(|(n, v)| ((*n).to_owned(), v.clone(), None)).collect(),
-                    warn: false,
-                },
-                Widget::Robot => {
-                    let linked = robot.linked();
-                    let volts = robot.f64("Systemcore/BatteryVolts").filter(|_| linked);
-                    let last_match = robot.logs.list().first().and_then(|row| row.digest.as_ref().map(|d| d.headline()));
-                    crate::glance::Card {
-                        big: volts.map_or("–".into(), |v| format!("{v:.1}")),
-                        unit: volts.map(|_| "v"),
-                        under: if linked { robot.string("Robot/Identity/Name").unwrap_or_else(|| "robot".into()).to_lowercase() } else { robot.status() },
-                        dot: Some(if linked { g.tokens.ice } else { g.tokens.faint }),
-                        rows: vec![
-                            ("health".into(), self.status_of("Health", robot).0, self.status_of("Health", robot).1),
-                            ("loop".into(), self.status_of("Loop", robot).0, self.status_of("Loop", robot).1),
-                            ("motors".into(), self.status_of("Motors", robot).0, self.status_of("Motors", robot).1),
-                            (
-                                "match".into(),
-                                last_match.as_ref().map_or_else(|| "–".into(), |(_, text)| text.clone()),
-                                last_match.as_ref().and_then(|(level, _)| match level {
-                                    Level::Fault => Some("ERROR"),
-                                    Level::Warn => Some("WARN"),
-                                    Level::Fine => None,
-                                }),
-                            ),
-                        ],
-                        warn: volts.is_some_and(|v| v < 11.0),
-                    }
-                }
-                other => crate::glance::card(other, robot, g.pinned.as_deref()),
-            };
-            crate::glance::draw(g, r, &card, self.on_glance() && self.card == i);
+    /// Apps on a board.
+    fn board_apps(&self, board: Board) -> usize {
+        match board {
+            Board::Glance => 0,
+            Board::Home => self.count(),
         }
     }
+
+    /// A board packed as it is drawn.
+    fn packed_board(&self, board: Board) -> Packed {
+        match board {
+            Board::Glance => self.glance_board(),
+            Board::Home => self.grid(),
+        }
+    }
+
+    /// A board's measures as last drawn (the standard text size's until then).
+    fn last_grid(&self, board: Board) -> Grid {
+        let drawn = match board {
+            Board::Home => self.grids.0,
+            Board::Glance => self.grids.1,
+        };
+        drawn.unwrap_or_else(|| {
+            let columns = self.board_columns(board);
+            let top = 28.0;
+            Grid { columns, top, cell_w: (W - 2.0 * PAD - GAP * (columns - 1) as f32) / columns as f32, cell_h: (H - 16.0 - top - GAP) / 2.0 }
+        })
+    }
+
+    /// Start editing a board (Home's grid only in the grid style: elsewhere
+    /// the glance page), the focused widget chosen, or the nearest; with
+    /// none on it, the picker opens.
+    fn begin_edit(&mut self, board: Board, cx: &mut Cx) -> Nav {
+        let calm = cx.settings.calm;
+        self.follow_layout(&cx.settings.widgets);
+        let board = if board == Board::Home && cx.settings.home != HomeStyle::Grid { Board::Glance } else { board };
+        self.opening = None;
+        if board == Board::Glance && !self.on_glance() {
+            self.show_glance(true, calm);
+        }
+        let list = self.layout.board(board).clone();
+        let selected = match board {
+            Board::Glance => (!list.is_empty()).then(|| self.card.min(list.len() - 1)),
+            Board::Home => self.widget.filter(|j| *j < list.len()).or_else(|| {
+                // The widget nearest the focused app.
+                let packed = self.grid();
+                let here = packed.cell(Slot::App(self.focus))?;
+                let distance = |c: &Cell| (c.page as i32 - here.page as i32).abs() * 100 + (c.row as i32 - here.row as i32).abs() * 10 + (c.col as i32 - here.col as i32).abs();
+                packed.slots.iter().filter_map(|(s, c)| if let Slot::Widget(j) = s { Some((*j, distance(c))) } else { None }).min_by_key(|(_, d)| *d).map(|(j, _)| j)
+            }),
+        };
+        // They jiggle once, one after another: these can be moved.
+        if !calm {
+            let packed = Packed::of(self.board_apps(board), &list, self.board_columns(board));
+            let order: Vec<u64> = packed.reading().into_iter().filter_map(|(s, _)| if let Slot::Widget(j) = s { Some(widget_key(list[j].id)) } else { None }).collect();
+            self.glides.jiggle(&order);
+        }
+        self.editing = Some(Editing::new(board, list, selected));
+        if selected.is_none() {
+            self.open_picker(cx);
+        }
+        self.follow_selection(calm);
+        Nav::Stay
+    }
+
+    /// Done editing: what was chosen keeps the focus.
+    fn end_edit(&mut self, cx: &mut Cx) {
+        let Some(e) = self.editing.take() else { return };
+        if e.picker.is_some() {
+            // The widget being chosen was never added: it closes.
+            self.leave_picker_widget(&e);
+        }
+        *cx.settings.widgets.board_mut(e.board) = e.kept();
+        self.layout = cx.settings.widgets.clone();
+        crate::save_settings_soon(cx.settings);
+        let selected = e.selected.filter(|_| e.picker.is_none()).filter(|j| *j < self.layout.board(e.board).len());
+        match e.board {
+            Board::Glance => self.card = selected.unwrap_or(self.card).min(self.layout.glance.len().saturating_sub(1)),
+            Board::Home => self.widget = selected,
+        }
+        self.gliding = true;
+    }
+
+    /// Keep what is being edited: in the settings, and on the card (written
+    /// on a thread of its own, so a move is never held up by the card).
+    fn commit(&mut self, cx: &mut Cx) {
+        let Some(e) = &self.editing else { return };
+        *cx.settings.widgets.board_mut(e.board) = e.kept();
+        self.layout = cx.settings.widgets.clone();
+        crate::save_settings_soon(cx.settings);
+    }
+
+    /// The picker's widget closing where it was (the picker put away).
+    fn leave_picker_widget(&mut self, e: &Editing) {
+        let Some(j) = e.selected else { return };
+        let m = self.glides.get(widget_key(e.list[j].id));
+        let rect = Rect::new(m.x.value(), m.y.value(), m.w.value(), m.h.value());
+        let mut left = Animated::new(1.0, role::smooth()).with_rest(0.01);
+        left.set(0.0);
+        self.glides.leaving.push(crate::widgets::edit::Leaving { rect, board: e.board, left });
+    }
+
+    /// The picker, in place: a live widget where the new one will go (after
+    /// the one chosen; on Home with none, where the focused app is), of the
+    /// first kind not on the board yet.
+    fn open_picker(&mut self, cx: &mut Cx) {
+        let Some(board) = self.editing.as_ref().map(|e| e.board) else { return };
+        let (apps, focus) = (self.board_apps(board), self.focus);
+        let Some(e) = &mut self.editing else { return };
+        if Kind::ALL.iter().all(|k| e.list.iter().any(|w| w.kind == *k)) {
+            *cx.say = Some("every widget is on this board".into());
+            return;
+        }
+        let seq = crate::widgets::sequence(apps, &e.list);
+        let before = match e.selected {
+            Some(j) => seq.iter().position(|s| *s == Slot::Widget(j)).and_then(|at| seq.get(at + 1).copied()),
+            None if board == Board::Home => Some(Slot::App(focus)),
+            None => None,
+        };
+        let at = crate::widgets::edit::first_new(&e.list, 0);
+        let kind = Kind::ALL[at];
+        let (list, k) = crate::widgets::edit::insert(apps, &e.list, before, Placed::new(kind, kind.usual(), 0));
+        let id = list[k].id;
+        e.list = list;
+        e.selected = Some(k);
+        e.picker = Some(crate::widgets::edit::Picker::new(at));
+        e.armed = false;
+        // It grows in where it will go, and the rest glide to make room.
+        if !cx.settings.calm {
+            if let Some(cell) = self.packed_board(board).cell(Slot::Widget(k)) {
+                let rect = self.last_grid(board).rect(&cell);
+                let along = match board {
+                    Board::Home => rect.offset(cell.page as f32 * W, 0.0),
+                    Board::Glance => rect.offset(-(cell.page as f32) * W, 0.0),
+                };
+                self.glides.grow_from(widget_key(id), along);
+            }
+        }
+        self.gliding = true;
+    }
+
+    /// The board's page turns to show what is chosen.
+    fn follow_selection(&mut self, calm: bool) {
+        let Some(e) = &self.editing else { return };
+        let Some(j) = e.selected else { return };
+        let board = e.board;
+        let Some(cell) = self.packed_board(board).cell(Slot::Widget(j)) else { return };
+        match board {
+            Board::Home => {
+                let page = cell.page as f32;
+                if calm {
+                    self.page.jump(page);
+                } else {
+                    self.page.set(page);
+                }
+            }
+            Board::Glance => {
+                if cell.page + 1 != self.glance_page {
+                    self.glance_to(cell.page + 1, calm);
+                }
+            }
+        }
+    }
+
+    /// Keys while a board is edited (`widgets::edit` says what each does).
+    fn edit_key(&mut self, key: Key, cx: &mut Cx) -> Nav {
+        let calm = cx.settings.calm;
+        if self.editing.as_ref().is_some_and(|e| e.picker.is_some()) {
+            return self.picker_key(key, cx);
+        }
+        let Some(board) = self.editing.as_ref().map(|e| e.board) else { return Nav::Stay };
+        let (apps, columns) = (self.board_apps(board), self.board_columns(board));
+        let Some(e) = &mut self.editing else { return Nav::Stay };
+        let armed = std::mem::take(&mut e.armed);
+        match key {
+            Key::Back | Key::Enter | Key::Char('e') | Key::Leave => {
+                self.end_edit(cx);
+                return Nav::Stay;
+            }
+            Key::Left | Key::Right | Key::Up | Key::Down => {
+                let Some(j) = e.selected else { return Nav::Stay };
+                let dir = match key {
+                    Key::Left => Dir::Left,
+                    Key::Right => Dir::Right,
+                    Key::Up => Dir::Up,
+                    _ => Dir::Down,
+                };
+                match crate::widgets::edit::step(apps, &e.list, j, dir, columns) {
+                    Some((list, k)) => {
+                        e.list = list;
+                        e.selected = Some(k);
+                        self.gliding = true;
+                        self.commit(cx);
+                    }
+                    None if !calm => {
+                        // No further that way: it gives a little and comes back.
+                        let push = match dir {
+                            Dir::Left => (-90.0, 0.0),
+                            Dir::Right => (90.0, 0.0),
+                            Dir::Up => (0.0, -70.0),
+                            Dir::Down => (0.0, 70.0),
+                        };
+                        let m = self.glides.get(widget_key(e.list[j].id));
+                        m.x.nudge(push.0);
+                        m.y.nudge(push.1);
+                    }
+                    None => {}
+                }
+            }
+            Key::Char('r') => {
+                if let Some(j) = e.selected {
+                    e.list[j].size = e.list[j].size.next();
+                    let said = format!("{} · {}", e.list[j].kind.name().to_lowercase(), e.list[j].size.key());
+                    self.gliding = true;
+                    self.commit(cx);
+                    *cx.say = Some(said);
+                }
+            }
+            Key::Char('d') | Key::Delete => {
+                if let Some(j) = e.selected {
+                    if armed {
+                        let gone = e.list.remove(j);
+                        // The next one along is chosen, else the one before.
+                        e.selected = if e.list.is_empty() { None } else { Some(j.min(e.list.len() - 1)) };
+                        let m = self.glides.get(widget_key(gone.id));
+                        let rect = Rect::new(m.x.value(), m.y.value(), m.w.value(), m.h.value());
+                        let mut left = Animated::new(1.0, role::smooth()).with_rest(0.01);
+                        if calm {
+                            left.jump(0.0);
+                        } else {
+                            left.set(0.0);
+                        }
+                        self.glides.leaving.push(crate::widgets::edit::Leaving { rect, board, left });
+                        self.gliding = true;
+                        self.commit(cx);
+                        *cx.say = Some(format!("{} taken off", gone.kind.name().to_lowercase()));
+                    } else {
+                        e.armed = true;
+                        *cx.say = Some(format!("d again takes {} off", e.list[j].kind.name().to_lowercase()));
+                    }
+                }
+            }
+            Key::Char('a') | Key::Char('+') => self.open_picker(cx),
+            Key::Tab => {
+                if let Some(j) = e.selected {
+                    let packed = Packed::of(apps, &e.list, columns);
+                    let order: Vec<usize> = packed.reading().into_iter().filter_map(|(s, _)| if let Slot::Widget(k) = s { Some(k) } else { None }).collect();
+                    let at = order.iter().position(|k| *k == j).unwrap_or(0);
+                    e.selected = order.get((at + 1) % order.len().max(1)).copied();
+                }
+            }
+            _ => {}
+        }
+        self.follow_selection(calm);
+        Nav::Stay
+    }
+
+    /// Keys while the picker is open.
+    fn picker_key(&mut self, key: Key, cx: &mut Cx) -> Nav {
+        let calm = cx.settings.calm;
+        let Some(e) = &mut self.editing else { return Nav::Stay };
+        let Some(j) = e.selected else { return Nav::Stay };
+        match key {
+            Key::Left | Key::Right => {
+                // Only kinds not on this board yet are offered.
+                let taken: Vec<Kind> = e.list.iter().enumerate().filter(|(i, _)| *i != j).map(|(_, w)| w.kind).collect();
+                if let Some(picker) = e.picker.as_mut() {
+                    picker.turn(if key == Key::Left { -1 } else { 1 }, calm, &taken);
+                    e.list[j].kind = picker.kind();
+                }
+            }
+            Key::Up | Key::Down | Key::Char('r') => {
+                let size = e.list[j].size;
+                let to = match key {
+                    Key::Up => size.step(true),
+                    Key::Down => size.step(false),
+                    _ => size.next(),
+                };
+                if to != size {
+                    e.list[j].size = to;
+                    self.gliding = true;
+                } else if !calm {
+                    // No bigger, or no smaller: it gives a little.
+                    let m = self.glides.get(widget_key(e.list[j].id));
+                    m.y.nudge(if key == Key::Up { -60.0 } else { 60.0 });
+                }
+            }
+            Key::Enter => {
+                let name = e.list[j].kind.name().to_lowercase();
+                e.picker = None;
+                self.gliding = true;
+                self.commit(cx);
+                *cx.say = Some(format!("{name} added"));
+            }
+            Key::Back | Key::Char('e') | Key::Leave => {
+                // Back to editing the board as it was: the new one closes.
+                let Some(e) = self.editing.take() else { return Nav::Stay };
+                self.leave_picker_widget(&e);
+                let kept = e.kept();
+                let empty = kept.is_empty();
+                let selected = (!empty).then(|| j.saturating_sub(1).min(kept.len() - 1));
+                self.editing = Some(Editing::new(e.board, kept, selected));
+                self.gliding = true;
+                if empty || key == Key::Leave {
+                    // Nothing on the board to edit: done.
+                    self.end_edit(cx);
+                }
+            }
+            _ => {}
+        }
+        self.follow_selection(calm);
+        Nav::Stay
+    }
+}
+
+#[cfg(test)]
+impl Home {
+    /// When a widget in sight next changes by itself, as last drawn.
+    pub fn next_change_for_tests(&self) -> Option<std::time::Instant> {
+        self.next_change
+    }
+
+    /// As if that time had come.
+    pub fn pretend_due(&mut self) {
+        self.next_change = Some(std::time::Instant::now());
+    }
+}
+
+/// The focus ring round `r`: on Home's grid riding the strip of pages
+/// (`along` it), on the glance page as on any screen. While a board is
+/// edited it is part of the widget chosen, which it never lags: drawn where
+/// the widget is, its own glide left where it was until editing ends, when
+/// it glides on from there.
+fn ring_on(g: &mut Gfx, r: Rect, along: Option<f32>, editing: bool) {
+    let radius = g.tile_radius() + 1.5;
+    let still = g.focus_static;
+    g.focus_static = still || editing;
+    match along {
+        Some(along) => g.focus_ring_on(r, radius, along),
+        None => g.focus_ring(r, radius),
+    }
+    g.focus_static = still;
+}
+
+/// The earlier of two times, either perhaps none.
+fn earlier(a: Option<std::time::Instant>, b: Option<std::time::Instant>) -> Option<std::time::Instant> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// What a board has at the left or right end of a row on a page (else
+/// whatever is on that page): where Left or Right lands coming onto it.
+fn edge_of(packed: &Packed, page: usize, row: usize, rightmost: bool) -> Option<Slot> {
+    let on_page: Vec<&(Slot, Cell)> = packed.slots.iter().filter(|(_, c)| c.page == page).collect();
+    let in_row: Vec<&(Slot, Cell)> = on_page.iter().copied().filter(|(_, c)| (c.row..c.row + c.h).contains(&row)).collect();
+    let pool = if in_row.is_empty() { on_page } else { in_row };
+    let pick = if rightmost { pool.iter().max_by_key(|(_, c)| (c.col + c.w, c.row)) } else { pool.iter().min_by_key(|(_, c)| (c.col, c.row)) };
+    pick.map(|(s, _)| *s)
 }
 
 impl Screen for Home {
@@ -1008,27 +1635,45 @@ impl Screen for Home {
             return None;
         }
         match self.style {
-            HomeStyle::Grid => self.rects.get(self.focus).copied().filter(|r| r.w > 0.0),
+            HomeStyle::Grid => match self.slot() {
+                Slot::Widget(j) => self.widget_rects.get(j).copied().filter(|r| r.w > 0.0),
+                Slot::App(i) => self.rects.get(i).copied().filter(|r| r.w > 0.0),
+            },
             HomeStyle::Carousel => Some(self.middle).filter(|r| r.w > 0.0),
             HomeStyle::Flow => Some(if self.flow.open_on(self.focus) { self.flow.enlarged() } else { self.flow.middle() }).filter(|r| r.w > 0.0),
         }
     }
 
     fn title(&self) -> &str {
-        if self.on_glance() {
-            "Glance"
-        } else {
-            "Catalyst"
+        match &self.editing {
+            Some(e) if e.picker.is_some() => "Add",
+            Some(_) => "Widgets",
+            None if self.on_glance() => "Glance",
+            None => "Catalyst",
         }
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let calm = cx.settings.calm;
         self.follow_arrangement(&cx.settings.arrangement());
+        self.follow_layout(&cx.settings.widgets);
+        // Editing takes every key.
+        if self.editing.is_some() {
+            return self.edit_key(key, cx);
+        }
         // The style in the settings, which a draw may not have caught up with yet.
         let style = cx.settings.home;
+        // e edits the widgets, on the board in view (widgets::edit says why e).
+        if key == Key::Char('e') {
+            let board = if self.on_glance() || style != HomeStyle::Grid { Board::Glance } else { Board::Home };
+            return self.begin_edit(board, cx);
+        }
         // Up from the top of Home pulls the control centre down.
-        let at_top = self.on_glance() || style.one_at_a_time() || (self.focus % self.per_page()) < self.columns;
+        let at_top = if self.on_glance() {
+            self.glance_board().cell(Slot::Widget(self.card)).is_none_or(|c| c.row == 0)
+        } else {
+            style.one_at_a_time() || self.grid().cell(self.slot()).is_none_or(|c| c.row == 0)
+        };
         if key == Key::Up && at_top {
             return Nav::Control;
         }
@@ -1081,7 +1726,7 @@ impl Screen for Home {
             HomeStyle::Grid => self.grid_key(key, calm),
             HomeStyle::Carousel | HomeStyle::Flow => self.carousel_key(key, calm),
         };
-        let (page, turn) = ((self.focus / self.per_page()) as f32, self.focus as f32);
+        let (page, turn) = (self.grid_page() as f32, self.focus as f32);
         if calm {
             self.page.jump(page);
             self.turn.jump(turn);
@@ -1105,9 +1750,9 @@ impl Screen for Home {
     fn parallax(&self) -> Option<f32> {
         // Home is one strip: the glance pages on the left, then the grid's
         // pages (or the carousel's cards). Where it is turned to, 0 to 1.
-        let glance_pages = self.cards.len().div_ceil(2).max(1) as f32;
+        let glance_pages = self.glance_pages() as f32;
         let (at, stops) = match self.style {
-            HomeStyle::Grid => (self.page.value(), self.count().div_ceil(self.per_page()) as f32),
+            HomeStyle::Grid => (self.page.value(), self.grid().pages as f32),
             HomeStyle::Carousel => (self.turn.value(), self.count() as f32),
             HomeStyle::Flow => (self.flow.pos.value(), self.count() as f32),
         };
@@ -1117,10 +1762,21 @@ impl Screen for Home {
 
     fn robot_linked(&mut self, calm: bool) -> Nav {
         let robot = || Box::new(RobotScreen::default());
-        // On the glance page: out of the robot's card if it is on this page.
+        // Not while widgets are being edited: the arrival is said instead.
+        if self.editing.is_some() {
+            return Nav::Stay;
+        }
+        // On the glance page: out of the robot's widget if it is on this page.
         if self.on_glance() {
-            let shown = |i: usize| i / 2 + 1 == self.glance_page;
-            let card = self.robot_card.filter(|i| shown(*i)).and_then(|i| self.cards.get(i)).copied().filter(|r| r.w > 0.0);
+            let packed = self.glance_board();
+            let card = self
+                .board(Board::Glance)
+                .iter()
+                .enumerate()
+                .find(|(j, w)| w.kind == Kind::Robot && packed.cell(Slot::Widget(*j)).is_some_and(|c| c.page + 1 == self.glance_page))
+                .and_then(|(j, _)| self.cards.get(j))
+                .copied()
+                .filter(|r| r.w > 0.0);
             return match card {
                 Some(from) => Nav::Open(robot(), from),
                 None => Nav::Push(robot()),
@@ -1131,11 +1787,12 @@ impl Screen for Home {
         };
         // An enlarged card in the flow turns back first.
         self.flow.close(calm);
-        if self.focus != at {
+        if self.focus != at || self.widget.is_some() {
             // Turn to Robot's tile first, so the app comes out of it and
             // goes back into it.
             self.focus = at;
-            let (page, turn) = ((at / self.per_page()) as f32, at as f32);
+            self.widget = None;
+            let (page, turn) = (self.page_of(Slot::App(at)) as f32, at as f32);
             if calm {
                 self.page.jump(page);
                 self.turn.jump(turn);
@@ -1174,7 +1831,7 @@ impl Screen for Home {
         if focus != self.focus {
             // The focused app went: its page or card may be gone with it.
             self.focus = focus;
-            self.page.jump((focus / self.per_page()) as f32);
+            self.page.jump(self.page_of(Slot::App(focus)) as f32);
             self.turn.jump(focus as f32);
             self.flow.place(focus);
         }
@@ -1183,9 +1840,19 @@ impl Screen for Home {
         if self.style == HomeStyle::Flow && self.flow.is_open() {
             self.flow.close_on_return = true;
         }
+        // What an app may have changed (a note, a reminder, a photo) is read again.
+        self.facts.invalidate();
     }
 
     fn update(&mut self, cx: &mut Cx) -> Nav {
+        self.follow_layout(&cx.settings.widgets);
+        // Settings › Home › Widgets sent Home here to edit a board.
+        if let Some(board) = cx.settings.edit_widgets.take() {
+            if self.editing.is_some() {
+                self.end_edit(cx);
+            }
+            return self.begin_edit(board, cx);
+        }
         match self.opening {
             Some(pressed) if pressed >= PRESS_IN => {
                 self.opening = None;
@@ -1197,7 +1864,10 @@ impl Screen for Home {
 
     fn tick(&mut self, dt: f32) -> bool {
         // Each spring must be advanced, so no short-circuit.
-        let mut moving = self.page.tick(dt) | self.turn.tick(dt) | self.glance.tick(dt);
+        let mut moving = self.page.tick(dt) | self.turn.tick(dt) | self.glance.tick(dt) | self.glides.tick(dt) | self.facts.tick(dt);
+        if let Some(picker) = self.editing.as_mut().and_then(|e| e.picker.as_mut()) {
+            moving |= picker.slide.tick(dt);
+        }
         if self.style == HomeStyle::Flow {
             moving |= self.flow.tick(dt, self.focus);
         }
@@ -1212,16 +1882,17 @@ impl Screen for Home {
             self.arrived += dt;
             moving = true;
         }
-        // While the glance page shows, its facts are re-read every few seconds.
-        if self.on_glance() {
-            self.device_age += dt.max(0.01);
-            if self.device_age > 4.0 {
-                self.device_age = 0.0;
-                let facts = DeviceFacts::read(self.h24);
-                if facts != self.device {
-                    self.device = facts;
-                    moving = true;
-                }
+        // Rearranged a moment ago, and settled now: the tiles hold still.
+        if self.gliding && self.editing.is_none() && !self.glides.moving() {
+            self.gliding = false;
+        }
+        // A widget in sight changes by itself now (a minute turned, a
+        // countdown's second): one frame for it. Asked once; with the screen
+        // off the shell draws nothing, and nothing more is asked until it has.
+        if let Some(at) = self.next_change {
+            if !self.asked && std::time::Instant::now() >= at {
+                self.asked = true;
+                moving = true;
             }
         }
         moving
@@ -1230,19 +1901,28 @@ impl Screen for Home {
     fn draw(&mut self, g: &mut Gfx, robot: &Robot) {
         let arrangement = g.arrangement.clone();
         self.follow_arrangement(&arrangement);
-        if g.clock.0 != self.h24 {
-            self.h24 = g.clock.0;
-            self.device = DeviceFacts::read(self.h24);
+        self.follow_layout(&g.widgets);
+        // The battery widget shows the shell's own reading.
+        if self.facts.battery != g.charge {
+            self.facts.battery.clone_from(&g.charge);
         }
         // Two larger tiles across when chosen, and always at the large text size.
         let columns = if g.text_size == TextSize::Large { 2 } else { g.columns.clamp(2, 3) };
+        if columns != self.columns {
+            // Every place is counted afresh.
+            self.glides.forget();
+        }
         if columns != self.columns || g.home != self.style {
             // A different Home: everything is where the focus is, at once.
             let first = self.arrived == 0.0;
             let was = self.style;
             self.columns = columns;
             self.style = g.home;
-            self.page.jump((self.focus / self.per_page()) as f32);
+            // Home's widgets live in the grid: elsewhere, an app has the focus.
+            if self.style != HomeStyle::Grid {
+                self.widget = None;
+            }
+            self.page.jump(self.grid_page() as f32);
             self.turn.jump(self.focus as f32);
             if self.style == HomeStyle::Carousel {
                 // No cascade here. Arriving, the carousel turns into place instead.
@@ -1266,25 +1946,27 @@ impl Screen for Home {
             }
         }
         // The pager counts the glance pages first (the farthest leftmost),
-        // then the grid's pages or the carousel's apps.
-        // Cards taken away in Settings meanwhile: never left on a page, or a
-        // card, that is no longer there.
-        let glance_pages = g.glance.len().div_ceil(2).max(1);
+        // then the grid's pages or the carousel's apps. Widgets taken away
+        // meanwhile: never left on a page, or a widget, that is no longer there.
+        let glance_pages = self.glance_pages();
         if self.glance_page > glance_pages {
             self.glance_page = glance_pages;
             self.glance.jump(glance_pages as f32);
         }
-        self.card = self.card.min(g.glance.len().saturating_sub(1));
+        self.card = self.card.min(self.board(Board::Glance).len().saturating_sub(1));
         let stops = match self.style {
-            HomeStyle::Grid => self.count().div_ceil(self.per_page()),
+            HomeStyle::Grid => self.grid().pages,
             HomeStyle::Carousel | HomeStyle::Flow => self.count(),
         };
         let at = match self.style {
-            HomeStyle::Grid => self.focus / self.per_page(),
+            HomeStyle::Grid => self.grid_page(),
             HomeStyle::Carousel | HomeStyle::Flow => self.focus,
         };
         let current = if self.on_glance() { glance_pages - self.glance_page } else { glance_pages + at };
-        if stops + glance_pages < 24 {
+        if self.editing.is_some() {
+            // Editing: what its keys do goes along the foot, where the pager rests.
+            g.pager = None;
+        } else if stops + glance_pages < 24 {
             g.pager = Some((stops + glance_pages, current, g.ox));
         } else if self.style == HomeStyle::Flow {
             // Too many for dots: the flow's place along its track, as it moves.
@@ -1296,22 +1978,29 @@ impl Screen for Home {
         // The apps and the glance pages are one strip: the glance pages to the left.
         let base = g.ox;
         let shift = self.glance.value() * W;
+        let mut next = None;
         if shift < W - 0.5 {
             g.ox = base + shift;
             match self.style {
-                HomeStyle::Grid => self.draw_grid(g, robot),
+                HomeStyle::Grid => next = self.draw_grid(g, robot),
                 HomeStyle::Carousel => self.draw_carousel(g, robot),
                 HomeStyle::Flow => self.draw_flow(g, robot),
             }
         }
-        for page in 1..=glance_pages {
-            let ox = shift - page as f32 * W;
-            if ox.abs() < W - 0.5 {
-                g.ox = base + ox;
-                self.draw_glance(g, robot, page);
-            }
+        // The glance pages, the first just left of the apps.
+        if shift > 0.5 {
+            g.ox = base + shift - W;
+            next = earlier(next, self.draw_glance(g, robot));
         }
         g.ox = base;
+        if let Some(e) = &self.editing {
+            g.hint_any(if e.picker.is_some() { &PICK_HINTS } else { &EDIT_HINTS });
+        }
+        if self.glides.moving() || self.editing.as_ref().is_some_and(|e| e.picker.as_ref().is_some_and(|p| !p.slide.is_settled())) {
+            g.started_moving();
+        }
+        self.next_change = next;
+        self.asked = false;
     }
 }
 
@@ -1861,8 +2550,8 @@ impl Screen for Tables {
                     let key = format!("{}{name}", self.path);
                     let unpin = cx.settings.pinned.as_deref() == Some(key.as_str());
                     cx.settings.pinned = (!unpin).then_some(key);
-                    if !unpin && !cx.settings.glance.contains(&Widget::Pinned) {
-                        cx.settings.glance.push(Widget::Pinned);
+                    if !unpin {
+                        cx.settings.widgets.pin_value();
                     }
                     crate::save_settings(cx.settings);
                     *cx.say = Some(if unpin { "unpinned".into() } else { format!("{name} pinned to the glance page") });
@@ -2277,9 +2966,8 @@ enum Item {
     Seconds,
     IslandChoice,
     Greeting,
-    GlancePage,
-    /// A glance card, by its place in `Widget::ALL`.
-    GlanceCard(usize),
+    /// Settings › Home › Widgets: a page of its own (widgets/page.rs).
+    WidgetsPage,
     TextScale,
     Calm,
     // Display.
@@ -2406,13 +3094,6 @@ fn nearest_hue(accent: bezel::Accent) -> u8 {
     ((hue / bezel::hues::STEP as f32).round() as u32 % bezel::Accent::HUES as u32) as u8
 }
 
-/// The glance page's settings rows: the cards in use in their order, then
-/// the rest.
-fn glance_items(order: &[Widget]) -> Vec<Item> {
-    let place = |w: &Widget| Widget::ALL.iter().position(|a| a == w).unwrap_or(0);
-    order.iter().map(|w| Item::GlanceCard(place(w))).chain(Widget::ALL.iter().filter(|w| !order.contains(w)).map(|w| Item::GlanceCard(place(w)))).collect()
-}
-
 /// Where everything in Settings is, for search: what it is called, the
 /// section it is in, and its place there (none: the section itself).
 const SETTING_PLACES: [(&str, Item, Option<usize>); 79] = [
@@ -2436,7 +3117,7 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 79] = [
     ("Home screen style", Item::HomeSection, Some(0)),
     ("Tiles per row", Item::HomeSection, Some(1)),
     ("Arrange apps", Item::ArrangeApps, None),
-    ("Glance page cards", Item::GlancePage, None),
+    ("Widgets", Item::WidgetsPage, None),
     ("Clock format", Item::HomeSection, Some(4)),
     ("Clock seconds", Item::HomeSection, Some(5)),
     ("Island at rest", Item::HomeSection, Some(6)),
@@ -2554,6 +3235,9 @@ pub fn open_setting(index: usize) -> Box<dyn Screen> {
     if section == Item::MusicSection {
         return Box::new(crate::music::MusicSettings::new().at(place.unwrap_or(0)));
     }
+    if section == Item::WidgetsPage {
+        return Box::new(crate::widgets::WidgetsPage::new());
+    }
     match SettingsApp::section(section) {
         Some(mut page) => {
             page.list.focus = place.unwrap_or(0);
@@ -2611,14 +3295,13 @@ impl SettingsApp {
             RobotSection => Self::page("Robot", vec![OpenRobot, MatchReport, DemoRobot]),
             Appearance => Self::page("Appearance", vec![ThemeChoice, Mode, AccentColor, OwnColour, WallpaperChoice, CornersChoice, Calm]),
             TextSection => Self::page("Text", vec![TextScale, LettersChoice, WidthChoice]),
-            HomeSection => Self::page("Home", vec![HomeScreen, Columns, ArrangeApps, GlancePage, ClockFormat, Seconds, IslandChoice, Greeting]),
+            HomeSection => Self::page("Home", vec![HomeScreen, Columns, ArrangeApps, WidgetsPage, ClockFormat, Seconds, IslandChoice, Greeting]),
             ArrangeApps => {
                 let apps = app_names();
                 let mut page = Self::page("Arrange apps", arrange_items(&apps, &crate::shell::Arrangement::default()));
                 page.apps = apps;
                 page
             }
-            GlancePage => Self::page("Glance page", glance_items(&crate::shell::Settings::default().glance)),
             Display => {
                 let motion: &[Item] = if crate::imu::has_motion() { &[LiftWake, FaceDown] } else { &[] };
                 Self::page("Display", [Brightness, Graphics, ScreenOff, Processor].into_iter().chain(motion.iter().copied()).collect())
@@ -2762,7 +3445,15 @@ impl SettingsApp {
             WidthChoice => ("Letter width".into(), g.look.width.name().into(), true),
             TextSection => section("Text", format!("{} · {}", g.text_size.name(), g.look.letters.name())),
             HomeSection => section("Home", format!("{} · {} across", g.home.name(), g.columns)),
-            GlancePage => section("Glance page", format!("{} cards", g.glance.len())),
+            WidgetsPage => section(
+                "Widgets",
+                match (g.widgets.glance.len(), g.widgets.home.len()) {
+                    (0, 0) => "none".to_owned(),
+                    (n, 0) => format!("{n} on the glance page"),
+                    (0, n) => format!("{n} among the apps"),
+                    (glance, home) => format!("{glance} glance · {home} home"),
+                },
+            ),
             ArrangeApps => section(
                 "Arrange apps",
                 match g.arrangement.hidden.len() {
@@ -2790,13 +3481,6 @@ impl SettingsApp {
             Seconds => ("Seconds on the clock".into(), onoff(g.clock.1), g.clock.1),
             IslandChoice => ("Island at rest".into(), g.island.name().into(), true),
             Greeting => ("Greeting".into(), onoff(g.greeting), g.greeting),
-            GlanceCard(i) => {
-                let widget = Widget::ALL[i];
-                match g.glance.iter().position(|w| *w == widget) {
-                    Some(at) => (widget.label().into(), format!("on · {}", at + 1), true),
-                    None => (widget.label().into(), "off".into(), false),
-                }
-            }
             TextScale => ("Text size".into(), g.text_size.name().into(), true),
             Calm => ("Calm version".into(), onoff(g.calm), g.calm),
             Brightness => ("Brightness".into(), dash(self.backlight.map(|b| format!("{b}%"))), true),
@@ -3002,30 +3686,6 @@ impl Screen for SettingsApp {
             return Nav::Stay;
         }
         let Some(&item) = self.items.get(self.list.focus) else { return Nav::Pop };
-        // A glance card: Enter switches it on or off; Left and Right move it
-        // earlier or later among those in use. The focus stays on it.
-        if let Item::GlanceCard(i) = item {
-            let widget = Widget::ALL[i];
-            let order = &mut cx.settings.glance;
-            let at = order.iter().position(|w| *w == widget);
-            match (key, at) {
-                (Key::Back, _) => return Nav::Pop,
-                (Key::Enter, Some(at)) => {
-                    order.remove(at);
-                }
-                (Key::Enter, None) => order.push(widget),
-                (Key::Left, Some(at)) if at > 0 => order.swap(at, at - 1),
-                (Key::Right, Some(at)) if at + 1 < order.len() => order.swap(at, at + 1),
-                (other, _) => {
-                    list_key(&mut self.list, other, self.items.len());
-                    return Nav::Stay;
-                }
-            }
-            self.items = glance_items(&cx.settings.glance);
-            self.list.focus = self.items.iter().position(|it| *it == Item::GlanceCard(i)).unwrap_or(0);
-            crate::save_settings(cx.settings);
-            return Nav::Stay;
-        }
         // An app on Arrange apps: Enter shows or hides it; Space makes it a
         // favourite or not; Left and Right move it earlier or later among the
         // favourites or among the rest. The focus stays on it.
@@ -3083,6 +3743,7 @@ impl Screen for SettingsApp {
                 }
             }
             Key::Enter | Key::Right if item == Item::TakeTour => return Nav::Tour,
+            Key::Enter | Key::Right if item == Item::WidgetsPage => return Nav::Push(Box::new(crate::widgets::WidgetsPage::new())),
             Key::Enter | Key::Right if item == Item::KeyboardShortcuts => return Nav::Push(Box::new(crate::help::Shortcuts::new())),
             Key::Enter | Key::Right if item == Item::BatterySection => return Nav::Push(Box::new(crate::power::BatteryPage::new())),
             Key::Enter | Key::Right if item == Item::LockSection => return Nav::Push(Box::new(crate::lockpages::LockPage::new())),
@@ -3134,15 +3795,6 @@ impl Screen for SettingsApp {
     fn draw(&mut self, g: &mut Gfx, robot: &Robot) {
         let t = g.tokens;
         let (top, row_h) = (g.top(), g.row_h());
-        // The glance page's cards are listed in the order they are in use.
-        if self.title == "Glance page" {
-            let order = glance_items(&g.glance);
-            if order != self.items {
-                let focused = self.items.get(self.list.focus).copied();
-                self.items = order;
-                self.list.focus = focused.and_then(|f| self.items.iter().position(|it| *it == f)).unwrap_or(0);
-            }
-        }
         // Developer options are listed after About once they are unlocked.
         if self.title == "Settings" && g.developer != self.items.contains(&Item::DeveloperSection) {
             let focused = self.items.get(self.list.focus).copied();

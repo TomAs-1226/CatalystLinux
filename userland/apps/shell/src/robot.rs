@@ -130,6 +130,13 @@ impl Robot {
         }
     }
 
+    /// What [`Robot::refresh`] last saw, as one number that moves whenever
+    /// its values, its logs or its schedule change: a widget looks again
+    /// only when it has moved.
+    pub fn seen(&self) -> u64 {
+        self.last_generation
+    }
+
     /// Advance the demo and sample histories. Returns whether anything
     /// changed since the last call, i.e. whether to redraw.
     pub fn refresh(&mut self, dt: f32) -> bool {
