@@ -317,7 +317,12 @@ impl Shared {
         let verb = if installed(&dir, &app.id).is_some() { "updating" } else { "getting" };
         *say = Some(format!("{verb} {}…", app.name));
         let (listing, keys) = (app.clone(), self.keys.clone());
-        self.working = Some(Working { id: app.id.clone(), name: app.name.clone(), verb, job: Job::start(move || install(&listing, &dir, &keys)) });
+        // Behind the frames, and tar and the rest it starts with it (sched.rs).
+        let job = Job::start(move || {
+            crate::sched::enter(crate::sched::Class::Background);
+            install(&listing, &dir, &keys)
+        });
+        self.working = Some(Working { id: app.id.clone(), name: app.name.clone(), verb, job });
     }
 
     /// Every frame: has the install under way finished? Then the next.

@@ -4083,6 +4083,19 @@ impl Shell {
         self.standby.asleep()
     }
 
+    /// Where the shell is, for the processor's boost (sched.rs): lit and in
+    /// use; lit but dimming, going out or showing StandBy's faces (only a
+    /// key raises it there); or dark.
+    pub fn boost_place(&self) -> crate::sched::Place {
+        if self.standby.asleep() || self.deep.on() {
+            crate::sched::Place::Dark
+        } else if self.standby.state() == crate::standby::State::Awake {
+            crate::sched::Place::Lit
+        } else {
+            crate::sched::Place::Quiet
+        }
+    }
+
     /// Drawn over everything: a screenshot's flash, and (where there is no
     /// backlight to dim, as in the simulator) standby's dimming.
     fn draw_flash_and_standby(&mut self) {

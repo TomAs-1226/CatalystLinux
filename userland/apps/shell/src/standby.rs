@@ -30,7 +30,8 @@ use detent::{role, Animated};
 pub enum Power {
     /// Fast when there is work, slow when not.
     Balanced,
-    /// Climbs to speed slowly, and never far: the battery lasts longer.
+    /// Climbs to speed slowly, and never far, and never for work at nice
+    /// above 0 (the background): the battery lasts longer.
     Saving,
     /// Always at full speed.
     Performance,
@@ -308,6 +309,8 @@ impl Standby {
     fn apply_power(&mut self, governors: &'static [&'static str]) {
         if self.power_set != Some(governors[0]) && crate::sys::set_governor(governors) {
             self.power_set = Some(governors[0]);
+            // Its tunables are the kernel's defaults again: set ours.
+            crate::sched::tune_governor();
         }
     }
 

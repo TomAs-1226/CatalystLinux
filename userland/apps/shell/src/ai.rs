@@ -1800,6 +1800,9 @@ impl Assistant {
         ctx.stop = Some(stop.clone());
         let (tx, rx) = mpsc::channel();
         let started = std::thread::Builder::new().name("offline".into()).stack_size(1024 * 1024).spawn(move || {
+            // Reading the match logs, for someone waiting: SCHED_BATCH at
+            // nice 10, so the frames still come first (sched.rs).
+            crate::sched::enter(crate::sched::Class::Batch(10));
             let mut send = |e: crate::offline::Event| {
                 tx.send(e).ok();
             };
