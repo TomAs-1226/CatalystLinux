@@ -72,6 +72,9 @@ pub const MODELS: [Model; 3] = [
         tools: false,
         licence: "Apache-2.0",
     },
+    // The default: the best of all measured on the handheld's own checks
+    // (17 of 25 about a match log; both tool calls), the quickest on the log
+    // analysis's questions (14 s each), in 210 MB.
     Model {
         id: "lfm2.5-230m",
         label: "Balanced",
@@ -82,12 +85,16 @@ pub const MODELS: [Model; 3] = [
         size: 149_080_928,
         context: 2048,
         peak_mb: 210,
-        about: "Follows instructions; JSON and tools",
+        about: "Best all round; JSON and tools",
         writes_per_s: 8.1,
         reads_per_s: 16.2,
         tools: true,
         licence: "LFM Open License v1.0",
     },
+    // The largest that fits with room to spare: half as much again of the
+    // same model, the best of these on Liquid's instruction-following test
+    // (77 against 72), though level with the 230M on the handheld's checks
+    // (15 of 25) and slower.
     Model {
         id: "lfm2.5-350m",
         label: "Smartest",
@@ -98,7 +105,7 @@ pub const MODELS: [Model; 3] = [
         size: 219_309_792,
         context: 2048,
         peak_mb: 280,
-        about: "The best answers; slower",
+        about: "Biggest; follows instructions best",
         writes_per_s: 5.9,
         reads_per_s: 9.5,
         tools: true,
@@ -342,18 +349,53 @@ fn available_in(meminfo: &str) -> Option<u64> {
     line.split_whitespace().nth(1)?.parse::<u64>().ok().map(|kb| kb / 1024)
 }
 
-/// Whether a model can be started with the memory free now: what it takes
-/// at its peak and a margin, or why not. (Unknown memory: let it try.)
+// ---------------------------------------------------------------- memory ---
+
+/// The handheld's memory as the kernel has it (the GPU keeps the rest of
+/// the 512 MB).
+pub const RAM_MB: u32 = 428;
+/// The shell's own, kept in RAM (it locks its memory).
+pub const SHELL_MB: u32 = 30;
+/// What a model must leave free while it answers, without counting swap:
+/// room for the shell, Music and an app beside it, and never a reason to
+/// push anything into zram. (Measured: a 382 MB model with zram on wrote
+/// 0.3 tokens a second, swapped the shell out and slowed its frames to a
+/// crawl.)
+pub const HEADROOM_MB: u32 = 100;
+/// Below this much free, a model loaded and not answering gives its memory
+/// back at once: something else needs it.
+pub const SHORT_MB: u64 = 60;
+/// How readily the kernel kills llama-server when memory runs out: first,
+/// before the shell or anything else (-1000 to 1000; 0 is everyone else's).
+pub const OOM_SCORE_ADJ: i32 = 800;
+
+/// Whether a model fits the handheld at all: its memory while answering,
+/// the shell's, and the headroom, in RAM alone. Only those that do are
+/// offered.
+pub fn fits(model: &Model) -> bool {
+    model.peak_mb + SHELL_MB + HEADROOM_MB <= RAM_MB
+}
+
+/// Whether a model can be started with the memory free now (the kernel's
+/// MemAvailable, which counts no swap): what it takes at its peak and the
+/// headroom, or why not, plainly. Music or an app may be using some.
+/// (Unknown memory: let it try.)
 pub fn room_for(model: &Model, available: Option<u64>) -> Result<(), String> {
+    let need = u64::from(model.peak_mb + HEADROOM_MB);
     match available {
-        Some(free) if free < u64::from(model.peak_mb) + 40 => Err(format!(
-            "{} needs about {} MB free and {free} MB is: close the camera or other apps{}",
+        Some(free) if free < need => Err(format!(
+            "{} needs {need} MB free to answer without slowing the handheld, and {free} MB is: close Music or other apps{}",
             model.name,
-            model.peak_mb + 40,
             if model.peak_mb <= MODELS.iter().map(|m| m.peak_mb).min().unwrap_or(0) { "" } else { ", or choose a smaller model" }
         )),
         _ => Ok(()),
     }
+}
+
+/// Whether memory is short enough that a model waiting (loaded, not
+/// answering) should give its memory back now.
+pub fn memory_short(available: Option<u64>) -> bool {
+    available.is_some_and(|free| free < SHORT_MB)
 }
 
 /// An OpenAI-style chat request: the instructions, then the turns so far as
@@ -464,13 +506,14 @@ fn read_response(mut reader: impl BufRead) -> Result<(u16, String), String> {
     Ok((status, String::from_utf8_lossy(&body).into_owned()))
 }
 
-/// Start llama-server for a model: its own process group (so stopping it
-/// stops all of it), a lower priority than the shell from its first
-/// instruction, every thread of it (nice 10: measured, the shell's frames
-/// kept their pace with all three of its threads working), held still
-/// while the processor is hot ([`HOT_C`]), what it prints in
-/// /tmp/llama-server.log. `CATALYST_LLAMA_SERVER` names another program
-/// (tests).
+/// Start llama-server for a model, only with room for it in RAM
+/// ([`room_for`]): its own process group (so stopping it stops all of it),
+/// a lower priority than the shell from its first instruction, every
+/// thread of it (nice 10: measured, the shell's frames kept their pace with
+/// all three of its threads working), the first the kernel kills should
+/// memory run out ([`OOM_SCORE_ADJ`]), held still while the processor is
+/// hot ([`HOT_C`]), what it prints in /tmp/llama-server.log.
+/// `CATALYST_LLAMA_SERVER` names another program (tests).
 pub fn spawn_server(dir: &Path, model: &Model) -> Result<std::process::Child, String> {
     if !present(dir, model) {
         return Err(format!("{} is not downloaded: Settings › On-device model", model.name));
@@ -487,15 +530,25 @@ pub fn spawn_server(dir: &Path, model: &Model) -> Result<std::process::Child, St
         };
         let mut command = Command::new(&program);
         command.args(server_args(&path(dir, model), model)).stdin(Stdio::null()).stdout(out).stderr(err).process_group(0);
-        // SAFETY: between fork and exec, one async-signal-safe system call
-        // on the child itself; every thread it starts inherits the nice.
+        // SAFETY: between fork and exec, only async-signal-safe system calls
+        // on the child itself (no allocation): its priority, which every
+        // thread it starts inherits, and its place first in line for the
+        // kernel's out-of-memory killer, both before it maps a byte.
         unsafe {
             command.pre_exec(|| {
                 libc::setpriority(libc::PRIO_PROCESS as _, 0, 10);
+                let fd = libc::open(c"/proc/self/oom_score_adj".as_ptr(), libc::O_WRONLY);
+                if fd >= 0 {
+                    let value = b"800";
+                    libc::write(fd, value.as_ptr().cast(), value.len());
+                    libc::close(fd);
+                }
                 Ok(())
             });
         }
         let child = command.spawn().map_err(|e| format!("could not start the model ({program}: {e})"))?;
+        // And again from here, should the child's own write have failed.
+        std::fs::write(format!("/proc/{}/oom_score_adj", child.id()), OOM_SCORE_ADJ.to_string()).ok();
         guard(child.id() as i32);
         Ok(child)
     }
@@ -664,12 +717,35 @@ mod tests {
         let meminfo = "MemTotal:  460000 kB\nMemFree:  100000 kB\nMemAvailable:  262144 kB\n";
         assert_eq!(available_in(meminfo), Some(256));
         let (small, big) = (&MODELS[0], &MODELS[2]);
-        assert!(room_for(small, Some(u64::from(small.peak_mb) + 40)).is_ok());
-        let why = room_for(big, Some(256)).unwrap_err();
-        assert!(why.contains(&format!("{} MB", big.peak_mb + 40)) && why.contains("smaller model"), "{why}");
+        // Its peak and 100 MB besides, in RAM: no less.
+        assert!(room_for(small, Some(u64::from(small.peak_mb + HEADROOM_MB))).is_ok());
+        assert!(room_for(small, Some(u64::from(small.peak_mb + HEADROOM_MB) - 1)).is_err());
+        let why = room_for(big, Some(300)).unwrap_err();
+        assert!(why.contains(&format!("{} MB free", big.peak_mb + HEADROOM_MB)) && why.contains("300 MB") && why.contains("Music") && why.contains("smaller model"), "{why}");
         let why = room_for(small, Some(100)).unwrap_err();
         assert!(!why.contains("smaller model"), "nothing smaller to choose: {why}");
         assert!(room_for(big, None).is_ok(), "unknown memory: it may try");
+    }
+
+    #[test]
+    fn only_models_that_fit_in_ram_with_room_to_spare_are_offered() {
+        for m in &MODELS {
+            assert!(fits(m), "{}: {} MB + the shell's {SHELL_MB} + {HEADROOM_MB} free is more than {RAM_MB}", m.id, m.peak_mb);
+        }
+        // Gemma 3 270M, measured at 363 MB while answering, would not be.
+        let gemma = Model { peak_mb: 363, ..MODELS[1] };
+        assert!(!fits(&gemma));
+        // At rest the handheld has about 380 MB free: every one offered
+        // starts then, with no swap.
+        assert!(MODELS.iter().all(|m| room_for(m, Some(380)).is_ok()));
+    }
+
+    #[test]
+    fn a_waiting_model_gives_way_when_memory_runs_short() {
+        assert!(memory_short(Some(SHORT_MB - 1)));
+        assert!(!memory_short(Some(SHORT_MB)) && !memory_short(None));
+        assert_eq!(OOM_SCORE_ADJ.to_string(), "800", "the figure the child writes for itself");
+        assert!(OOM_SCORE_ADJ > 0 && OOM_SCORE_ADJ <= 1000);
     }
 
     #[test]

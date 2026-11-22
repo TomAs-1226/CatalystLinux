@@ -18,6 +18,10 @@
 //!   the end of it.
 //! - It runs at a lower priority than the shell, on three of the four cores,
 //!   and loaded but not answering it uses no processor time (measured).
+//! - It never needs swap: only models that fit in RAM with 100 MB to spare
+//!   are offered, one is started only with that much free now (else it says
+//!   what to close), a waiting one gives way when memory runs short, and the
+//!   kernel kills it first should memory run out.
 //!
 //! What the models are, where they live and how the server is run is in the
 //! `localmodel` crate, which `ai` in the Terminal shares.
@@ -275,7 +279,10 @@ fn reap_when_done() {
                         if working {
                             r.last = now;
                         }
-                        !matches!(r.child.try_wait(), Ok(None)) || time_to_stop(r.last, now, AWAY.load(Ordering::SeqCst))
+                        // Something else needs the memory (Music, an app):
+                        // a model only waiting gives it back now.
+                        let short = !working && lm::memory_short(lm::available_mb());
+                        !matches!(r.child.try_wait(), Ok(None)) || short || time_to_stop(r.last, now, AWAY.load(Ordering::SeqCst))
                     }
                 };
                 if done {
