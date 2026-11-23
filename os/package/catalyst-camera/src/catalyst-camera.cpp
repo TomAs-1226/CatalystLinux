@@ -1661,6 +1661,10 @@ int bytes_file(const char *name, const uint8_t *data, size_t size)
 // in use and no frame came: it is the first thing to doubt.
 bool last_try_held = false;
 
+// The last try's patience (deadline_ms): twice, so a sensor slow to switch
+// still gives its photo when the others ran out.
+static int still_patience = 1;
+
 bool take_still_at(Size size, Shot &shot, std::string &why, bool want_raw, bool use_held, int extra, std::vector<int> *files, std::vector<Shot> *set, bool &held_suspect)
 {
 	held_suspect = false;
@@ -1741,7 +1745,7 @@ bool take_still_at(Size size, Shot &shot, std::string &why, bool want_raw, bool 
 	char exposing[64];
 	std::snprintf(exposing, sizeof exposing, "%lld %d %s", (long long)(expect_us / 1000), frames, is_set ? "bracket" : extra > 0 ? "detail" : "still");
 	tell(6, 0, exposing);
-	const long wait = still::deadline_ms(fixed, still::Judge::most(fixed > 0, fixed > 1000000) + 1);
+	const long wait = still::deadline_ms(fixed, still::Judge::most(fixed > 0, fixed > 1000000) + 1, still_patience);
 	Request *got = nullptr;
 	{
 		std::unique_lock<std::mutex> hold(still_lock);
@@ -2131,7 +2135,9 @@ void take_still(const std::string &path, const std::string &words, int detail)
 	}
 	if (!ok && running) {
 		std::string again;
+		still_patience = 2;
 		ok = take_still_at(Size(1640, 1232), shot, again, false, false, 0, nullptr, &set, suspect);
+		still_patience = 1;
 	}
 	// Its picture is in: the shell may take the next as soon as the preview
 	// is back.

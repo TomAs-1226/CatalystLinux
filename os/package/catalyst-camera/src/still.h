@@ -33,13 +33,16 @@ inline int64_t frame_us(int64_t exposure_us)
 }
 
 // How long to wait for a try's frames before giving it up (ms): the
-// sensor's start in its new mode (a second covers a CM0's mode switch
-// with room; rpicam-still's own takes 0.4 to 0.6 s: my own tuning), then
-// two frame lengths for each frame it may take (the pipeline keeps one
-// raw frame, so frames come at every other one the sensor sends).
-inline long deadline_ms(int64_t exposure_us, int frames)
+// sensor's start in its new mode, then two frame lengths for each frame it
+// may take (the pipeline keeps one raw frame, so frames come at every other
+// one the sensor sends), the whole times `patience` (the last try, twice).
+// The start was given a second in 0.9.4, a guess never measured: on the
+// handheld every try ran out ("the camera gave no picture"). Four seconds;
+// a try the pipeline refuses still ends at once, so a working one costs
+// nothing for it.
+inline long deadline_ms(int64_t exposure_us, int frames, int patience = 1)
 {
-	return long(1000 + 2 * frame_us(exposure_us) * std::max(1, frames) / 1000);
+	return long((4000 + 2 * frame_us(exposure_us) * std::max(1, frames) / 1000) * std::max(1, patience));
 }
 
 // Whether a frame's exposure is the one asked for (a tenth either way, or

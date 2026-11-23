@@ -87,7 +87,8 @@ int main()
 			n++;
 		check(n == 8, "auto: never settling, the ninth frame");
 	}
-	check(deadline_ms(10000, 3) == 1400 && deadline_ms(10000, 1) == 1133, "a photo at 1/100 s waits 1.1 to 1.4 s at most, not six");
+	check(deadline_ms(10000, 3) == 4400 && deadline_ms(10000, 1) == 4133, "a photo at 1/100 s waits 4.1 to 4.4 s at most for its first frame");
+	check(deadline_ms(10000, 3, 2) == 8800, "the last try waits twice as long");
 	check(deadline_ms(LONGEST_US, 1) > LONGEST_US / 1000 * 2, "the longest exposure is waited for");
 	check(matches(16000, 16000) && matches(16100, 16000) && !matches(20000, 16000) && !matches(5000, 0), "an exposure matches within a tenth");
 
