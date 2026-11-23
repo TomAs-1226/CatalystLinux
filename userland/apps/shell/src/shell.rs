@@ -318,6 +318,20 @@ pub trait Screen {
     fn busy(&self) -> bool {
         false
     }
+    /// Something on the page that changes on its own and is not motion: the
+    /// field's robot, as often as its pose arrives; a replay playing. Asked
+    /// on every look with the time that has really passed (motion's stands
+    /// still at rest), with the robot as just refreshed. True to be drawn.
+    /// It never holds the frame beat: the main loop looks in as often as
+    /// [`Screen::ambient`] says, as it does for Music's bars (0.8.1).
+    fn ambient_tick(&mut self, _dt: f32, _robot: &Robot) -> bool {
+        false
+    }
+    /// How often the main loop looks in for [`Screen::ambient_tick`] while
+    /// nothing moves; `None` for the usual four times a second.
+    fn ambient(&self) -> Option<std::time::Duration> {
+        None
+    }
     /// A word for the island when the screen opens.
     fn greeting(&self) -> Option<&'static str> {
         None
@@ -2277,20 +2291,32 @@ impl Shell {
         } else if self.standby.asleep() && self.deep.due(self.standby.idle(), self.settings.battery.deep_after, dt) && self.deep_blocker().is_none() {
             self.enter_deep();
         }
+        // The page's own ambient change (the field's robot, a replay
+        // playing), in real time: drawn, but not counted as motion.
+        let ambient = self.transition.is_none() && !self.standby.asleep() && self.stack.last_mut().is_some_and(|(s, _)| s.ambient_tick(dt, &self.robot));
         // With the screen off and dark, nothing is drawn (or sent to the panel).
-        let draw = (moving || changed || self.dirty) && !self.standby.asleep();
+        let draw = (moving || changed || ambient || self.dirty) && !self.standby.asleep();
         self.dirty = false;
         self.moving = moving;
         draw
     }
 
     /// Something drawn a few times a second that is not motion (Music's
-    /// bars on the island): how often the main loop looks in for it.
+    /// bars on the island, the field's robot): how often the main loop
+    /// looks in for it.
     pub fn ambient(&self) -> Option<std::time::Duration> {
+        if self.standby.asleep() {
+            return None;
+        }
         // My own tuning: 15 a second, lively enough for bars that follow
         // the music, and about a quarter of the frames (and the panel's
         // time, as only the island's rows change) of keeping to the beat.
-        (!self.standby.asleep() && self.activities.bars_live).then_some(std::time::Duration::from_millis(66))
+        let bars = self.activities.bars_live.then_some(std::time::Duration::from_millis(66));
+        let page = if self.transition.is_none() { self.stack.last().and_then(|(s, _)| s.ambient()) } else { None };
+        match (bars, page) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Whether something on screen is in motion.

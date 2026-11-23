@@ -2067,6 +2067,8 @@ impl Screen for RobotScreen {
         match key {
             Key::Enter => self.editing = Some(String::new()),
             Key::Back => return Nav::Pop,
+            // The field, with the robot where its pose says.
+            Key::Right | Key::Char('f') => return Nav::Push(Box::new(crate::field::FieldPage::default())),
             _ => {}
         }
         Nav::Stay
@@ -2149,7 +2151,11 @@ impl Screen for RobotScreen {
                 }
             }
         }
-        g.hint(if self.editing.is_some() { "team number, ip or host · enter" } else { "enter: set the robot address" });
+        if self.editing.is_some() {
+            g.hint("team number, ip or host · enter");
+        } else {
+            g.hint_any(&["enter: robot address · →: the field", "enter: address · →: field", "→: the field"]);
+        }
     }
 }
 
@@ -2387,9 +2393,12 @@ impl Screen for LogsScreen {
 }
 
 /// One match: how long, how low the battery went, the worst loop, and
-/// everything that stood out, worst first.
+/// everything that stood out, worst first, each that happened at a moment
+/// with its time. Enter replays the match there (the first row, from the
+/// start); the focus starts on the worst finding.
 pub struct LogDetail {
     title: String,
+    name: String,
     digest: Digest,
     list: ListState,
 }
@@ -2397,7 +2406,15 @@ pub struct LogDetail {
 impl LogDetail {
     /// A log's summary, once it has been read.
     pub fn of(row: &crate::logs::Row) -> Option<Self> {
-        Some(LogDetail { title: row.title(), digest: row.digest.clone()?, list: ListState::default() })
+        let digest = row.digest.clone()?;
+        let mut list = ListState::default();
+        list.focus = (!digest.highlights.is_empty()) as usize;
+        Some(LogDetail { title: row.title(), name: row.name.clone(), digest, list })
+    }
+
+    /// The match as the replay names it: "Q14", else its log's time.
+    fn short_title(&self) -> String {
+        crate::offline::facts::label_from_name(&self.name).unwrap_or_else(|| self.title.clone())
     }
 }
 
@@ -2406,11 +2423,18 @@ impl Screen for LogDetail {
         "Match"
     }
 
-    fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
-        if key == Key::Back {
-            return Nav::Pop;
+    fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
+        match key {
+            Key::Back => return Nav::Pop,
+            Key::Enter => {
+                let at = self.list.focus.checked_sub(1).and_then(|i| self.digest.highlights.get(i)).and_then(|(_, text)| self.digest.moment(text));
+                match crate::replay::Replay::of_log(&self.name, &self.short_title(), &cx.robot.logs, at) {
+                    Some(replay) => return Nav::Push(Box::new(replay)),
+                    None => *cx.say = Some("the log is not on this handheld".into()),
+                }
+            }
+            other => list_key(&mut self.list, other, self.digest.highlights.len() + 1),
         }
-        list_key(&mut self.list, key, self.digest.highlights.len());
         Nav::Stay
     }
 
@@ -2436,14 +2460,22 @@ impl Screen for LogDetail {
         let list_top = top + chip_h + GAP;
         let bottom = g.above_hint();
         let row_h = g.row_h();
-        for (i, y) in self.list.layout(g, d.highlights.len(), list_top, row_h, 3.0, bottom) {
-            let (level, text) = &d.highlights[i];
+        let rows = d.highlights.len() + 1;
+        for (i, y) in self.list.layout(g, rows, list_top, row_h, 3.0, bottom) {
             let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
+            let focused = i == self.list.focus;
+            let Some((level, text)) = i.checked_sub(1).and_then(|k| d.highlights.get(k)) else {
+                g.row(r, "    replay the match", "", t.dim, focused);
+                g.icon("play_arrow", true, r.x + 13.0, r.cy(), 13.0, t.ink);
+                continue;
+            };
             let color = level_color(g, *level);
-            g.row(r, &format!("    {text}"), "", t.dim, i == self.list.focus);
+            // When it happened, to replay it there.
+            let when = d.moment(text).map(|at| crate::replay::clock(at as f32)).unwrap_or_default();
+            g.row(r, &format!("    {text}"), &when, t.dim, focused);
             g.dot(r.x + 12.0, r.cy(), 3.0, color);
         }
-        self.list.scrollbar(g, d.highlights.len(), list_top, bottom);
+        self.list.scrollbar(g, rows, list_top, bottom);
         let fitted = g.text.fit(&self.title, &ty.caption, W - 2.0 * PAD);
         g.hint(&fitted);
     }

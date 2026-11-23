@@ -294,6 +294,7 @@ mod tests {
             loop_overruns: Some(1),
             hottest: Some(("Elevator".into(), temp)),
             can_peak: Some(0.4),
+            moments: Vec::new(),
         };
         let rows: Vec<Row> = [(11.8, 55.0), (11.6, 58.0), (11.9, 54.0), (11.7, 57.0)]
             .iter()

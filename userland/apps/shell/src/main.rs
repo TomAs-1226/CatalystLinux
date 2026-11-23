@@ -70,6 +70,7 @@ mod control;
 mod deep;
 mod device;
 mod faces;
+mod field;
 mod files;
 #[cfg(not(target_arch = "aarch64"))]
 mod gallery3d;
@@ -122,6 +123,7 @@ mod pty;
 mod platform;
 mod recents;
 mod reminders;
+mod replay;
 mod remote;
 mod robot;
 mod robot3d;
@@ -626,6 +628,15 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--audio-shots") {
         return audio_shots(std::path::Path::new(&dir));
+    }
+    // The field, live on the demo robot, and a match's replay (0.9).
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--field-shots") {
+        tour_fixtures();
+        let own = std::env::temp_dir().join(format!("catalyst-field-shots-{}", std::process::id()));
+        std::fs::create_dir_all(&own).ok();
+        std::env::set_var("CATALYST_CONF", own.join("robot"));
+        return field::shots(std::path::Path::new(&dir));
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--standby-shots") {

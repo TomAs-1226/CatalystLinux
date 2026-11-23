@@ -131,6 +131,8 @@ pub struct Spec {
     pub extra: usize,
     /// The FMS's match type and number (2: qualification).
     pub fms: Option<(i64, i64)>,
+    /// On the red alliance (the FMS's `IsRedAlliance`, logged with the match).
+    pub red: bool,
 }
 
 impl Spec {
@@ -168,6 +170,7 @@ impl Spec {
             checks: Vec::new(),
             extra: 0,
             fms: crate::offline::facts::label_from_name(name).and_then(|l| l.strip_prefix('Q').and_then(|n| n.parse().ok())).map(|n| (2, n)),
+            red: false,
         }
     }
 
@@ -253,6 +256,11 @@ impl Log {
         self.record(id, t, &bytes);
     }
 
+    fn raw(&mut self, name: &str, kind: &str, t: f64, bytes: &[u8]) {
+        let id = self.id(name, kind, t);
+        self.record(id, t, bytes);
+    }
+
     fn texts(&mut self, name: &str, t: f64, v: &[String]) {
         let id = self.id(name, "string[]", t);
         let mut bytes = (v.len() as u32).to_le_bytes().to_vec();
@@ -290,6 +298,7 @@ pub fn write(spec: &Spec) -> Vec<u8> {
         log.int("NT:/FMSInfo/MatchType", 0.0, kind);
         log.int("NT:/FMSInfo/MatchNumber", 0.0, number);
         log.text("NT:/FMSInfo/EventName", 0.0, "NYRO");
+        log.flag("NT:/FMSInfo/IsRedAlliance", 0.0, spec.red);
     }
     if let Some(auto) = &spec.auto {
         if let Some((metres, degrees)) = auto.start_off {
@@ -524,6 +533,16 @@ pub fn write(spec: &Spec) -> Vec<u8> {
         // Something else every robot logs, for the reader to step over.
         log.double(&format!("{NT}Swerve/HeadingDeg"), t, (m * 11.0 + phase * 40.0).rem_euclid(360.0));
         log.double(&format!("{NT}Swerve/SpeedMPS"), t, if enabled { 1.8 + 1.2 * (m * 0.5).sin() } else { 0.0 });
+        // Where it is on the field: AdvantageKit's odometry pose, or (every
+        // other match) WPILib's Field2d, as DataLogManager records them.
+        let pose = crate::field::demo_match(m as f32, spec.seed, spec.red);
+        let (x, y, heading) = (pose.x as f64, pose.y as f64, pose.heading as f64);
+        if spec.seed % 2 == 0 {
+            let bytes: Vec<u8> = [x, y, heading].iter().flat_map(|v| v.to_le_bytes()).collect();
+            log.raw("NT:/AdvantageKit/RealOutputs/Odometry/Robot", "struct:Pose2d", t, &bytes);
+        } else {
+            log.doubles("NT:/SmartDashboard/Field/Robot", t, &[x, y, heading.to_degrees()]);
+        }
     }
     log.out
 }
@@ -574,6 +593,8 @@ pub fn demo_event() -> Vec<Spec> {
         shooter.peak_c = temp - 9.0;
         s.can_spikes.push((84.0, 0.6, 0, can));
         s.auto = Some(Auto { routine: "ThreePiece", done_at: Some(16.5 + i as f64 * 0.2), start_off: None });
+        // The alliance each was played on (Q9 as the demo schedule has it).
+        s.red = matches!(i, 0 | 1 | 3 | 5);
         out.push(s);
     }
     out
