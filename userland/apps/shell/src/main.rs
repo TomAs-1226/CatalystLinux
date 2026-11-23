@@ -22,6 +22,8 @@
 //! catalyst-shell clip …           the clipboard for scripts (`catalyst-clip`, a link to this)
 //! catalyst-shell --widget-shots <dir>    every widget at each size, and Home showing them
 //! catalyst-shell --assistant-shots <dir>  the assistant's tasks, briefings and memory, to PNG
+//! catalyst-shell --mech-shots <dir>     Mech's calculators, dark and light, at each text size
+//! catalyst-shell --gamepad-shots <dir>  Gamepad on a simulated controller, dark and light, at each size
 //!     --robot <team|ip|host>     robot to connect to (overrides the saved one)
 //!     --demo                     a scripted robot instead of a real one
 //!     --arrive <seconds>         the scripted robot, plugged in that long after start
@@ -84,6 +86,7 @@ mod gallery3d;
 mod fullheight;
 mod equalizer;
 mod gfx;
+mod gamepad;
 mod git;
 mod github;
 mod flow;
@@ -107,6 +110,7 @@ mod lock;
 mod lockpages;
 mod logs;
 mod look;
+mod mech;
 mod monitor;
 mod music;
 mod nettools;
@@ -671,6 +675,14 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--unitv-shots") {
         return unitv::shots(std::path::Path::new(&dir));
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--mech-shots") {
+        return mech::shots::shots(std::path::Path::new(&dir));
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--gamepad-shots") {
+        return gamepad::shots::shots(std::path::Path::new(&dir));
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--standby-shots") {

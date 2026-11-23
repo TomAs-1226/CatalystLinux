@@ -15,7 +15,7 @@ windows that grow out of tiles whenever it is there.
 | `userland/crates/bezel` | Bezel on the CPU: tonal surfaces, the two type voices, Material Symbols, and the full glass pass (refraction, frost, edge light, groups, shadow). |
 | `userland/crates/nt4` | A NetworkTables 4.1 client: one thread, read-only, reconnects on its own. |
 | `userland/crates/apriltag` | AprilTag detection: AprilRobotics' C library (3.4.5, BSD 2-Clause, vendored with the 36h11 family FRC uses) behind a small flat shim, with each tag's pose. |
-| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, Camera, Photos, AprilTag, Graphs, Pit, Remote, Level, Compass, Weather, Calculator, Clock, Notes, Units, HTTP, Share, Browse, Assistant, Web, Music, Settings) and the launcher for external ones. |
+| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, Camera, Photos, AprilTag, Graphs, Pit, Remote, Level, Compass, Weather, Calculator, Clock, Notes, Units, Mech, Gamepad, HTTP, Share, Browse, Assistant, Web, Music, Settings) and the launcher for external ones. |
 | `userland/apps/update` | `catalyst-update`: system updates on the handheld (A/B, tried once, rolled back if it does not come up), and the release tool that makes and signs them. |
 | `userland/apps/flasher` | Catalyst Flasher: the newest release onto an SD card in one go. |
 | `userland/assets/app-icon` | Catalyst's icon (the FrcCatalyst bolt) at each size Windows uses, built into the simulator; `assets/` holds it for Raspberry Pi Imager's listing. |
@@ -2064,6 +2064,34 @@ The Pit app opens on two cards, the checklist and the match timer.
   2.0 fills from the FMS), that is shown instead, its period told from what
   it counted before (the clock alone cannot tell AUTO's 0:15 from END
   GAME's).
+
+## Mech and Gamepad
+
+**Mech** works a mechanism out from its motor: a gear train (gears, belts
+and chains, typed as teeth `12:60`, Left and Right for the kind), a
+drivetrain (free and real top speed, acceleration, time to cover a
+distance, pushing force, the current where the wheels slip), an arm
+(holding current at its worst angle, gravity's torque, time to move), an
+elevator (speed and current with its load, the most it can hold) and a
+flywheel (spin-up and recovery). Tab steps through the numbers and they are
+typed straight in; the card on the left shows the two that matter and a
+graph, which glides to each new answer. The motor model is ReCalc's (a DC
+motor, linear between its free and stall points, under a stator current
+limit), over the motor table in `apps/shell/src/mech/motors.tsv` (Kraken
+X60 and X44 with and without FOC, NEO, NEO 2.0, Vortex, NEO 550, Falcon
+500, Minion, Pulsar, CIM, mini-CIM, BAG, 775pro), each line's source named.
+Ctrl-S keeps a mechanism by name in `/data/mech/`.
+
+**Gamepad** checks a driver's controller in the USB-A port (Xbox, PlayStation,
+a Logitech F310 in either mode, any HID gamepad, read through evdev and
+found as it is plugged in). It shows both sticks, the triggers, the D-pad
+and every button live, every axis it has as a bar, and rumbles (`r`). Its
+check: two seconds hands off (drift and shake), then both sticks rolled
+round their edges (full throw, and how often reports come); it suggests a
+deadzone and says good, fair or worn. Enter keeps the result, named, by the
+controller's ID in `/data/gamepad/`, and the last page lists them best first:
+the one to bring is on top. USB-A needs Settings › USB on charging only and
+the USB switch on the hub's side; the page says so when it is not.
 
 ## Event schedule
 

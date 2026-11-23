@@ -74,7 +74,7 @@ struct App {
     open: fn(&Robot) -> Box<dyn Screen>,
 }
 
-const APPS: [App; 38] = [
+const APPS: [App; 40] = [
     App { icon: "smart_toy", name: "Robot", open: |_| Box::new(RobotScreen::default()) },
     App { icon: "monitor_heart", name: "Health", open: |_| Box::new(Health::default()) },
     App { icon: "description", name: "Logs", open: |_| Box::new(LogsScreen::default()) },
@@ -110,6 +110,9 @@ const APPS: [App; 38] = [
     // Passwords and secrets, sealed on the card, opened with the passcode.
     App { icon: "encrypted", name: "Vault", open: |_| Box::new(crate::vault::Vault::new()) },
     App { icon: "square_foot", name: "Units", open: |_| Box::new(crate::units::UnitsApp::new()) },
+    // For the pit: a mechanism worked out from its motor, and a driver's controller checked.
+    App { icon: "manufacturing", name: "Mech", open: |_| Box::new(crate::mech::MechApp::new()) },
+    App { icon: "sports_esports", name: "Gamepad", open: |_| Box::new(crate::gamepad::Gamepad::new()) },
     App { icon: "api", name: "HTTP", open: |_| Box::new(crate::http::Http::new()) },
     App { icon: "qr_code_2", name: "Share", open: |robot| Box::new(crate::share::Share::new(robot)) },
     App { icon: "auto_awesome", name: "Assistant", open: |_| Box::new(crate::ai::Assistant::new()) },
@@ -576,6 +579,8 @@ impl Home {
             "Reminders" => crate::reminders::tile(),
             "Vault" => ((if crate::vault::is_open() { "open" } else { "passwords" }).into(), None),
             "Units" => ("in·lb · N·m".into(), None),
+            "Mech" => ("ratio · arm · drive".into(), None),
+            "Gamepad" => crate::gamepad::tile(),
             "HTTP" => ("GET · POST".into(), None),
             "Share" => ("as a QR code".into(), None),
             "Assistant" => crate::ai::tile(),
@@ -4463,7 +4468,7 @@ mod tests {
         pretend(Some(Found::Nothing));
         let shown = builtin(&Home::new());
         assert!(!shown.iter().any(|n| n == "Level" || n == "Compass"), "{shown:?}");
-        assert_eq!(shown.len(), 36, "the thirty-six the emulator's run counts on (all but Level and Compass are on every unit)");
+        assert_eq!(shown.len(), 38, "the thirty-eight the emulator's run counts on (all but Level and Compass are on every unit)");
         assert_eq!(shown.last().map(String::as_str), Some("Settings"), "Settings stays last");
         assert_eq!(builtin_apps().position(|(_, _, n)| n == "Terminal"), Some(8), "Terminal where it was");
         assert!(!builtin_apps().any(|(_, _, n)| n == "Level"), "nor in search");

@@ -107,6 +107,8 @@ const ALSO: &[(&str, &str)] = &[
     ("Clock", "timer stopwatch alarm"),
     ("Notes", "memo pit notes"),
     ("Units", "convert conversion"),
+    ("Mech", "mechanism gear ratio motor arm elevator flywheel drivetrain recalc"),
+    ("Gamepad", "controller joystick xbox playstation drift deadzone"),
     ("HTTP", "api request curl"),
     ("Share", "qr code"),
     ("Assistant", "ai claude chatgpt openai ask"),
