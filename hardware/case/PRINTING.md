@@ -11,7 +11,7 @@ The first print failed. Revision 3 fixes each cause:
 | Frame turned to spaghetti | It stood 25.5 mm tall on about 1 mm of lip, and its port windows printed as 12-41 mm bridges | The frame is now a 4.9 mm bezel: the lip plus a flat cheek beside the screen. It prints face-down on a much bigger flat area. The side walls moved into the backplates, and every port window is a notch open at the top of the print on both parts. No bridges, no supports. |
 | Back cover came out "weird" | Big shallow pockets on the face that prints on the bed: a 0.5 mm grip panel over 69 × 18 mm and a 0.8 mm trim pocket. Both print as bridges just above the first layers. A 1.5 mm inward ledge inside the lip, 14.6 mm up, needed a ring of supports. The pins were printed upright and weak. | Nothing is recessed on the bed face except bridgeable details: a 0.8 mm groove outlines the grip panel, and the counterbores are 4.2 mm. No inward ledges. The rear edges start with a 45° chamfer. Walls are 2 mm, ribs stiffen the pod, and screw towers have 1.7 mm walls. |
 | UnitV pins didn't click | Short, and printed upright | Separate click pins, printed lying down |
-| Grove plug didn't fit the cable opening | The opening was 3.8 × 8.6 mm | 12 × 8 mm, with a proper channel inside |
+| Grove plug didn't fit the cable opening | The opening was 3.8 × 8.6 mm | 13 × 9 mm, with a proper channel inside |
 
 **Colour.** Everything new is **black PLA**. The gold trim, gold accent and blue link cover are gone:
 
@@ -24,7 +24,7 @@ The first print failed. Revision 3 fixes each cause:
 | --- | --- | --- |
 | Thickness | **40.5 mm** (42.9 at the lens ring) | **28.5 mm** |
 | Footprint | 88.5 × 58.5 mm (94.1 wide with the link cover) | 88.5 × 58.5 mm |
-| New black parts | 43.2 g, about 1 h 45 min | 26.9 g, about 55 min |
+| New black parts | 43.0 g, about 1 h 44 min | 26.9 g, about 55 min |
 | Weight with the CardputerZero (95 g), chassis, UnitV, cable and screws | about 165 g | about 132 g |
 
 ## 1. Parts
@@ -43,16 +43,16 @@ All STLs in `stl/` are already oriented for the bed (z = 0 is the bed).
 | Part | File | Material | **Print face (on the bed)** | Layer | Walls | Infill | Time | Filament |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Bezel (both versions) | `frame__black-PLA.stl` | black PLA | the **front face** (lip and cheek) | 0.20 | 5 | 25% | 6 min | 3.1 g |
-| Camera backplate | `back-camera__black-PLA.stl` | black PLA | the **outer back face** | 0.20 | 5 | 25% | 1 h 24 min | 36.4 g |
+| Camera backplate | `back-camera__black-PLA.stl` | black PLA | the **outer back face** | 0.20 | 5 | 25% | 1 h 23 min | 36.2 g |
 | Plain backplate | `back-plain__black-PLA.stl` | black PLA | the **outer back face** | 0.20 | 5 | 25% | 49 min | 23.8 g |
 | Lens ring (camera) | `lens-ring-camera__black-PLA.stl` | black PLA (gold optional) | the **ring's top face**, spigot up | 0.16 | 4 | 100% | 2 min | 0.5 g |
-| Link cover (camera) | `link-cover-camera__black-PLA.stl` | black PLA | the **flat outer face**, hooks up | 0.16 | 4 | 30% | 8 min | 2.3 g |
+| Link cover (camera) | `link-cover-camera__black-PLA.stl` | black PLA | the **flat outer face**, hooks up | 0.16 | 4 | 30% | 8 min | 2.2 g |
 | UnitV pins ×4 (2 + 2 spare) | `pins-camera__black-PLA.stl` | black PLA | **lying on their flats** (the split stands vertical) | 0.12 | 4 | 100% | 6 min | 0.9 g |
 | **Fit test** | `fit-test__black-PLA.stl` | black PLA | as placed | 0.20 | 2 | 15% | **30 min** | 13.9 g |
 | Chassis (both) | `chassis__white-PETG.stl` | white PETG | **already printed, not on the black plate** | | | | | |
 | Plunger (camera) | `plunger-camera__white-PETG.stl` | white PETG | **already printed, not on the black plate** | | | | | |
 
-**Total of the new black parts:** both backplates, bezel, small parts and fit test come to **about 3 h 04 min and 81 g**.
+**Total of the new black parts:** both backplates, bezel, small parts and fit test come to **about 3 h 03 min and 81 g**.
 
 ### Ready-to-print plate: `plates/black-PLA.3mf`
 
@@ -135,14 +135,15 @@ It takes **about 3 h 18 min and 66.6 g**, brims included, as sliced by Creality 
 
 ## 4. Grove cable routing (camera)
 
-**Size.** The pass-through in the backplate's right wall is **12 × 8 mm**:
+**Size.** The pass-through in the backplate's right wall is **13 × 9 mm**:
 
-- **Plug envelope:** the HY2.0-4P plug is about 10 mm wide and 6 mm tall with its latch.
-  - The width comes from the JST-PH-compatible 2.0 mm 4-way housing (9.9 mm).
-  - The matching board receptacle is 10 × 5.1 mm (LCSC C7429580).
-  - The latch adds about 1 mm.
+- **Plug envelope:** 11 × 7 mm. You described your plug as "just ever so slightly wider than a USB-C port" and taller because of its two latch bumps.
+  - A USB-C port is 8.9 × 3.3 mm.
+  - The JST-PH-size 2.0 mm 4-way housing is 9.9 mm wide.
+  - The board receptacle (LCSC C7429580) is 10 × 5.1 mm.
 - **Margin:** 1 mm all round on top of that envelope.
 - **Roof:** the opening has a 45° pointed top, so it prints without a bridge.
+- **Channel entry:** inside, the channel's guide walls stop 5 mm short of the wall (`entry_len`). The plug, latch bumps included, therefore passes straight through the full 13 × 9 mm opening.
 
 If your plug is bigger, measure it and set `plug` in `case.scad`.
 

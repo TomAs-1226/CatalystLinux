@@ -1,6 +1,6 @@
 """Export case.scad to STL.
 
-usage: python tools/build.py [render|print|all]   (default: all)
+usage: python tools/build.py [render|print|all] [print parts...]   (default: all)
   render -> out/stl/<part>.stl      device coordinates, for tools/render.py
   print  -> stl/<name>.stl          oriented for the bed, named part__material-colour
 OpenSCAD: $OPENSCAD, else the portable copy in hardware/case/.tools, else PATH.
@@ -68,7 +68,8 @@ def main():
         jobs += [(p, os.path.join(HERE, "out", "stl", p + ".stl")) for p in RENDER]
     if mode in ("print", "all"):
         os.makedirs(os.path.join(HERE, "stl"), exist_ok=True)
-        jobs += [(p, os.path.join(HERE, "stl", n + ".stl")) for p, n in PRINT.items()]
+        only = sys.argv[2:]   # optional: just these print parts, e.g. camera_back_print link_print
+        jobs += [(p, os.path.join(HERE, "stl", n + ".stl")) for p, n in PRINT.items() if not only or p in only]
     failed = False
     with cf.ThreadPoolExecutor(max_workers=6) as ex:
         for part, ok, dt, msg in ex.map(lambda j: build(exe, *j), jobs):

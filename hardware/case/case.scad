@@ -51,8 +51,9 @@ k_hole_d = 4.85;                     // LEGO-style hole straight through the 8.2
 k_cbore  = [6.2, 1.0];               // counterbore at both faces (diameter, depth)
 k_holes  = [[4, 28.2], [20, 28.2]];  // in its own frame: x from its outer side, z from its lens end
 
-/* ===== 4. Grove HY2.0-4P plug: JST-PH-size 2.0 mm 4-way housing + latch ===== */
-plug        = [10.0, 6.0, 9.0];  // width, height with latch, length with strain relief
+/* ===== 4. Grove HY2.0-4P plug: the user's plug is "slightly wider than a USB-C port,
+   and taller with two latch bumps" -- sized up from the JST-PH-size 2.0 mm 4-way housing ===== */
+plug        = [11.0, 7.0, 9.0];  // width, height over the latch bumps, length with strain relief
 plug_margin = 1.0;               // added all round for the pass-through
 
 /* ===== 5. Fit: tune these from the fit test (PRINTING.md, "Fit test") ===== */
@@ -115,9 +116,10 @@ Zc      = k_back - k_size[2] - 0.3 - wall;   // camera back surface (-16.6): set
 seat_z  = -tip_gap - screw_len;      // head seat for the nut screws (-3.4)
 floor_t = (Zch - fz_boss[1]) - seat_z;       // plastic under the head (1.2)
 Zp      = seat_z - screw_head[1] - 0.1;      // plain back surface (-4.6): head sinks below it
-pass    = [plug[0] + 2 * plug_margin, plug[1] + 2 * plug_margin];  // 12 x 8
+pass    = [plug[0] + 2 * plug_margin, plug[1] + 2 * plug_margin];  // 13 x 9
 pass_y  = 30.5;                      // pass-through centre (Y): channel stays under the UnitV tail
-pass_z  = [Zc + wall + 1.4, Zc + wall + 1.4 + pass[1]];  // pass-through Z span (-13.2 .. -5.2), clear of the rear-edge round
+entry_len = 5.0;                     // channel guides stop this far from the wall: open plug entry
+pass_z  = [Zc + wall + 1.4, Zc + wall + 1.4 + pass[1]];  // pass-through Z span (-13.2 .. -4.2), clear of the rear-edge round
 k_pins  = [for (h = k_holes) [k_x1 - h[0], k_top - h[1]]];
 function fov_x(d) = 1.5 + d * tan(imx_fov[0] / 2 + fov_margin);
 function fov_y(d) = 1.5 + d * tan(imx_fov[1] / 2 + fov_margin);
@@ -326,7 +328,10 @@ module camera_back() {
                     // UnitV pin bosses (sockets for the separate click pins)
                     for (p = k_pins) translate([p[0], p[1], Zc + 1]) cylinder(d = 9, h = k_tail - 0.2 - Zc - 1);
                     // cable channel guides (3.5 tall)
-                    translate([0, 0, Zc + wall - 0.01]) linear_extrude(3.5) difference() { channel2d(1.6); channel2d(0); }
+                    translate([0, 0, Zc + wall - 0.01]) linear_extrude(3.5) difference() {
+                        channel2d(1.6); channel2d(0);
+                        translate([X1 - wall - entry_len, pass_y - pass[0] / 2]) square([entry_len + 1, pass[0]]);  // open entry
+                    }
                     // guide for the frozen plunger (open toward the UnitV)
                     translate([fz_plunger[0], fz_plunger[1], Zc + 1]) difference() {
                         translate([-2.6, -3.2, 0]) cube([3.6, 6.4, 11]);
@@ -340,7 +345,7 @@ module camera_back() {
                 translate([lens[0] + 2.5 - 1.2, y, Zc + wall + 2.3]) cube([2.8, 3, 1.2]);
                 translate([lens[0] - 2.5 - 1.6, y, Zc + wall + 2.3]) cube([2.8, 3, 1.2]);
             }
-            translate([77, pass_y + 2.5 - 1.2, Zc + wall + 2.3]) cube([3, 2.8, 1.2]);
+            translate([X1 - wall - entry_len - 4, pass_y + 2.5 - 1.2, Zc + wall + 2.3]) cube([3, 2.8, 1.2]);
             for (s = slots) slot_hook(s[0]);
         }
         bay_cut();
@@ -444,7 +449,7 @@ module soft_bar(y0, y1, z0, z1, p, r = 2.4)
     }
 // Link cover: closes over the Grove cable between the pass-through and the device's
 // Grove plug; two hooks clip into the pass-through; a window keeps the side control reachable.
-lc = [pass_y - pass[0] / 2 - 2.5, 47.4, pass_z[0] - 0.8, 9.5, 5.6];   // y0 y1 z0 z1 protrusion
+lc = [pass_y - pass[0] / 2 - 2.0, 47.4, pass_z[0] - 0.8, 9.5, 5.6];   // y0 y1 z0 z1 protrusion (clear of the button-A key)
 module link() {
     cy = [pass_y - pass[0] / 2 + 1.4, pass_y + pass[0] / 2 - 1.4];   // cable space between the hooks
     difference() {
