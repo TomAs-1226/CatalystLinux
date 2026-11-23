@@ -1347,6 +1347,29 @@ pub(crate) fn request(service: Service, key: &str, body: &Value) -> Result<Value
     serde_json::from_str(body).map_err(|_| "the answer could not be read".to_owned())
 }
 
+/// One question to Claude about what `system` and the question give it,
+/// with no tools and no web (Rulebook asks about the rules its search
+/// found): the request `Chat::body` makes for Claude, less the tools, and
+/// the words of its answer.
+pub(crate) fn grounded_request(key: &str, system: &str, question: &str, max_tokens: u32) -> Result<String, String> {
+    let service = Service::Claude;
+    let body = json!({
+        "model": service.model(),
+        "max_tokens": max_tokens,
+        "system": system,
+        "output_config": {"effort": Effort::Light.wire()},
+        "fallbacks": "default",
+        "cache_control": {"type": "ephemeral"},
+        "messages": [{"role": "user", "content": question}],
+    });
+    let reply = request(service, key, &body)?;
+    match Chat::for_mode(service, Mode::Browse).take(&reply)? {
+        Reply { stop: Stop::Refused(why), .. } => Err(why),
+        Reply { text, .. } if text.trim().is_empty() => Err("an empty answer came back".into()),
+        Reply { text, .. } => Ok(text),
+    }
+}
+
 /// The on-device model: its server started if it is not running, then asked
 /// OpenAI-style chat completions over plain HTTP, on this handheld only.
 fn request_local(body: &Value) -> Result<Value, String> {

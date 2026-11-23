@@ -15,7 +15,7 @@ windows that grow out of tiles whenever it is there.
 | `userland/crates/bezel` | Bezel on the CPU: tonal surfaces, the two type voices, Material Symbols, and the full glass pass (refraction, frost, edge light, groups, shadow). |
 | `userland/crates/nt4` | A NetworkTables 4.1 client: one thread, read-only, reconnects on its own. |
 | `userland/crates/apriltag` | AprilTag detection: AprilRobotics' C library (3.4.5, BSD 2-Clause, vendored with the 36h11 family FRC uses) behind a small flat shim, with each tag's pose. |
-| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, Camera, Photos, AprilTag, Graphs, Pit, Remote, Level, Compass, Weather, Calculator, Clock, Notes, Units, HTTP, Share, Browse, Assistant, Web, Music, Settings) and the launcher for external ones. |
+| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, Camera, Photos, AprilTag, Graphs, Pit, Remote, Level, Compass, Weather, Calculator, Clock, Notes, Units, HTTP, Share, Browse, Rulebook, Assistant, Web, Music, Settings) and the launcher for external ones. |
 | `userland/apps/update` | `catalyst-update`: system updates on the handheld (A/B, tried once, rolled back if it does not come up), and the release tool that makes and signs them. |
 | `userland/apps/flasher` | Catalyst Flasher: the newest release onto an SD card in one go. |
 | `userland/assets/app-icon` | Catalyst's icon (the FrcCatalyst bolt) at each size Windows uses, built into the simulator; `assets/` holds it for Raspberry Pi Imager's listing. |
@@ -2862,6 +2862,28 @@ are kept), and Tab types afresh. Each page is a conversation of its own, so
 following links does not pile up what each page cost, and the address goes
 in the question itself, which is what lets Claude's `web_fetch` read it.
 The on-device model has no web, so Browse needs an OpenAI or Claude key.
+
+## Rulebook
+
+Rulebook (Home, after Browse) is FIRST's game manual on the handheld, for
+events where the Wi-Fi is bad. The manual is not in the image: on first open
+the handheld downloads FIRST's own HTML edition of the 2026 manual (REBUILT,
+about 1.2 MB, from `firstfrc.blob.core.windows.net`), reads it into its
+sections and rules (IDs, headlines, violations, blue boxes, tables) in well
+under a second, and keeps a compact index in `/data/rulebook/`. Online, it
+asks FIRST every six hours whether the file changed (a few hundred bytes);
+when a team update revises it, it downloads it again and Manual › What
+changed lists the rules changed, new and removed.
+
+Its chapters to read, at every text size; a rule's ID typed anywhere jumps to
+it ("G101", or "R2" for the rules it begins); `b` bookmarks a rule. Search is
+an inverted index with BM25 ranking, the matches marked; its dictionary is
+read on the first search and each word's postings from the card as needed.
+Ask answers a plain question from the rules the search finds: Claude (with
+its key, online) or the on-device model (offline, given as much of the rules
+as its 2048-token context holds), citing rule IDs, with the rules shown under
+the answer and a reminder that the head referee has the final word. FIRST's
+Q&A is not included: it now needs a FIRST account to read.
 
 ## On-device model
 

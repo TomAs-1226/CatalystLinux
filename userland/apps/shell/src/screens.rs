@@ -74,7 +74,7 @@ struct App {
     open: fn(&Robot) -> Box<dyn Screen>,
 }
 
-const APPS: [App; 38] = [
+const APPS: [App; 39] = [
     App { icon: "smart_toy", name: "Robot", open: |_| Box::new(RobotScreen::default()) },
     App { icon: "monitor_heart", name: "Health", open: |_| Box::new(Health::default()) },
     App { icon: "description", name: "Logs", open: |_| Box::new(LogsScreen::default()) },
@@ -103,6 +103,8 @@ const APPS: [App; 38] = [
     App { icon: "sunny", name: "Weather", open: |_| Box::new(crate::weather::Weather::new()) },
     // The web read for you: an address made readable, a question answered.
     App { icon: "travel_explore", name: "Browse", open: |_| Box::new(crate::browse::Browse::new()) },
+    // FIRST's game manual, kept on the handheld: read, searched, asked.
+    App { icon: "menu_book", name: "Rulebook", open: |_| Box::new(crate::rulebook::Rulebook::new()) },
     App { icon: "calculate", name: "Calculator", open: |_| Box::new(crate::calc::Calculator::new()) },
     App { icon: "timer", name: "Clock", open: |_| Box::new(crate::clock::Clock::new()) },
     App { icon: "sticky_note_2", name: "Notes", open: |_| Box::new(crate::notes::Notes::new()) },
@@ -580,6 +582,7 @@ impl Home {
             "Share" => ("as a QR code".into(), None),
             "Assistant" => crate::ai::tile(),
             "Browse" => ("read the web".into(), None),
+            "Rulebook" => crate::rulebook::tile(),
             "Web" => ("pages as text".into(), None),
             "Music" => crate::music::tile(),
             "Logs" => {
@@ -4463,7 +4466,7 @@ mod tests {
         pretend(Some(Found::Nothing));
         let shown = builtin(&Home::new());
         assert!(!shown.iter().any(|n| n == "Level" || n == "Compass"), "{shown:?}");
-        assert_eq!(shown.len(), 36, "the thirty-six the emulator's run counts on (all but Level and Compass are on every unit)");
+        assert_eq!(shown.len(), 37, "the thirty-seven the emulator's run counts on (all but Level and Compass are on every unit)");
         assert_eq!(shown.last().map(String::as_str), Some("Settings"), "Settings stays last");
         assert_eq!(builtin_apps().position(|(_, _, n)| n == "Terminal"), Some(8), "Terminal where it was");
         assert!(!builtin_apps().any(|(_, _, n)| n == "Level"), "nor in search");

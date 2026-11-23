@@ -134,6 +134,7 @@ mod replay;
 mod remote;
 mod robot;
 mod robot3d;
+mod rulebook;
 mod schedule;
 mod sched;
 mod schedbench;
@@ -519,6 +520,11 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--vault-shots") {
         return vault::shots::gallery(std::path::Path::new(&dir));
+    }
+    // Rulebook's pages, from its sample manual, dark and light at each size.
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--rulebook-shots") {
+        return rulebook::shots::gallery(std::path::Path::new(&dir));
     }
     // The clock, the battery and the card, measured for sched.rs's choices.
     if let Some(at) = args.iter().position(|a| a == "--sched-bench") {
