@@ -611,8 +611,9 @@ def updates(vm):
         check("config.txt starts system A and tries system B", len(parts) == 4 and "[all] os_prefix=slot-a/ [tryboot] os_prefix=slot-b/" in parts[0], parts[0] if parts else boot)
         check("system B's kernel is in slot-b, rooted on system B", len(parts) == 4 and "root=/dev/mmcblk0p3" in parts[1] and int("".join(c for c in parts[2].split()[-1:][0] if c.isdigit()) or 0) > 3 if parts[2].split() else False, boot)
         # The board's cmdline.txt as it is in os/ (0.6.1 was made with an old
-        # copy, and its graphics memory stayed at 32 MB).
-        check("system B starts with the board's own command line: 64 MB for graphics", len(parts) == 4 and "cma=64M" in parts[1], parts[1] if len(parts) == 4 else boot)
+        # copy, and its graphics memory stayed at 32 MB; 1.0.1's 128 MB is
+        # what a full-size photo needs).
+        check("system B starts with the board's own command line: 128 MB for graphics and the camera", len(parts) == 4 and "cma=128M" in parts[1], parts[1] if len(parts) == 4 else boot)
         # The Pi firmware for this chip reads tryboot.txt, not config.txt, on
         # the start an update is tried in (the emulator has no firmware, so
         # only the file is checked): it must start system B.

@@ -191,12 +191,15 @@ impl Timeline {
 
     /// Given up on, and why: no word from the camera program for too long
     /// at the step it is at (the order waiting for room, the camera
-    /// changing mode and trying the ways it has, then the exposure).
+    /// changing mode and trying the ways it has, then the exposure). The
+    /// exposure's wait is longer than the camera program's own last try
+    /// (8.8 s and the exposure: still.h's deadline_ms, twice): at 8 s the
+    /// shell gave up first, and that try's photo would have been lost.
     pub fn overdue(&self, now: Instant) -> Option<&'static str> {
         let since = |m: Mark| self.at(m).map_or(Duration::ZERO, |t| now.saturating_duration_since(t));
         match self.reached() {
             Mark::Key | Mark::Request if since(Mark::Key) > Duration::from_secs(15) => Some("the camera did not start the photo"),
-            Mark::Exposing if since(Mark::Exposing) > self.exposing.map_or(Duration::ZERO, |(_, d, _)| d) + Duration::from_secs(8) => Some("the camera did not finish the photo"),
+            Mark::Exposing if since(Mark::Exposing) > self.exposing.map_or(Duration::ZERO, |(_, d, _)| d) + Duration::from_secs(12) => Some("the camera did not finish the photo"),
             Mark::Exposed if since(Mark::Exposed) > Duration::from_secs(8) => Some("the photo's picture did not come"),
             _ => None,
         }
@@ -1198,7 +1201,8 @@ mod tests {
         t.exposing = Some(read_exposing("8000 1 still"));
         t.mark(Mark::Exposing, t0 + Duration::from_secs(1));
         assert_eq!(t.overdue(t0 + Duration::from_secs(16)), None, "a long exposure is given its time");
-        assert!(t.overdue(t0 + Duration::from_secs(18)).is_some());
+        assert_eq!(t.overdue(t0 + Duration::from_secs(19)), None, "and the camera program's last try");
+        assert!(t.overdue(t0 + Duration::from_secs(22)).is_some());
     }
 
     fn metered(lux: f32, total: f32) -> Metered {

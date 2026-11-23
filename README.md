@@ -1337,7 +1337,8 @@ It is automatic, and never a risk:
   Flow's atlases (2.9 MB) for a minute after Flow was last on screen.
   `catalyst-shell --about` gives what it holds now (`textures … mb`). The
   kernel reports the pool as `CmaTotal` and `CmaFree` in `/proc/meminfo`;
-  the boot line asks for 64 MB of it (`cma=64M`, which this kernel takes
+  the boot line asks for 128 MB of it (`cma=128M`, which a full-size photo
+  needs: its raw frame and picture are 22 MB together; this kernel takes it
   over the Device Tree's `linux,cma` node, saying "Skipping dt
   linux,cma-default" as it boots).
 - Memory: Mesa is loaded only once a GPU device is found, so without one, or

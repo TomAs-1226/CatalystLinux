@@ -6,8 +6,13 @@ arm_64bit=1
 # The firmware keeps 64 MB for itself, as M5Stack ships it: the camera's
 # image processing runs in the firmware and needs it (with 16 MB and the
 # cut-down firmware the camera does not appear). The GPU's 3D core is driven
-# by Linux (the vc4 driver) from its own contiguous memory pool, 32 MB, which
-# the rest of the system borrows while the GPU and camera do not need it. No
+# by Linux (the vc4 driver) from its own contiguous memory pool, which the
+# rest of the system borrows while the GPU and camera do not need it. Its size
+# is cmdline.txt's cma=, 128 MB, over the 32 MB asked for here: a full 8 MP
+# photo needs its raw frame (10 MB) and its picture (12 MB) in that pool at
+# once, and with 64 MB the image processor could not get them, so no photo
+# was ever taken (libcamera: "Unable to request 1 buffers: Out of memory";
+# found on a handheld, 23 November 2026). No
 # HDMI: the panel is an SPI display; the GPU draws into memory and the frame
 # goes out over SPI.
 gpu_mem=64
