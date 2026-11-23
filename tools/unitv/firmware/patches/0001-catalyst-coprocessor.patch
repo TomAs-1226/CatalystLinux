@@ -1,0 +1,210 @@
+diff -ruN a/components/kendryte_sdk/kendryte-standalone-sdk/lib/freertos/os_entry.c b/components/kendryte_sdk/kendryte-standalone-sdk/lib/freertos/os_entry.c
+--- a/components/kendryte_sdk/kendryte-standalone-sdk/lib/freertos/os_entry.c
++++ b/components/kendryte_sdk/kendryte-standalone-sdk/lib/freertos/os_entry.c
+@@ -26,6 +26,9 @@
+ 
+ void vApplicationIdleHook(void)
+ {
++    /* Catalyst Coprocessor: nothing to run, so the core waits for an
++     * interrupt (the scheduler's tick, a UART's byte) instead of spinning. */
++    asm volatile("wfi");
+ }
+ 
+ void vApplicationGetIdleTaskMemory(StaticTask_t **ppxIdleTaskTCBBuffer, StackType_t **ppxIdleTaskStackBuffer, uint32_t *pulIdleTaskStackSize)
+diff -ruN a/components/micropython/CMakeLists.txt b/components/micropython/CMakeLists.txt
+--- a/components/micropython/CMakeLists.txt
++++ b/components/micropython/CMakeLists.txt
+@@ -58,10 +58,18 @@
+     append_srcs_dir(MPY_PORT_SRCS "port/src/modules")
+     append_srcs_dir(MPY_PORT_SRCS "port/src/modules/ultrasonic/src")
+     append_srcs_dir(MPY_PORT_SRCS "port/src/modules/onewire")
++    if(CONFIG_MAIXPY_CATALYST_COPROCESSOR)
++        # No speech recogniser of MaixPy's (its ASR is a closed library):
++        # the Catalyst module's own front end, for the KPU's keyword spotter.
++        append_srcs_dir(MPY_PORT_SRCS "port/src/catalyst")
++        list(APPEND ADD_INCLUDE "${mpy_port_dir}/src/catalyst")
++        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DCATALYST_FIRMWARE=$ENV{CATALYST_FIRMWARE}")
++    else()
+     append_srcs_dir(MPY_PORT_SRCS "port/src/speech/")
+     append_srcs_dir(MPY_PORT_SRCS "port/src/speech/maix_asr")
+     list(APPEND ADD_STATIC_LIB "port/src/speech/maix_asr/libmaix_asr.a") # append_srcs_dir(MPY_PORT_SRCS "port/src/speech/maix_asr/src")
+     append_srcs_dir(MPY_PORT_SRCS "port/src/speech/isolated_word")
++    endif()
+     append_srcs_dir(MPY_PORT_SRCS "port/src/modules/ws2812/src")
+     append_srcs_dir(MPY_PORT_SRCS "port/src/modules/htpa/src")
+     append_srcs_dir(MPY_PORT_SRCS "port/src/modules/amg88xx/src")
+diff -ruN a/components/micropython/Kconfig b/components/micropython/Kconfig
+--- a/components/micropython/Kconfig
++++ b/components/micropython/Kconfig
+@@ -93,6 +93,10 @@
+ 			bool "support v4 kmodel"
+ 			default n
+ 
++		config MAIXPY_CATALYST_COPROCESSOR
++			bool "Catalyst Coprocessor: only the UnitV's modules, the catalyst module, sleeping delays"
++			default n
++
+ 		config MAIXPY_SPEECH_RECOGNIZER_ENABLE
+ 			bool "Enable Speech Recognizer"
+ 			default n
+diff -ruN a/components/micropython/port/include/mpconfigport.h b/components/micropython/port/include/mpconfigport.h
+--- a/components/micropython/port/include/mpconfigport.h
++++ b/components/micropython/port/include/mpconfigport.h
+@@ -383,6 +383,24 @@
+ #endif
+ /////////////////////////////////////////////////////////////////////////////////
+ 
++#if CONFIG_MAIXPY_CATALYST_COPROCESSOR
++// Catalyst Coprocessor: what the UnitV on a handheld's Grove port uses, and
++// nothing else (no LCD, audio, network, sockets, ciphers, NES, video or
++// speech recogniser: the UnitV has no screen, speaker, microphone or radio).
++extern const struct _mp_obj_module_t mp_module_catalyst;
++#define MICROPY_PORT_BUILTIN_MODULES \
++    { MP_OBJ_NEW_QSTR(MP_QSTR_uos), (mp_obj_t)&uos_module }, \
++    { MP_OBJ_NEW_QSTR(MP_QSTR_time), (mp_obj_t)&utime_module }, \
++    { MP_OBJ_NEW_QSTR(MP_QSTR_utime), (mp_obj_t)&utime_module }, \
++    { MP_OBJ_NEW_QSTR(MP_QSTR_Maix), (mp_obj_t)&maix_module },\
++    { MP_OBJ_NEW_QSTR(MP_QSTR_machine), (mp_obj_t)&machine_module },\
++    { MP_OBJ_NEW_QSTR(MP_QSTR_image), (mp_obj_t)&image_module }, \
++    { MP_OBJ_NEW_QSTR(MP_QSTR_sensor), (mp_obj_t)&sensor_module }, \
++    { MP_OBJ_NEW_QSTR(MP_QSTR_KPU), (mp_obj_t)&kpu_module }, \
++    { MP_OBJ_NEW_QSTR(MP_QSTR_uhashlib), (mp_obj_t)&mp_module_uhashlib_maix }, \
++    { MP_OBJ_NEW_QSTR(MP_QSTR_modules), (mp_obj_t)&mp_module_modules }, \
++    { MP_OBJ_NEW_QSTR(MP_QSTR_catalyst), (mp_obj_t)&mp_module_catalyst },
++#else
+ #define MICROPY_PORT_BUILTIN_MODULES \
+     { MP_OBJ_NEW_QSTR(MP_QSTR_uos), (mp_obj_t)&uos_module }, \
+     { MP_OBJ_NEW_QSTR(MP_QSTR_time), (mp_obj_t)&utime_module }, \
+@@ -407,6 +425,7 @@
+     MAIXPY_PY_LVGL_DEF \
+     MAIXPY_PY_LODEPNG_DEF \
+     MAIXPY_PY_TOUCHSCREEN_DEF
++#endif // CONFIG_MAIXPY_CATALYST_COPROCESSOR
+ 
+ 
+ 
+diff -ruN a/components/micropython/port/src/Maix/Maix_kpu.c b/components/micropython/port/src/Maix/Maix_kpu.c
+--- a/components/micropython/port/src/Maix/Maix_kpu.c
++++ b/components/micropython/port/src/Maix/Maix_kpu.c
+@@ -1356,7 +1356,14 @@
+         }
+         else
+         {
+-            mp_raise_ValueError("input not support");
++            // Catalyst Coprocessor: a float32 tensor as a buffer (an
++            // array('f')), as it is, without a list of boxed floats.
++            mp_buffer_info_t bufinfo;
++            if (!mp_get_buffer(args[ARG_img].u_obj, &bufinfo, MP_BUFFER_READ) || bufinfo.len < sizeof(float) || ((uintptr_t)bufinfo.buf & 3) != 0)
++            {
++                mp_raise_ValueError("input not support");
++            }
++            data_in = (uint8_t*)bufinfo.buf;
+         }
+ 		int out_index = args[ARG_out_index].u_int;		//which output you want, defaultly index 0
+ 		/*************************************************************************************/
+diff -ruN a/components/micropython/port/src/Maix/modMaix.c b/components/micropython/port/src/Maix/modMaix.c
+--- a/components/micropython/port/src/Maix/modMaix.c
++++ b/components/micropython/port/src/Maix/modMaix.c
+@@ -23,9 +23,11 @@
+     { MP_OBJ_NEW_QSTR(MP_QSTR___name__), MP_OBJ_NEW_QSTR(MP_QSTR_machine) },
+     { MP_ROM_QSTR(MP_QSTR_FPIOA), MP_ROM_PTR(&Maix_fpioa_type) },
+     { MP_ROM_QSTR(MP_QSTR_GPIO),  MP_ROM_PTR(&Maix_gpio_type) },
++#if !CONFIG_MAIXPY_CATALYST_COPROCESSOR
+     { MP_ROM_QSTR(MP_QSTR_I2S),  MP_ROM_PTR(&Maix_i2s_type) },
+     { MP_ROM_QSTR(MP_QSTR_Audio),  MP_ROM_PTR(&Maix_audio_type) },
+     { MP_ROM_QSTR(MP_QSTR_FFT),  MP_ROM_PTR(&Maix_fft_type) },
++#endif
+ #if CONFIG_MAIXPY_MIC_ARRAY_ENABLE
+     { MP_ROM_QSTR(MP_QSTR_MIC_ARRAY),  MP_ROM_PTR(&Maix_mic_array_type) },
+ #endif
+diff -ruN a/components/micropython/port/src/mphalport.c b/components/micropython/port/src/mphalport.c
+--- a/components/micropython/port/src/mphalport.c
++++ b/components/micropython/port/src/mphalport.c
+@@ -15,7 +15,8 @@
+ 
+ #if  MICROPY_PY_THREAD
+ 	#include "FreeRTOS.h"
+-#endif 
++	#include "task.h"
++#endif
+ 
+ int mp_hal_stdin_rx_chr(void) {
+ 	int c = 0;
+@@ -89,6 +90,23 @@
+ 	return (unsigned long)(read_csr(mcycle));
+ }
+ 
++#if CONFIG_MAIXPY_CATALYST_COPROCESSOR
++// Catalyst Coprocessor (port/src/catalyst/modcatalyst.c): time from the
++// CLINT's timer, continuous across changes of the CPU clock and while the
++// CPU waits for an interrupt; and delays that sleep.
++extern uint64_t catalyst_time_us(void);
++extern volatile int catalyst_sleeping;
++
++mp_uint_t mp_hal_ticks_us(void)
++{
++	return (mp_uint_t)catalyst_time_us();
++}
++
++mp_uint_t mp_hal_ticks_ms(void)
++{
++	return (mp_uint_t)(catalyst_time_us() / 1000);
++}
++#else
+ mp_uint_t inline mp_hal_ticks_us(void)
+ {
+ 	return (unsigned long)(read_csr(mcycle)/(sysctl_clock_get_freq(SYSCTL_CLOCK_CPU)/1000000));
+@@ -98,8 +116,9 @@
+ {
+     return (unsigned long)(read_csr(mcycle)/(sysctl_clock_get_freq(SYSCTL_CLOCK_CPU)/1000));
+ }
++#endif
+ 
+-void mp_hal_delay_ms(mp_uint_t ms) 
++void mp_hal_delay_ms(mp_uint_t ms)
+ {
+ 	#if  MICROPY_PY_THREAD
+ 		if( xTaskGetSchedulerState() == taskSCHEDULER_NOT_STARTED )
+@@ -112,6 +131,25 @@
+ 			mp_uint_t us = ms * 1000;
+ 			mp_uint_t dt;
+ 			mp_uint_t t0 = mp_hal_ticks_us();
++#if CONFIG_MAIXPY_CATALYST_COPROCESSOR
++			// Asleep a tick at a time (the idle task waits for an interrupt
++			// meanwhile: the tick, or a byte on a UART), at least `ms` and at
++			// most a tick (10 ms) more; under 2 ms, MaixPy's exact busy wait.
++			if (catalyst_sleeping && ms >= 2) {
++				const mp_uint_t tick = portTICK_PERIOD_MS * 1000;
++				for (;;) {
++					extern void mp_handle_pending();
++					mp_handle_pending();
++					dt = mp_hal_ticks_us() - t0;
++					if (dt >= us) {
++						return;
++					}
++					MP_THREAD_GIL_EXIT();
++					vTaskDelay((TickType_t)((us - dt + tick - 1) / tick));
++					MP_THREAD_GIL_ENTER();
++				}
++			}
++#endif
+ 			for (;;) {
+ 				extern void mp_handle_pending();
+ 				mp_handle_pending();
+diff -ruN a/components/micropython/port/src/standard_lib/uos/vfs_spiffs.c b/components/micropython/port/src/standard_lib/uos/vfs_spiffs.c
+--- a/components/micropython/port/src/standard_lib/uos/vfs_spiffs.c
++++ b/components/micropython/port/src/standard_lib/uos/vfs_spiffs.c
+@@ -266,8 +266,12 @@
+         open_name[0] = '/';
+         strcat(open_name, path);
+     }
+-	int res = SPIFFS_remove(&vfs->fs, open_name); 
++	int res = SPIFFS_remove(&vfs->fs, open_name);
+     if (res != SPIFFS_OK) {
++		// os.remove() of a file that is not there raises ENOENT as any
++		// port does; MaixPy also printed "SPIFFS Error Code -10002"
++		// (SPIFFS_ERR_NOT_FOUND), which read like a fault at every start.
++		if (res != SPIFFS_ERR_NOT_FOUND)
+ 	   	mp_printf(&mp_plat_print, "[MaixPy]:SPIFFS Error Code %d\n",res);
+ 		mp_raise_OSError(SPIFFS_errno_table[GET_ERR_CODE(res)]);
+     }

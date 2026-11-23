@@ -202,7 +202,7 @@ fn quick(spec: sim::Spec) -> sim::Spec {
 
 fn small_payload() -> crate::unitv::Payload {
     let made = |n: usize, seed: u8| (0..n).map(|i| (i as u8).wrapping_mul(29).wrapping_add(seed)).collect::<Vec<u8>>();
-    crate::unitv::Payload { main: made(30_000, 1), boot: made(2_000, 2), model: made(60_000, 3), firmware: Vec::new(), firmware_name: String::new(), isp: Vec::new() }
+    crate::unitv::Payload { main: made(30_000, 1), model: made(60_000, 3), kws: made(9_000, 2), firmware: Vec::new(), firmware_name: String::new(), firmware_version: 0, isp: Vec::new() }
 }
 
 const OLD_MAIN: &[u8] = b"# the program it came with\n";
@@ -215,10 +215,10 @@ fn update_with(spec: sim::Spec) -> (Result<update::Sent, String>, Arc<Mutex<sim:
     let h = Hello::parse(&hello.payload).expect("its hello");
     let p = small_payload();
     let stamp = p.stamp("MaixPy 0.6.3 (simulated)");
-    let update::Plan::Send { program, model } = update::plan(&h, Some(&stamp)) else { panic!("{:?}", update::plan(&h, Some(&stamp))) };
+    let update::Plan::Send { program, model, kws } = update::plan(&h, Some(&stamp)) else { panic!("{:?}", update::plan(&h, Some(&stamp))) };
     climb(&mut link, &QUICK);
     let mut seen = Vec::new();
-    let r = update::run(&mut link, &p, &stamp, program, model, &QUICK, &mut |u| seen.push(u));
+    let r = update::run(&mut link, &p, &stamp, (program, model, kws), &QUICK, &mut |u| seen.push(u));
     (r, flash, seen, stamp)
 }
 
@@ -241,7 +241,8 @@ fn a_slow_start_is_waited_for() {
     let hello = link.hello(Duration::from_secs(8)).expect("heard");
     assert!(began.elapsed() >= Duration::from_millis(2400), "{:?}", began.elapsed());
     let h = Hello::parse(&hello.payload).expect("its hello");
-    assert_eq!((h.version, h.updates, h.full, h.cwd.as_str()), (2, true, Some(true), "/flash"));
+    assert_eq!((h.version, h.updates, h.full, h.cwd.as_str()), (3, true, Some(true), "/flash"));
+    assert!(h.can("audio") && h.can("pipes") && h.firmware == "catalyst-coprocessor" && h.firmware_version >= 1);
     assert!(link.got > 0 && link.sent > 0, "the bytes counted");
 }
 
@@ -272,19 +273,30 @@ fn hellos_old_and_new_are_read() {
 #[test]
 fn the_plan_takes_only_what_the_camera_can() {
     use crate::unitv::Stamp;
-    let e = Stamp { catalyst: "0.9.4".into(), main: "111111111111".into(), model: "222222222222".into(), firmware: String::new() };
+    let e = Stamp { catalyst: "0.9.4".into(), main: "111111111111".into(), model: "222222222222".into(), ..Stamp::default() };
     let v2 = Hello { version: 2, updates: true, full: Some(true), cwd: "/flash".into(), stamp: Some(Stamp { catalyst: "0.9.3".into(), main: "000000000000".into(), ..e.clone() }), ..Hello::default() };
-    assert_eq!(update::plan(&v2, Some(&e)), update::Plan::Send { program: true, model: false });
+    assert_eq!(update::plan(&v2, Some(&e)), update::Plan::Send { program: true, model: false, kws: false });
     let model_only = Hello { stamp: Some(Stamp { model: "333333333333".into(), ..e.clone() }), ..v2.clone() };
-    assert_eq!(update::plan(&model_only, Some(&e)), update::Plan::Send { program: false, model: true });
+    assert_eq!(update::plan(&model_only, Some(&e)), update::Plan::Send { program: false, model: true, kws: false });
     let unstamped = Hello { stamp: None, ..v2.clone() };
-    assert_eq!(update::plan(&unstamped, Some(&e)), update::Plan::Send { program: true, model: true });
+    assert_eq!(update::plan(&unstamped, Some(&e)), update::Plan::Send { program: true, model: true, kws: false });
+    // Catalyst Coprocessor: the firmware first (USB-A only, once), then the
+    // keyword spotter over the link when its stamp differs (an install over
+    // USB-A leaves it empty), and main.py again when the safe program answers.
+    let e3 = Stamp { kws: "444444444444".into(), fwv: 2, ..e.clone() };
+    let v3 = Hello { version: 3, firmware_version: 2, stamp: Some(Stamp { kws: String::new(), ..e3.clone() }), ..v2.clone() };
+    assert_eq!(update::plan(&v3, Some(&e3)), update::Plan::Send { program: false, model: false, kws: true });
+    assert!(matches!(update::plan(&Hello { firmware_version: 1, ..v3.clone() }, Some(&e3)), update::Plan::UsbOnce(w) if w.contains("firmware") && w.contains("USB-A")));
+    assert!(matches!(update::plan(&Hello { version: 2, firmware_version: 0, ..v3.clone() }, Some(&e3)), update::Plan::UsbOnce(w) if w.contains("firmware")));
+    let safe = Hello { safe: Some("main.py: SyntaxError".into()), stamp: Some(e3.clone()), ..v3.clone() };
+    assert_eq!(update::plan(&safe, Some(&e3)), update::Plan::Send { program: true, model: false, kws: false });
+    assert_eq!(update::plan(&Hello { stamp: Some(e3.clone()), ..v3.clone() }, Some(&e3)), update::Plan::Nothing);
     assert_eq!(update::plan(&Hello { stamp: Some(e.clone()), ..v2.clone() }, Some(&e)), update::Plan::Nothing, "up to date");
     assert_eq!(update::plan(&v2, None), update::Plan::Nothing, "no program in the image");
     // What only USB-A can do: 0.9.3's program, a MaixPy short of what it
     // needs (even with the program up to date), a card it starts from.
     assert!(matches!(update::plan(&Hello { updates: false, version: 1, ..v2.clone() }, Some(&e)), update::Plan::UsbOnce(w) if w.contains("USB-A")));
-    assert!(matches!(update::plan(&Hello { full: Some(false), stamp: Some(e.clone()), ..v2.clone() }, Some(&e)), update::Plan::UsbOnce(w) if w.contains("MaixPy")));
+    assert!(matches!(update::plan(&Hello { full: Some(false), stamp: Some(e.clone()), ..v2.clone() }, Some(&e)), update::Plan::UsbOnce(w) if w.contains("firmware")));
     assert!(matches!(update::plan(&Hello { cwd: "/sd".into(), ..v2.clone() }, Some(&e)), update::Plan::UsbOnce(w) if w.contains("microSD")));
 }
 
@@ -295,7 +307,7 @@ fn an_update_goes_over_in_chunks_and_the_camera_starts_again_with_it() {
     let p = small_payload();
     let f = flash.lock().unwrap();
     assert_eq!(f.files["main.py"], p.main);
-    assert_eq!(f.files["boot.py"], p.boot);
+    assert_eq!(f.files["kws.kmodel"], p.kws, "the keyword spotter: none before");
     assert_eq!(f.files["face.kmodel"], p.model, "the model too: its stamp differed");
     assert_eq!(f.old["main.py"], OLD_MAIN, "the old program kept for a rollback");
     assert!(f.trial.is_none(), "the new program answered: its trial over");
@@ -347,4 +359,117 @@ fn a_new_program_that_never_starts_is_rolled_back() {
     assert_eq!(f.files["main.py"], OLD_MAIN);
     assert!(!f.files.contains_key("face.kmodel"), "a model that was not a file before is gone again");
     assert!(f.starts >= 4, "two starts that never answered, then the old one: {} starts", f.starts);
+}
+
+// ----------------------------------------------------- Catalyst Coprocessor ---
+
+#[test]
+fn each_screen_asks_only_for_its_own_pipelines_at_its_own_pace() {
+    let l = |uses: &[Use]| uses.iter().enumerate().map(|(i, u)| (i as u64, *u)).collect::<Vec<_>>();
+    assert_eq!(pipes(&l(&[])), (vec![], 0.0), "nothing: idle");
+    assert_eq!(pipes(&l(&[Use::Status, Use::Speech, Use::Ready])), (vec![], 0.0), "the status page, speech, ready: idle too");
+    assert_eq!(pipes(&l(&[Use::Faces])), (vec!["faces"], 5.0));
+    assert_eq!(pipes(&l(&[Use::Codes])), (vec!["codes"], 10.0));
+    assert_eq!(pipes(&l(&[Use::Tags, Use::Faces])), (vec!["faces", "tags"], 15.0), "the faster pace of the two");
+    assert_eq!(pipes(&l(&[Use::View, Use::Tags])), (vec!["faces", "codes", "tags", "blobs", "preview"], 0.0), "the AI view: all, as fast as it can");
+    let p: serde_json::Value = serde_json::from_str(&pipe_payload(&l(&[Use::Codes]))).unwrap();
+    assert_eq!(p, serde_json::json!({"p": ["codes"], "fps": 10.0, "idle_ms": IDLE_MS}));
+}
+
+#[test]
+fn the_cameras_clock_maps_onto_the_handhelds_by_the_quickest_exchange() {
+    let mut c = ClockMap::default();
+    assert_eq!(c.offset(), None);
+    // The camera's clock is 5 s behind; round trips of 4 ms, 1 ms, 9 ms
+    // (an answer held up on one way): the 1 ms one decides, within 0.5 ms.
+    let cam = |local: u64| local - 5_000_000;
+    c.add(10_000_000, cam(10_003_000), 10_004_000);
+    c.add(20_000_000, cam(20_000_500), 20_001_000);
+    c.add(30_000_000, cam(30_008_000), 30_009_000);
+    let (off, within) = c.offset().unwrap();
+    assert_eq!(within, 500);
+    assert!((off + 5_000_000).abs() <= 500, "{off}");
+    // A result at the camera's 25.000 s (as ms) is at the handheld's 30.0 s.
+    let at = c.local_us_of(25_000, 31_000_000).unwrap();
+    assert!((at as i64 - 30_000_000).abs() <= 1_000, "{at}");
+    // Past the 30-bit wrap of the camera's milliseconds: the nearest one.
+    let mut w = ClockMap::default();
+    let wrap_ms: u64 = 1 << 30;
+    let local = 2_000_000_000_000u64; // about 23 days in
+    let cam_us = local + 1_000_000; // a second ahead
+    w.add(local, cam_us, local);
+    let cam_ms = ((cam_us / 1000) % wrap_ms) as u32;
+    assert!((w.local_us_of(cam_ms, local).unwrap() as i64 - local as i64).abs() <= 1_000);
+}
+
+#[test]
+fn an_utterance_goes_in_100_ms_frames_then_its_end() {
+    use super::speech::{self, Flow, Mode, Vad};
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut f = Flow { id: 1, queue: (0..4000).map(|i| i as i16).collect(), sent: 0, end: None, end_sent: false, vad: Vad::default() };
+    let out = speech::frames(&mut f);
+    assert_eq!(out.len(), 3, "1600 + 1600 + 800");
+    assert!(out.iter().all(|(k, _)| *k == AUDIO));
+    assert_eq!(u32::from_le_bytes(out[1].1[..4].try_into().unwrap()), 1600, "each with its offset");
+    assert_eq!(i16::from_le_bytes([out[1].1[4], out[1].1[5]]), 1600);
+    assert_eq!(out[2].1.len(), 4 + 2 * 800);
+    f.queue.extend([7i16; 10]);
+    f.end = Some((Mode::Command, Instant::now(), tx));
+    let out = speech::frames(&mut f);
+    assert_eq!(out.iter().map(|(k, _)| *k).collect::<Vec<_>>(), [AUDIO, AUDIO_END], "the rest, then the end");
+    let end: serde_json::Value = serde_json::from_slice(&out[1].1).unwrap();
+    assert_eq!(end, serde_json::json!({"mode": "command", "n": 4010}));
+    assert!(speech::frames(&mut f).is_empty(), "the end once");
+    let h = speech::Heard::parse(br#"{"mode":"command","vad":2,"start_ms":40,"end_ms":612,"speech_ms":420,"n":16000,"lost":320,"top":[[8,0.93],[9,0.04]],"emb":[0.5,-0.25],"ms":3}"#).unwrap();
+    assert_eq!((h.vad.state, h.vad.start_ms, h.vad.end_ms, h.top[0], h.embedding.len(), h.lost), (2, 40, 612, (8, 0.93), 2, 320));
+}
+
+/// The whole of version 3 against the stand-in: a screen's pipelines asked
+/// for and idle again after; results stamped with when they were taken on
+/// the handheld's clock; health; the tag pose calibrated; an utterance and
+/// its command.
+#[test]
+fn the_coprocessor_answers_pipelines_clock_health_speech_and_calibration() {
+    let _port = sim::exclusive(true);
+    let wait = |what: &dyn Fn() -> bool, secs: u64| {
+        let started = Instant::now();
+        while !what() && started.elapsed() < Duration::from_secs(secs) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        what()
+    };
+    {
+        let _tags = lease(Use::Tags);
+        let _status = lease(Use::Status);
+        assert!(wait(&|| results(Duration::from_secs(1)).is_some_and(|r| !r.tags.is_empty() && r.at.is_some()), 20), "tags, with when on this clock: {:?}", results(Duration::from_secs(5)));
+        let r = results(Duration::from_secs(2)).unwrap();
+        assert!(r.faces.is_empty() && r.codes.is_empty(), "only the tags asked for");
+        assert!(r.at.unwrap() <= Instant::now() && r.at.unwrap().elapsed() < Duration::from_secs(2), "taken just now");
+        assert!(diag().clock.is_some(), "the clocks compared");
+        assert!(wait(&|| diag().health.is_some_and(|h| h["state"] == "active"), 10), "{:?}", diag().health);
+        // The tag pose: two distances, then kept.
+        for d in [500.0, 1000.0] {
+            let m = calibrate(&serde_json::json!({"do": "measure", "d_mm": d, "tag_mm": 165.1})).recv_timeout(Duration::from_secs(10)).expect("answered").expect("measured");
+            let v: serde_json::Value = serde_json::from_slice(&m).unwrap();
+            assert_eq!(v["ok"], 1);
+        }
+        let kept: serde_json::Value = serde_json::from_slice(&calibrate(&serde_json::json!({"do": "save"})).recv_timeout(Duration::from_secs(10)).unwrap().unwrap()).unwrap();
+        assert_eq!((kept["ok"].as_u64(), kept["calibrated"].as_u64()), (Some(1), Some(1)));
+    }
+    // Nothing wanted but the camera warm: idle, asked so.
+    assert!(wait(&|| diag().idle_since.is_some(), 10), "idle once nothing is wanted");
+    // An utterance: streamed while held, its end answered with the word.
+    let s = speech::begin();
+    let voice: Vec<i16> = (0..16_000).map(|i| if (3_000..11_000).contains(&i) { ((i as f32 * 0.07).sin() * 9000.0) as i16 } else { 0 }).collect();
+    for piece in voice.chunks(640) {
+        s.push(piece);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(wait(&|| s.vad().state == 1, 10), "the camera heard the voice start");
+    let pending = s.finish(speech::Mode::Command);
+    let heard = pending.rx.recv_timeout(Duration::from_secs(10)).expect("an answer").expect("heard");
+    assert_eq!(heard.top.first().map(|t| t.0), Some(8), "the stand-in's word: stop");
+    assert_eq!((heard.samples, heard.embedding.len()), (16_000, 64));
+    let d = crate::voicecmd::decide(&heard, &crate::voicecmd::Prefs::default());
+    assert!(matches!(d, crate::voicecmd::Decision::Command { ref word, .. } if word == "stop"), "{d:?}");
 }

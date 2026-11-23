@@ -242,7 +242,7 @@ impl Fake {
             }
             Mode::Running => {
                 // main.py as installed by this release listens on USB too.
-                let listens = self.files.get("/flash/main.py").is_some_and(|m| m.windows(9).any(|w| w == b"repl_uart"));
+                let listens = self.files.get("/flash/main.py").is_some_and(|m| m.windows(9).any(|w| w == b"repl_uart") || m.windows(13).any(|w| w == b"catalyst_port"));
                 for f in self.frames.push(&[b]) {
                     if !listens {
                         continue;

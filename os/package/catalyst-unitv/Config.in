@@ -2,10 +2,11 @@ config BR2_PACKAGE_CATALYST_UNITV
 	bool "catalyst-unitv"
 	help
 	  What the shell installs on the smart camera (an M5Stack UnitV,
-	  K210) over USB-A, with no microSD card: Sipeed's MaixPy v0.6.3
-	  firmware (MIT and Apache-2.0), Sipeed's YOLOv2 face model (MIT),
-	  kflash.py's K210 flash loader (MIT) and Catalyst's main.py, in
-	  /usr/share/catalyst/unitv (2.6 MB), each with its source and
-	  licence.
+	  K210) over USB-A and the Grove port: Catalyst Coprocessor, a
+	  MaixPy of Catalyst's own (MIT and Apache-2.0), Sipeed's YOLOv2
+	  face model (MIT), the voice commands' keyword spotter (trained on
+	  Speech Commands, CC-BY-4.0), kflash.py's K210 flash loader (MIT)
+	  and Catalyst's main.py, in /usr/share/catalyst/unitv (2.4 MB),
+	  each with its source and licence.
 
 	  https://github.com/sipeed/MaixPy-v1

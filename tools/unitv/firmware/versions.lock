@@ -1,0 +1,31 @@
+# What Catalyst Coprocessor's firmware is built from, pinned by commit and
+# by the SHA-256 of each download (build.sh refuses anything else). Read by
+# build.sh as shell assignments.
+#
+# MaixPy at the commit the UnitV M12 came with (its banner said
+# v0.6.2-89-gd8901fd22; tagged v0.6.3-2-gd8901fd22), and its submodules at
+# the commits that commit records. MIT (MicroPython, OpenMV) and Apache-2.0
+# (Sipeed's code, Kendryte's SDK); MIT (SPIFFS, Kconfiglib, kflash.py).
+
+MAIXPY_COMMIT=d8901fd2272f000226f1c1037c1eb7c412b88e66
+MAIXPY_SHA256=6ae38798a4f4c2058039e1ad303209ccf9f5c0926141ee993fa7db3fe656d7f2
+
+# path in the tree | GitHub repository | commit | SHA-256 of its tarball
+SUBMODULES="
+components/kendryte_sdk/kendryte-standalone-sdk|sipeed/kendryte-standalone-sdk|7fdb511fe61026eec5874885de5981c4f60f664d|10aac95088e23f26199d8aff42b95c6e6b2cd7b41efcf272a1e4e9150158c624
+components/micropython/core|micropython/micropython|ced340d739e84737dd5c8e6b4ab9af2ea44e29e7|681e09b71f957598dd3d010a31d490035fd0f4e14189e90a8d8de38936678000
+components/spiffs/core|pellepl/spiffs|ec68ba8208d7550860e4e78299d58a529b88bf85|4615443ca9b14ee141c0903e498832913844d2d937844ba55f9e48a729fbb67c
+tools/kconfig/Kconfiglib|ulfalizer/Kconfiglib|53c72959ac4d71f99913e4b0eea99261a6585430|4042ee82ecb379c20a6f7d223da76e77be7ebe75430337c0fab110cc70cbe903
+tools/flash/kflash_py|sipeed/kflash.py|550828c768b16ef329695d3f5eace3f6bcf14af2|a193c2cbf3a361cbe25129945e865b27dc50d73688ace43a04d9a12f77a1aa23
+"
+
+# Kendryte's GCC 8.2.0 for the K210 (RISC-V rv64imafc), its Ubuntu build.
+TOOLCHAIN_URL=https://github.com/kendryte/kendryte-gnu-toolchain/releases/download/v8.2.0-20190409/kendryte-toolchain-ubuntu-amd64-8.2.0-20190409.tar.xz
+TOOLCHAIN_SHA256=6b7b9f654df339cfb5da85f7db6f598552196c499eb244f548eaf73c63b81072
+
+# MaixPy's build scripts need CMake 3.x and pyserial (its build script
+# imports its flash tool); both taken as their makers publish them.
+CMAKE_URL=https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-x86_64.tar.gz
+CMAKE_SHA256=5a1133ff103c71eb5120e2cc3de922733e7d8a26a98ae716397e8676adb367bf
+PYSERIAL_URL=https://files.pythonhosted.org/packages/07/bc/587a445451b253b285629263eb51c2d8e9bcea4fc97826266d186f96f558/pyserial-3.5-py2.py3-none-any.whl
+PYSERIAL_SHA256=c4451db6ba391ca6ca299fb3ec7bae67a5c55dde170964c7a14ceefec02f2cf0

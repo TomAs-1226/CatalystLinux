@@ -51,6 +51,48 @@ pub struct Model {
     pub licence: &'static str,
 }
 
+/// A file kept in the models folder, pinned by its size and SHA-256: one of
+/// the models here, or another the handheld downloads and keeps the same
+/// way (the shell's dictation model).
+pub trait Pinned {
+    /// The file it is kept as.
+    fn file(&self) -> &str;
+    fn url(&self) -> &str;
+    fn sha256(&self) -> &str;
+    /// Bytes, exactly.
+    fn size(&self) -> u64;
+}
+
+impl<T: Pinned + ?Sized> Pinned for &T {
+    fn file(&self) -> &str {
+        (**self).file()
+    }
+    fn url(&self) -> &str {
+        (**self).url()
+    }
+    fn sha256(&self) -> &str {
+        (**self).sha256()
+    }
+    fn size(&self) -> u64 {
+        (**self).size()
+    }
+}
+
+impl Pinned for Model {
+    fn file(&self) -> &str {
+        self.file
+    }
+    fn url(&self) -> &str {
+        self.url
+    }
+    fn sha256(&self) -> &str {
+        self.sha256
+    }
+    fn size(&self) -> u64 {
+        self.size
+    }
+}
+
 /// The models offered, fastest first.
 pub const MODELS: [Model; 3] = [
     // 0.5.4's model, now at 4 bits: as right as at 8 (5 of 15 either way),
@@ -179,29 +221,29 @@ pub fn set_chosen(dir: &Path, model: &Model) -> std::io::Result<()> {
     std::fs::write(dir.join("chosen"), format!("{}\n", model.id))
 }
 
-pub fn path(dir: &Path, model: &Model) -> PathBuf {
-    dir.join(model.file)
+pub fn path(dir: &Path, model: &(impl Pinned + ?Sized)) -> PathBuf {
+    dir.join(model.file())
 }
 
 /// The file a download goes to until it is whole and checked.
-pub fn partial(dir: &Path, model: &Model) -> PathBuf {
-    dir.join(format!("{}.part", model.file))
+pub fn partial(dir: &Path, model: &(impl Pinned + ?Sized)) -> PathBuf {
+    dir.join(format!("{}.part", model.file()))
 }
 
 /// Written beside a model once its SHA-256 has been checked.
-fn checked_mark(dir: &Path, model: &Model) -> PathBuf {
-    dir.join(format!("{}.checked", model.file))
+fn checked_mark(dir: &Path, model: &(impl Pinned + ?Sized)) -> PathBuf {
+    dir.join(format!("{}.checked", model.file()))
 }
 
 /// Whether a model is here, whole and checked.
-pub fn present(dir: &Path, model: &Model) -> bool {
-    std::fs::metadata(path(dir, model)).is_ok_and(|m| m.len() == model.size) && std::fs::read_to_string(checked_mark(dir, model)).is_ok_and(|s| s.trim() == model.sha256)
+pub fn present(dir: &Path, model: &(impl Pinned + ?Sized)) -> bool {
+    std::fs::metadata(path(dir, model)).is_ok_and(|m| m.len() == model.size()) && std::fs::read_to_string(checked_mark(dir, model)).is_ok_and(|s| s.trim() == model.sha256())
 }
 
 /// A downloaded file accepted as the model, once its sum has been checked:
 /// moved into place and marked.
-pub fn accept(dir: &Path, model: &Model, sha256: &str) -> Result<(), String> {
-    if sha256 != model.sha256 {
+pub fn accept(dir: &Path, model: &(impl Pinned + ?Sized), sha256: &str) -> Result<(), String> {
+    if sha256 != model.sha256() {
         std::fs::remove_file(partial(dir, model)).ok();
         return Err("the download did not check out: it was thrown away".into());
     }
@@ -210,7 +252,7 @@ pub fn accept(dir: &Path, model: &Model, sha256: &str) -> Result<(), String> {
 }
 
 /// A model removed, and anything half-downloaded of it.
-pub fn remove(dir: &Path, model: &Model) {
+pub fn remove(dir: &Path, model: &(impl Pinned + ?Sized)) {
     for p in [path(dir, model), partial(dir, model), checked_mark(dir, model)] {
         std::fs::remove_file(p).ok();
     }
@@ -468,13 +510,73 @@ pub fn speed(v: &Value) -> Option<f64> {
 /// One HTTP request to llama-server, as (status, body). Plain HTTP on the
 /// loopback address, so no TLS, no curl: a few lines of HTTP/1.1.
 pub fn http(method: &str, path: &str, body: Option<&str>, timeout: Duration) -> Result<(u16, String), String> {
-    let mut stream = TcpStream::connect((HOST, PORT)).map_err(|e| format!("the model is not running ({e})"))?;
-    stream.set_read_timeout(Some(timeout)).ok();
-    stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
-    let body = body.unwrap_or("");
-    let request = format!("{method} {path} HTTP/1.1\r\nHost: {HOST}:{PORT}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-    stream.write_all(request.as_bytes()).map_err(|e| format!("asking the model: {e}"))?;
-    read_response(BufReader::new(stream))
+    let request = Request { port: PORT, method, path, content_type: "application/json", body: body.unwrap_or("").as_bytes(), timeout, who: "the model" };
+    request.send(None)
+}
+
+/// An HTTP request to a server on this handheld's own address (llama-server,
+/// whisper-server).
+pub struct Request<'a> {
+    pub port: u16,
+    pub method: &'a str,
+    pub path: &'a str,
+    pub content_type: &'a str,
+    pub body: &'a [u8],
+    /// The longest to wait for the answer.
+    pub timeout: Duration,
+    /// What answers, for what is said when it does not: "the model".
+    pub who: &'a str,
+}
+
+impl Request<'_> {
+    /// Send it and read the whole answer, as (status, body). `cancel`, set
+    /// from another thread while it waits, cuts it short within a twentieth
+    /// of a second: the connection is closed, which the servers here take
+    /// as the asker gone (they stop working on it).
+    pub fn send(&self, cancel: Option<&AtomicBool>) -> Result<(u16, String), String> {
+        let who = self.who;
+        let mut stream = TcpStream::connect((HOST, self.port)).map_err(|e| format!("{who} is not running ({e})"))?;
+        stream.set_read_timeout(Some(Duration::from_millis(50))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
+        let head = format!(
+            "{} {} HTTP/1.1\r\nHost: {HOST}:{}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            self.method,
+            self.path,
+            self.port,
+            self.content_type,
+            self.body.len()
+        );
+        stream.write_all(head.as_bytes()).and_then(|()| stream.write_all(self.body)).map_err(|e| format!("asking {who}: {e}"))?;
+        let waiting = Waiting { stream: &stream, cancel, until: std::time::Instant::now() + self.timeout };
+        read_response(BufReader::new(waiting))
+    }
+}
+
+/// A connection read until an answer comes, the time runs out, or someone
+/// gives up on it (`cancel`), looked at every time a read has waited 50 ms.
+struct Waiting<'a> {
+    stream: &'a TcpStream,
+    cancel: Option<&'a AtomicBool>,
+    until: std::time::Instant,
+}
+
+impl std::io::Read for Waiting<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use std::io::ErrorKind;
+        loop {
+            match (&mut &*self.stream).read(buf) {
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => {
+                    if self.cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                        return Err(std::io::Error::other("given up on"));
+                    }
+                    if std::time::Instant::now() >= self.until {
+                        return Err(std::io::Error::new(ErrorKind::TimedOut, "no answer in time"));
+                    }
+                }
+                other => return other,
+            }
+        }
+    }
 }
 
 /// A whole HTTP/1.1 response: its status and body, the body as sent with a
@@ -534,17 +636,33 @@ pub fn spawn_server(dir: &Path, model: &Model) -> Result<std::process::Child, St
         return Err(format!("{} is not downloaded: Settings › On-device model", model.name));
     }
     room_for(model, available_mb())?;
+    let program = std::env::var("CATALYST_LLAMA_SERVER").unwrap_or_else(|_| SERVER.to_owned());
+    let child = spawn_background(&program, &server_args(&path(dir, model), model), Path::new("/tmp/llama-server.log"), None)?;
+    #[cfg(unix)]
+    guard(child.id() as i32);
+    Ok(child)
+}
+
+/// Start a server program the way llama-server is started (see
+/// [`spawn_server`]): its own process group, nice 10 and SCHED_BATCH for
+/// every thread from its first instruction, first for the out-of-memory
+/// killer, what it prints in `log`; in `cwd` when given.
+pub fn spawn_background(program: &str, args: &[String], log: &Path, cwd: Option<&Path>) -> Result<std::process::Child, String> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         use std::process::{Command, Stdio};
-        let program = std::env::var("CATALYST_LLAMA_SERVER").unwrap_or_else(|_| SERVER.to_owned());
-        let (out, err) = match std::fs::File::create("/tmp/llama-server.log").and_then(|log| Ok((log.try_clone()?, log))) {
+        let (out, err) = match std::fs::File::create(log).and_then(|log| Ok((log.try_clone()?, log))) {
             Ok((copy, log)) => (Stdio::from(log), Stdio::from(copy)),
             Err(_) => (Stdio::null(), Stdio::null()),
         };
-        let mut command = Command::new(&program);
-        command.args(server_args(&path(dir, model), model)).stdin(Stdio::null()).stdout(out).stderr(err).process_group(0);
+        let mut command = Command::new(program);
+        command.args(args).stdin(Stdio::null()).stdout(out).stderr(err).process_group(0);
+        // ggml loads a backend named here as well as its own: never another.
+        command.env_remove("GGML_BACKEND_PATH");
+        if let Some(cwd) = cwd {
+            command.current_dir(cwd);
+        }
         // SAFETY: between fork and exec, only async-signal-safe system calls
         // on the child itself (no allocation): its priority, which every
         // thread it starts inherits, and its place first in line for the
@@ -571,15 +689,15 @@ pub fn spawn_server(dir: &Path, model: &Model) -> Result<std::process::Child, St
                 Ok(())
             });
         }
-        let child = command.spawn().map_err(|e| format!("could not start the model ({program}: {e})"))?;
+        let child = command.spawn().map_err(|e| format!("could not start {program}: {e}"))?;
         // And again from here, should the child's own write have failed.
         std::fs::write(format!("/proc/{}/oom_score_adj", child.id()), OOM_SCORE_ADJ.to_string()).ok();
-        guard(child.id() as i32);
         Ok(child)
     }
     #[cfg(not(unix))]
     {
-        Err("the on-device model runs on the handheld".into())
+        let _ = (args, log, cwd);
+        Err(format!("{program} runs on the handheld"))
     }
 }
 
@@ -819,6 +937,87 @@ mod tests {
         assert!(chat_answer(&short_cut).unwrap().ends_with("anywhere"), "too little would be left: all of it");
         let list = json!({"choices": [{"message": {"content": "Try these:\n1. Check the cable.\n2. Check the port.\n3."}, "finish_reason": "length"}]});
         assert_eq!(chat_answer(&list).unwrap(), "Try these:\n1. Check the cable.\n2. Check the port.");
+    }
+
+    #[test]
+    fn a_request_goes_whole_and_can_be_cut_short() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind((HOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let body = [0u8, 1, 255, 2, b'\r', b'\n'];
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut got = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !got.ends_with(&body) {
+                let n = s.read(&mut buf).unwrap();
+                assert!(n > 0, "the body never came");
+                got.extend_from_slice(&buf[..n]);
+            }
+            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").unwrap();
+            // A second asker, never answered.
+            let (_never, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_secs(10));
+            got
+        });
+        let request = Request { port, method: "POST", path: "/inference", content_type: "multipart/form-data; boundary=x", body: &body, timeout: Duration::from_secs(20), who: "dictation" };
+        let cancel = AtomicBool::new(false);
+        assert_eq!(request.send(Some(&cancel)).unwrap(), (200, "ok".into()));
+
+        // Given up on from another thread: it ends within moments, with no
+        // answer, though the server never answers.
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let giving_up = cancel.clone();
+        let started = std::time::Instant::now();
+        let cutter = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            giving_up.store(true, Ordering::Relaxed);
+        });
+        assert!(request.send(Some(&cancel)).unwrap_err().contains("given up on"));
+        assert!(started.elapsed() < Duration::from_secs(2), "not waited out");
+        cutter.join().unwrap();
+        // And with nobody giving up, the time it was given runs out.
+        let short = Request { timeout: Duration::from_millis(400), ..request };
+        let started = std::time::Instant::now();
+        assert!(short.send(None).is_err());
+        assert!(started.elapsed() < Duration::from_secs(3));
+        drop(server);
+
+        // Nobody there: said plainly, by name.
+        let gone = std::net::TcpListener::bind((HOST, 0)).unwrap();
+        let port = gone.local_addr().unwrap().port();
+        drop(gone);
+        let why = Request { port, ..request }.send(None).unwrap_err();
+        assert!(why.starts_with("dictation is not running"), "{why}");
+    }
+
+    #[test]
+    fn a_file_is_pinned_by_its_size_and_sum_whatever_it_is() {
+        struct Other;
+        impl Pinned for Other {
+            fn file(&self) -> &str {
+                "other.bin"
+            }
+            fn url(&self) -> &str {
+                "https://example.org/other.bin"
+            }
+            fn sha256(&self) -> &str {
+                "ab"
+            }
+            fn size(&self) -> u64 {
+                3
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("catalyst-pinned-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(partial(&dir, &Other), b"abc").unwrap();
+        accept(&dir, &Other, "ab").unwrap();
+        assert!(present(&dir, &Other) && path(&dir, &Other).ends_with("other.bin"));
+        let as_dyn: &dyn Pinned = &Other;
+        assert!(present(&dir, as_dyn), "by reference to the trait too");
+        remove(&dir, &Other);
+        assert!(!present(&dir, &Other));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

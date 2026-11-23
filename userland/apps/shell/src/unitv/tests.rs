@@ -167,7 +167,7 @@ fn nothing_answers_without_maixpy() {
 
 #[test]
 fn a_probe_is_read() {
-    let stamp = Stamp { catalyst: "0.9.1".into(), main: "aaaaaaaaaaaa".into(), model: "bbbbbbbbbbbb".into(), firmware: "x".into() };
+    let stamp = Stamp { catalyst: "0.9.1".into(), main: "aaaaaaaaaaaa".into(), model: "bbbbbbbbbbbb".into(), firmware: "x".into(), ..Stamp::default() };
     let out = format!("noise\r\nCATALYST|1|0.6.3|{}\r\n", stamp.json());
     assert_eq!(parse_probe(&out), Some(Found::MaixPy { full: true, version: "0.6.3".into(), stamp: Some(stamp) }));
     assert_eq!(parse_probe("CATALYST|0|0.5.0|{}"), Some(Found::MaixPy { full: false, version: "0.5.0".into(), stamp: None }));
@@ -250,7 +250,7 @@ fn a_bridge_without_its_driver_is_said_so() {
 #[test]
 fn what_is_offered_follows_the_stamp() {
     let board = Board { id: "1-1.2".into(), chip: "FT2232", name: String::new(), ttys: vec!["/dev/ttyUSB1".into()], sure: true };
-    let now = Stamp { catalyst: "0.9.1".into(), main: "m1".into(), model: "k1".into(), firmware: String::new() };
+    let now = Stamp { catalyst: "0.9.1".into(), main: "m1".into(), model: "k1".into(), ..Stamp::default() };
     let st = |found: Found| State { board: Some(board.clone()), found, job: Job::Idle };
     assert_eq!(need(&st(Found::NoMaixPy), Some(&now)), Need::Install);
     assert_eq!(need(&st(Found::MaixPy { full: false, version: "0.6.3".into(), stamp: Some(now.clone()) }), Some(&now)), Need::Install);
@@ -312,10 +312,14 @@ fn a_bare_unitv_gets_everything_and_answers_then_an_update_only_main_py() {
         assert_eq!(&k.flash[..image.len()], &image[..]);
         assert_eq!(&k.flash[MODEL_AT as usize..MODEL_AT as usize + payload.model.len()], &payload.model[..]);
         assert_eq!(k.files["/flash/main.py"], payload.main);
-        assert_eq!(k.files["/flash/boot.py"], BOOT_PY);
+        assert!(!k.files.contains_key("/flash/boot.py"), "the firmware's own boot runs main.py");
         assert_eq!(Stamp::parse(&String::from_utf8_lossy(&k.files[STAMP_FILE])), Some(stamp.clone()));
     }
-    assert!(stamp.same_program(&payload.stamp("")) && stamp.firmware.contains("installed by Catalyst"));
+    // The keyword spotter is left to the Grove port (its stamp empty, so
+    // the first answer there sends it); the firmware is this image's.
+    let e = payload.stamp("");
+    assert!(stamp.main == e.main && stamp.model == e.model && stamp.kws.is_empty() && stamp.fwv == payload.firmware_version);
+    assert!(stamp.firmware.contains("installed by Catalyst"));
     let seen = steps.lock().unwrap().clone();
     assert!(seen.iter().any(|(s, ..)| *s == Step::Firmware) && seen.iter().any(|(s, ..)| *s == Step::Model) && seen.last().is_some_and(|(s, d, _)| *s == Step::Check && *d == 1.0));
     // Asked again, it is up to date.

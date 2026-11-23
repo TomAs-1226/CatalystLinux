@@ -1,0 +1,13 @@
+Catalyst Coprocessor firmware 1 (MaixPy d8901fd22 with patches/)
+file    catalyst-coprocessor.bin
+sha256  49c7f07477036bf83a43113d1497c9e5c27120396cd92f81efef48f1da08447b
+bytes   1844800
+# In the K210's 6 MB of main memory (its other 2 MB are the KPU's own):
+text    1815940
+data    28515
+bss     168880
+gc-heap 786432
+# Left for everything allocated at run time: the image sensor's frame
+# buffers (about 0.4 MB at QVGA, double-buffered, plus the KPU's copy), the
+# models (face 0.37 MB, keywords 0.09 MB) and their working memory:
+left    3491689

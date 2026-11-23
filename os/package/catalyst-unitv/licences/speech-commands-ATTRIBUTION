@@ -1,0 +1,14 @@
+The keyword spotter (kws.kmodel) was trained by Catalyst Linux on the
+Speech Commands dataset, version 0.02:
+
+  Pete Warden, "Speech Commands: A Dataset for Limited-Vocabulary Speech
+  Recognition", arXiv:1804.03209, 2018.
+  http://download.tensorflow.org/data/speech_commands_v0.02.tar.gz
+
+Copyright 2018 Google LLC. Licensed under the Creative Commons Attribution
+4.0 International licence (CC BY 4.0):
+https://creativecommons.org/licenses/by/4.0/
+
+The model is a work derived from the dataset (trained on it); the dataset
+itself is not included. How it was made is in tools/unitv/speech in the
+Catalyst Linux source (train.py, convert.py, kws.json).

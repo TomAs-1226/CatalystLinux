@@ -1,0 +1,19 @@
+config BR2_PACKAGE_WHISPER_CPP
+	bool "whisper-cpp"
+	depends on BR2_aarch64 # its CPU flags are the CM0's A53's
+	depends on BR2_INSTALL_LIBSTDCPP
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on BR2_TOOLCHAIN_GCC_AT_LEAST_9
+	help
+	  whisper.cpp's whisper-server, for offline dictation: speech
+	  to text on the handheld with OpenAI's Whisper (tiny.en, which
+	  the shell downloads to /data/models when asked). One program,
+	  /usr/bin/whisper-server (2 MB), with its own copy of ggml
+	  linked in, so it never meets llama.cpp's libggml.
+
+	  https://github.com/ggml-org/whisper.cpp
+
+comment "whisper-cpp needs a toolchain w/ C++, threads, gcc >= 9"
+	depends on BR2_aarch64
+	depends on !BR2_INSTALL_LIBSTDCPP || !BR2_TOOLCHAIN_HAS_THREADS \
+		|| !BR2_TOOLCHAIN_GCC_AT_LEAST_9

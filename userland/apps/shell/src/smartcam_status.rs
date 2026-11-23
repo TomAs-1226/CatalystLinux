@@ -339,7 +339,7 @@ impl StatusPage {
             Some((at, words)) => (format!("Error · {}", ago(*at)), words.clone()),
             None => ("Last error".to_owned(), "none".to_owned()),
         };
-        vec![
+        let mut rows = vec![
             ("5 V".into(), five_words(d), bad_five),
             ("Bytes".into(), format!("in {} · out {}", bytes(d.bytes_in), bytes(d.bytes_out)), false),
             ("Frames".into(), if d.refused > 0 { format!("{} · {} refused", d.frames, d.refused) } else { d.frames.to_string() }, d.refused > 20 && d.refused * 10 > d.frames),
@@ -348,7 +348,9 @@ impl StatusPage {
             ("Started in".into(), started, d.restarts > 0),
             ("Program".into(), update_words(&d.update), matches!(d.update, Update::Failed(_))),
             (error_name, error, false),
-        ]
+        ];
+        rows.extend(coprocessor_rows(d));
+        rows
     }
 
     fn refresh(&mut self) -> bool {
@@ -403,6 +405,8 @@ impl Screen for StatusPage {
                 crate::smartcam::retry_update();
                 *cx.say = Some("its program is checked again".into());
             }
+            Key::Char('t') if self.facts.diag.hello.as_ref().is_some_and(|h| h.can("calib")) => return Nav::Push(Box::new(CalibratePage::new())),
+            Key::Char('t') => *cx.say = Some("the tag pose is calibrated on Catalyst's firmware · USB-A".into()),
             Key::Enter => {
                 if !self.facts.chosen {
                     crate::smartcam::switch_grove(true);
@@ -467,6 +471,201 @@ impl Screen for StatusPage {
             &["enter: install over USB-A · c: copy a report", "enter: USB-A · c: report", "enter: USB-A"]
         } else {
             &["c: copy a report · u: its program again", "c: report · u: program again", "c: report"]
+        };
+        g.hint_any(hint);
+    }
+}
+
+/// Catalyst Coprocessor's own rows (main.py version 3): its state and
+/// clock, its pace, its memory, its clock against the handheld's, how long
+/// its sensor took to wake, the tag pose's calibration.
+pub fn coprocessor_rows(d: &Diag) -> Vec<(String, String, bool)> {
+    let Some(h) = d.hello.as_ref().filter(|h| h.can("health")) else { return Vec::new() };
+    let v = d.health.clone().unwrap_or_default();
+    let n = |k: &str| v[k].as_f64();
+    let state = v["state"].as_str().unwrap_or(if d.idle_since.is_some() { "idle" } else { "–" });
+    let clock = n("cpu_hz").map(|hz| format!(" · {} MHz", (hz / 1e6).round())).unwrap_or_default();
+    let pace = match (state, n("fps")) {
+        ("active", Some(fps)) => format!("{fps:.1} a second · {}", v["p"].as_array().map(|p| p.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default()),
+        _ => "nothing asked".into(),
+    };
+    let memory = match (n("heap"), n("gc_free")) {
+        (Some(heap), Some(gc)) => format!("{:.1} MB free · python {} kB", heap / 1e6, (gc / 1024.0) as u32),
+        _ => "–".into(),
+    };
+    let sync = match d.clock {
+        Some((off, within)) => format!("{:+.1} s ahead · ±{:.1} ms", off as f64 / 1e6, within as f64 / 1e3),
+        None => "–".into(),
+    };
+    let errors = v["errors"].as_u64().unwrap_or(0);
+    let fw = if h.firmware_version > 0 { format!("{} {}", h.firmware, h.firmware_version) } else { "MaixPy of Sipeed's".into() };
+    vec![
+        ("Coprocessor".into(), format!("{state}{clock}"), false),
+        ("Firmware".into(), fw, h.firmware_version == 0),
+        ("Pace".into(), pace, false),
+        ("Memory".into(), memory, false),
+        ("Clock".into(), sync, false),
+        ("Wake".into(), d.wake_ms.map_or("–".into(), |ms| format!("{ms} ms to its first frame")), false),
+        ("Errors".into(), if errors == 0 { "none".into() } else { format!("{errors} · {}", v["last_error"].as_str().unwrap_or("?")) }, errors > 0),
+        ("Tag pose".into(), if h.calibrated || v["calibrated"].as_u64() == Some(1) { "calibrated · t again".into() } else { "lens figures · t calibrates".into() }, false),
+    ]
+}
+
+// -------------------------------------------------------------- calibrate ---
+
+/// The tag sizes offered (mm across the black square): FRC's 6.5 in, then
+/// what printed sheets often are.
+pub const TAG_SIZES: [f64; 4] = [165.1, 150.0, 100.0, 200.0];
+/// Where the tag is held, from the lens (mm).
+pub const DISTANCES: [f64; 2] = [500.0, 1000.0];
+
+/// Settings › Camera › Smart camera › t: the AprilTag pose calibrated with
+/// a 36h11 tag of known size, held square-on at two known distances (a
+/// tape measure from the lens): the camera measures the tag's side in
+/// pixels and the pose's raw distance each time, then keeps the focal
+/// length and the pose's scale they give in its /flash/intrinsics.json.
+pub struct CalibratePage {
+    _lease: Option<Lease>,
+    size: usize,
+    /// Each distance's measurement (fx it gave), and the saved result.
+    measured: [Option<f64>; 2],
+    saved: Option<(f64, f64)>,
+    waiting: Option<std::sync::mpsc::Receiver<Result<Vec<u8>, String>>>,
+    list: ListState,
+}
+
+impl CalibratePage {
+    pub fn new() -> CalibratePage {
+        CalibratePage { _lease: Some(crate::smartcam::lease(crate::smartcam::Use::Status)), size: 0, measured: [None, None], saved: None, waiting: None, list: ListState::default() }
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn with(measured: [Option<f64>; 2], saved: Option<(f64, f64)>, focus: usize) -> CalibratePage {
+        let mut page = CalibratePage { _lease: None, size: 0, measured, saved, waiting: None, list: ListState::default() };
+        page.list.focus = focus;
+        page
+    }
+
+    fn rows(&self) -> Vec<(String, String, bool)> {
+        let at = |i: usize| match (self.measured[i], &self.waiting, self.list.focus == i + 1) {
+            (_, Some(_), true) => "measuring…".to_owned(),
+            (Some(fx), ..) => format!("fx {fx:.1} px"),
+            (None, ..) => "enter measures".to_owned(),
+        };
+        vec![
+            ("Tag".into(), format!("36h11 · {} mm", TAG_SIZES[self.size]), false),
+            (format!("At {:.1} m", DISTANCES[0] / 1000.0), at(0), false),
+            (format!("At {:.1} m", DISTANCES[1] / 1000.0), at(1), false),
+            ("Lens".into(), self.saved.map_or_else(|| if self.measured.iter().all(Option::is_some) { "enter keeps it".into() } else { "measure both".into() }, |(fx, unit)| format!("fx {fx:.1} · {unit:.1} mm a unit")), self.saved.is_some()),
+        ]
+    }
+
+    fn ask(&mut self, request: serde_json::Value) {
+        self.waiting = Some(crate::smartcam::calibrate(&request));
+    }
+}
+
+impl Screen for CalibratePage {
+    fn title(&self) -> &str {
+        "Tag pose"
+    }
+
+    fn keeps_awake(&self) -> bool {
+        self.waiting.is_some()
+    }
+
+    fn update(&mut self, cx: &mut Cx) -> Nav {
+        let Some(rx) = &self.waiting else { return Nav::Stay };
+        let Ok(answer) = rx.try_recv() else { return Nav::Stay };
+        self.waiting = None;
+        let v: serde_json::Value = match answer.map(|p| serde_json::from_slice(&p).unwrap_or_default()) {
+            Ok(v) => v,
+            Err(why) => {
+                *cx.say = Some(why);
+                return Nav::Stay;
+            }
+        };
+        if v["ok"].as_u64() != Some(1) {
+            *cx.say = Some(match v["err"].as_str() {
+                Some("no tag") => "no 36h11 tag seen · hold it square-on, lit".into(),
+                Some(other) => other.to_owned(),
+                None => "the camera could not".into(),
+            });
+            return Nav::Stay;
+        }
+        match v["do"].as_str() {
+            Some("measure") => {
+                let d = v["d_mm"].as_f64().unwrap_or(0.0);
+                if let Some(i) = DISTANCES.iter().position(|x| (x - d).abs() < 1.0) {
+                    self.measured[i] = v["fx"].as_f64();
+                    *cx.say = Some(format!("seen {} times · fx {:.1}", v["seen"].as_u64().unwrap_or(0), v["fx"].as_f64().unwrap_or(0.0)));
+                }
+            }
+            Some("save") => {
+                self.saved = Some((v["fx"].as_f64().unwrap_or(0.0), v["unit_mm"].as_f64().unwrap_or(0.0)));
+                *cx.say = Some("tag pose calibrated · kept on the camera".into());
+            }
+            Some("reset") => {
+                (self.measured, self.saved) = ([None, None], None);
+                *cx.say = Some("back to the lens figures".into());
+            }
+            _ => {}
+        }
+        Nav::Stay
+    }
+
+    fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
+        if self.waiting.is_some() && !matches!(key, Key::Back | Key::Leave) {
+            *cx.say = Some("measuring · hold it still".into());
+            return Nav::Stay;
+        }
+        let tag_mm = TAG_SIZES[self.size];
+        match (key, self.list.focus) {
+            (Key::Back | Key::Leave, _) => return Nav::Pop,
+            (Key::Left | Key::Right | Key::Enter, 0) => {
+                let by = if key == Key::Left { TAG_SIZES.len() - 1 } else { 1 };
+                self.size = (self.size + by) % TAG_SIZES.len();
+                self.measured = [None, None];
+            }
+            (Key::Enter, i @ (1 | 2)) => self.ask(serde_json::json!({ "do": "measure", "d_mm": DISTANCES[i - 1], "tag_mm": tag_mm, "frames": 15 })),
+            (Key::Enter, 3) if self.measured.iter().all(Option::is_some) => self.ask(serde_json::json!({ "do": "save", "tag_mm": tag_mm })),
+            (Key::Enter, 3) => *cx.say = Some("measure at both distances first".into()),
+            (Key::Char('d'), _) => self.ask(serde_json::json!({ "do": "reset" })),
+            (other, _) => crate::screens::list_key(&mut self.list, other, 4),
+        }
+        Nav::Stay
+    }
+
+    fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
+        let t = g.tokens;
+        let ty = g.ty;
+        let (top, row_h, bottom) = (g.top(), g.row_h(), g.above_hint());
+        let width = W - 2.0 * PAD - 4.0;
+        let cap_lh = ty.caption.size + 4.0;
+        let what = match self.list.focus {
+            1 | 2 => format!("Hold the tag square-on, {:.1} m from the lens, still; then enter.", DISTANCES[self.list.focus - 1] / 1000.0),
+            3 => "Kept on the camera: tags' distances in millimetres from then on.".to_owned(),
+            _ => "A 36h11 tag of known size, at two distances by tape measure.".to_owned(),
+        };
+        let lines = crate::help::wrap(g, &what, ty.caption, width);
+        for (i, line) in lines.iter().take(2).enumerate() {
+            g.text_at(PAD + 2.0, top + 1.0 + (0.5 + i as f32) * cap_lh, Align::Left, line, ty.caption, t.dim);
+        }
+        let rows_top = top + 5.0 + 2.0 * cap_lh;
+        let rows = self.rows();
+        for (i, y) in self.list.layout(g, rows.len(), rows_top, row_h, 3.0, bottom) {
+            let (name, value, good) = &rows[i];
+            let r = Rect::new(PAD, y, W - 2.0 * PAD - 5.0, row_h);
+            let (name_style, value_style, name_text) = if g.theme == crate::look::Theme::Bezel { (ty.label, ty.body, name.to_lowercase()) } else { (ty.body, ty.label, name.clone()) };
+            let room = r.w - 30.0 - g.measure(&name_text, name_style);
+            let value = if g.measure(value, value_style) <= room { value.clone() } else { g.text.fit(value, &value_style, room) };
+            g.row(r, name, &value, if *good { t.ink } else if value.ends_with("measures") || value.starts_with("measure ") { t.dim } else { t.ink }, self.list.focus == i);
+        }
+        self.list.scrollbar(g, rows.len(), rows_top, bottom);
+        let hint: &[&str] = match self.list.focus {
+            0 => &["←→: the tag's size · d: forget it", "←→: size · d: forget", "←→ · d"],
+            3 => &["enter: keep it · d: forget it", "enter: keep · d: forget", "enter · d"],
+            _ => &["enter: measure · esc: back", "enter: measure", "enter"],
         };
         g.hint_any(hint);
     }
@@ -604,13 +803,98 @@ pub fn shots(dir: &std::path::Path) {
     }
 }
 
+/// Catalyst Coprocessor's pages at each text size: the smart camera page
+/// with its rows (idle, then active), the tag pose calibration as it goes,
+/// Settings › Voice commands (its top, its words, a word being taught).
+/// `catalyst-shell --coprocessor-shots <dir>`.
+#[cfg(not(target_arch = "aarch64"))]
+pub fn coprocessor_shots(dir: &std::path::Path) {
+    use crate::gfx::TextSize;
+    use crate::shell::Shell;
+    use crate::smartcam::Hello;
+    use crate::voicecmd::{Action, CommandsPage, Prefs, UserWord};
+    std::fs::create_dir_all(dir).ok();
+    crate::unitv::work_out_expected();
+    let expected = crate::unitv::expected();
+    let now = Instant::now();
+    let ago_s = |s: u64| now.checked_sub(Duration::from_secs(s)).unwrap_or(now);
+    let hello = Hello {
+        version: 3,
+        updates: true,
+        maixpy: "0.6.2".into(),
+        full: Some(true),
+        sensor: Some("ok".into()),
+        kpu: "not loaded".into(),
+        up_ms: 64_000,
+        listen_ms: Some(910),
+        cwd: "/flash".into(),
+        stamp: expected.clone(),
+        firmware: "catalyst-coprocessor".into(),
+        firmware_version: crate::unitv::firmware_number(),
+        caps: ["idle", "pipes", "sync", "health", "audio", "calib"].map(String::from).to_vec(),
+        ..Hello::default()
+    };
+    let linked = Diag {
+        five_volt: Some(true),
+        powered_at: Some(ago_s(64)),
+        wakes: 1,
+        bytes_in: 912_408,
+        bytes_out: 61_220,
+        frames: 3_921,
+        baud: 3_000_000,
+        baud_tried: 3_000_000,
+        hello: Some(hello.clone()),
+        hello_at: Some(ago_s(63)),
+        start_ms: Some(2_240),
+        clock: Some((-3_412_880, 210)),
+        wake_ms: Some(214),
+        idle_since: Some(ago_s(12)),
+        health: Some(serde_json::json!({"state": "idle", "cpu_hz": 100_000_000, "fps": 0.0, "frames": 1_204, "errors": 0, "heap": 3_120_000, "gc_free": 628_000, "calibrated": 0})),
+        health_at: Some(ago_s(1)),
+        ..Diag::default()
+    };
+    let active = Diag { idle_since: None, health: Some(serde_json::json!({"state": "active", "p": ["tags"], "cpu_hz": 400_000_000, "fps": 14.8, "frames": 1_388, "errors": 0, "heap": 2_610_000, "gc_free": 590_000, "calibrated": 1})), ..linked.clone() };
+    let facts = |diag: Diag| Facts { diag, status: Status::Ready { baud: 3_000_000, woke_ms: 2_240 }, chosen: true, switching: false, expected: expected.clone(), on_device: false };
+    let settle = |shell: &mut Shell| {
+        for _ in 0..90 {
+            if shell.tick(1.0 / 60.0) {
+                shell.draw();
+            }
+        }
+        shell.draw();
+    };
+    let taught = Prefs { ready: true, user: vec![UserWord { action: Action::Open("Camera"), mean: vec![0.125; 64] }], ..Prefs::default() };
+    for (size, tag) in [(TextSize::Compact, "compact"), (TextSize::Standard, "standard"), (TextSize::Large, "large")] {
+        let mut pages: Vec<(String, Box<dyn Screen>)> = Vec::new();
+        for (name, diag) in [("1-camera-idle", linked.clone()), ("2-camera-active", active.clone())] {
+            let mut page = StatusPage::with(facts(diag));
+            page.list.focus = 15;
+            pages.push((name.into(), Box::new(page)));
+        }
+        pages.push(("3-pose-start".into(), Box::new(CalibratePage::with([None, None], None, 0))));
+        pages.push(("4-pose-measured".into(), Box::new(CalibratePage::with([Some(244.1), None], None, 2))));
+        pages.push(("5-pose-kept".into(), Box::new(CalibratePage::with([Some(244.1), Some(243.7)], Some((243.9, 82.6)), 3))));
+        pages.push(("6-voice-top".into(), Box::new(CommandsPage::with(taught.clone(), 0))));
+        pages.push(("7-voice-words".into(), Box::new(CommandsPage::with(taught.clone(), 14))));
+        pages.push(("8-voice-yours".into(), Box::new(CommandsPage::with(taught.clone(), 23))));
+        for (name, page) in pages {
+            let mut shell = Shell::new(Robot::demo());
+            shell.settings.text = size;
+            shell.apply_settings();
+            shell.show(page);
+            settle(&mut shell);
+            crate::platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}-{tag}.png")), 3);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::smartcam::Hello;
 
     fn facts(diag: Diag) -> Facts {
-        let expected = Stamp { catalyst: "0.9.4".into(), main: "aaaaaaaaaaaa".into(), model: "bbbbbbbbbbbb".into(), firmware: String::new() };
+        let expected = Stamp { catalyst: "0.9.4".into(), main: "aaaaaaaaaaaa".into(), model: "bbbbbbbbbbbb".into(), ..Stamp::default() };
         Facts { diag, status: Status::Waking { since: Instant::now() }, chosen: true, switching: false, expected: Some(expected), on_device: true }
     }
 

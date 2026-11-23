@@ -428,6 +428,11 @@ pub trait Screen {
     fn dictation(&self) -> Option<crate::voice::Dictation> {
         None
     }
+    /// The screen reads the talk key itself (Settings › Voice commands,
+    /// teaching a word): push-to-talk leaves it alone meanwhile.
+    fn takes_talk_key(&self) -> bool {
+        false
+    }
     /// What was said, written down, for a screen that takes dictation.
     fn dictated(&mut self, _text: &str, _cx: &mut Cx) -> Nav {
         Nav::Stay
@@ -3204,6 +3209,7 @@ impl Shell {
         let here = match self.stack.last() {
             // Quick capture's sheet takes what is said, as a note's page does.
             _ if down && !in_the_way && self.sheets.capture.is_open() => Some(Target { kind: Dictation::Text, depth: usize::MAX, title: crate::capture::TITLE.to_owned() }),
+            Some((top, _)) if top.takes_talk_key() => None,
             Some((top, _)) if down && !in_the_way && !top.full_screen() => {
                 Some(Target { kind: top.dictation().unwrap_or(Dictation::Question), depth: self.stack.len(), title: top.title().to_owned() })
             }
@@ -3217,6 +3223,7 @@ impl Shell {
             }
             Some(Event::Say(text)) => self.say(text),
             Some(Event::Heard(text, target)) => self.heard(&text, &target),
+            Some(Event::Command(word, action)) => self.command(&word, action),
             None => {}
         }
         // Someone holding the key and talking: no dimming meanwhile. (An
@@ -3229,6 +3236,39 @@ impl Shell {
             self.dirty = true;
         }
         busy
+    }
+
+    /// A voice command heard on the smart camera (voicecmd.rs): done here
+    /// where it is the shell's (a key, Home, the assistant, an app), the
+    /// rest done there; the island says which word and what it did.
+    fn command(&mut self, word: &str, action: crate::voicecmd::Action) {
+        use crate::voicecmd::Act;
+        if self.lock.covering() || self.faces.showing() {
+            return;
+        }
+        match crate::voicecmd::perform(action) {
+            Act::Said(words) => self.say(format!("“{word}” · {words}")),
+            Act::Key(key) => {
+                self.say(format!("“{word}”"));
+                self.key(key);
+            }
+            Act::Home => {
+                self.say(format!("“{word}” · home"));
+                self.back_home();
+            }
+            Act::Assistant => {
+                let from = self.places.island.unwrap_or_else(|| Rect::new(W * 0.5 - 30.0, 4.0, 60.0, self.gfx.island_h()));
+                self.open(Box::new(crate::ai::Assistant::new()), Path::Grow(from));
+            }
+            Act::Open(app) => match crate::screens::builtin_apps().find(|(_, _, n)| n.eq_ignore_ascii_case(app)) {
+                Some((at, _, name)) => {
+                    self.say(format!("“{word}” · {}", name.to_lowercase()));
+                    let screen = crate::screens::open_builtin(at, &self.robot);
+                    self.open(screen, Path::Slide);
+                }
+                None => self.say(format!("“{word}” · no app called {app}")),
+            },
+        }
     }
 
     /// What was said, written down: typed into the page it was said over
@@ -4136,9 +4176,10 @@ impl Shell {
         self.lights.tick(dt);
         // Nobody looking (the screen off, StandBy's faces, locked): the
         // on-device model gives its memory back, after the answer it is
-        // writing if it is writing one.
+        // writing if it is writing one; dictation's model too.
         if matches!(self.standby.state(), crate::standby::State::Off | crate::standby::State::Faces) || self.lock.engaged() {
             crate::local::away();
+            crate::whisper_local::away();
         }
         self.watch_queue(dt);
         self.watch_reminders(dt);

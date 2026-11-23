@@ -1,0 +1,58 @@
+From: Catalyst Linux
+Subject: [PATCH] server: max_tokens, per request and on the command line
+
+whisper_full_params.max_tokens (the most text tokens decoded for a
+segment) is not reachable through whisper-server. The shell asks for a
+few seconds of speech at a time and bounds each by its length: about
+eight tokens a second of speech, so a decoder caught repeating itself
+(which a short window can bring on) stops after a second of the A53's
+time rather than at the 224-token end of the context.
+
+A request's `max_tokens` field sets it for that request, `-mt N` for all
+of them; 0, the default, is no limit, as before.
+
+--- a/examples/server/server.cpp
++++ b/examples/server/server.cpp
+@@ -81,6 +81,7 @@
+     int32_t best_of       = 2;
+     int32_t beam_size     = -1;
+     int32_t audio_ctx     = 0;
++    int32_t max_tokens    = 0;
+ 
+     float word_thold      =  0.01f;
+     float entropy_thold   =  2.40f;
+@@ -147,6 +148,7 @@
+     fprintf(stderr, "  -bo N,     --best-of N                 [%-7d] number of best candidates to keep\n",              params.best_of);
+     fprintf(stderr, "  -bs N,     --beam-size N               [%-7d] beam size for beam search\n",                      params.beam_size);
+     fprintf(stderr, "  -ac N,     --audio-ctx N               [%-7d] audio context size (0 - all)\n",                   params.audio_ctx);
++    fprintf(stderr, "  -mt N,     --max-tokens N              [%-7d] most text tokens decoded per segment (0 - no limit)\n", params.max_tokens);
+     fprintf(stderr, "  -wt N,     --word-thold N              [%-7.2f] word timestamp probability threshold\n",         params.word_thold);
+     fprintf(stderr, "  -et N,     --entropy-thold N           [%-7.2f] entropy threshold for decoder fail\n",           params.entropy_thold);
+     fprintf(stderr, "  -lpt N,    --logprob-thold N           [%-7.2f] log probability threshold for decoder fail\n",   params.logprob_thold);
+@@ -217,6 +219,7 @@
+         else if (arg == "-bo"    || arg == "--best-of")                   { params.best_of                   = std::stoi(argv[++i]); }
+         else if (arg == "-bs"    || arg == "--beam-size")                 { params.beam_size                 = std::stoi(argv[++i]); }
+         else if (arg == "-ac"    || arg == "--audio-ctx")                 { params.audio_ctx                 = std::stoi(argv[++i]); }
++        else if (arg == "-mt"    || arg == "--max-tokens")                { params.max_tokens                = std::stoi(argv[++i]); }
+         else if (arg == "-wt"    || arg == "--word-thold")                { params.word_thold                = std::stof(argv[++i]); }
+         else if (arg == "-et"    || arg == "--entropy-thold")             { params.entropy_thold             = std::stof(argv[++i]); }
+         else if (arg == "-lpt"   || arg == "--logprob-thold")             { params.logprob_thold             = std::stof(argv[++i]); }
+@@ -511,6 +514,10 @@
+     {
+         params.audio_ctx = std::stof(req.get_file_value("audio_ctx").content);
+     }
++    if (req.has_file("max_tokens"))
++    {
++        params.max_tokens = std::stoi(req.get_file_value("max_tokens").content);
++    }
+     if (req.has_file("word_thold"))
+     {
+         params.word_thold = std::stof(req.get_file_value("word_thold").content);
+@@ -942,6 +949,7 @@
+             wparams.max_len          = params.max_len == 0 ? 60 : params.max_len;
+             wparams.split_on_word    = params.split_on_word;
+             wparams.audio_ctx        = params.audio_ctx;
++            wparams.max_tokens       = params.max_tokens;
+ 
+             wparams.debug_mode       = params.debug_mode;
+ 

@@ -1,0 +1,4 @@
+# Locally computed: GitHub's tarball of the v1.9.5 tag (the same by either
+# archive URL, fetched twice), and its MIT licence.
+sha256  ff1a9053feb509ff9d7729703355541ae9690073a6b1c40eb692c962e0dc1720  whisper-cpp-1.9.5.tar.gz
+sha256  94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d  LICENSE
