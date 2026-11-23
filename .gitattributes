@@ -4,3 +4,4 @@
 *.bin binary
 *.clm_blob binary
 os/board/cardputer-zero/rootfs-overlay/lib/firmware/** -text
+*.kmodel binary

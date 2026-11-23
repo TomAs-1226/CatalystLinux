@@ -3009,6 +3009,8 @@ enum Item {
     OnDeviceModel,
     /// Settings › Offline dictation: a page of its own (whisper_local.rs).
     OfflineDictation,
+    /// Settings › Voice commands: a page of its own (voicecmd.rs).
+    VoiceCommands,
     /// Settings › Sound and Settings › Bluetooth: pages of their own
     /// (sound.rs, bluetooth.rs).
     SoundSection,
@@ -3178,7 +3180,7 @@ fn nearest_hue(accent: bezel::Accent) -> u8 {
 
 /// Where everything in Settings is, for search: what it is called, the
 /// section it is in, and its place there (none: the section itself).
-const SETTING_PLACES: [(&str, Item, Option<usize>); 93] = [
+const SETTING_PLACES: [(&str, Item, Option<usize>); 94] = [
     ("Robot settings", Item::RobotSection, None),
     ("Open Robot on link", Item::RobotSection, Some(0)),
     ("Match report after a match", Item::RobotSection, Some(1)),
@@ -3258,6 +3260,7 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 93] = [
     ("Read keys from a file", Item::KeysSection, Some(5)),
     ("On-device model", Item::OnDeviceModel, None),
     ("Offline dictation", Item::OfflineDictation, None),
+    ("Voice commands", Item::VoiceCommands, None),
     ("SSH access", Item::Access, Some(0)),
     ("System update", Item::UpdateSection, None),
     ("Check for updates", Item::UpdateSection, Some(1)),
@@ -3325,6 +3328,9 @@ pub fn open_setting(index: usize) -> Box<dyn Screen> {
     if section == Item::OfflineDictation {
         return Box::new(crate::whisper_local::DictationPage::new());
     }
+    if section == Item::VoiceCommands {
+        return Box::new(crate::voicecmd::CommandsPage::new());
+    }
     if section == Item::SoundSection {
         return Box::new(crate::sound::SoundScreen::new().at(place.unwrap_or(0)));
     }
@@ -3363,7 +3369,7 @@ impl SettingsApp {
         use Item::*;
         Self::page(
             "Settings",
-            vec![RobotSection, Appearance, TextSection, HomeSection, Display, LockSection, StandBySection, BatterySection, Network, SoundSection, BluetoothSection, MusicSection, CameraSection, NameSection, UsbSection, CompanionSection, KeysSection, OnDeviceModel, OfflineDictation, Access, UpdateSection, Help, About, FromComputer],
+            vec![RobotSection, Appearance, TextSection, HomeSection, Display, LockSection, StandBySection, BatterySection, Network, SoundSection, BluetoothSection, MusicSection, CameraSection, NameSection, UsbSection, CompanionSection, KeysSection, OnDeviceModel, OfflineDictation, VoiceCommands, Access, UpdateSection, Help, About, FromComputer],
         )
     }
 
@@ -3540,6 +3546,7 @@ impl SettingsApp {
             StandBySection => section("StandBy", (if g.lock.standby { "on the charger" } else { "off" }).to_owned()),
             OnDeviceModel => section("On-device model", crate::local::summary()),
             OfflineDictation => section("Offline dictation", crate::whisper_local::summary()),
+            VoiceCommands => section("Voice commands", crate::voicecmd::summary()),
             SoundSection => section("Sound", crate::sound::summary()),
             BluetoothSection => section("Bluetooth", crate::bluetooth::summary()),
             MusicSection => section("Music", crate::music::summary()),
@@ -3880,6 +3887,7 @@ impl Screen for SettingsApp {
             Key::Enter | Key::Right if item == Item::StandBySection => return Nav::Push(Box::new(crate::lockpages::StandByPage::new())),
             Key::Enter | Key::Right if item == Item::OnDeviceModel => return Nav::Push(Box::new(crate::local::ModelPage::new())),
             Key::Enter | Key::Right if item == Item::OfflineDictation => return Nav::Push(Box::new(crate::whisper_local::DictationPage::new())),
+            Key::Enter | Key::Right if item == Item::VoiceCommands => return Nav::Push(Box::new(crate::voicecmd::CommandsPage::new())),
             Key::Enter | Key::Right if item == Item::CameraProgram => return Nav::Push(Box::new(crate::unitv::InstallScreen::new())),
             Key::Enter | Key::Right if item == Item::SmartCamera => return Nav::Push(Box::new(crate::smartcam_status::StatusPage::new())),
             Key::Enter | Key::Right if item == Item::SoundSection => return Nav::Push(Box::new(crate::sound::SoundScreen::new())),

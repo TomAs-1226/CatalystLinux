@@ -1,0 +1,814 @@
+{
+ "name": "Catalyst Coprocessor keyword spotter",
+ "labels": [
+  "yes",
+  "no",
+  "up",
+  "down",
+  "left",
+  "right",
+  "on",
+  "off",
+  "stop",
+  "go",
+  "zero",
+  "one",
+  "two",
+  "three",
+  "four",
+  "five",
+  "six",
+  "seven",
+  "eight",
+  "nine",
+  "bed",
+  "bird",
+  "cat",
+  "dog",
+  "happy",
+  "house",
+  "marvin",
+  "sheila",
+  "tree",
+  "wow",
+  "_silence_"
+ ],
+ "commands": [
+  "yes",
+  "no",
+  "up",
+  "down",
+  "left",
+  "right",
+  "on",
+  "off",
+  "stop",
+  "go",
+  "zero",
+  "one",
+  "two",
+  "three",
+  "four",
+  "five",
+  "six",
+  "seven",
+  "eight",
+  "nine"
+ ],
+ "command_indices": [
+  0,
+  1,
+  2,
+  3,
+  4,
+  5,
+  6,
+  7,
+  8,
+  9,
+  10,
+  11,
+  12,
+  13,
+  14,
+  15,
+  16,
+  17,
+  18,
+  19
+ ],
+ "other_words": [
+  "bed",
+  "bird",
+  "cat",
+  "dog",
+  "happy",
+  "house",
+  "marvin",
+  "sheila",
+  "tree",
+  "wow"
+ ],
+ "silence_label": "_silence_",
+ "held_out_words": [
+  "backward",
+  "follow",
+  "forward",
+  "learn",
+  "visual"
+ ],
+ "input": {
+  "shape": [
+   1,
+   1,
+   48,
+   40
+  ],
+  "dtype": "float32",
+  "layout": "48 rows (frames, 20 ms apart, oldest first) x 40 mel bands (low to high); fe_window() writes it"
+ },
+ "outputs": [
+  {
+   "index": 0,
+   "name": "probabilities",
+   "shape": [
+    1,
+    31
+   ],
+   "note": "softmax over labels; the kmodel computes exp through a uint8 table, so values are coarse (steps of about 0.004)"
+  },
+  {
+   "index": 1,
+   "name": "embedding",
+   "shape": [
+    1,
+    64,
+    1,
+    1
+   ],
+   "note": "global-average-pooled features, already centred and whitened (train.py); L2-normalise, compare by cosine"
+  }
+ ],
+ "normalisation": {
+  "formula": "(L[frame][band] - mean[band]) * inv_std[band]",
+  "mean": [
+   -1.472912,
+   -1.207986,
+   -1.422817,
+   -1.596645,
+   -1.801277,
+   -1.807432,
+   -1.668044,
+   -1.706724,
+   -1.786358,
+   -1.914321,
+   -2.02782,
+   -2.097692,
+   -2.175764,
+   -2.226368,
+   -2.27734,
+   -2.405553,
+   -2.391168,
+   -2.394937,
+   -2.466646,
+   -2.520516,
+   -2.558886,
+   -2.607702,
+   -2.593508,
+   -2.574128,
+   -2.576035,
+   -2.652733,
+   -2.645905,
+   -2.610902,
+   -2.537985,
+   -2.496236,
+   -2.432925,
+   -2.403436,
+   -2.454382,
+   -2.534835,
+   -2.603509,
+   -2.68257,
+   -2.735904,
+   -2.722924,
+   -2.758487,
+   -2.888197
+  ],
+  "inv_std": [
+   0.24209,
+   0.240588,
+   0.237355,
+   0.238504,
+   0.240118,
+   0.236563,
+   0.233421,
+   0.232998,
+   0.233876,
+   0.236431,
+   0.241397,
+   0.246263,
+   0.249434,
+   0.251215,
+   0.253205,
+   0.256236,
+   0.25691,
+   0.258301,
+   0.26115,
+   0.263093,
+   0.264772,
+   0.266032,
+   0.265029,
+   0.264817,
+   0.264828,
+   0.265976,
+   0.266769,
+   0.266553,
+   0.264574,
+   0.262333,
+   0.258156,
+   0.255596,
+   0.25666,
+   0.257877,
+   0.259186,
+   0.260586,
+   0.262342,
+   0.262134,
+   0.261965,
+   0.258744
+  ]
+ },
+ "frontend": {
+  "sample_rate": 16000,
+  "window": 512,
+  "hop": 320,
+  "fft": 512,
+  "window_function": "periodic Hann",
+  "bands": 40,
+  "fmin_hz": 60.0,
+  "fmax_hz": 7600.0,
+  "mel": "HTK 2595*log10(1+f/700), 42 edges evenly spaced in mel, triangles linear in mel, peak 1",
+  "log": "ln(mel + 1e-6)",
+  "energy": "10*log10(mean(x^2) + 1e-10) dB, x = s/32768",
+  "vad": {
+   "floor_start_db": "frame 0, at most -45",
+   "floor_rise_db_per_frame": 0.05,
+   "margin_db": 12.0,
+   "min_db": -60.0,
+   "onset_frames": 3,
+   "preroll_frames": 5,
+   "hangover_frames": 30
+  },
+  "window_frames": 48,
+  "window_choice": "fe_best_window(s, vad_state ? vad_start : 0, fe_count(s) - 1)",
+  "reference": "features.py; C: fe.c / fe.h"
+ },
+ "thresholds": {
+  "command": 0.75,
+  "command_rule": "top = argmax(probabilities); act if top < 20 and probabilities[top] >= command",
+  "user_word_cosine": 0.64,
+  "user_word_rule": "enrol 3 utterances (L2-normalised embeddings); take the highest cosine over all enrolled embeddings; accept if >= user_word_cosine. Check user words before the command rule (see accuracy.kmodel_system). Matching against each word's prototype (the L2-normalised mean of its 3 embeddings) with user_word_cosine_prototype does better (accuracy.kmodel_fewshot_prototype).",
+  "user_word_cosine_prototype": 0.62,
+  "user_word_enrol_utterances": 3
+ },
+ "accuracy": {
+  "note": "Speech Commands v0.02 testing_list.txt (speakers never trained on); commands = the 20; thresholds from the validation split; kmodel = ncc infer (nncase's K210 simulator); few-shot on validation+test speakers",
+  "float_test_top1_commands": 0.9577,
+  "kmodel_test_top1_commands": 0.957,
+  "kmodel_test_at_threshold": {
+   "threshold": 0.75,
+   "commands": 8181,
+   "top1_accuracy": 0.957,
+   "accepted_correct": 0.8504,
+   "false_reject": 0.1453,
+   "wrong_command": 0.0043,
+   "false_accept_others": 0.009,
+   "n_others": 2006,
+   "false_accept_silence": 0.0,
+   "n_silence": 600,
+   "false_accept_unseen_words": 0.2017,
+   "n_unseen_words": 818
+  },
+  "kmodel_test_other_thresholds": [
+   {
+    "threshold": 0.5,
+    "accepted_correct": 0.9232,
+    "false_reject": 0.0623,
+    "wrong_command": 0.0144,
+    "false_accept_others": 0.0214,
+    "false_accept_silence": 0.0,
+    "false_accept_unseen_words": 0.3765
+   },
+   {
+    "threshold": 0.6,
+    "accepted_correct": 0.9015,
+    "false_reject": 0.0886,
+    "wrong_command": 0.0099,
+    "false_accept_others": 0.0155,
+    "false_accept_silence": 0.0,
+    "false_accept_unseen_words": 0.2983
+   },
+   {
+    "threshold": 0.7,
+    "accepted_correct": 0.8706,
+    "false_reject": 0.1238,
+    "wrong_command": 0.0056,
+    "false_accept_others": 0.011,
+    "false_accept_silence": 0.0,
+    "false_accept_unseen_words": 0.2298
+   },
+   {
+    "threshold": 0.8,
+    "accepted_correct": 0.8207,
+    "false_reject": 0.1766,
+    "wrong_command": 0.0027,
+    "false_accept_others": 0.005,
+    "false_accept_silence": 0.0,
+    "false_accept_unseen_words": 0.1638
+   },
+   {
+    "threshold": 0.9,
+    "accepted_correct": 0.7211,
+    "false_reject": 0.2783,
+    "wrong_command": 0.0006,
+    "false_accept_others": 0.0025,
+    "false_accept_silence": 0.0,
+    "false_accept_unseen_words": 0.0941
+   }
+  ],
+  "float_test_at_threshold": {
+   "threshold": 0.75,
+   "commands": 8181,
+   "top1_accuracy": 0.9577,
+   "accepted_correct": 0.847,
+   "false_reject": 0.1495,
+   "wrong_command": 0.0035,
+   "false_accept_others": 0.0085,
+   "n_others": 2006,
+   "false_accept_silence": 0.0,
+   "n_silence": 600,
+   "false_accept_unseen_words": 0.2042,
+   "n_unseen_words": 818
+  },
+  "kmodel_official_test_set": {
+   "threshold": 0.75,
+   "commands": 4314,
+   "top1_accuracy": 0.9481,
+   "accepted_correct": 0.838,
+   "false_reject": 0.1562,
+   "wrong_command": 0.0058,
+   "false_accept_others": 0.0,
+   "n_others": 121,
+   "false_accept_silence": 0.0,
+   "n_silence": 408,
+   "false_accept_unseen_words": 0.2766,
+   "n_unseen_words": 47,
+   "accuracy_12_class": 0.9511
+  },
+  "float_official_test_set": {
+   "threshold": 0.75,
+   "commands": 4314,
+   "top1_accuracy": 0.9485,
+   "accepted_correct": 0.8338,
+   "false_reject": 0.1616,
+   "wrong_command": 0.0046,
+   "false_accept_others": 0.0,
+   "n_others": 121,
+   "false_accept_silence": 0.0,
+   "n_silence": 408,
+   "false_accept_unseen_words": 0.2766,
+   "n_unseen_words": 47,
+   "accuracy_12_class": 0.9517
+  },
+  "kmodel_per_command": {
+   "yes": {
+    "n": 419,
+    "top1": 0.9857,
+    "accepted": 0.9165,
+    "most_confused_with": "left"
+   },
+   "no": {
+    "n": 405,
+    "top1": 0.9605,
+    "accepted": 0.7926,
+    "most_confused_with": "down"
+   },
+   "up": {
+    "n": 425,
+    "top1": 0.9482,
+    "accepted": 0.8282,
+    "most_confused_with": "off"
+   },
+   "down": {
+    "n": 406,
+    "top1": 0.9212,
+    "accepted": 0.7906,
+    "most_confused_with": "no"
+   },
+   "left": {
+    "n": 412,
+    "top1": 0.983,
+    "accepted": 0.8762,
+    "most_confused_with": "yes"
+   },
+   "right": {
+    "n": 396,
+    "top1": 0.9596,
+    "accepted": 0.8561,
+    "most_confused_with": "one"
+   },
+   "on": {
+    "n": 396,
+    "top1": 0.9116,
+    "accepted": 0.8308,
+    "most_confused_with": "off"
+   },
+   "off": {
+    "n": 402,
+    "top1": 0.9179,
+    "accepted": 0.8035,
+    "most_confused_with": "up"
+   },
+   "stop": {
+    "n": 411,
+    "top1": 0.9781,
+    "accepted": 0.8905,
+    "most_confused_with": "down"
+   },
+   "go": {
+    "n": 402,
+    "top1": 0.908,
+    "accepted": 0.7662,
+    "most_confused_with": "no"
+   },
+   "zero": {
+    "n": 418,
+    "top1": 0.9665,
+    "accepted": 0.8732,
+    "most_confused_with": "seven"
+   },
+   "one": {
+    "n": 399,
+    "top1": 0.9624,
+    "accepted": 0.8722,
+    "most_confused_with": "four"
+   },
+   "two": {
+    "n": 424,
+    "top1": 0.9575,
+    "accepted": 0.8514,
+    "most_confused_with": "go"
+   },
+   "three": {
+    "n": 405,
+    "top1": 0.9457,
+    "accepted": 0.7951,
+    "most_confused_with": "tree"
+   },
+   "four": {
+    "n": 400,
+    "top1": 0.9575,
+    "accepted": 0.8525,
+    "most_confused_with": "off"
+   },
+   "five": {
+    "n": 445,
+    "top1": 0.973,
+    "accepted": 0.8787,
+    "most_confused_with": "left"
+   },
+   "six": {
+    "n": 394,
+    "top1": 0.9721,
+    "accepted": 0.9061,
+    "most_confused_with": "seven"
+   },
+   "seven": {
+    "n": 406,
+    "top1": 0.9754,
+    "accepted": 0.9138,
+    "most_confused_with": "zero"
+   },
+   "eight": {
+    "n": 408,
+    "top1": 0.9804,
+    "accepted": 0.8431,
+    "most_confused_with": "yes"
+   },
+   "nine": {
+    "n": 408,
+    "top1": 0.9706,
+    "accepted": 0.8652,
+    "most_confused_with": "no"
+   }
+  },
+  "kmodel_never_trained_words": {
+   "backward": {
+    "n": 165,
+    "accepted_as_command": 0.0303,
+    "mostly_as": [
+     [
+      "left",
+      3
+     ],
+     [
+      "one",
+      1
+     ]
+    ]
+   },
+   "follow": {
+    "n": 172,
+    "accepted_as_command": 0.1395,
+    "mostly_as": [
+     [
+      "four",
+      15
+     ],
+     [
+      "on",
+      2
+     ]
+    ]
+   },
+   "forward": {
+    "n": 155,
+    "accepted_as_command": 0.5677,
+    "mostly_as": [
+     [
+      "four",
+      88
+     ]
+    ]
+   },
+   "learn": {
+    "n": 161,
+    "accepted_as_command": 0.0994,
+    "mostly_as": [
+     [
+      "left",
+      8
+     ],
+     [
+      "one",
+      3
+     ]
+    ]
+   },
+   "visual": {
+    "n": 165,
+    "accepted_as_command": 0.1939,
+    "mostly_as": [
+     [
+      "zero",
+      31
+     ],
+     [
+      "eight",
+      1
+     ]
+    ]
+   }
+  },
+  "kmodel_fewshot": {
+   "accuracy": 0.6576,
+   "confused": 0.0014,
+   "false_accept": 0.0191,
+   "false_accept_trained_words": 0.0194,
+   "positives": 422,
+   "negatives": 6394,
+   "tau": 0.64,
+   "speakers": 63,
+   "enrolled_words": 252
+  },
+  "float_fewshot": {
+   "accuracy": 0.6559,
+   "confused": 0.0017,
+   "false_accept": 0.0182,
+   "false_accept_trained_words": 0.0185,
+   "positives": 422,
+   "negatives": 6394,
+   "tau": 0.64,
+   "speakers": 63,
+   "enrolled_words": 252
+  },
+  "kmodel_fewshot_prototype": {
+   "accuracy": 0.7289,
+   "confused": 0.0026,
+   "false_accept": 0.0189,
+   "false_accept_trained_words": 0.0193,
+   "positives": 422,
+   "negatives": 6394,
+   "tau": 0.62,
+   "speakers": 63,
+   "enrolled_words": 252
+  },
+  "kmodel_system": [
+   {
+    "order": "user words first",
+    "user_word_recognised": 0.6576,
+    "user_word_taken_as_command": 0.0225,
+    "command_recognised": 0.8481,
+    "command_hijacked_by_user_word": 0.02,
+    "other_speech_acted_on": 0.0722,
+    "tau": 0.64
+   },
+   {
+    "order": "commands first",
+    "user_word_recognised": 0.5137,
+    "user_word_taken_as_command": 0.1666,
+    "command_recognised": 0.8659,
+    "command_hijacked_by_user_word": 0.002,
+    "other_speech_acted_on": 0.0722,
+    "tau": 0.64
+   }
+  ],
+  "float_kmodel_agreement": {
+   "top1_same": 0.9933,
+   "mean_abs_prob_diff": 0.0011,
+   "top_prob_mean_abs_diff": 0.0109,
+   "embedding_cosine_mean": 0.9986,
+   "embedding_cosine_min": 0.9504
+  }
+ },
+ "model": {
+  "architecture": [
+   "conv3x3 16 + BN + ReLU + maxpool2",
+   "conv3x3 32 + BN + ReLU + maxpool2",
+   "conv3x3 64 + BN + ReLU + maxpool2",
+   "conv3x3 96 + BN + ReLU",
+   "conv1x1 64 (linear; output whitened)",
+   "global average pool (embedding, 64)",
+   "dense 31 + softmax"
+  ],
+  "note": "all convs 'same', stride 1; BN folded by the TFLite converter",
+  "params": 87535,
+  "macs": 6545344,
+  "training": {
+   "seed": 5805,
+   "epochs": 40,
+   "arch": "16p,32p,64p,96"
+  },
+  "best_val_accuracy": 0.9595
+ },
+ "kmodel": {
+  "file": "kws.kmodel",
+  "bytes": 93740,
+  "sha256": "4d603785ce7d0bd25f1e2baee712ed703ec77608ed807ec58d325ebcd9cc90eb",
+  "format": "kmodel v4 (nncase v0.2), K210",
+  "nncase": "nncase v0.2.0-beta4 (ncc_linux_x86_64.tar.xz)",
+  "ncc_archive_sha256": "b20768e444540aafd1896e72b88be7bad15302b371bf35f6039f08f6011599ae",
+  "ncc_command": "ncc compile kws.tflite kws.kmodel -i tflite -o kmodel -t k210 --dataset calib/ --dataset-format raw --inference-type uint8 --input-type float --calibrate-method l2 --dump-ir",
+  "rebuild_note": "ncc v0.2 leaves a few reserved/padding bytes uninitialised, so recompiling gives a functionally identical kmodel with a different sha256",
+  "calibration": "400 normalised windows of augmented training data",
+  "memory": {
+   "working_memory_bytes": 9600,
+   "kmodel_main_mem_bytes": 9600,
+   "kpu_ram_bytes": 43008
+  },
+  "memory_note": "working_memory_bytes: nncase's main-memory buffer (activations on the CPU side); kpu_ram_bytes: KPU feature maps in the K210's 2 MB AI SRAM; plus the kmodel itself (loaded into RAM) and the caller's 7680-byte float input",
+  "layers": [
+   {
+    "op": "Quantize",
+    "unit": "CPU",
+    "in": "1x1x48x40",
+    "out": "1x1x48x40"
+   },
+   {
+    "op": "KPUUpload",
+    "unit": "CPU",
+    "in": "1x1x48x40",
+    "out": "1x1x48x40"
+   },
+   {
+    "op": "KPUConv2D",
+    "unit": "KPU",
+    "in": "1x1x48x40",
+    "out": "1x16x24x20"
+   },
+   {
+    "op": "KPUConv2D",
+    "unit": "KPU",
+    "in": "1x16x24x20",
+    "out": "1x32x12x10"
+   },
+   {
+    "op": "KPUConv2D",
+    "unit": "KPU",
+    "in": "1x32x12x10",
+    "out": "1x64x6x5"
+   },
+   {
+    "op": "KPUConv2D",
+    "unit": "KPU",
+    "in": "1x64x6x5",
+    "out": "1x96x6x5"
+   },
+   {
+    "op": "KPUConv2D",
+    "unit": "KPU",
+    "in": "1x96x6x5",
+    "out": "1x64x6x5"
+   },
+   {
+    "op": "Dequantize",
+    "unit": "CPU",
+    "in": "1x64x6x5",
+    "out": "1x64x6x5"
+   },
+   {
+    "op": "Reduce",
+    "unit": "CPU",
+    "in": "1x64x6x5",
+    "out": "1x64"
+   },
+   {
+    "op": "MemoryCopy",
+    "unit": "CPU",
+    "in": "1x64",
+    "out": "1x64x1x1"
+   },
+   {
+    "op": "Pad",
+    "unit": "CPU",
+    "in": "1x64x1x1",
+    "out": "1x64x4x4"
+   },
+   {
+    "op": "Quantize",
+    "unit": "CPU",
+    "in": "1x64x4x4",
+    "out": "1x64x4x4"
+   },
+   {
+    "op": "KPUUpload",
+    "unit": "CPU",
+    "in": "1x64x4x4",
+    "out": "1x64x4x4"
+   },
+   {
+    "op": "KPUConv2D",
+    "unit": "KPU",
+    "in": "1x64x4x4",
+    "out": "1x31x4x4"
+   },
+   {
+    "op": "Pad",
+    "unit": "CPU",
+    "in": "1x31x4x4",
+    "out": "1x31x1x1"
+   },
+   {
+    "op": "MemoryCopy",
+    "unit": "CPU",
+    "in": "1x31x1x1",
+    "out": "1x31"
+   },
+   {
+    "op": "Dequantize",
+    "unit": "CPU",
+    "in": "1x31",
+    "out": "1x31"
+   },
+   {
+    "op": "Reduce",
+    "unit": "CPU",
+    "in": "1x31",
+    "out": "1x1"
+   },
+   {
+    "op": "Binary",
+    "unit": "CPU",
+    "in": "1x31",
+    "out": "1x31"
+   },
+   {
+    "op": "Quantize",
+    "unit": "CPU",
+    "in": "1x31",
+    "out": "1x31"
+   },
+   {
+    "op": "TableLookup1D",
+    "unit": "CPU",
+    "in": "1x31",
+    "out": "1x31"
+   },
+   {
+    "op": "Dequantize",
+    "unit": "CPU",
+    "in": "1x31",
+    "out": "1x31"
+   },
+   {
+    "op": "Reduce",
+    "unit": "CPU",
+    "in": "1x31",
+    "out": "1x1"
+   },
+   {
+    "op": "Binary",
+    "unit": "CPU",
+    "in": "1x31",
+    "out": "1x31"
+   },
+   {
+    "op": "MemoryCopy",
+    "unit": "CPU",
+    "in": "1x64",
+    "out": "1x64x1x1"
+   }
+  ]
+ },
+ "dataset": {
+  "name": "Google Speech Commands v0.02",
+  "urls": [
+   "http://download.tensorflow.org/data/speech_commands_v0.02.tar.gz",
+   "http://download.tensorflow.org/data/speech_commands_test_set_v0.02.tar.gz"
+  ],
+  "sha256": {
+   "speech_commands_v0.02.tar.gz": "af14739ee7dc311471de98f5f9d2c9191b18aedfe957f4a6ff791c709868ff58",
+   "speech_commands_test_set_v0.02.tar.gz": "cc2a00c1147c2254e9be3fa0f779d8c17421dc349b86366567a8edfa9acd51df"
+  },
+  "license": "CC-BY-4.0 (https://creativecommons.org/licenses/by/4.0/)",
+  "attribution": "Speech Commands v0.02 by Pete Warden, Google (2018), https://arxiv.org/abs/1804.03209, licensed under CC BY 4.0. The model was trained on it; the dataset is not redistributed."
+ }
+}

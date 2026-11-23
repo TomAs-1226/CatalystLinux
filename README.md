@@ -2599,14 +2599,16 @@ shows its AI view: what it sees, with what it found drawn on it.
   then read back on the camera and checked whole (one that fails is sent
   again). main.py writes each as `name.new`, and on the commit moves them
   all into place with the old ones kept as `name.old`, from a journal (a
-  commit cut off is finished at the next start), and starts again. boot.py
-  counts the new program's starts: two that never reach the handheld, and
-  the third start has the old files back (the status page says so). The
-  island shows it under way, as a download. MaixPy itself cannot go over
-  the Grove port (flashing it needs the K210's boot pin, which only the USB
-  bridge's DTR and RTS reach): when the camera's MaixPy lacks what main.py
-  needs, or its program is 0.9.3's (which takes no update over the link),
-  the status page and a notification say "USB-A, once", and only then.
+  commit cut off is finished at the next start), and starts again. The
+  firmware's frozen boot counts the new program's starts: two that never
+  reach the handheld, and the third start has the old files back (the
+  status page says so). The keyword spotter (`kws.kmodel`) comes the same
+  way. The island shows it under way, as a download. The firmware itself
+  cannot go over the Grove port (flashing it needs the K210's boot pin,
+  which only the USB bridge's DTR and RTS reach): when the camera does not
+  run Catalyst Coprocessor at the image's firmware number, or its program
+  is 0.9.3's (which takes no update over the link), the status page and a
+  notification say "USB-A, once", and only then.
 - **Settings › Camera › Smart camera** (Enter on the row) shows how it
   stands, live: the 5 V and for how long, the bytes each way, the frames
   and those refused, the rate in use and the fastest that failed, the
@@ -2627,6 +2629,102 @@ shows its AI view: what it sees, with what it found drawn on it.
   `a` in the AI view lays its picture over the main one's at half strength:
   the arrows move it, `+`/`-` size it, `r` resets, Enter keeps it.
 
+### Catalyst Coprocessor: the UnitV's own firmware
+
+The UnitV runs a MaixPy of Catalyst's own, built from MaixPy at the commit
+M5Stack ships (d8901fd22) by `tools/unitv/firmware/build.sh` (WSL or Linux;
+it fetches Kendryte's GCC 8.2, CMake, pyserial and MaixPy's tree as
+tarballs pinned by commit and SHA-256 in `versions.lock`, applies
+`patches/`, adds `cmodule/` and `frozen/`, and builds under
+`~/catalyst-coprocessor-build`, never the image's tree; two clean builds
+give the same SHA-256). It is 1.84 MB (Sipeed's M5StickV build: 2.10 MB);
+in the K210's 6 MB of main memory it leaves 3.3 MB for frames and models
+(Sipeed's left 2.5 MB), with 768 kB for Python's own objects; the KPU has
+its 2 MB besides. What changed:
+
+- **Only what the UnitV uses:** no LCD, audio, network, sockets, ciphers,
+  NES, video, LVGL, ulab, editor, IDE protocol, microphone array or MaixPy's
+  closed speech recogniser; kept: the sensor, the KPU (kmodel v3 and v4),
+  image (AprilTags 36h11, QR codes, blobs, JPEG), UART, the filesystem, the
+  LED.
+- **A frozen boot that always runs the program**, `/flash/main.py` (sent
+  over the Grove port as before), after finishing or rolling back an update;
+  if main.py is missing or stops with an error, a frozen safe program
+  answers the handheld, says why, and takes a new main.py (one on trial is
+  rolled back first). Sipeed's M5StickV boot ran `boot.py` and then
+  `sys.exit()`, which is why main.py never started on the UnitV.
+- **`SPIFFS Error Code -10002`** was SPIFFS_ERR_NOT_FOUND, printed by
+  MaixPy's `os.remove()` of a file that is not there (the program's end of
+  an update trial, at every start) before it raised the usual OSError:
+  harmless. The program no longer removes what is not there, and the
+  firmware no longer prints it.
+- **Power:** MaixPy's `time.sleep_ms` was a busy loop and its idle task
+  spun; here a delay sleeps a scheduler tick at a time and the idle task
+  waits for an interrupt (`wfi`). The `catalyst` module sets the CPU's clock
+  at run time (PLL0 again, the time base kept continuous on the CLINT's
+  timer, every UART's divisor set again; MaixPy itself could change it only
+  through `freq.conf` and a restart), gates the KPU's clock and stops PLL1,
+  and powers the OV7740 down (PWDN, its XCLK stopped).
+- **Speech front end** (`tools/unitv/speech/fe.c`): 40 log-mels every
+  20 ms, a voice detector, and the keyword spotter's window, in C, as the
+  audio arrives (well under 1% of the CPU at 400 MHz).
+
+**Its states** (currents at the Grove 5 V are estimates from the parts'
+figures, not yet measured: a USB meter on the UnitV's own USB-C or the
+handheld's battery current will tell):
+
+| State | What runs | Current (5 V) | Back to work |
+|---|---|---|---|
+| Off | the handheld's 5 V switch off | 0 | 2.2–2.5 s (MaixPy, the program) |
+| Idle (default) | CPU 100 MHz waiting for interrupts, sensor down, KPU off, LED dark | ~25–40 mA | its next look at the link, ≤ 30 ms; a pipeline's first result ~0.25 s (the sensor's exposure settling) |
+| Listening | the talk key's audio arriving, the front end at 100 MHz | ~30–45 mA | a command ~10 ms after the last audio (the KPU ~1 ms) |
+| Active | the pipelines asked for, at their pace, 400 MHz | ~120–150 mA (tags); ~160–220 mA with faces on the KPU and the preview | – |
+| Before (Sipeed's MaixPy, 0.9's main.py) | busy loop at 400 MHz, the sensor always on | ~110–140 mA even doing nothing | – |
+
+The handheld asks only for what the screen in front needs (the Camera's
+exposure: faces 5 a second; scan mode: codes 10; the field view: tags 15;
+the AI view: everything as fast as it goes) and sends IDLE when nothing is;
+with nothing heard for 6 s the camera idles by itself. It stays powered 15
+s after its last use (or always, with Settings › Voice commands ›
+Coprocessor › kept ready), then its 5 V goes off. Version 3's link adds:
+`PIPE` (pipelines, pace, idle time), `IDLE`, `TIME` (the camera's clock
+against the handheld's, the exchange with the shortest round trip of the
+last eight; results carry the camera's ms of capture and arrive as the
+handheld's `Instant`), `HEALTH` (state, pace, errors, memory, CPU clock;
+the K210 and OV7740 have no temperature sensor), `AUDIO`/`AUDIO_END`/
+`HEARD`/`COMMAND` (speech), `CALIB` (the tag pose). Settings › Camera ›
+Smart camera shows its state, firmware, pace, memory, clock offset and wake
+time, and `t` calibrates the tag pose: a 36h11 tag of known size (165.1 mm
+FRC tags, or 150, 100, 200 mm) held square-on at 0.5 m and 1.0 m by tape
+measure; the camera keeps the focal length and the pose's scale in
+`/flash/intrinsics.json` (until then, the lens's 80° figures).
+
+**Voice (commands first, then dictation).** Hold Alt and say a word: the
+audio streams to the camera while the key is held, and on release its
+keyword spotter (a 6.6 M-multiply CNN on the KPU, 94 kB; trained on
+Google's Speech Commands, CC-BY-4.0; `tools/unitv/speech`) answers. The
+words: yes, no, up, down, left, right, on, off, stop, go, zero to nine,
+each with an action in Settings › Voice commands (one to six send Team's
+six calls; the arrows, Enter, Esc, Home, timers, music, the assistant,
+apps), plus up to four words of your own, each taught by saying it three
+times. Measured on Speech Commands' test speakers in nncase's simulator:
+95.7% top-1 on the twenty words; at the 0.75 threshold used, 85% of
+commands acted on, 0.4% taken as the wrong word, 0.9% of other words and
+no silence taken; taught words found 73% of the time at 1.9% false
+accepts. Anything that is not a command, or a tap of Alt (hands-free: it
+listens until 0.6 s after you stop), is dictation: only the voice's span
+(the camera's voice detector, or the handheld's when no camera answers) goes
+to Whisper tiny.en on the handheld (Settings › Offline dictation) or to
+OpenAI, so silence is never transcribed and a command never is.
+
+**Building and flashing the firmware:** `bash tools/unitv/firmware/build.sh`
+(about a minute after the first download), then commit
+`catalyst-coprocessor.bin` and `.txt` (the package checks its SHA-256);
+raise `tools/unitv/firmware/FIRMWARE` when the firmware changes, so
+handhelds offer it over USB-A. `python tools/unitv/test_protocol.py` and
+`tools/unitv/speech/test_fe.py` check the program and the front end on a
+computer.
+
 **Setting it up, once, from the handheld (0.9.1).** Plug the UnitV's USB-C
 into the handheld's USB-A port. The shell notices a K210 board on its USB
 serial bridge (the UnitV's FTDI FT2232, which Sipeed's CH552 boards also
@@ -2636,28 +2734,24 @@ and the island offers "install on the camera" (also in Settings › Camera ›
 UnitV, which opens the same page). Enter, then about a minute
 (`unitv.rs`, on a thread of its own; the page shows each part and a bar):
 
-1. **MaixPy**, only if the camera does not already run one with what main.py
-   needs (QR codes, AprilTags, blobs, the KPU's YOLOv2): Sipeed's MaixPy
-   v0.6.3, its build for the M5StickV (which M5Stack says the UnitV runs),
-   written through the K210's ISP as kflash.py does it. DTR and RTS reset the
-   K210 into its boot ROM (both wirings kflash.py knows are tried), the ROM
-   takes kflash.py's flash loader into SRAM, and the loader writes the flash
-   at 1.5 Mbaud (115 200 if the bridge cannot), 64 KiB at a time, every
-   request SLIP-framed with a CRC-32 and answered.
+1. **The firmware, Catalyst Coprocessor** (below), unless the camera already
+   runs it at this image's number: written through the K210's ISP as
+   kflash.py does it. DTR and RTS reset the K210 into its boot ROM (both
+   wirings kflash.py knows are tried), the ROM takes kflash.py's flash
+   loader into SRAM, and the loader writes the flash at 1.5 Mbaud (115 200
+   if the bridge cannot), 64 KiB at a time, every request SLIP-framed with a
+   CRC-32 and answered.
 2. **The face model** at 0x300000, where main.py loads it, the same way.
-3. **main.py**, and Catalyst's boot.py (in place of a firmware's own demo
-   boot.py, which can loop for ever; it finishes or rolls back an update
-   over the Grove port), into the camera's `/flash` over the raw REPL the
-   way mpremote writes files (raw-paste mode where MicroPython has it, which
-   MaixPy's older one does not), each read back to check. A microSD card in
-   the camera matters: MaixPy starts `/sd/main.py` instead of `/flash`'s
-   whenever a card is in (and writes a demo main.py onto a card without
-   one), so a card with no program, or an older Catalyst one, gets a few
-   lines that start `/flash`'s; a card with someone else's main.py is left
-   alone and the page says to take it out.
-4. **A version stamp** (`/flash/catalyst.json`: this release, main.py's and
-   the model's SHA-256), a soft reset, and a hello on the framed protocol
-   over the same USB line: main.py answers there as on the Grove port.
+3. **main.py**, into the camera's `/flash` over the raw REPL the way
+   mpremote writes files (raw-paste mode where MicroPython has it, which
+   MaixPy's older one does not), read back to check. An older Catalyst's
+   `/flash/boot.py` goes: the firmware's own boot runs main.py now (and
+   never a card's). The keyword spotter is left to the Grove port, where it
+   takes under a second (over the REPL it would take most of a minute).
+4. **A version stamp** (`/flash/catalyst.json`: this release, the firmware's
+   number, main.py's and the models' SHA-256), a soft reset, and a hello on
+   the framed protocol over the same USB line: main.py answers there as on
+   the Grove port.
 
 The stamp is how a later Catalyst knows: when its main.py or model differs,
 a camera running 0.9.4's program or later takes the new ones over the
@@ -2671,34 +2765,22 @@ page with Ctrl-Enter while it shows (any island notice that leads
 somewhere does, since 0.9.4; otherwise Ctrl-Enter is search, as ever).
 
 What the image carries for this, in `/usr/share/catalyst/unitv`
-(`catalyst-unitv`, 2.6 MB, with `SOURCES` and the licences): MaixPy v0.6.3
-for the M5StickV (`maixpy_v0.6.3_2_gd8901fd22_m5stickv.bin`, Sipeed's
-release download, source github.com/sipeed/MaixPy-v1 at v0.6.3; MIT and
-Apache-2.0), Sipeed's face model (MaixPy_scripts, MIT), kflash.py's flash
-loader (its ISP_PROG; Kendryte, MIT), main.py and boot.py. The USB serial drivers
-are modules: FTDI and CH340 were already in the kernel; CDC-ACM is added in
-0.9.1 (`CONFIG_USB_ACM`). USB-A works while the handheld is the USB host
-(Settings › USB › charging only).
+(`catalyst-unitv` 2.0, 2.4 MB, with `SOURCES` and the licences): Catalyst
+Coprocessor (`catalyst-coprocessor.bin` and `firmware.version`, built from
+this source tree, below), Sipeed's face model (MaixPy_scripts, MIT), the
+keyword spotter (`kws.kmodel`, `kws.json`; trained on Speech Commands,
+CC-BY-4.0), kflash.py's flash loader (its ISP_PROG; Kendryte, MIT) and
+main.py. The USB serial drivers are modules: FTDI and CH340 were already in
+the kernel; CDC-ACM is added in 0.9.1 (`CONFIG_USB_ACM`). The UnitV M12's
+bridge is an FTDI FT232 (`0403:6001`, one port). USB-A works while the
+handheld is the USB host (Settings › USB › charging only).
 
-**The microSD route still works,** without the handheld:
-
-1. The firmware: M5Stack's UnitV firmware (`M5StickV_Firmware_v5.1.2.kfpkg`)
-   or a full MaixPy build (not a "minimum" one: it needs `find_qrcodes`,
-   `find_apriltags` and KPU), flashed over its USB-C with kflash_gui (board
-   "M5StickV") or `kflash -p COM5 -b 1500000 <firmware>`. Most UnitVs ship
-   with it.
-2. Copy `tools/unitv/main.py` to the root of a FAT32 microSD card (MBR, a
-   card that works in SPI mode; M5Stack's page lists some that do not), and
-   for faces Sipeed's face model beside it as `face.kmodel` (from
-   MaixPy_scripts' `face_model_at_0x300000.kfpkg`, a zip: its `.kmodel`
-   inside). MaixPy runs `/sd/main.py` at every start, ahead of `/flash`.
-3. Or from a computer without a card: MaixPy IDE over USB-C (open
-   `main.py`, Tools › Save open script to board), or `mpfshell -o ser:COM5
-   -c "put main.py"`; the face model flashed with `kflash -p COM5 -b 1500000
-   face_model_at_0x300000.kfpkg` (main.py looks on the card, then at
-   0x300000).
-4. On the handheld: Settings › Camera › Grove port › Smart camera (at once),
-   and the UnitV into the Grove port.
+**Without the handheld,** from a computer: `kflash -p COM5 -b 1500000
+tools/unitv/firmware/catalyst-coprocessor.bin`, the face model with `kflash
+-p COM5 -b 1500000 face_model_at_0x300000.kfpkg`, then `mpfshell -o
+ser:COM5 -c "put tools/unitv/main.py main.py"` (and `kws.kmodel` from
+`tools/unitv/speech` the same way, or let the Grove port send it). The
+firmware never runs a microSD card's main.py (the UnitV has no slot).
 
 main.py never sends a byte until the handheld speaks to it, and listens on
 both Grove pins (G34, G35) until the handheld's hello says which is its RX,

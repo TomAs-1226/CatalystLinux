@@ -1,9 +1,16 @@
-//! The smart camera's program, installed from the handheld over USB, with no
-//! microSD card. The UnitV's USB-C goes into the handheld's USB-A port; its
-//! K210 sits behind a USB serial bridge (an FTDI FT2232 on M5Stack's
-//! boards, the same two-port bridge Sipeed's CH552 boards show; a CH340 or
-//! CH9102 on others), whose DTR and RTS lines reach the K210's reset and its
-//! boot pin.
+//! The smart camera's firmware and program, installed from the handheld over
+//! USB, with no microSD card. The UnitV's USB-C goes into the handheld's
+//! USB-A port; its K210 sits behind a USB serial bridge (an FTDI FT232 on
+//! the UnitV M12, `0403:6001`; an FT2232 on other M5Stack boards and the
+//! same two-port bridge Sipeed's CH552 boards show; a CH340 or CH9102 on
+//! others), whose DTR and RTS lines reach the K210's reset and its boot pin.
+//!
+//! **Catalyst Coprocessor.** The firmware is Catalyst's own MaixPy
+//! (tools/unitv/firmware: trimmed to the UnitV, sleeping delays, the
+//! `catalyst` module's power and speech front end, a frozen boot that always
+//! runs /flash/main.py and a safe program if it cannot). It goes on through
+//! the ISP whenever the camera does not run it at this image's FIRMWARE
+//! number; main.py and the models then come over the Grove port too.
 //!
 //! **Noticed.** A thread looks at the USB devices every two seconds. A K210
 //! board (an FT2232, or a bridge whose name says M5Stack, UnitV, Sipeed or
@@ -13,21 +20,23 @@
 //! UnitV says the same and opens [`InstallScreen`].
 //!
 //! **Installed**, on the same thread, the page showing how far:
-//! 1. MaixPy, if the camera does not already run one with what main.py needs
-//!    (QR codes, AprilTags, blobs, the KPU's YOLOv2): Sipeed's v0.6.3 for the
-//!    M5StickV, through the K210's ISP ([`isp`], kflash.py's protocol): the
-//!    boot ROM loads kflash.py's flash loader into SRAM, which writes the
-//!    flash at 1.5 Mbaud (115 200 where the bridge will not).
+//! 1. The firmware, unless the camera already runs Catalyst Coprocessor at
+//!    this image's number, through the K210's ISP ([`isp`], kflash.py's
+//!    protocol): the boot ROM loads kflash.py's flash loader into SRAM,
+//!    which writes the flash at 1.5 Mbaud (115 200 where the bridge will not).
 //! 2. The face model at 0x300000, where main.py loads it, the same way.
-//! 3. main.py (and a boot.py that does nothing first) into the camera's
-//!    /flash, through the raw REPL ([`repl`], mpremote's way), read back.
+//! 3. main.py and the keyword spotter (kws.kmodel) into the camera's
+//!    /flash, through the raw REPL ([`repl`], mpremote's way), read back;
+//!    an older Catalyst's /flash/boot.py taken away (the firmware's own boot
+//!    does its work now).
 //! 4. The stamp, then a soft reset, and a hello on the framed protocol over
 //!    the same USB line: main.py answers there as on the Grove port.
 //!
-//! **Versioned.** The stamp names the main.py and the model by their
-//! SHA-256 (a dozen hex digits each). A later Catalyst whose main.py or
-//! model differs says "update on the camera" the next time the camera is on
-//! USB-A (or answers on the Grove port with its stamp in its hello).
+//! **Versioned.** The stamp names the firmware (by number), main.py, the
+//! face model and the keyword spotter (each by its SHA-256, a dozen hex
+//! digits). A later Catalyst whose firmware is newer says "update on the
+//! camera · USB-A"; one whose program or models differ sends them over the
+//! Grove port (or USB-A, when the camera is there).
 //!
 //! In the simulator a stand-in UnitV ([`stub`]) answers behind the same
 //! bytes: `CATALYST_SIM_UNITV=bare|new|old|current` plugs one in.
@@ -64,53 +73,63 @@ const STAMP_FILE: &str = "/flash/catalyst.json";
 /// How long each port is given to answer on MaixPy's REPL (a reset, then
 /// MaixPy starting, about two seconds on a K210).
 const PROBE_WAIT: Duration = if cfg!(test) { Duration::from_millis(800) } else { Duration::from_secs(5) };
-/// Before main.py: Catalyst's boot.py (tools/unitv), in place of a
-/// firmware's own (M5Stack's demo loops for ever), which finishes an update
-/// cut off part way and rolls back a new program that never starts.
-#[cfg(any(test, not(target_arch = "aarch64")))]
-const BOOT_PY: &[u8] = include_bytes!("../../../../tools/unitv/boot.py");
-/// What the install tidies on the camera, and what it finds on a microSD
-/// card there. MaixPy starts /sd/main.py instead of /flash's whenever a card
-/// is in (and writes a demo main.py onto a card without one), so a card with
-/// no program of its own, or an older Catalyst one, gets a few lines that
-/// start /flash's; a card with someone else's main.py is left alone and the
-/// page says to take it out. A pending update's trial ends (this install is
-/// what runs now), and a face model sent over the Grove port goes when the
-/// model is written to flash again.
-const TIDY: &str = "import os\nfor n in ('catalyst.trial','catalyst.commit','catalyst.rolledback','main.py.new','main.py.part','boot.py.new','boot.py.part','face.kmodel.new','face.kmodel.part'@MODEL@):\n try:os.remove('/flash/'+n)\n except OSError:pass\nc='none'\ntry:\n if 'sd' in os.listdir('/'):\n  try:\n   h=open('/sd/main.py').read(40)\n  except OSError:\n   h=''\n  if h=='' or h.startswith('# Catalyst Linux'):\n   f=open('/sd/main.py','w')\n   f.write(\"# Catalyst Linux: the smart camera's program is in /flash; this card's\\n# main.py only starts it (MaixPy starts a card's ahead of /flash's).\\nimport os\\nos.chdir('/flash')\\nexec(open('/flash/boot.py').read())\\nexec(open('/flash/main.py').read())\\n\")\n   f.close()\n   c='shim'\n  else:\n   c='own'\nexcept Exception:\n c='?'\nprint('CARD|'+c)";
-/// What a probe prints: whether this MaixPy has what main.py needs, its
-/// version, and the stamp.
-const PROBE: &str = "import sys\nok=1\ntry:\n import KPU,image,ujson\n from fpioa_manager import fm\n from machine import UART\n for n in ('find_apriltags','find_qrcodes','find_blobs'):\n  if not hasattr(image.Image,n):ok=0\n if not hasattr(KPU,'init_yolo2'):ok=0\nexcept Exception:\n ok=0\ntry:\n v='.'.join(str(x) for x in sys.implementation.version)\nexcept Exception:\n v='?'\ntry:\n s=open('/flash/catalyst.json').read()\nexcept Exception:\n s='{}'\nprint('CATALYST|%d|%s|%s'%(ok,v,s.replace('\\n','')))";
+/// What the install tidies on the camera. A pending update's trial ends
+/// (this install is what runs now), an older Catalyst's boot.py goes (the
+/// firmware's frozen boot runs main.py itself, and never a card's), the
+/// leftovers of a transfer cut off go, and a face model sent over the Grove
+/// port goes when the model is written to flash again. It still says
+/// whether a card is in (the UnitV has no slot; another K210 board may).
+const TIDY: &str = "import os\ndef _e(p):\n try:\n  os.stat(p)\n  return 1\n except OSError:\n  return 0\nfor n in ('catalyst.trial','catalyst.commit','catalyst.rolledback','boot.py','boot.py.old','boot.py.new','boot.py.part','main.py.new','main.py.part','face.kmodel.new','face.kmodel.part','kws.kmodel.new','kws.kmodel.part','kws.kmodel.old'@MODEL@):\n if _e('/flash/'+n):os.remove('/flash/'+n)\nc='none'\ntry:\n if 'sd' in os.listdir('/'):c='shim'\nexcept Exception:\n c='?'\nprint('CARD|'+c)";
+/// What a probe prints: whether the camera runs Catalyst Coprocessor's
+/// firmware at this image's number (or newer), with what main.py needs; its
+/// MaixPy version; and the stamp. `@FW@` is the number ([`probe_code`]).
+const PROBE: &str = "import sys\nok=1\ntry:\n import KPU,image,ujson\n from fpioa_manager import fm\n from machine import UART\n for n in ('find_apriltags','find_qrcodes','find_blobs'):\n  if not hasattr(image.Image,n):ok=0\n if not hasattr(KPU,'init_yolo2'):ok=0\n import catalyst\n if catalyst.FIRMWARE<@FW@:ok=0\nexcept Exception:\n ok=0\ntry:\n v='.'.join(str(x) for x in sys.implementation.version)\nexcept Exception:\n v='?'\ntry:\n s=open('/flash/catalyst.json').read()\nexcept Exception:\n s='{}'\nprint('CATALYST|%d|%s|%s'%(ok,v,s.replace('\\n','')))";
+
+/// The probe, asking for this image's firmware number.
+pub fn probe_code() -> String {
+    PROBE.replace("@FW@", &firmware_number().max(1).to_string())
+}
 
 // ------------------------------------------------------------------ stamp ---
 
-/// What Catalyst put on a camera: its version, and the main.py and model by
-/// their SHA-256's first twelve hex digits; and the firmware it found or put.
+/// What Catalyst put on a camera: its version; the main.py, the face model
+/// and the keyword spotter's model by their SHA-256's first twelve hex
+/// digits; and the firmware it found or put, by name and number (Catalyst
+/// Coprocessor's FIRMWARE; 0 for a MaixPy of Sipeed's).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Stamp {
     pub catalyst: String,
     pub main: String,
     pub model: String,
+    pub kws: String,
     pub firmware: String,
+    pub fwv: u32,
 }
 
 impl Stamp {
     pub fn json(&self) -> String {
-        serde_json::json!({"catalyst": self.catalyst, "main": self.main, "model": self.model, "firmware": self.firmware}).to_string()
+        serde_json::json!({"catalyst": self.catalyst, "main": self.main, "model": self.model, "kws": self.kws, "firmware": self.firmware, "fwv": self.fwv}).to_string()
     }
 
     pub fn from_value(v: &serde_json::Value) -> Option<Stamp> {
         let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_owned);
-        Some(Stamp { catalyst: s("catalyst").unwrap_or_default(), main: s("main")?, model: s("model")?, firmware: s("firmware").unwrap_or_default() })
+        Some(Stamp {
+            catalyst: s("catalyst").unwrap_or_default(),
+            main: s("main")?,
+            model: s("model")?,
+            kws: s("kws").unwrap_or_default(),
+            firmware: s("firmware").unwrap_or_default(),
+            fwv: v.get("fwv").and_then(serde_json::Value::as_u64).unwrap_or(0) as u32,
+        })
     }
 
     pub fn parse(text: &str) -> Option<Stamp> {
         Stamp::from_value(&serde_json::from_str(text).ok()?)
     }
 
-    /// The same program and model (the firmware may differ).
+    /// The same program and models (the firmware may differ).
     pub fn same_program(&self, other: &Stamp) -> bool {
-        self.main == other.main && self.model == other.model
+        self.main == other.main && self.model == other.model && self.kws == other.kws
     }
 }
 
@@ -122,10 +141,13 @@ fn short_sum(bytes: &[u8]) -> String {
 /// The files to install.
 pub struct Payload {
     pub main: Vec<u8>,
-    pub boot: Vec<u8>,
     pub model: Vec<u8>,
+    /// The keyword spotter (tools/unitv/speech/kws.kmodel).
+    pub kws: Vec<u8>,
     pub firmware: Vec<u8>,
     pub firmware_name: String,
+    /// Catalyst Coprocessor's firmware number (tools/unitv/firmware/FIRMWARE).
+    pub firmware_version: u32,
     pub isp: Vec<u8>,
 }
 
@@ -135,34 +157,37 @@ impl Payload {
         let read = |name: &str| std::fs::read(Path::new(DIR).join(name)).map_err(|_| format!("{DIR}/{name} is missing"));
         Ok(Payload {
             main: read("main.py")?,
-            boot: read("boot.py")?,
             model: read("face.kmodel")?,
-            firmware: read("maixpy.bin")?,
-            firmware_name: std::fs::read_to_string(Path::new(DIR).join("maixpy.version")).map(|v| v.trim().to_owned()).unwrap_or_else(|_| "MaixPy".into()),
+            kws: read("kws.kmodel")?,
+            firmware: read("catalyst-coprocessor.bin")?,
+            firmware_name: "Catalyst Coprocessor".into(),
+            firmware_version: firmware_number(),
             isp: read("isp.bin")?,
         })
     }
 
-    /// The simulator's: the real main.py, and stand-ins of the others' sizes.
+    /// The simulator's: the real main.py and keyword spotter, and stand-ins
+    /// of the others' sizes.
     #[cfg(not(target_arch = "aarch64"))]
     pub fn load() -> Result<Payload, String> {
         let made = |n: usize, seed: u8| (0..n).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed)).collect::<Vec<u8>>();
         Ok(Payload {
             main: include_bytes!("../../../../tools/unitv/main.py").to_vec(),
-            boot: BOOT_PY.to_vec(),
             model: made(388_776, 7),
-            firmware: made(2_100_672, 3),
-            firmware_name: "maixpy_v0.6.3_2_gd8901fd22_m5stickv".into(),
+            kws: include_bytes!("../../../../tools/unitv/speech/kws.kmodel").to_vec(),
+            firmware: made(1_844_800, 3),
+            firmware_name: "Catalyst Coprocessor".into(),
+            firmware_version: firmware_number(),
             isp: made(66_304, 11),
         })
     }
 
-    /// Only what goes over the Grove port (main.py, boot.py, the model):
-    /// no firmware or loader read for it.
+    /// Only what goes over the Grove port (main.py, the models): no
+    /// firmware or loader read for it.
     #[cfg(target_arch = "aarch64")]
     pub fn program() -> Result<Payload, String> {
         let read = |name: &str| std::fs::read(Path::new(DIR).join(name)).map_err(|_| format!("{DIR}/{name} is missing"));
-        Ok(Payload { main: read("main.py")?, boot: read("boot.py")?, model: read("face.kmodel")?, firmware: Vec::new(), firmware_name: String::new(), isp: Vec::new() })
+        Ok(Payload { main: read("main.py")?, model: read("face.kmodel")?, kws: read("kws.kmodel")?, firmware: Vec::new(), firmware_name: String::new(), firmware_version: firmware_number(), isp: Vec::new() })
     }
 
     #[cfg(not(target_arch = "aarch64"))]
@@ -171,12 +196,18 @@ impl Payload {
     }
 
     pub fn stamp(&self, firmware: &str) -> Stamp {
-        // The program is main.py with the boot.py that starts it: a new
-        // boot.py alone (1.0's, which starts main.py on MaixPy builds that
-        // do not) is an update the camera is offered too.
-        let program = [self.main.as_slice(), self.boot.as_slice()].concat();
-        Stamp { catalyst: crate::sysupdate::version(), main: short_sum(&program), model: short_sum(&self.model), firmware: firmware.to_owned() }
+        Stamp { catalyst: crate::sysupdate::version(), main: short_sum(&self.main), model: short_sum(&self.model), kws: if self.kws.is_empty() { String::new() } else { short_sum(&self.kws) }, firmware: firmware.to_owned(), fwv: self.firmware_version }
     }
+}
+
+/// The firmware number this image carries (catalyst-unitv's
+/// firmware.version; in the simulator, tools/unitv/firmware/FIRMWARE).
+pub fn firmware_number() -> u32 {
+    #[cfg(target_arch = "aarch64")]
+    let text = std::fs::read_to_string(Path::new(DIR).join("firmware.version")).unwrap_or_default();
+    #[cfg(not(target_arch = "aarch64"))]
+    let text = include_str!("../../../../tools/unitv/firmware/FIRMWARE").to_owned();
+    text.trim().parse().unwrap_or(0)
 }
 
 /// This image's program and model, as a stamp (worked out once, off the
@@ -345,8 +376,9 @@ pub fn need(state: &State, expected: Option<&Stamp>) -> Need {
         Found::Looking if !board.sure => Need::Unsure,
         Found::Looking => Need::Looking,
         Found::NoMaixPy | Found::MaixPy { full: false, .. } | Found::MaixPy { stamp: None, .. } => Need::Install,
+        // The keyword spotter comes over the Grove port: not USB-A's to send.
         Found::MaixPy { stamp: Some(s), .. } => match expected {
-            Some(e) if !s.same_program(e) => Need::Update,
+            Some(e) if s.main != e.main || s.model != e.model => Need::Update,
             _ => Need::Current,
         },
     }
@@ -566,7 +598,7 @@ fn probe(board: &Board, first: Option<String>) -> (Option<String>, Found) {
     for tty in ttys {
         let Some(mut port) = open(&tty) else { continue };
         if let Ok(mut repl) = repl::Repl::enter(port.as_mut(), PROBE_WAIT) {
-            let said = repl.exec(PROBE, Duration::from_secs(5));
+            let said = repl.exec(&probe_code(), Duration::from_secs(5));
             repl.restart();
             if let Ok(out) = said {
                 if let Some(found) = parse_probe(&out) {
@@ -669,15 +701,18 @@ pub fn install_on(board: &Board, first: Option<String>, payload: &Payload, repor
     let tty = tty.ok_or("no MaixPy answered on its USB")?;
     let mut port = open(&tty).ok_or("its USB port went away")?;
     report(Step::Program, 0.0, plan);
-    let stamp = Stamp { firmware: firmware_name, ..expected };
+    // Its firmware is this image's now (flashed, or found at its number).
+    // The keyword spotter (94 kB) is not written over the REPL (as a bytes
+    // literal there and read back as hex, near a minute at 115 200): its
+    // stamp is left empty, so the Grove port sends it at 3 Mbaud, in under
+    // a second, the first time the camera answers there.
+    let stamp = Stamp { firmware: firmware_name, fwv: payload.firmware_version, kws: String::new(), ..expected };
     let card: String;
     {
         // A fresh MaixPy makes its /flash filesystem at its first start.
         let mut repl = repl::Repl::enter(port.as_mut(), Duration::from_secs(if plan.firmware { 40 } else { 12 }))?;
-        let total = (payload.boot.len() + payload.main.len() + stamp.json().len()) as f32;
+        let total = (payload.main.len() + stamp.json().len()) as f32;
         let mut sent = 0usize;
-        repl.write_file("/flash/boot.py", &payload.boot, &mut |_| {})?;
-        sent += payload.boot.len();
         repl.write_file("/flash/main.py", &payload.main, &mut |n| report(Step::Program, (sent + n) as f32 / total, plan))?;
         sent += payload.main.len();
         repl.write_file(STAMP_FILE, stamp.json().as_bytes(), &mut |n| report(Step::Program, (sent + n) as f32 / total, plan))?;

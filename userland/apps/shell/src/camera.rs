@@ -3965,6 +3965,7 @@ pub fn shots(dir: &std::path::Path) {
         codes: vec![Code { at: [212.0 / 320.0, 128.0 / 240.0, 264.0 / 320.0, 180.0 / 240.0], text: "SCOUT 5805 Q12 auto=3 tele=11".into() }],
         tags: vec![Tag { id: 7, centre: [70.0 / 320.0, 62.0 / 240.0], turn: 0.1, pose_mm: [-412.0, -88.0, 2640.0] }],
         blobs: vec![Blob { colour: 0, at: [40.0 / 320.0, 176.0 / 240.0, 74.0 / 320.0, 204.0 / 240.0], pixels: 640 }],
+        ..Results::default()
     };
     let ready = Status::Ready { baud: 3_000_000, woke_ms: 1420 };
     type Setup = Box<dyn Fn(&mut Camera)>;

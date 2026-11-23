@@ -38,7 +38,7 @@
 //!
 //! **Its program.** When the camera answers with an older program or model
 //! than this image carries (`/usr/share/catalyst/unitv`), the new ones go
-//! over the link ([`update`]) and the camera starts again with them; boot.py
+//! over the link ([`update`]) and the camera starts again with them; its boot
 //! there rolls back a program that never starts. MaixPy itself cannot go
 //! over the Grove port (it needs the K210's boot pin, which only the USB
 //! bridge reaches): when the camera's lacks what the program needs, it is
@@ -107,6 +107,19 @@ pub mod frame {
     pub const CHUNK: u8 = 0x06;
     pub const DONE: u8 = 0x07;
     pub const COMMIT: u8 = 0x08;
+    /// Catalyst Coprocessor (main.py version 3, on Catalyst's firmware):
+    /// idle now; the pipelines and pace wanted (`{"p":[..],"fps":n,
+    /// "idle_ms":n}`); the clock exchange (8 bytes of the handheld's µs);
+    /// health; an utterance's audio (u32 offset in samples, then 16 kHz
+    /// int16 PCM), its end (`{"mode":"command"|"dictation"}`); the tag
+    /// pose calibration.
+    pub const IDLE: u8 = 0x09;
+    pub const PIPE: u8 = 0x0A;
+    pub const TIME: u8 = 0x0B;
+    pub const HEALTH: u8 = 0x0C;
+    pub const AUDIO: u8 = 0x0D;
+    pub const AUDIO_END: u8 = 0x0E;
+    pub const CALIB: u8 = 0x0F;
     // Its answers, and what it sends by itself once asked.
     pub const HELLO_BACK: u8 = 0x81;
     pub const BAUD_BACK: u8 = 0x82;
@@ -122,6 +135,17 @@ pub mod frame {
     pub const CHUNK_BACK: u8 = 0x89;
     pub const DONE_BACK: u8 = 0x8A;
     pub const COMMIT_BACK: u8 = 0x8B;
+    pub const IDLE_BACK: u8 = 0x8C;
+    pub const PIPE_BACK: u8 = 0x8D;
+    /// The handheld's 8 bytes back, then the camera's µs (u64 LE).
+    pub const TIME_BACK: u8 = 0x8E;
+    pub const HEALTH_BACK: u8 = 0x8F;
+    /// The voice in an utterance started (`vad` 1) or ended (2), and where.
+    pub const HEARD: u8 = 0x90;
+    /// An utterance's end: the keyword spotter's top three (label index,
+    /// probability), its 64-d embedding, the speech's span.
+    pub const COMMAND: u8 = 0x91;
+    pub const CALIB_BACK: u8 = 0x92;
 
     /// CRC-32 (IEEE 802.3, as zlib and MicroPython's binascii have it).
     pub fn crc32(bytes: &[u8]) -> u32 {
@@ -272,6 +296,10 @@ pub struct Results {
     pub blobs: Vec<Blob>,
     /// The camera's own pace, frames a second.
     pub fps: f32,
+    /// When the frame was taken, on the camera's clock (ms, 30 bits), and
+    /// on the handheld's once the clocks have been compared ([`ClockMap`]).
+    pub t: Option<u32>,
+    pub at: Option<Instant>,
 }
 
 /// Results from the camera's JSON: `{"n":frame,"w":320,"h":240,"fps":..,
@@ -294,7 +322,112 @@ pub fn parse_results(json: &[u8]) -> Option<Results> {
             .map(|a| Tag { id: num(a, 0) as u16, centre: [num(a, 1) / w, num(a, 2) / h], turn: num(a, 3) / 1000.0, pose_mm: [num(a, 4), num(a, 5), num(a, 6)] })
             .collect(),
         blobs: list("b").iter().map(|a| Blob { colour: num(a, 0) as u8, at: [num(a, 1) / w, num(a, 2) / h, (num(a, 1) + num(a, 3)) / w, (num(a, 2) + num(a, 4)) / h], pixels: num(a, 5) as u32 }).collect(),
+        t: v["t"].as_u64().map(|t| (t & 0x3FFF_FFFF) as u32),
+        at: None,
     })
+}
+
+// --------------------------------------------------------------- pipelines ---
+
+/// How long the camera stays awake with nothing from the handheld (it is
+/// pinged every two seconds while anything is wanted); then idle by itself.
+pub const IDLE_MS: u32 = 6000;
+
+/// What the leases ask of the camera: the pipelines to run (in main.py's
+/// order) and the pace (frames a second; 0 is as fast as it can). Each use
+/// asks only for what its screen needs: the Camera's exposure, faces 5 a
+/// second; scan mode, codes 10; the field view, tags 15; the AI view,
+/// everything and its picture as fast as it can. Settings' status page,
+/// speech and keeping ready ask for nothing: the camera idles.
+pub fn pipes(leases: &[(u64, Use)]) -> (Vec<&'static str>, f32) {
+    let has = |u: Use| leases.iter().any(|(_, w)| *w == u);
+    let view = has(Use::View);
+    let mut p = Vec::new();
+    let mut fps: f32 = 0.0;
+    let mut want = |name: &'static str, on: bool, pace: f32| {
+        if on {
+            if !p.contains(&name) {
+                p.push(name);
+            }
+            fps = fps.max(pace);
+        }
+    };
+    want("faces", view || has(Use::Faces), 5.0);
+    want("codes", view || has(Use::Codes), 10.0);
+    want("tags", view || has(Use::Tags), 15.0);
+    want("blobs", view, 0.0);
+    want("preview", view, 0.0);
+    if view {
+        fps = 0.0;
+    }
+    (p, fps)
+}
+
+/// The PIPE payload for what the leases ask.
+pub fn pipe_payload(leases: &[(u64, Use)]) -> String {
+    let (p, fps) = pipes(leases);
+    serde_json::json!({ "p": p, "fps": fps, "idle_ms": IDLE_MS }).to_string()
+}
+
+// ------------------------------------------------------------------- clock ---
+
+/// The handheld's clock for the link: microseconds since the shell first
+/// asked (monotonic).
+pub fn local_us() -> u64 {
+    static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    BASE.get_or_init(Instant::now).elapsed().as_micros() as u64
+}
+
+fn local_instant(us: u64) -> Option<Instant> {
+    let now = local_us();
+    let ago = now.checked_sub(us).map(Duration::from_micros)?;
+    Instant::now().checked_sub(ago)
+}
+
+/// The camera's clock on the handheld's, from TIME exchanges: the handheld
+/// sends its time t1, the camera answers with its own t2, it arrives at
+/// t3; the camera's clock is t2 − (t1 + t3)/2 ahead, within half the round
+/// trip. Of the last eight, the one with the shortest round trip is kept
+/// (the K210's crystal and the Pi's drift apart by tens of µs a second, so
+/// they are compared again every ten seconds).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ClockMap {
+    samples: Vec<(u64, i64)>,
+}
+
+impl ClockMap {
+    pub const KEEP: usize = 8;
+
+    /// One exchange: sent at `t1`, the camera's `t2`, back at `t3` (µs).
+    pub fn add(&mut self, t1: u64, t2: u64, t3: u64) {
+        if t3 < t1 {
+            return;
+        }
+        let rtt = t3 - t1;
+        let offset = t2 as i64 - ((t1 + t3) / 2) as i64;
+        self.samples.push((rtt, offset));
+        if self.samples.len() > Self::KEEP {
+            self.samples.remove(0);
+        }
+    }
+
+    /// The camera's clock ahead of the handheld's (µs), and how sure (half
+    /// the round trip).
+    pub fn offset(&self) -> Option<(i64, u64)> {
+        self.samples.iter().min_by_key(|(rtt, _)| *rtt).map(|(rtt, off)| (*off, rtt / 2))
+    }
+
+    /// A camera time in ms (30 bits, as its results carry it) on the
+    /// handheld's clock (µs), taking the nearest to `near` (µs) where the
+    /// 30-bit count could have wrapped.
+    pub fn local_us_of(&self, cam_ms: u32, near: u64) -> Option<u64> {
+        let (off, _) = self.offset()?;
+        const WRAP: i64 = 1 << 30;
+        let near_cam_ms = (near as i64 + off) / 1000;
+        let base = near_cam_ms - near_cam_ms.rem_euclid(WRAP);
+        let best = [base - WRAP, base, base + WRAP].into_iter().map(|b| b + i64::from(cam_ms)).min_by_key(|ms| (ms - near_cam_ms).abs())?;
+        u64::try_from(best * 1000 - off).ok()
+    }
 }
 
 // ------------------------------------------------------------------- power ---
@@ -414,6 +547,12 @@ pub enum Use {
     /// Settings › Camera › Smart camera: powered and linked, asked for
     /// nothing (what it says of itself, its program brought up to date).
     Status,
+    /// An utterance on its way to the coprocessor (the talk key held).
+    Speech,
+    /// Voice commands on with the coprocessor kept ready: powered and idle
+    /// (about 40 mA), so the first word is heard at once rather than after
+    /// its two-second start.
+    Ready,
 }
 
 // --------------------------------------------------------------- diagnosis ---
@@ -441,12 +580,28 @@ pub struct Hello {
     pub cwd: String,
     /// A new program's starts so far (None: no update on trial).
     pub trial: Option<u32>,
-    /// The last update never started, and boot.py put the old one back.
+    /// The last update never started, and its boot put the old one back.
     pub rolled_back: bool,
     pub stamp: Option<crate::unitv::Stamp>,
+    /// Its firmware: "catalyst-coprocessor" and its version number (0: a
+    /// MaixPy of Sipeed's, which only USB-A replaces).
+    pub firmware: String,
+    pub firmware_version: u32,
+    /// What its program does beyond results (version 3: "idle", "pipes",
+    /// "sync", "health", "audio", "calib").
+    pub caps: Vec<String>,
+    /// The safe program answers (main.py missing or stopped), and why.
+    pub safe: Option<String>,
+    /// The tag pose is calibrated.
+    pub calibrated: bool,
 }
 
 impl Hello {
+    /// Whether its program does `cap` (a version 3 one).
+    pub fn can(&self, cap: &str) -> bool {
+        self.caps.iter().any(|c| c == cap)
+    }
+
     pub fn parse(json: &[u8]) -> Option<Hello> {
         let v: serde_json::Value = serde_json::from_slice(json).ok()?;
         let text = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_owned);
@@ -466,6 +621,11 @@ impl Hello {
             trial: num("trial").map(|n| n as u32),
             rolled_back: flag("rolled_back").unwrap_or(false),
             stamp: v.get("stamp").and_then(crate::unitv::Stamp::from_value),
+            firmware: text("fw").unwrap_or_default(),
+            firmware_version: num("fwv").unwrap_or(0) as u32,
+            caps: v.get("caps").and_then(|c| c.as_array()).map(|a| a.iter().filter_map(|c| c.as_str().map(str::to_owned)).collect()).unwrap_or_default(),
+            safe: flag("safe").filter(|s| *s).map(|_| text("why").unwrap_or_else(|| "?".into())),
+            calibrated: flag("calibrated").unwrap_or(false),
         })
     }
 }
@@ -522,6 +682,15 @@ pub struct Diag {
     /// The port's own trouble: it would not open, catalyst-grove's word.
     pub port: Option<String>,
     pub update: Update,
+    /// The camera's last HEALTH answer, and when.
+    pub health: Option<serde_json::Value>,
+    pub health_at: Option<Instant>,
+    /// Its clock against the handheld's: ahead by (µs), within (µs).
+    pub clock: Option<(i64, u64)>,
+    /// Asked for idle (version 3), since.
+    pub idle_since: Option<Instant>,
+    /// Its PIPE_BACK: how long the last wake took (sensor up), ms.
+    pub wake_ms: Option<u32>,
 }
 
 struct Shared {
@@ -533,6 +702,39 @@ struct Shared {
     /// The camera's own description (from its HELLO).
     about: Option<String>,
     diag: Diag,
+    /// The utterance on its way, if any.
+    speech: Option<speech::Flow>,
+    /// Requests waiting for the link (calibration, health on demand).
+    asks: std::collections::VecDeque<Ask>,
+}
+
+/// A request for the link thread to send once the camera answers, and
+/// where its answer goes.
+struct Ask {
+    kind: u8,
+    payload: Vec<u8>,
+    back: u8,
+    within: Duration,
+    reply: std::sync::mpsc::Sender<Result<Vec<u8>, String>>,
+}
+
+/// Asked of the camera once it answers: its answer's payload (or why not)
+/// on the receiver. The camera is powered for it while it waits (hold a
+/// lease meanwhile for it to stay so).
+pub fn ask(kind: u8, payload: &[u8], back: u8, within: Duration) -> std::sync::mpsc::Receiver<Result<Vec<u8>, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    if let Ok(mut s) = hub().shared.lock() {
+        s.asks.push_back(Ask { kind, payload: payload.to_vec(), back, within, reply: tx });
+        CHANGED.fetch_add(1, Ordering::AcqRel);
+    }
+    hub().wake.notify_all();
+    rx
+}
+
+/// The tag pose calibration (Settings › Camera › Smart camera): `{"do":
+/// "measure","d_mm":..,"tag_mm":..}`, then `{"do":"save"}`; `get`, `reset`.
+pub fn calibrate(request: &serde_json::Value) -> std::sync::mpsc::Receiver<Result<Vec<u8>, String>> {
+    ask(frame::CALIB, request.to_string().as_bytes(), frame::CALIB_BACK, Duration::from_secs(8))
 }
 
 struct Hub {
@@ -544,7 +746,7 @@ fn hub() -> &'static Arc<Hub> {
     static HUB: std::sync::OnceLock<Arc<Hub>> = std::sync::OnceLock::new();
     HUB.get_or_init(|| {
         let hub = Arc::new(Hub {
-            shared: Mutex::new(Shared { leases: Vec::new(), next_lease: 1, status: Status::Asleep, rates: Rates::default(), seen: Seen::default(), about: None, diag: Diag::default() }),
+            shared: Mutex::new(Shared { leases: Vec::new(), next_lease: 1, status: Status::Asleep, rates: Rates::default(), seen: Seen::default(), about: None, diag: Diag::default(), speech: None, asks: std::collections::VecDeque::new() }),
             wake: Condvar::new(),
         });
         let h = hub.clone();
@@ -981,8 +1183,8 @@ pub fn baud_words(baud: u32) -> String {
 /// answered once the camera has read the file back and checked its CRC (a
 /// file that fails is thrown away and sent again). Then COMMIT with the
 /// stamp: main.py moves them all into place with the old ones kept, begins a
-/// trial for boot.py and starts again; if the new program does not answer,
-/// the camera is powered off and on until boot.py (on its third start) has
+/// trial for its boot (catalyst_boot) and starts again; if the new program does not answer,
+/// the camera is powered off and on until the boot (on its third start) has
 /// the old one back.
 pub mod update {
     use super::*;
@@ -994,20 +1196,27 @@ pub mod update {
         Nothing,
         /// Over USB-A, once: why.
         UsbOnce(String),
-        /// Over the link: the program (main.py and boot.py), the model.
-        Send { program: bool, model: bool },
+        /// Over the link: the program (main.py), the face model, the
+        /// keyword spotter's model.
+        Send { program: bool, model: bool, kws: bool },
     }
 
     pub fn plan(hello: &Hello, expected: Option<&Stamp>) -> Plan {
         if hello.full == Some(false) {
-            return Plan::UsbOnce("its MaixPy lacks what the program needs: a full one over USB-A".into());
+            return Plan::UsbOnce("its firmware lacks what the program needs: Catalyst's over USB-A".into());
         }
         let Some(e) = expected else { return Plan::Nothing };
-        let (program, model) = match &hello.stamp {
-            Some(s) => (s.main != e.main, s.model != e.model),
-            None => (true, true),
+        // Catalyst's firmware, as new as this image's: only USB-A flashes it
+        // (the K210's boot pin is the USB bridge's).
+        if e.fwv > 0 && hello.firmware_version < e.fwv && hello.version >= 2 {
+            return Plan::UsbOnce(if hello.firmware_version == 0 { "the coprocessor's firmware goes on over USB-A, once".into() } else { "new firmware for the coprocessor: USB-A, once".into() });
+        }
+        let (program, model, kws) = match &hello.stamp {
+            // The safe program answers: main.py again, whatever its stamp says.
+            Some(s) => (s.main != e.main || hello.safe.is_some(), s.model != e.model, !e.kws.is_empty() && s.kws != e.kws),
+            None => (true, true, !e.kws.is_empty()),
         };
-        if !program && !model {
+        if !program && !model && !kws {
             return Plan::Nothing;
         }
         if !hello.updates {
@@ -1016,7 +1225,7 @@ pub mod update {
         if hello.cwd == "/sd" {
             return Plan::UsbOnce("it starts from a microSD card: take the card out, then once over USB-A".into());
         }
-        Plan::Send { program, model }
+        Plan::Send { program, model, kws }
     }
 
     /// How an update went: the camera's hello after, the files that resumed
@@ -1030,18 +1239,21 @@ pub mod update {
     }
 
     /// The files, then the commit, then the camera started again.
-    pub fn run(link: &mut Link, payload: &Payload, stamp: &Stamp, program: bool, model: bool, t: &Timing, progress: &mut dyn FnMut(Update)) -> Result<Sent, String> {
+    pub fn run(link: &mut Link, payload: &Payload, stamp: &Stamp, what: (bool, bool, bool), t: &Timing, progress: &mut dyn FnMut(Update)) -> Result<Sent, String> {
+        let (program, model, kws) = what;
         let mut files: Vec<(&str, &[u8])> = Vec::new();
         if program {
             files.push(("main.py", payload.main.as_slice()));
-            files.push(("boot.py", payload.boot.as_slice()));
         }
         if model {
             files.push(("face.kmodel", payload.model.as_slice()));
         }
+        if kws && !payload.kws.is_empty() {
+            files.push(("kws.kmodel", payload.kws.as_slice()));
+        }
         let total = files.iter().map(|(_, d)| d.len()).sum::<usize>().max(1);
         let (mut before, mut resumed, mut again) = (0usize, Vec::new(), 0u32);
-        // Nothing streams while files arrive.
+        // Nothing streams while files arrive (version 3 stops for PUT itself).
         link.send(frame::WANT, br#"{"faces":0,"codes":0,"tags":0,"blobs":0,"preview":0}"#);
         for (name, data) in &files {
             let id = format!("{:08x}{:x}", frame::crc32(data), data.len());
@@ -1133,7 +1345,7 @@ pub mod update {
     }
 
     /// Hellos until it answers; powered off and on between tries (a new
-    /// program that never answers is rolled back by boot.py on its third
+    /// program that never answers is rolled back by its boot on its third
     /// start). Its hello.
     pub fn restart(link: &mut Link, t: &Timing, tries: u32) -> Option<Hello> {
         for i in 0..tries {
@@ -1158,6 +1370,194 @@ pub mod update {
         restart(link, t, 2).ok_or("the camera stopped answering")?;
         climb(link, t);
         Ok(())
+    }
+}
+
+/// Speech for the coprocessor: the talk key's audio, streamed to the camera
+/// only while it is held (16 kHz int16, about 32 kB a second, in 100 ms
+/// frames), where the front end runs as it arrives; at the end, the keyword
+/// spotter on the KPU (for a command) or only the voice's span (dictation).
+/// The camera is powered for it (a lease) and wakes from idle on the first
+/// frame; audio that arrives before it answers waits here and goes after.
+pub mod speech {
+    use super::*;
+    use std::sync::mpsc;
+
+    /// What an utterance is for.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Mode {
+        /// A command first (the keyword spotter runs), else dictation.
+        Command,
+        /// Dictation only: the voice's span, no keyword spotter.
+        Dictation,
+    }
+
+    /// The voice in an utterance as the camera's front end found it: state
+    /// 0 none yet, 1 speaking, 2 ended (0.6 s of quiet after it); its start
+    /// and end (ms from the utterance's start) and how much was speech.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Vad {
+        pub state: u8,
+        pub start_ms: u32,
+        pub end_ms: u32,
+        pub speech_ms: u32,
+    }
+
+    impl Vad {
+        pub fn from_value(v: &serde_json::Value) -> Vad {
+            let n = |k: &str| v[k].as_u64().unwrap_or(0) as u32;
+            Vad { state: n("vad") as u8, start_ms: n("start_ms"), end_ms: n("end_ms"), speech_ms: n("speech_ms") }
+        }
+    }
+
+    /// The camera's answer at an utterance's end.
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub struct Heard {
+        pub vad: Vad,
+        /// The keyword spotter's top three: label index (kws.json), probability.
+        pub top: Vec<(usize, f32)>,
+        /// Its 64-d embedding (for the words the user taught).
+        pub embedding: Vec<f32>,
+        /// How long the spotter took on the camera (ms).
+        pub ms: u32,
+        /// Samples it had, and samples lost on the way (kept as silence).
+        pub samples: u32,
+        pub lost: u32,
+        pub err: Option<String>,
+    }
+
+    impl Heard {
+        pub fn parse(json: &[u8]) -> Option<Heard> {
+            let v: serde_json::Value = serde_json::from_slice(json).ok()?;
+            let top = v["top"].as_array().map(|a| a.iter().filter_map(|t| Some((t.get(0)?.as_u64()? as usize, t.get(1)?.as_f64()? as f32))).collect()).unwrap_or_default();
+            let embedding = v["emb"].as_array().map(|a| a.iter().filter_map(|x| x.as_f64().map(|x| x as f32)).collect()).unwrap_or_default();
+            Some(Heard { vad: Vad::from_value(&v), top, embedding, ms: v["ms"].as_u64().unwrap_or(0) as u32, samples: v["n"].as_u64().unwrap_or(0) as u32, lost: v["lost"].as_u64().unwrap_or(0) as u32, err: v["err"].as_str().map(str::to_owned) })
+        }
+    }
+
+    /// Samples in one AUDIO frame: 100 ms.
+    pub const CHUNK: usize = 1600;
+    /// The camera answered nothing this long after the end: given up.
+    pub const ANSWER_WITHIN: Duration = Duration::from_secs(5);
+
+    /// In the hub: an utterance's audio waiting for the link.
+    pub(super) struct Flow {
+        pub id: u64,
+        pub queue: std::collections::VecDeque<i16>,
+        /// Samples sent so far (the next frame's offset).
+        pub sent: u32,
+        pub end: Option<(Mode, Instant, mpsc::Sender<Result<Heard, String>>)>,
+        pub end_sent: bool,
+        pub vad: Vad,
+    }
+
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+
+    /// An utterance under way. Dropped without `finish`, it is let go.
+    pub struct Session {
+        id: u64,
+        _lease: Lease,
+        done: bool,
+    }
+
+    /// The answer to come, the camera kept powered until it has.
+    pub struct Pending {
+        pub rx: mpsc::Receiver<Result<Heard, String>>,
+        _lease: Lease,
+    }
+
+    /// Whether utterances can go to the coprocessor: the Grove port is the
+    /// smart camera's, and the camera (if it has answered) has a program
+    /// that takes audio.
+    pub fn available() -> bool {
+        chosen() && diag().hello.as_ref().is_none_or(|h| h.can("audio"))
+    }
+
+    /// An utterance begins: the camera woken for it.
+    pub fn begin() -> Session {
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let lease = lease(Use::Speech);
+        if let Ok(mut s) = hub().shared.lock() {
+            s.speech = Some(Flow { id, queue: std::collections::VecDeque::new(), sent: 0, end: None, end_sent: false, vad: Vad::default() });
+            CHANGED.fetch_add(1, Ordering::AcqRel);
+        }
+        hub().wake.notify_all();
+        Session { id, _lease: lease, done: false }
+    }
+
+    impl Session {
+        /// More of what the microphone heard.
+        pub fn push(&self, samples: &[i16]) {
+            if let Ok(mut s) = hub().shared.lock() {
+                if let Some(f) = s.speech.as_mut().filter(|f| f.id == self.id) {
+                    // At most 30 s waits for a camera still starting.
+                    if f.queue.len() + samples.len() <= 30 * 16_000 {
+                        f.queue.extend(samples.iter().copied());
+                    }
+                }
+            }
+            hub().wake.notify_all();
+        }
+
+        /// The voice as the camera has found it so far.
+        pub fn vad(&self) -> Vad {
+            hub().shared.lock().ok().and_then(|s| s.speech.as_ref().filter(|f| f.id == self.id).map(|f| f.vad)).unwrap_or_default()
+        }
+
+        /// The end: the camera's answer to come.
+        pub fn finish(mut self, mode: Mode) -> Pending {
+            let (tx, rx) = mpsc::channel();
+            self.done = true;
+            if let Ok(mut s) = hub().shared.lock() {
+                match s.speech.as_mut().filter(|f| f.id == self.id) {
+                    Some(f) => f.end = Some((mode, Instant::now(), tx)),
+                    None => {
+                        tx.send(Err("let go".into())).ok();
+                    }
+                }
+                CHANGED.fetch_add(1, Ordering::AcqRel);
+            }
+            hub().wake.notify_all();
+            let lease = std::mem::replace(&mut self._lease, Lease(0));
+            Pending { rx, _lease: lease }
+        }
+    }
+
+    impl Drop for Session {
+        fn drop(&mut self) {
+            if self.done {
+                return;
+            }
+            if let Ok(mut s) = hub().shared.lock() {
+                if s.speech.as_ref().is_some_and(|f| f.id == self.id) {
+                    s.speech = None;
+                }
+            }
+        }
+    }
+
+    /// What the link sends next for the utterance: AUDIO frames (offset,
+    /// then PCM), and the end once all of it has gone.
+    pub(super) fn frames(flow: &mut Flow) -> Vec<(u8, Vec<u8>)> {
+        let mut out = Vec::new();
+        while !flow.queue.is_empty() {
+            let n = flow.queue.len().min(CHUNK);
+            let mut p = Vec::with_capacity(4 + 2 * n);
+            p.extend_from_slice(&flow.sent.to_le_bytes());
+            for v in flow.queue.drain(..n) {
+                p.extend_from_slice(&v.to_le_bytes());
+            }
+            flow.sent += n as u32;
+            out.push((frame::AUDIO, p));
+        }
+        if let Some((mode, ..)) = &flow.end {
+            if !flow.end_sent {
+                flow.end_sent = true;
+                let m = if *mode == Mode::Command { "command" } else { "dictation" };
+                out.push((frame::AUDIO_END, serde_json::json!({ "mode": m, "n": flow.sent }).to_string().into_bytes()));
+            }
+        }
+        out
     }
 }
 
@@ -1223,12 +1623,51 @@ mod link {
         // back, so the K210 starts afresh (at 115 200) rather than riding a
         // short gap on its capacitors at the rate it had.
         let mut off_at: Option<Instant> = None;
+        // Version 3's own: the clocks compared, its health, a request's
+        // answer awaited (and where it goes), an utterance's end awaited.
+        let mut clock = ClockMap::default();
+        let (mut last_time, mut last_health) = (Instant::now() - Duration::from_secs(60), Instant::now() - Duration::from_secs(60));
+        let mut waiting: Option<(u8, Instant, std::sync::mpsc::Sender<Result<Vec<u8>, String>>)> = None;
+        let mut heard_end: Option<(Instant, std::sync::mpsc::Sender<Result<speech::Heard, String>>)> = None;
         loop {
             let now = Instant::now();
-            let (leases, chosen, gen) = {
+            let (leases, chosen, gen, v3) = {
                 let s = hub.shared.lock().unwrap_or_else(|e| e.into_inner());
-                (s.leases.clone(), super::chosen() && !HOLD_OFF.load(Ordering::Acquire), CHANGED.load(Ordering::Acquire))
+                let v3 = s.diag.hello.as_ref().is_some_and(|h| h.can("pipes"));
+                (s.leases.clone(), super::chosen() && !HOLD_OFF.load(Ordering::Acquire), CHANGED.load(Ordering::Acquire), v3)
             };
+            // An utterance's end, or a request, that nothing will answer:
+            // given up on, said so.
+            if let Some((at, tx)) = heard_end.take() {
+                if at.elapsed() > speech::ANSWER_WITHIN {
+                    tx.send(Err("the coprocessor did not answer".into())).ok();
+                } else {
+                    heard_end = Some((at, tx));
+                }
+            }
+            if let Some((back, until, tx)) = waiting.take() {
+                if now > until {
+                    tx.send(Err(format!("no answer from the camera ({back:#04x})"))).ok();
+                } else {
+                    waiting = Some((back, until, tx));
+                }
+            }
+            if let Ok(mut s) = hub.shared.lock() {
+                // Ended, and still not sent: the camera never came.
+                let stale = s.speech.as_ref().is_some_and(|f| !f.end_sent && f.end.as_ref().is_some_and(|(_, at, _)| at.elapsed() > speech::ANSWER_WITHIN));
+                if stale {
+                    if let Some(f) = s.speech.take() {
+                        if let Some((.., tx)) = f.end {
+                            tx.send(Err(if chosen { "the coprocessor did not answer".into() } else { "the Grove port is the console".into() })).ok();
+                        }
+                    }
+                }
+                if !chosen {
+                    for a in s.asks.drain(..) {
+                        a.reply.send(Err("the Grove port is the console".into())).ok();
+                    }
+                }
+            }
             // Not the camera's (any more, or for now): unpowered and let go
             // of at once, no warm time.
             if !chosen && power.powered() {
@@ -1360,7 +1799,9 @@ mod link {
                     }
                     frame::RESULTS => {
                         window.3 += 1;
-                        if let Some(r) = parse_results(&f.payload) {
+                        if let Some(mut r) = parse_results(&f.payload) {
+                            // When it was taken, on this clock.
+                            r.at = r.t.and_then(|t| clock.local_us_of(t, local_us())).and_then(local_instant);
                             if let Ok(mut s) = hub.shared.lock() {
                                 if !r.tags.is_empty() {
                                     s.seen.tags = Some((Instant::now(), r.tags.clone()));
@@ -1381,6 +1822,46 @@ mod link {
                         }
                     }
                     frame::LOG => fault(hub, format!("the camera said: {}", String::from_utf8_lossy(&f.payload))),
+                    frame::TIME_BACK if f.payload.len() >= 16 => {
+                        let t3 = local_us();
+                        let t1 = u64::from_le_bytes(f.payload[..8].try_into().unwrap_or([0; 8]));
+                        let t2 = u64::from_le_bytes(f.payload[8..16].try_into().unwrap_or([0; 8]));
+                        clock.add(t1, t2, t3);
+                        let off = clock.offset();
+                        note(hub, |d| d.clock = off);
+                    }
+                    frame::HEALTH_BACK => {
+                        let v = serde_json::from_slice::<serde_json::Value>(&f.payload).ok();
+                        note(hub, |d| (d.health, d.health_at) = (v, Some(Instant::now())));
+                        crate::platform::wake();
+                    }
+                    frame::PIPE_BACK => {
+                        let v: serde_json::Value = serde_json::from_slice(&f.payload).unwrap_or_default();
+                        if let Some(ms) = v["wake_ms"].as_u64() {
+                            note(hub, |d| d.wake_ms = Some(ms as u32));
+                        }
+                    }
+                    frame::HEARD => {
+                        let vad = speech::Vad::from_value(&serde_json::from_slice(&f.payload).unwrap_or_default());
+                        if let Ok(mut s) = hub.shared.lock() {
+                            if let Some(flow) = s.speech.as_mut() {
+                                flow.vad = vad;
+                            }
+                        }
+                        crate::platform::wake();
+                    }
+                    frame::COMMAND => {
+                        if let Some((_, tx)) = heard_end.take() {
+                            tx.send(speech::Heard::parse(&f.payload).ok_or_else(|| "the coprocessor's answer was not read".to_owned())).ok();
+                        }
+                        crate::platform::wake();
+                    }
+                    kind if waiting.as_ref().is_some_and(|(back, ..)| *back == kind) => {
+                        if let Some((_, _, tx)) = waiting.take() {
+                            tx.send(Ok(f.payload.clone())).ok();
+                        }
+                        crate::platform::wake();
+                    }
                     _ => {}
                 }
             }
@@ -1402,16 +1883,85 @@ mod link {
                     }
                 }
             }
-            // Ask for what the leases want, once it answers (and again when that changes).
-            let want = wants(&leases);
-            if answered && settled && (want != asked) && wanted {
-                link.send(frame::WANT, want.as_bytes());
-                (asked, last_sent) = (want, Instant::now());
+            // Ask for what the leases want, once it answers (and again when
+            // that changes). Version 3: only the pipelines the screens need,
+            // at their pace, or idle (sensor down, KPU off, CPU slowed) when
+            // none does; version 2: WANT, all off when warm.
+            if answered && settled {
+                if v3 {
+                    let want = pipe_payload(if wanted { &leases } else { &[] });
+                    if want != asked {
+                        if pipes(if wanted { &leases } else { &[] }).0.is_empty() {
+                            link.send(frame::IDLE, b"{}");
+                            note(hub, |d| d.idle_since = Some(Instant::now()));
+                        } else {
+                            link.send(frame::PIPE, want.as_bytes());
+                            note(hub, |d| d.idle_since = None);
+                        }
+                        (asked, last_sent) = (want, Instant::now());
+                    }
+                } else {
+                    let want = wants(&leases);
+                    if want != asked && wanted {
+                        link.send(frame::WANT, want.as_bytes());
+                        (asked, last_sent) = (want, Instant::now());
+                    }
+                    if !wanted && !asked.is_empty() {
+                        // Warm: it keeps quiet meanwhile.
+                        link.send(frame::WANT, br#"{"faces":0,"codes":0,"tags":0,"blobs":0,"preview":0}"#);
+                        (asked, last_sent) = (String::new(), Instant::now());
+                    }
+                }
             }
-            if !wanted && answered && !asked.is_empty() {
-                // Warm: it keeps quiet meanwhile.
-                link.send(frame::WANT, br#"{"faces":0,"codes":0,"tags":0,"blobs":0,"preview":0}"#);
-                (asked, last_sent) = (String::new(), Instant::now());
+            if answered && settled && v3 {
+                // An utterance's audio as it arrives, then its end.
+                let (out, end) = {
+                    let mut s = hub.shared.lock().unwrap_or_else(|e| e.into_inner());
+                    match s.speech.as_mut() {
+                        Some(flow) => {
+                            let out = speech::frames(flow);
+                            let end = if flow.end_sent && out.iter().any(|(k, _)| *k == frame::AUDIO_END) { flow.end.as_ref().map(|(_, _, tx)| tx.clone()) } else { None };
+                            (out, end)
+                        }
+                        None => (Vec::new(), None),
+                    }
+                };
+                for (kind, payload) in &out {
+                    link.send(*kind, payload);
+                }
+                if !out.is_empty() {
+                    last_sent = Instant::now();
+                }
+                if let Some(tx) = end {
+                    if let Some((_, old)) = heard_end.replace((Instant::now(), tx)) {
+                        old.send(Err("a newer utterance".into())).ok();
+                    }
+                    if let Ok(mut s) = hub.shared.lock() {
+                        s.speech = None;
+                    }
+                }
+                // A request (calibration, health), one at a time.
+                if waiting.is_none() {
+                    let next = hub.shared.lock().ok().and_then(|mut s| s.asks.pop_front());
+                    if let Some(a) = next {
+                        link.send(a.kind, &a.payload);
+                        waiting = Some((a.back, Instant::now() + a.within, a.reply));
+                        last_sent = Instant::now();
+                    }
+                }
+                // The clocks compared every ten seconds (twice at first).
+                let every = if clock.offset().is_none() { Duration::from_secs(1) } else { Duration::from_secs(10) };
+                if hub.shared.lock().ok().and_then(|s| s.diag.hello.clone()).is_some_and(|h| h.can("sync")) && last_time.elapsed() >= every {
+                    link.send(frame::TIME, &local_us().to_le_bytes());
+                    (last_time, last_sent) = (Instant::now(), Instant::now());
+                }
+                // Its health: every two seconds while the status page is
+                // open, else every thirty.
+                let watching = leases.iter().any(|(_, u)| *u == Use::Status);
+                if last_health.elapsed() >= if watching { Duration::from_secs(2) } else { Duration::from_secs(30) } {
+                    link.send(frame::HEALTH, b"");
+                    (last_health, last_sent) = (Instant::now(), Instant::now());
+                }
             }
             // Something every two seconds, whatever arrives: main.py goes
             // back to 115 200 after five without a frame from here, and a
@@ -1481,7 +2031,7 @@ mod link {
     /// Whether the camera was touched (it has started again).
     fn bring_up_to_date(hub: &Hub, link: &mut Link, hello: &Hello, t: &Timing) -> bool {
         let expected = crate::unitv::expected();
-        let (program, model) = match update::plan(hello, expected.as_ref()) {
+        let what = match update::plan(hello, expected.as_ref()) {
             update::Plan::Nothing => {
                 note(hub, |d| {
                     if matches!(d.update, Update::UsbOnce(_)) {
@@ -1498,10 +2048,10 @@ mod link {
                 }
                 return false;
             }
-            update::Plan::Send { program, model } => (program, model),
+            update::Plan::Send { program, model, kws } => (program, model, kws),
         };
         let Some(expected) = expected else { return false };
-        let target = format!("{}{}", expected.main, expected.model);
+        let target = format!("{}{}{}", expected.main, expected.model, expected.kws);
         {
             let mut tried = TRIED.lock().unwrap_or_else(|e| e.into_inner());
             if tried.as_deref() == Some(target.as_str()) {
@@ -1517,9 +2067,10 @@ mod link {
             }
         };
         let firmware = hello.stamp.as_ref().map(|s| s.firmware.clone()).filter(|f| !f.is_empty()).unwrap_or_else(|| format!("MaixPy {} (as found)", hello.maixpy));
-        let stamp = crate::unitv::Stamp { firmware, ..expected.clone() };
+        // The firmware is what it runs (only USB-A changes it).
+        let stamp = crate::unitv::Stamp { firmware, fwv: hello.firmware_version, ..expected.clone() };
         let task = crate::liveactivity::task(crate::liveactivity::Kind::Download, "Smart camera", "updating its program");
-        let outcome = update::run(link, &payload, &stamp, program, model, t, &mut |u| {
+        let outcome = update::run(link, &payload, &stamp, what, t, &mut |u| {
             match &u {
                 Update::Sending { file, done } => {
                     task.progress(*done);
@@ -1847,12 +2398,17 @@ pub mod sim {
         pub cut_at: Option<usize>,
         /// It starts again by itself this long after each start (short of power).
         pub restarts_after: Option<Duration>,
+        /// Its firmware's number (Catalyst Coprocessor's; 0: Sipeed's MaixPy).
+        pub firmware: u32,
+        /// What its keyword spotter makes of any utterance with a voice in
+        /// it: a label index of kws.json (None: silence).
+        pub word: Option<usize>,
     }
 
     impl Spec {
-        /// No program of Catalyst's yet: a stamp of none.
+        /// Catalyst's firmware, no program of Catalyst's yet: a stamp of none.
         pub fn bare() -> Spec {
-            Spec { boot: BOOT, max_baud: 3_000_000, version: 2, stamp: None, full: true, sensor_fails: false, silent: false, breaks_new: false, drop_chunk: None, bad_write: None, cut_at: None, restarts_after: None }
+            Spec { boot: BOOT, max_baud: 3_000_000, version: 3, stamp: None, full: true, sensor_fails: false, silent: false, breaks_new: false, drop_chunk: None, bad_write: None, cut_at: None, restarts_after: None, firmware: crate::unitv::firmware_number(), word: Some(8) }
         }
 
         /// This image's program on it, up to date (the simulator's).
@@ -1861,15 +2417,16 @@ pub mod sim {
             Spec { stamp, ..Spec::bare() }
         }
 
-        /// An older release's program on it.
+        /// An older release's program on it (version 2's, on Sipeed's MaixPy).
         pub fn old() -> Spec {
-            Spec { stamp: Some(r#"{"catalyst":"0.9.3","main":"0a1b2c3d4e5f","model":"000000000000","firmware":"MaixPy 0.6.3 (installed by Catalyst)"}"#.into()), ..Spec::bare() }
+            Spec { version: 2, firmware: 0, stamp: Some(r#"{"catalyst":"0.9.3","main":"0a1b2c3d4e5f","model":"000000000000","firmware":"MaixPy 0.6.3 (installed by Catalyst)"}"#.into()), ..Spec::bare() }
         }
 
         /// As CATALYST_SIM_SMARTCAM says (else up to date).
         pub fn from_env() -> Spec {
             match std::env::var("CATALYST_SIM_SMARTCAM").unwrap_or_default().as_str() {
                 "old" => Spec::old(),
+                "oldprogram" => Spec { stamp: Spec::old().stamp, ..Spec::bare() },
                 "v1" => Spec { version: 1, ..Spec::old() },
                 "slow" => Spec { boot: Duration::from_secs(7), ..Spec::current() },
                 "slowlink" => Spec { max_baud: START_BAUD, ..Spec::current() },
@@ -2059,12 +2616,19 @@ pub mod sim {
         last_frame: Instant,
         started: Instant,
         file: Option<String>,
+        /// Version 3: the pace asked for (None: as fast as it does, 15 a
+        /// second), an utterance's samples and its voice (0, 1, 2) and loud
+        /// samples, the calibration.
+        pace: Option<Duration>,
+        audio: (u32, u8, u32),
+        calibrated: bool,
+        measured: u32,
     }
 
     impl Cam {
         fn new(spec: Spec, flash: Arc<Mutex<Flash>>, tx: mpsc::Sender<(u32, Vec<u8>)>) -> Cam {
             let now = Instant::now();
-            Cam { spec, flash, tx, decoder: frame::Decoder::default(), baud: START_BAUD, before: START_BAUD, since_baud: None, heard_at: now, want: (false, false, false, false, false), seq: 0, n: 0, on_since: None, booted_at: None, alive: false, last_frame: now, started: now, file: None }
+            Cam { spec, flash, tx, decoder: frame::Decoder::default(), baud: START_BAUD, before: START_BAUD, since_baud: None, heard_at: now, want: (false, false, false, false, false), seq: 0, n: 0, on_since: None, booted_at: None, alive: false, last_frame: now, started: now, file: None, pace: None, audio: (0, 0, 0), calibrated: false, measured: 0 }
         }
 
         /// From its first line again (power, or a reset of its own).
@@ -2074,6 +2638,11 @@ pub mod sim {
             self.want = (false, false, false, false, false);
             self.decoder = frame::Decoder::default();
             self.file = None;
+            (self.pace, self.audio) = (None, (0, 0, 0));
+        }
+
+        fn ms(&self) -> u64 {
+            self.started.elapsed().as_millis() as u64 & 0x3FFF_FFFF
         }
 
         /// Sent at its rate: as long as the bytes take on the wire; garbled
@@ -2098,6 +2667,13 @@ pub mod sim {
             let sensor = if self.spec.sensor_fails { "failed: Reset Failed" } else { "ok" };
             if v < 2 {
                 return format!(r#"{{"v":1,"fw":"catalyst-unitv 1 (simulated)","kpu":"face yolo2 320x240","crc":"native","fov":80,"w":320,"h":240,"up_ms":{up},"usb":false,"stamp":{stamp}}}"#);
+            }
+            if v >= 3 {
+                let (fwv, cal) = (self.spec.firmware, u8::from(self.calibrated));
+                return format!(
+                    r#"{{"v":{v},"fw":"catalyst-coprocessor","fwv":{fwv},"upd":1,"mp":"0.6.3","full":{},"sensor":"{sensor}","kpu":"not loaded","kws":"present","crc":"native","fov":80,"w":320,"h":240,"up_ms":{up},"listen_ms":880,"usb":false,"cwd":"/flash","free":2850000,"trial":{trial},"rolled_back":{rolled},"boot":"ok","state":"idle","calibrated":{cal},"caps":["idle","pipes","sync","health","audio","calib"],"stamp":{stamp}}}"#,
+                    u8::from(self.spec.full)
+                );
             }
             format!(
                 r#"{{"v":{v},"fw":"catalyst-unitv {v} (simulated)","upd":1,"mp":"0.6.3","full":{},"sensor":"{sensor}","kpu":"face yolo2 320x240 (flash 0x300000)","crc":"native","fov":80,"w":320,"h":240,"up_ms":{up},"listen_ms":880,"usb":false,"cwd":"/flash","free":2850000,"trial":{trial},"rolled_back":{rolled},"stamp":{stamp}}}"#,
@@ -2198,13 +2774,109 @@ pub mod sim {
                     let v: serde_json::Value = serde_json::from_slice(&f.payload).unwrap_or_default();
                     let on = |k: &str| v[k].as_u64().unwrap_or(0) != 0;
                     self.want = (on("faces"), on("codes"), on("tags"), on("blobs"), on("preview"));
+                    self.pace = None;
                     self.send(frame::WANT_BACK, &f.payload);
+                }
+                frame::PIPE if self.spec.version >= 3 => {
+                    let v: serde_json::Value = serde_json::from_slice(&f.payload).unwrap_or_default();
+                    let p: Vec<&str> = v["p"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect()).unwrap_or_default();
+                    let on = |k: &str| p.contains(&k);
+                    let was_idle = self.want == (false, false, false, false, false);
+                    self.want = (on("faces"), on("codes"), on("tags"), on("blobs"), on("preview"));
+                    let fps = v["fps"].as_f64().unwrap_or(0.0);
+                    self.pace = (fps > 0.0).then(|| Duration::from_secs_f64(1.0 / fps.min(30.0)));
+                    // Waking the sensor takes a fifth of a second.
+                    let wake = if was_idle && !p.is_empty() { 210 } else { 0 };
+                    let said = serde_json::json!({ "p": p, "fps": fps, "state": if p.is_empty() { "idle" } else { "active" }, "wake_ms": wake, "idle_ms": v["idle_ms"], "t": self.ms() });
+                    self.send(frame::PIPE_BACK, said.to_string().as_bytes());
+                }
+                frame::IDLE if self.spec.version >= 3 => {
+                    self.want = (false, false, false, false, false);
+                    let said = format!(r#"{{"state":"idle","t":{}}}"#, self.ms());
+                    self.send(frame::IDLE_BACK, said.as_bytes());
+                }
+                frame::TIME if self.spec.version >= 3 && f.payload.len() >= 8 => {
+                    let mut back = f.payload[..8].to_vec();
+                    back.extend_from_slice(&(self.started.elapsed().as_micros() as u64).to_le_bytes());
+                    self.send(frame::TIME_BACK, &back);
+                }
+                frame::HEALTH if self.spec.version >= 3 => {
+                    let w = self.want;
+                    let active = w.0 || w.1 || w.2 || w.3 || w.4;
+                    let said = serde_json::json!({
+                        "t": self.ms(), "up_ms": self.booted_at.map_or(0, |b| b.elapsed().as_millis() as u64),
+                        "state": if self.audio.0 > 0 { "listening" } else if active { "active" } else { "idle" },
+                        "fps": if active { 15.0 } else { 0.0 }, "frames": self.n, "errors": 0, "last_error": null,
+                        "gc_free": 612_000, "heap": 3_210_000, "cpu_hz": if active { 400_000_000 } else { 100_000_000 },
+                        "kpu": active && w.0, "sensor": active, "temp": null, "reset": "power", "calibrated": u8::from(self.calibrated),
+                    });
+                    self.send(frame::HEALTH_BACK, said.to_string().as_bytes());
+                }
+                frame::AUDIO if self.spec.version >= 3 && f.payload.len() >= 4 => {
+                    let at = u32::from_le_bytes([f.payload[0], f.payload[1], f.payload[2], f.payload[3]]);
+                    if at == 0 {
+                        self.audio = (0, 0, 0);
+                    }
+                    let samples: Vec<i16> = f.payload[4..].chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+                    let loud = samples.iter().filter(|s| s.unsigned_abs() > 1500).count() as u32;
+                    self.audio.0 = at + samples.len() as u32;
+                    self.audio.2 += loud;
+                    // The voice starts once there is a little loud sound.
+                    if self.audio.1 == 0 && self.audio.2 > 800 {
+                        self.audio.1 = 1;
+                        let said = format!(r#"{{"vad":1,"start_ms":{},"end_ms":{},"speech_ms":60,"n":{}}}"#, (at / 16).saturating_sub(100), at / 16, self.audio.0);
+                        self.send(frame::HEARD, said.as_bytes());
+                    }
+                }
+                frame::AUDIO_END if self.spec.version >= 3 => {
+                    let v: serde_json::Value = serde_json::from_slice(&f.payload).unwrap_or_default();
+                    let mode = v["mode"].as_str().unwrap_or("command").to_owned();
+                    let (n, voiced) = (self.audio.0, self.audio.1 > 0);
+                    let mut said = serde_json::json!({ "mode": mode, "vad": if voiced { 2 } else { 0 }, "start_ms": 120, "end_ms": (n / 16).saturating_sub(80), "speech_ms": (n / 16).saturating_sub(200), "n": n, "lost": 0 });
+                    if mode == "command" {
+                        let top = match (voiced, self.spec.word) {
+                            (true, Some(w)) => serde_json::json!([[w, 0.93], [9, 0.03], [30, 0.01]]),
+                            _ => serde_json::json!([[30, 0.97], [8, 0.01], [9, 0.01]]),
+                        };
+                        // An embedding that is the word's own (for the
+                        // words the user taught, in the simulator).
+                        let emb: Vec<f32> = (0..64).map(|i| ((i as f32 + 1.0) * (self.spec.word.unwrap_or(30) as f32 + 1.0) * 0.37).sin()).collect();
+                        said["top"] = top;
+                        said["emb"] = serde_json::json!(emb);
+                        said["ms"] = serde_json::json!(2);
+                    }
+                    self.audio = (0, 0, 0);
+                    self.send(frame::COMMAND, said.to_string().as_bytes());
+                }
+                frame::CALIB if self.spec.version >= 3 => {
+                    let v: serde_json::Value = serde_json::from_slice(&f.payload).unwrap_or_default();
+                    let said = match v["do"].as_str().unwrap_or("get") {
+                        "measure" => {
+                            let d = v["d_mm"].as_f64().unwrap_or(1000.0);
+                            self.measured += 1;
+                            // A lens of fx 244 px, the tag square-on.
+                            let side = 244.0 * v["tag_mm"].as_f64().unwrap_or(165.1) / d;
+                            serde_json::json!({ "do": "measure", "ok": 1, "d_mm": d, "side_px": (side * 100.0).round() / 100.0, "fx": 244.0, "z_raw": d / 82.55, "fx_used": 238.4, "seen": 15, "id": 7, "kept": self.measured })
+                        }
+                        "save" if self.measured > 0 => {
+                            self.calibrated = true;
+                            self.measured = 0;
+                            serde_json::json!({ "do": "save", "ok": 1, "fx": 244.0, "fy": 244.0, "cx": 160.0, "cy": 120.0, "unit_mm": 82.55, "tag_mm": 165.1, "calibrated": 1 })
+                        }
+                        "save" => serde_json::json!({ "do": "save", "ok": 0, "err": "no measurements" }),
+                        "reset" => {
+                            (self.calibrated, self.measured) = (false, 0);
+                            serde_json::json!({ "do": "reset", "ok": 1, "fx": 238.4, "calibrated": 0, "kept": 0 })
+                        }
+                        other => serde_json::json!({ "do": other, "ok": 1, "fx": if self.calibrated { 244.0 } else { 238.4 }, "calibrated": u8::from(self.calibrated), "kept": self.measured }),
+                    };
+                    self.send(frame::CALIB_BACK, said.to_string().as_bytes());
                 }
                 frame::PUT => {
                     self.want = (false, false, false, false, false);
                     let v: serde_json::Value = serde_json::from_slice(&f.payload).unwrap_or_default();
                     let (name, size, crc, id) = (v["name"].as_str().unwrap_or("").to_owned(), v["size"].as_u64().unwrap_or(0) as usize, v["crc"].as_u64().unwrap_or(0) as u32, v["id"].as_str().unwrap_or("").to_owned());
-                    let said = if ["main.py", "boot.py", "face.kmodel"].contains(&name.as_str()) {
+                    let said = if ["main.py", "boot.py", "face.kmodel", "kws.kmodel"].contains(&name.as_str()) {
                         let mut fl = self.flash.lock().unwrap_or_else(|e| e.into_inner());
                         let have = match fl.new.get(&name) {
                             Some((s, c, i, data)) if *s == size && *c == crc && *i == id && data.len() <= size => data.len(),
@@ -2295,7 +2967,8 @@ pub mod sim {
         fn look(&mut self) {
             let w = self.want;
             let any = w.0 || w.1 || w.2 || w.3 || w.4;
-            if !self.alive || self.spec.sensor_fails || !any || self.last_frame.elapsed() < Duration::from_millis(66) {
+            let pace = self.pace.unwrap_or(Duration::from_millis(66)).max(Duration::from_millis(66));
+            if !self.alive || self.spec.sensor_fails || !any || self.last_frame.elapsed() < pace {
                 std::thread::sleep(Duration::from_millis(8));
                 return;
             }
@@ -2304,7 +2977,8 @@ pub mod sim {
             let n = self.n;
             let t = self.started.elapsed().as_secs_f32();
             let face = [0.42 + 0.12 * (t * 0.4).sin(), 0.28 + 0.04 * (t * 0.7).cos()];
-            let mut json = format!(r#"{{"n":{n},"w":320,"h":240,"fps":15.0"#);
+            let fps = 1.0 / pace.as_secs_f32();
+            let mut json = if self.spec.version >= 3 { format!(r#"{{"n":{n},"t":{},"w":320,"h":240,"fps":{fps:.1}"#, self.ms()) } else { format!(r#"{{"n":{n},"w":320,"h":240,"fps":15.0"#) };
             if w.0 {
                 json += &format!(r#","f":[[{:.0},{:.0},58,70,87]]"#, face[0] * 320.0, face[1] * 240.0);
             }

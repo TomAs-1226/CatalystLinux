@@ -173,6 +173,7 @@ mod units;
 mod upnext;
 mod vault;
 mod voice;
+mod voicecmd;
 mod weather;
 mod whisper_local;
 mod widgets;
@@ -741,6 +742,12 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--smartcam-shots") {
         return smartcam_status::shots(std::path::Path::new(&dir));
+    }
+    // Catalyst Coprocessor's pages: the camera's health, the tag pose,
+    // voice commands.
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--coprocessor-shots") {
+        return smartcam_status::coprocessor_shots(std::path::Path::new(&dir));
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--mech-shots") {

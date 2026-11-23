@@ -363,6 +363,16 @@ impl Listener {
         self.samples.len() as f32 / speech::RATE as f32
     }
 
+    /// What it has heard from sample `n` on (to stream on as it arrives).
+    pub fn since(&self, n: usize) -> &[i16] {
+        &self.samples[n.min(self.samples.len())..]
+    }
+
+    /// Everything heard so far.
+    pub fn heard(&self) -> &[i16] {
+        &self.samples
+    }
+
     /// Why it stopped hearing, if it did.
     pub fn failed(&self) -> Option<&str> {
         self.failed.as_deref()
@@ -402,20 +412,55 @@ impl Drop for Listener {
 /// Who writes down what was said.
 enum Hearing {
     OpenAi(String),
+    /// Whisper tiny.en on the handheld (whisper_local.rs), offline.
+    Local,
     /// The simulator's script.
     Demo,
 }
 
 fn hearing() -> Result<Hearing, String> {
+    use crate::voicecmd::Engine;
     if crate::ai::demo() {
         return Ok(Hearing::Demo);
     }
-    Keys::load().get("openai").map(|k| Hearing::OpenAi(k.to_owned())).ok_or_else(|| NO_KEY.to_owned())
+    let engine = crate::voicecmd::Prefs::load().dictation;
+    let local = crate::whisper_local::ready();
+    let key = Keys::load().get("openai").map(str::to_owned);
+    match (engine, local, key) {
+        (Engine::Auto | Engine::Local, Ok(()), _) => Ok(Hearing::Local),
+        (Engine::Local, Err(why), _) => Err(why),
+        (_, _, Some(k)) => Ok(Hearing::OpenAi(k)),
+        (_, _, None) => Err(NO_KEY.to_owned()),
+    }
 }
 
-/// Whether anything can write down what is said: the OpenAI key is set.
+/// Whether anything can write down what is said: Whisper on the handheld,
+/// or the OpenAI key.
 pub fn can_hear() -> Result<(), String> {
     hearing().map(|_| ())
+}
+
+/// Whether the talk key does anything: commands on the smart camera, or
+/// dictation.
+pub fn can_talk() -> Result<(), String> {
+    if crate::voicecmd::Prefs::load().active() {
+        return Ok(());
+    }
+    can_hear()
+}
+
+/// Settings › Voice commands changed: the smart camera kept ready (powered
+/// and idle) while commands want it so, let go otherwise.
+pub fn commands_changed() {
+    static READY: Mutex<Option<crate::smartcam::Lease>> = Mutex::new(None);
+    let p = crate::voicecmd::Prefs::load();
+    let want = p.enabled && p.ready && crate::smartcam::chosen();
+    let mut held = READY.lock().unwrap_or_else(|e| e.into_inner());
+    match (want, held.is_some()) {
+        (true, false) => *held = Some(crate::smartcam::lease(crate::smartcam::Use::Ready)),
+        (false, true) => *held = None,
+        _ => {}
+    }
 }
 
 /// The simulator's transcripts: a question for the assistant, a line for a note.
@@ -435,6 +480,7 @@ fn dictate_for(clip: &Clip, kind: Dictation) -> Result<String, String> {
         return Err(NOTHING_HEARD.into());
     }
     match hearing()? {
+        Hearing::Local => crate::whisper_local::transcribe(&clip.samples, speech::RATE),
         Hearing::OpenAi(key) => speech::openai::transcribe(&key, &clip.wav(), speech::openai::KEYWORDS, &crate::config_dir()),
         Hearing::Demo => {
             std::thread::sleep(Duration::from_secs_f32(DEMO_WRITING));
@@ -471,8 +517,29 @@ pub struct Target {
 
 enum Phase {
     Idle,
-    Listening { listener: Listener, since: f32, let_go: Option<f32>, target: Target },
-    Writing { rx: Receiver<Result<String, String>>, since: f32, target: Target },
+    Listening {
+        listener: Listener,
+        since: f32,
+        let_go: Option<f32>,
+        target: Target,
+        /// The utterance streaming to the smart camera (voice commands, and
+        /// its voice detector), and how much of it has gone.
+        session: Option<crate::smartcam::speech::Session>,
+        sent: usize,
+        /// A tap: dictation, listening until the voice ends (or Alt again).
+        latched: bool,
+        /// When the handheld's own voice detector last looked (no camera).
+        looked: f32,
+    },
+    Writing { rx: Receiver<Result<Outcome, String>>, since: f32, target: Target },
+}
+
+/// What an utterance came to.
+#[derive(Debug, PartialEq)]
+pub enum Outcome {
+    Text(String),
+    /// A voice command: its word and what it does.
+    Command(String, crate::voicecmd::Action),
 }
 
 /// What push-to-talk asks of the shell.
@@ -483,6 +550,16 @@ pub enum Event {
     Say(String),
     /// What was said, written down, for where it was going.
     Heard(String, Target),
+    /// A voice command, for the shell to carry out.
+    Command(String, crate::voicecmd::Action),
+}
+
+/// A tap listens hands-free for at most this long.
+const LATCHED_MOST: f32 = 30.0;
+
+thread_local! {
+    /// In tests: whether push-to-talk streams to the simulator's camera.
+    static COPROCESSOR_IN_TESTS: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Push-to-talk as the shell holds it: the key, the listening, the writing
@@ -510,6 +587,8 @@ pub struct Talk {
 
 impl Talk {
     pub fn new() -> Self {
+        // The smart camera kept ready, if voice commands ask for it.
+        commands_changed();
         Talk {
             phase: Phase::Idle,
             was_down: false,
@@ -554,14 +633,19 @@ impl Talk {
             self.spent = false;
         }
         let mut event = self.note.take().map(Event::Say);
-        if pressed && !self.spent {
+        // Alt again while a tap listens: that is the end of it.
+        let stop_latched = pressed && matches!(self.phase, Phase::Listening { latched: true, .. });
+        if pressed && !self.spent && !stop_latched {
             event = self.press(awake, here).or(event);
+        }
+        if stop_latched {
+            self.spent = true;
         }
         let now = self.clock;
         let mut level = 0.0;
         match &mut self.phase {
             Phase::Idle => {}
-            Phase::Listening { listener, since, let_go, target } => {
+            Phase::Listening { listener, since, let_go, target, session, sent, latched, looked } => {
                 listener.take_in();
                 level = listener.level();
                 if let Some(why) = listener.failed().map(brief) {
@@ -569,12 +653,39 @@ impl Talk {
                     self.spent = down;
                     return Some(Event::Say(why));
                 }
-                if released && let_go.is_none() {
+                // What it heard goes on to the smart camera as it arrives.
+                if let Some(s) = session.as_ref() {
+                    let fresh = listener.since(*sent);
+                    s.push(fresh);
+                    *sent += fresh.len();
+                }
+                if released && let_go.is_none() && !*latched {
                     if now - *since < TAP {
-                        self.phase = Phase::Idle;
-                        return Some(Event::Say("hold alt while you talk".into()));
+                        // A tap: dictation, until the voice ends.
+                        if can_hear().is_err() {
+                            self.phase = Phase::Idle;
+                            return Some(Event::Say("hold alt while you talk".into()));
+                        }
+                        *latched = true;
+                    } else {
+                        *let_go = Some(now);
                     }
-                    *let_go = Some(now);
+                }
+                if *latched && let_go.is_none() {
+                    // The voice ended (the camera's detector, else the
+                    // handheld's, looked at five times a second), Alt again,
+                    // or long enough.
+                    let ended = match session.as_ref() {
+                        Some(s) => s.vad().state == 2,
+                        None if now - *looked >= 0.2 => {
+                            *looked = now;
+                            crate::voicecmd::vad(listener.heard()).state == 2
+                        }
+                        None => false,
+                    };
+                    if ended || stop_latched || now - *since >= LATCHED_MOST {
+                        *let_go = Some(now - TAIL);
+                    }
                 }
                 // Long enough: it stops by itself, and the key held on is spent.
                 if let_go.is_none() && now - *since >= MOST {
@@ -583,12 +694,16 @@ impl Talk {
                 }
                 if let_go.is_some_and(|at| now - at >= TAIL) {
                     let target = target.clone();
-                    let Phase::Listening { listener, .. } = std::mem::replace(&mut self.phase, Phase::Idle) else { unreachable!() };
-                    self.phase = Phase::Writing { rx: write_down(listener, target.kind), since: now, target };
+                    let Phase::Listening { listener, session, latched, .. } = std::mem::replace(&mut self.phase, Phase::Idle) else { unreachable!() };
+                    self.phase = Phase::Writing { rx: write_down(listener, session, latched, target.kind), since: now, target };
                 }
             }
             Phase::Writing { rx, target, .. } => match rx.try_recv() {
-                Ok(Ok(text)) => {
+                Ok(Ok(Outcome::Command(word, action))) => {
+                    self.phase = Phase::Idle;
+                    return Some(Event::Command(word, action));
+                }
+                Ok(Ok(Outcome::Text(text))) => {
                     let target = target.clone();
                     self.phase = Phase::Idle;
                     let text = text.trim().to_owned();
@@ -622,7 +737,7 @@ impl Talk {
             self.spent = true;
             return None;
         };
-        if let Err(why) = can_hear() {
+        if let Err(why) = can_talk() {
             self.spent = true;
             return Some(Event::Say(why));
         }
@@ -630,7 +745,12 @@ impl Talk {
         // the last is being written down starts over.
         stop_speaking();
         self.history.clear();
-        self.phase = Phase::Listening { listener: listen(), since: self.clock, let_go: None, target };
+        // The smart camera hears it too (commands, and where the voice is),
+        // streamed only while the key is held or a tap listens. (Tests of
+        // push-to-talk alone leave the simulator's camera out of it.)
+        let wanted = !cfg!(test) || COPROCESSOR_IN_TESTS.with(Cell::get);
+        let session = (wanted && crate::voicecmd::Prefs::load().enabled && crate::smartcam::speech::available()).then(crate::smartcam::speech::begin);
+        self.phase = Phase::Listening { listener: listen(), since: self.clock, let_go: None, target, session, sent: 0, latched: false, looked: self.clock };
         None
     }
 
@@ -691,12 +811,19 @@ impl Talk {
         }
         let bars = self.bars.each_ref().map(|b| b.value().clamp(0.0, 1.0));
         match &self.phase {
-            Phase::Listening { target, .. } => Some(Island {
+            Phase::Listening { target, latched, .. } => Some(Island {
                 icon: "mic",
                 hot: true,
                 // The live microphone and its meter say it listens; the words
                 // say what letting go does (short, so the title keeps its room).
-                words: if target.kind == Dictation::Question { "let go to ask" } else { "let go to type" }.into(),
+                words: if *latched {
+                    "listening · alt stops"
+                } else if target.kind == Dictation::Question {
+                    "let go to ask"
+                } else {
+                    "let go to type"
+                }
+                .into(),
                 bars,
             }),
             Phase::Writing { .. } => Some(Island { icon: "mic", hot: false, words: "writing it down".into(), bars }),
@@ -723,12 +850,49 @@ pub struct Island {
     pub bars: [f32; BARS],
 }
 
-/// Write down what a listener heard, on a thread of its own.
-fn write_down(listener: Listener, kind: Dictation) -> Receiver<Result<String, String>> {
+/// How long the camera's answer is waited for at an utterance's end (it
+/// takes a few milliseconds; the rest is the link, or a camera starting).
+const CAMERA_ANSWER: Duration = Duration::from_millis(3500);
+
+/// What a listener heard, on a thread of its own: commands first (held, on
+/// the smart camera's NPU), else dictation of the voice's span only (the
+/// camera's voice detector, else the handheld's), written down by Whisper
+/// on the handheld or by OpenAI. Silence is written down by neither.
+fn write_down(listener: Listener, session: Option<crate::smartcam::speech::Session>, latched: bool, kind: Dictation) -> Receiver<Result<Outcome, String>> {
+    use crate::smartcam::speech::Mode;
+    use crate::voicecmd::{decide, trim, vad, Decision};
     let (tx, rx) = mpsc::channel();
     let started = std::thread::Builder::new().name("voice-write".into()).stack_size(256 * 1024).spawn(move || {
-        let heard = listener.finish().and_then(|clip| dictate_for(&clip, kind));
-        tx.send(heard).ok();
+        let pending = session.map(|s| s.finish(if latched { Mode::Dictation } else { Mode::Command }));
+        let clip = match listener.finish() {
+            Ok(clip) => clip,
+            Err(why) => {
+                tx.send(Err(why)).ok();
+                return;
+            }
+        };
+        let heard = pending.and_then(|p| p.rx.recv_timeout(CAMERA_ANSWER).ok()).and_then(Result::ok);
+        let prefs = crate::voicecmd::Prefs::load();
+        let span = match &heard {
+            Some(h) if !latched => match decide(h, &prefs) {
+                Decision::Command { word, action, .. } => {
+                    tx.send(Ok(Outcome::Command(word, action))).ok();
+                    return;
+                }
+                Decision::Silence => {
+                    tx.send(Err(NOTHING_HEARD.into())).ok();
+                    return;
+                }
+                Decision::Speech => h.vad,
+            },
+            Some(h) if h.vad.state > 0 => h.vad,
+            _ => vad(&clip.samples),
+        };
+        // Only the voice is written down: Whisper's work follows its length.
+        // (The simulator's test signal is written down whole.)
+        let voice = if crate::ai::demo() { clip.samples.clone() } else { trim(&clip.samples, &span) };
+        let written = if voice.is_empty() { Err(NOTHING_HEARD.to_owned()) } else { dictate_for(&Clip { samples: voice }, kind).map(Outcome::Text) };
+        tx.send(written).ok();
     });
     if started.is_err() {
         let (tx, rx) = mpsc::channel();
@@ -1253,11 +1417,18 @@ mod tests {
     }
 
     #[test]
-    fn a_tap_sends_nothing_and_esc_lets_go() {
+    fn a_tap_listens_hands_free_until_alt_again_and_esc_lets_go() {
         crate::shell::tests::sandbox();
         let mut talk = Talk::new();
         hold(&mut talk, true, 0.1, target(Dictation::Text));
-        assert_eq!(hold(&mut talk, false, 0.1, target(Dictation::Text)), [Event::Say("hold alt while you talk".into())]);
+        assert!(hold(&mut talk, false, 0.5, target(Dictation::Text)).is_empty(), "a tap: listening on, the key up");
+        assert_eq!(talk.island().expect("listening hands-free").words, "listening · alt stops");
+        // Alt again: that is the end of it, written down (no command looked for).
+        hold(&mut talk, true, 0.1, target(Dictation::Text));
+        let events = hold(&mut talk, false, 2.0, target(Dictation::Text));
+        assert_eq!(events, [Event::Heard(DEMO_NOTE.into(), target(Dictation::Text).unwrap())]);
+        assert!(talk.island().is_none());
+        // Held and let go of with Esc.
         hold(&mut talk, true, 0.6, target(Dictation::Text));
         assert!(talk.key(Key::Back), "esc is spent letting go");
         assert!(talk.island().is_none());
