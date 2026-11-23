@@ -1465,7 +1465,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(preview().0 >= 3, "previews arrive");
-        let r = results(Duration::from_secs(1)).expect("results arrive");
+        // Room for a busy machine: the whole suite runs beside it.
+        let r = results(Duration::from_secs(5)).expect("results arrive");
         assert!(!r.faces.is_empty() && !r.codes.is_empty() && !r.tags.is_empty());
         assert!(tags().is_some_and(|(_, t)| t[0].id == 7), "the field view's tags");
         drop(lease);

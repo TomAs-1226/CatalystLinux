@@ -10,6 +10,18 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.9.1
+
+### Smart camera
+- Settings › Camera › Grove port changes at once, both ways: no restart. Moving to the smart camera stops the login on the port and keeps the system's messages off it; back to the console, the login is there again at once and the system's messages return from the next start.
+- The smart camera's program installs from the handheld: plug the UnitV's USB-C into the USB-A port and the island offers "install on the camera". No microSD card needed. It puts MaixPy on it if it needs it, then the face model and the program, and checks it answers. Takes about a minute.
+- Settings › Camera › UnitV says whether the camera's program is up to date, and "update on the camera" when a newer Catalyst has a newer one: plug it into USB-A once to update.
+- USB serial adapters that use CDC-ACM now work when plugged in.
+
+### Panel
+- The tear-free panel (Developer options) no longer tears at the full-speed link: each frame goes out where the panel's refresh cannot cross it, usually at once and at most a few milliseconds later. Try it: it is to become the default once it is seen upright on a handheld.
+- In the tear-free mode the panel refreshes 59.9 times a second, just under the 60 frames drawn, so motion no longer hitches about twice a second.
+
 ## 0.9.0
 
 ### Lock screen
