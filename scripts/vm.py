@@ -483,8 +483,8 @@ def tour(vm, folder):
     check("Home draws", shot("1-home") > 50)
 
     # Left and Right go through the apps in order: forty-two built in,
-# Settings last; then the image's Processes (42) and the user's own by
-# name: hello (43) and Paint (44).
+    # Settings last; then the image's Processes (42) and the user's own by
+    # name: hello (43) and Paint (44).
     for key in ["right"] * BUILT_IN:
         vm.key(key)
     time.sleep(6)
