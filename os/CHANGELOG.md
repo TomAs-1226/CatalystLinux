@@ -10,6 +10,17 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.9.2
+
+### Camera
+- Photos are quicker: the shot appears in the corner the moment you press the shutter, the next photo can be taken while the last is still being saved, and a photo now takes about half the time to save.
+- Crisper photos: in auto the shutter stays at 1/60 or faster while it can, and in good light the camera's noise filter no longer smears fine detail.
+- Pro mode: shutter (s), ISO (i), exposure compensation (e) and white balance (w), each turned with ← →, with a live histogram, zebras on bright highlights (x) and the shutter speed always in sight. The lens is a fixed f/2.0.
+- RAW (r in pro mode): a DNG of the sensor's own picture beside each JPEG.
+- Looks (f): Vivid, Dramatic, Mono, Silvertone, Noir, Classic, Contemporary, BW Natural, BW High Contrast, a Tint in any colour and more, shown live and kept on the photo. Photos shows the original with o.
+- The focus check (z): the picture at its real pixels, with sharp edges marked, to see what is in focus.
+- Detail mode's auto now merges a burst only in real low light.
+
 ## 0.9.1
 
 ### Smart camera
