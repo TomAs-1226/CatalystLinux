@@ -1,6 +1,11 @@
 //! Help: a tour of the keys, offered once after first-boot setup and always
-//! from Settings › Help, and the list of keyboard shortcuts, which `?` held
-//! for five seconds brings up over any screen that is not taking text.
+//! from Settings › Help; each screen's own keys ([`KeyGroup`]), which `?`
+//! tapped brings up on a sheet over it (`keysheet.rs`); and the list of
+//! every keyboard shortcut, which `?` held for five seconds brings up.
+//!
+//! Where a screen takes text, `?` is typed: there Fn 1 (F1) brings the
+//! sheet up instead, and the hint line says so. A terminal's program takes
+//! F1 for itself.
 
 use bezel::{Align, Color, Rect};
 use detent::{role, Animated};
@@ -48,8 +53,53 @@ const STEPS: [Step; 9] = [
     Step { spot: Spot::Nothing, title: "Control centre", words: "Ctrl Space brings it down over any screen: Wi-Fi, light mode, brightness. Up from Home's top row works too." },
     Step { spot: Spot::Nothing, title: "Recent apps", words: "Ctrl Tab shows the apps you used last. Enter takes you back to one, just as you left it." },
     Step { spot: Spot::Nothing, title: "Search", words: "Ctrl Enter searches from any screen: apps, settings, files, notes, matches, a sum. Space on Home too." },
-    Step { spot: Spot::Nothing, title: "Forgot a key?", words: "Hold ? for five seconds on any screen for the list of shortcuts. Settings › Help has this tour again." },
+    Step { spot: Spot::Nothing, title: "Forgot a key?", words: "Tap ? on any screen for its keys; hold it for every shortcut. Settings › Help has this tour again." },
 ];
+
+// ------------------------------------------------------------- key sheets ---
+
+/// A group of a screen's own keys, for the sheet `?` brings up over it: a
+/// heading and its rows, each (the keys, written as printed on the
+/// keyboard; what they do). Keys pressed together are written apart
+/// ("ctrl q"), two ways to the same thing with " · " between ("↑ · l"), and
+/// a plain word is drawn as it is ("held").
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KeyGroup {
+    pub title: &'static str,
+    pub keys: &'static [(&'static str, &'static str)],
+}
+
+/// A group of keys under a heading.
+pub const fn keys(title: &'static str, keys: &'static [(&'static str, &'static str)]) -> KeyGroup {
+    KeyGroup { title, keys }
+}
+
+/// The keys that work over every screen, after its own on the sheet.
+pub const EVERYWHERE: KeyGroup = keys(
+    "everywhere",
+    &[
+        ("esc", "Back"),
+        ("esc held · ctrl q", "Leave the app"),
+        ("ctrl tab", "Recent apps"),
+        ("ctrl enter", "Search, or island news"),
+        ("ctrl space", "Control centre"),
+        ("ctrl bksp", "Notifications"),
+        ("fn u · fn i", "Brightness"),
+        ("? held", "Every shortcut"),
+    ],
+);
+
+/// What the hint line says brings this screen's keys up: `?`, or where it
+/// takes text, Fn 1. None in a terminal, whose program takes both.
+pub fn sheet_hint(screen: &dyn Screen) -> Option<&'static str> {
+    if screen.keeps_ctrl() {
+        None
+    } else if screen.wants_text() {
+        Some("fn 1 keys")
+    } else {
+        Some("? keys")
+    }
+}
 
 /// How dark the screen goes behind the tour.
 const DIM: f32 = 0.62;
@@ -319,6 +369,8 @@ const SHORTCUTS: &[Line] = &[
     Line::Keys("Clipboard history", "ctrl shift h"),
     Line::Keys("Quick capture", "ctrl shift n"),
     Line::Keys("Ask aloud, or dictate", "alt held"),
+    Line::Keys("This screen's keys", "?"),
+    Line::Keys("...where text is typed", "fn 1"),
     Line::Keys("This list, after 5 s", "? held"),
     Line::Head("search"),
     Line::Keys("Next or last result", "↑ ↓"),
@@ -485,6 +537,10 @@ impl Screen for Shortcuts {
         false
     }
 
+    fn key_sheet(&self) -> Vec<KeyGroup> {
+        vec![keys("shortcuts", crate::screens::LIST_KEYS)]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         match key {
             Key::Back => Nav::Pop,
@@ -526,7 +582,7 @@ impl Screen for Shortcuts {
 /// Keys as keycaps, right-aligned at `right`: each key on its own cap, a dot
 /// between two ways of doing the same thing, plain words as they are.
 /// Where they begin on the left; with `draw` false, only that.
-fn keycaps(g: &mut Gfx, right: f32, cy: f32, keys: &str, focused: bool, draw: bool) -> f32 {
+pub(crate) fn keycaps(g: &mut Gfx, right: f32, cy: f32, keys: &str, focused: bool, draw: bool) -> f32 {
     let t = g.tokens;
     let style = g.ty.caption;
     let cap_h = style.size + 5.0;
@@ -566,7 +622,7 @@ fn keycaps(g: &mut Gfx, right: f32, cy: f32, keys: &str, focused: bool, draw: bo
 /// Whether a word in a shortcut is a key (drawn on a cap) or a plain word
 /// ("held", "on the first").
 fn is_key_name(word: &str) -> bool {
-    word.chars().count() == 1 || matches!(word, "enter" | "esc" | "ctrl" | "space" | "tab" | "pg" | "up" | "dn" | "bksp" | "shift" | "fn" | "sym")
+    word.chars().count() == 1 || matches!(word, "enter" | "esc" | "ctrl" | "space" | "tab" | "pg" | "up" | "dn" | "bksp" | "shift" | "fn" | "sym" | "alt" | "del" | "home" | "end")
 }
 
 #[cfg(test)]

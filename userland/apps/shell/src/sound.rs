@@ -1302,6 +1302,27 @@ impl Screen for SoundScreen {
         "Sound"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let here = match self.row() {
+            Row::Volume => Some(keys("volume", &[("← →", "Louder or softer")])),
+            Row::Mute => Some(keys("mute", &[("enter · space", "Mute or unmute")])),
+            Row::Test => Some(keys("test", &[("enter", "A short chime")])),
+            Row::Spatial => Some(keys("spatial sound", &[("enter · ← →", "On or off")])),
+            Row::Noise => Some(keys("noise control", &[("← →", "The next mode")])),
+            Row::Equalizer => Some(keys("equalizer", &[("enter · →", "Presets and bands")])),
+            Row::Loudness => Some(keys("loudness", &[("enter · ← →", "On or off")])),
+            Row::Crossfade => Some(keys("crossfade", &[("← →", "Up to 8 s")])),
+            Row::Microphone => Some(keys("microphone", &[("enter · ← →", "Which one")])),
+            Row::MicGain => Some(keys("mic gain", &[("← →", "More or less")])),
+            Row::Usb => Some(keys("usb headphones", &[("enter", "Play here, or more")])),
+            Row::Bluetooth => Some(keys("bluetooth", &[("enter · →", "Its page")])),
+            Row::Output | Row::Quality => None,
+        };
+        let sound = keys("sound", &[("fn s · fn d", "Volume, anywhere"), ("fn a", "Mute, anywhere"), ("r", "Read it again")]);
+        here.into_iter().chain([sound, keys("moving", crate::screens::LIST_KEYS)]).collect()
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         self.last_key = Instant::now();
         let row = self.row();
@@ -1559,6 +1580,15 @@ impl Screen for UsbAudioPage {
     fn title(&self) -> &str {
         // Short enough to sit whole beside the island at the largest text.
         "USB"
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        match self.status.as_ref().map(|s| s.setup) {
+            Some(Setup::DeviceMode) => vec![keys("usb headphones", &[("enter", "USB on charging only"), ("r", "Read it again")])],
+            Some(Setup::Restart) => vec![keys("usb headphones", &[("enter", "Restart now"), ("r", "Read it again")])],
+            _ => vec![keys("usb headphones", &[("r", "Read it again")])],
+        }
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {

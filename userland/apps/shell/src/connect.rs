@@ -288,6 +288,21 @@ impl Screen for Connect {
         self.ports = ports();
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.field.is_some() {
+            return vec![keys("the host", &[("type", "user@host:port"), ("enter", "Keep it"), ("esc", "Cancel")])];
+        }
+        let here = match self.rows().get(self.list.focus) {
+            Some(Row::Host(_)) => keys("a host", &[("enter · →", "Connect"), ("e", "Edit it"), ("d twice", "Forget it")]),
+            Some(Row::Port(_)) => keys("a serial port", &[("enter · →", "Open it")]),
+            Some(Row::Speed) => keys("speed", &[("← →", "Slower or faster")]),
+            Some(Row::Key) => keys("the key", &[("enter · →", "Show it, or make one")]),
+            _ => keys("connect", &[("enter · →", "Add a host")]),
+        };
+        vec![here, keys("list", &[("↑ ↓", "Move")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         if let Some((field, typing)) = &mut self.field {
             let typing = *typing;
@@ -421,6 +436,11 @@ pub struct KeyScreen {
 impl Screen for KeyScreen {
     fn title(&self) -> &str {
         "Key"
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("key", &[("enter · ←", "Done")])]
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {

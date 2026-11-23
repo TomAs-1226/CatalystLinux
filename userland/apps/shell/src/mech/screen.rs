@@ -52,13 +52,27 @@ impl Screen for MechApp {
         self.saved = super::saved();
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.forgetting.is_some() {
+            return vec![keys("forgetting", &[("del", "Forget it"), ("esc", "Keep it")])];
+        }
+        if self.saved.is_empty() {
+            return vec![keys("mechanisms", &[("enter", "Work one out"), ("↑ ↓", "Move")])];
+        }
+        vec![keys("mechanisms", &[("enter", "Open"), ("↑ ↓", "Move"), ("del twice", "Forget a kept one")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let len = self.len();
         let at = self.list.focus;
-        if key != Key::Backspace {
+        // Backspace comes as Esc here (the shell's), so Fn-Backspace forgets.
+        let forgetting = self.forgetting;
+        if !matches!(key, Key::Backspace | Key::Delete) {
             self.forgetting = None;
         }
         match key {
+            Key::Back if forgetting.is_some() => Nav::Stay,
             Key::Back | Key::Leave => Nav::Pop,
             Key::Enter | Key::Right => match at.checked_sub(Calc::ALL.len() + 1) {
                 Some(k) => self.saved.get(k).map_or(Nav::Stay, |(_, m)| Nav::Push(Box::new(Form::new(m.clone())))),
@@ -103,9 +117,9 @@ impl Screen for MechApp {
         }
         self.list.scrollbar(g, len, top, bottom);
         if self.forgetting.is_some() {
-            g.hint_any(&["backspace again: forget it · esc: keep it", "backspace again: forget it"]);
+            g.hint_any(&["del again: forget it · esc: keep it", "del again: forget it"]);
         } else if self.list.focus > Calc::ALL.len() {
-            g.hint_any(&["enter: open · backspace: forget", "enter: open"]);
+            g.hint_any(&["enter: open · del: forget", "enter: open"]);
         } else {
             g.hint_any(&["enter: work one out · ctrl-s in it keeps it", "enter: work one out"]);
         }
@@ -281,6 +295,22 @@ impl Screen for Form {
 
     fn tick(&mut self, dt: f32) -> bool {
         self.glide.tick(dt)
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.naming.is_some() {
+            return vec![keys("keeping it", &[("enter", "Keep it"), ("esc", "Not now")])];
+        }
+        let here = match self.field().map(|f| f.kind) {
+            _ if self.typing.is_some() => keys("typing", &[("enter", "Done"), ("tab", "Done, next number"), ("esc", "As it was"), ("bksp", "Take a figure off")]),
+            Some(FieldKind::Motor) => keys("the motor", &[("← →", "Another motor"), ("tab", "Next number")]),
+            Some(FieldKind::Stage(_)) => keys("a stage", &[("type 12:60", "Its teeth"), ("← →", "Gear, belt or chain"), ("bksp", "Change it"), ("tab", "Next number")]),
+            Some(FieldKind::Count) => keys("a count", &[("type · ← →", "Change it"), ("tab", "Next number")]),
+            Some(_) => keys("a number", &[("type 2.5", "A new value"), ("bksp", "Change it"), ("tab", "Next number")]),
+            None => keys("results", &[("tab", "Back to the numbers")]),
+        };
+        vec![here, keys("mechanism", &[("↑ ↓", "Move"), ("ctrl s", "Keep it")])]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {

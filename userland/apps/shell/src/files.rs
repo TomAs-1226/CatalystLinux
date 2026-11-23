@@ -135,6 +135,17 @@ impl Screen for Files {
         self.naming.is_some()
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.naming.is_some() {
+            return vec![keys("new file", &[("enter", "Make it"), ("esc", "Cancel")])];
+        }
+        vec![keys(
+            "files",
+            &[("enter · →", "Open"), ("←", "Folder above"), ("n", "New file"), ("d twice", "Delete"), ("h", "Open as hex")],
+        )]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         if let Some(name) = &mut self.naming {
             match key {
@@ -511,6 +522,17 @@ impl Screen for Editor {
 
     fn greeting(&self) -> Option<&'static str> {
         Some("ctrl-s saves · ctrl-q closes")
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![
+            keys(
+                "editor",
+                &[("ctrl s", "Save"), ("ctrl q", "Close, asks if unsaved"), ("ctrl x", "Cut the line"), ("ctrl c", "Copy the line"), ("ctrl v", "Paste"), ("ctrl k", "Delete the line"), ("del", "Delete forward")],
+            ),
+            keys("moving", &[("home · end", "Start or end of line"), ("pg up · pg dn", "A screen at a time")]),
+        ]
     }
 
     /// Copy, with nothing chosen: the line the cursor is on.

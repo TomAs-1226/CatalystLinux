@@ -234,6 +234,10 @@ impl Screen for KeepPanel {
         self.counting.get_or_insert(0.0);
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        vec![crate::help::keys("the new panel", &[("enter", "Keep it"), ("esc", "Go back to the old")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         match (key, self.answer) {
             (Key::Enter, Answer::Waiting) => {

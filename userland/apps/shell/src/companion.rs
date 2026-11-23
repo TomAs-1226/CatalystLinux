@@ -528,6 +528,23 @@ impl Screen for CompanionScreen {
         "Computer companion"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        match &self.showing {
+            Some(Showing::Code { .. }) => return vec![keys("pairing", &[("esc", "Stop pairing")])],
+            Some(Showing::Paired(_)) => return vec![keys("paired", &[("enter", "Done")])],
+            Some(_) => return vec![keys("not paired", &[("enter", "Try again")])],
+            None => {}
+        }
+        let here = match self.rows.get(self.list.focus.min(self.rows.len().saturating_sub(1))) {
+            Some(Row::Switch) => Some(keys("companion", &[("enter · ← →", "On or off")])),
+            Some(Row::Pair) => Some(keys("pairing", &[("enter", "Pair a computer")])),
+            Some(Row::Computer(_)) => Some(keys("this computer", &[("enter twice", "Unpair it")])),
+            _ => None,
+        };
+        here.into_iter().chain([keys("moving", crate::screens::LIST_KEYS)]).collect()
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         self.changed = true;
         if let Some(showing) = self.showing.clone() {

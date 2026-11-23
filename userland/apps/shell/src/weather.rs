@@ -1164,6 +1164,17 @@ impl Screen for Weather {
         "Weather"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let here = match (self.forecast.is_some(), self.section) {
+            (false, _) => keys("weather", &[("enter", "Choose a place")]),
+            (true, Section::Now) => keys("now", &[("enter", "Choose a place"), ("↓", "The hours")]),
+            (true, Section::Hours) => keys("the hours", &[("← →", "Another hour"), ("enter", "That hour's day"), ("↑ ↓", "Now, or the days")]),
+            (true, Section::Days) => keys("the days", &[("enter · →", "That day"), ("↑ ↓", "Another day")]),
+        };
+        vec![here, keys("also", &[("l", "Choose a place"), ("u", "Other units"), ("r", "Ask again")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         match key {
             Key::Back => return Nav::Pop,
@@ -1493,6 +1504,10 @@ impl Screen for DayScreen {
         &self.title
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        vec![crate::help::keys("a day", &[("← →", "Day before or after")])]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         match key {
             Key::Back => return Nav::Pop,
@@ -1734,6 +1749,14 @@ impl Screen for PlaceScreen {
 
     fn wants_text(&self) -> bool {
         !self.in_list
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if !self.in_list {
+            return vec![keys("searching", &[("enter", "Search for the city"), ("↓", "The places")])];
+        }
+        vec![keys("places", &[("enter", "Choose it"), ("↑ on the first", "The search")]), keys("moving", crate::screens::LIST_KEYS)]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {

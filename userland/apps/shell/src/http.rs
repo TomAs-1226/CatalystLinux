@@ -230,6 +230,20 @@ impl Screen for Http {
         }
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.typing.is_some() {
+            return vec![keys("typing", &[("enter", "Done"), ("esc", "Cancel")])];
+        }
+        let here = match self.list.focus {
+            0 => keys("method", &[("← → · enter", "Another method")]),
+            4 => keys("send", &[("enter", "Send it")]),
+            5 => keys("earlier", &[("enter · →", "Send one again")]),
+            _ => keys("field", &[("enter · →", "Change it")]),
+        };
+        vec![here, keys("request", &[("ctrl s", "Send it"), ("↑ ↓", "Move")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         if let Some((field, row)) = &mut self.typing {
             let row = *row;
@@ -346,6 +360,11 @@ impl Screen for History {
         "Earlier"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("earlier requests", &[("enter · →", "Use it"), ("↑ ↓", "Move")])]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         match key {
             Key::Back => Nav::Pop,
@@ -432,6 +451,16 @@ pub fn hard_wrap(text: &str, columns: usize) -> Vec<String> {
 impl Screen for ResponseView {
     fn title(&self) -> &str {
         "Response"
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let rows: &'static [(&'static str, &'static str)] = if self.headers {
+            &[("↑ ↓", "Scroll"), ("← →", "A page at a time"), ("tab · h", "The body"), ("home · end", "Top or end")]
+        } else {
+            &[("↑ ↓", "Scroll"), ("← →", "A page at a time"), ("tab · h", "The headers"), ("home · end", "Top or end")]
+        };
+        vec![keys("response", rows)]
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {

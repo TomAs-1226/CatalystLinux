@@ -478,6 +478,14 @@ impl Screen for GitScreen {
         self.repos = find_repos(&code_dir());
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.typing.is_some() {
+            return vec![keys("the address", &[("enter", "Clone it"), ("esc", "Cancel")])];
+        }
+        vec![keys("git", &[("enter · →", "Open"), ("↑ ↓", "Move")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         if let Some(field) = &mut self.typing {
             match field.key(key, |c| !c.is_whitespace()) {
@@ -620,6 +628,11 @@ impl Screen for AccountScreen {
         "Account"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("account", &[("enter · →", "Choose"), ("↑ ↓", "Move")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let rows = self.rows();
         match key {
@@ -703,6 +716,11 @@ impl RemoteReposScreen {
 impl Screen for RemoteReposScreen {
     fn title(&self) -> &str {
         "Your repositories"
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("repositories", &[("enter · →", "Clone, or open"), ("r", "Look again"), ("↑ ↓", "Move")])]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -883,6 +901,14 @@ impl Screen for RepoScreen {
 
     fn resume(&mut self) {
         self.status = Self::read(&self.repo);
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.message.is_some() {
+            return vec![keys("commit message", &[("enter", "Commit every change"), ("esc", "Cancel")])];
+        }
+        vec![keys("repository", &[("enter · →", "Pull, push, commit…"), ("↑ ↓", "Move")])]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -1070,6 +1096,11 @@ impl Screen for HistoryScreen {
         "History"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("history", &[("enter · →", "Open the commit"), ("↑ ↓", "Commit by commit"), ("pg up · pg dn", "Six at a time")])]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         let Some(Ok(rows)) = self.rows.get() else {
             return if key == Key::Back { Nav::Pop } else { Nav::Stay };
@@ -1241,6 +1272,11 @@ impl Screen for BranchesScreen {
         "Branches"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("branches", &[("enter · →", "Switch to it"), ("↑ ↓", "Move")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let branches = self.branches.get().and_then(Result::ok).unwrap_or_default();
         match key {
@@ -1356,6 +1392,11 @@ impl TextScreen {
 impl Screen for TextScreen {
     fn title(&self) -> &str {
         &self.title
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("reading", &[("↑ ↓", "A line up or down"), ("enter · pg dn", "A page on"), ("pg up", "A page back"), ("← →", "Scroll across")])]
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {

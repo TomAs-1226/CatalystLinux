@@ -753,6 +753,14 @@ impl Screen for Replay {
         Some("space plays · ↑↓ moments")
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![
+            keys("replay", &[("space · enter", "Play or pause"), ("↑ ↓", "Moment before or after"), ("← →", "Back or on 5 s"), ("home · end", "Start or end")]),
+            keys("speed and zoom", &[("1 · 2 · 4", "Times as fast"), ("s", "The next speed"), ("+ · -", "Zoom in or out")]),
+        ]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         if key == Key::Back {
             return Nav::Pop;

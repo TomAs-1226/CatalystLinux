@@ -24,12 +24,15 @@ use crate::clipboard::{Hotkey, Panel, Sensitivity, CAPTURE_KEY, HISTORY_KEY};
 pub enum Sheet {
     Clipboard,
     Capture,
+    /// The keys of the screen in front (`keysheet.rs`), `?` tapped.
+    Keys,
 }
 
 /// The sheets' own state in the shell.
 pub struct Sheets {
     pub panel: Panel,
     pub capture: Capture,
+    pub keys: crate::keysheet::KeySheet,
     /// While one is out: the frame it came up over, the page dots that
     /// frame asked for (held still behind it, as Spotlight's), and where
     /// the screen's foot was (above its hint line, if it has one).
@@ -38,20 +41,21 @@ pub struct Sheets {
 
 impl Sheets {
     pub fn new() -> Sheets {
-        Sheets { panel: Panel::new(), capture: Capture::new(), under: None }
+        Sheets { panel: Panel::new(), capture: Capture::new(), keys: crate::keysheet::KeySheet::new(), under: None }
     }
 
     pub fn visible(&self) -> bool {
-        self.panel.visible() || self.capture.visible()
+        self.panel.visible() || self.capture.visible() || self.keys.visible()
     }
 
     pub fn open(&self) -> bool {
-        self.panel.is_open() || self.capture.is_open()
+        self.panel.is_open() || self.capture.is_open() || self.keys.is_open()
     }
 
     fn gone_now(&mut self) {
         self.panel.gone_now();
         self.capture.gone_now();
+        self.keys.gone_now();
         self.under = None;
     }
 }
@@ -75,6 +79,10 @@ impl Shell {
             s.panel.gone_now();
             s.under = None;
         }
+        if !s.keys.is_open() && s.keys.visible() && !matches!(key, Key::Char('?') | Key::F(1)) {
+            s.keys.gone_now();
+            s.under = None;
+        }
         // The recent apps, the control centre and the notifications in their
         // place; search in the history's (in quick capture, Ctrl-Enter saves
         // and opens what it saved).
@@ -89,9 +97,34 @@ impl Shell {
             CAPTURE_KEY if !self.sheets.capture.is_open() => self.summon_sheet(Sheet::Capture),
             _ if self.sheets.capture.is_open() => self.capture_key(key),
             _ if self.sheets.panel.is_open() => self.panel_key(key),
+            _ if self.sheets.keys.is_open() => return self.keys_sheet_key(key),
             _ => return false,
         }
         true
+    }
+
+    /// A key for the sheet of the screen's keys: true if it took it. `?`
+    /// (and Fn 1) tapped puts it away, held goes on to every shortcut; a
+    /// key it has no use for puts it away at once and goes on to the screen.
+    fn keys_sheet_key(&mut self, key: Key) -> bool {
+        use crate::keysheet::Outcome;
+        self.moving = true;
+        if matches!(key, Key::Char('?') | Key::F(1)) {
+            self.question_mark();
+            return true;
+        }
+        match self.sheets.keys.key(key) {
+            Outcome::Stay => true,
+            Outcome::Close => {
+                self.sheets.keys.dismiss();
+                true
+            }
+            Outcome::Pass(_) => {
+                self.sheets.keys.gone_now();
+                self.sheets.under = None;
+                false
+            }
+        }
     }
 
     /// Bring a sheet up over whatever is showing (never over a lock): what
@@ -121,12 +154,25 @@ impl Shell {
         // Over the other sheet, it takes that one's glass as it is.
         match which {
             Sheet::Clipboard => {
-                s.panel.summon(&self.gfx, calm, Some(s.capture.grown()));
+                let over = if s.keys.visible() { s.keys.grown() } else { s.capture.grown() };
+                s.panel.summon(&self.gfx, calm, Some(over));
                 s.capture.gone_now();
+                s.keys.gone_now();
             }
             Sheet::Capture => {
-                s.capture.summon(&self.gfx, calm, &self.robot, self.settings.clock24, Some(s.panel.grown()));
+                let over = if s.keys.visible() { s.keys.grown() } else { s.panel.grown() };
+                s.capture.summon(&self.gfx, calm, &self.robot, self.settings.clock24, Some(over));
                 s.panel.gone_now();
+                s.keys.gone_now();
+            }
+            Sheet::Keys => {
+                let (top, _) = self.stack.last().expect("the home screen is always there");
+                let title = shown_title(self.gfx.theme, top.title());
+                let own = top.key_sheet();
+                let over = if s.capture.visible() { s.capture.grown() } else { s.panel.grown() };
+                s.keys.summon(&self.gfx, calm, &title, &own, Some(over));
+                s.panel.gone_now();
+                s.capture.gone_now();
             }
         }
         self.moving = true;
@@ -154,6 +200,8 @@ impl Shell {
             Some(Sheet::Capture)
         } else if self.sheets.panel.is_open() {
             Some(Sheet::Clipboard)
+        } else if self.sheets.keys.is_open() {
+            Some(Sheet::Keys)
         } else {
             None
         }
@@ -302,7 +350,7 @@ impl Shell {
                 self.say_fitting(&receipt.words, crate::capture::RECEIPT_SECONDS);
             }
         }
-        let moving = self.sheets.panel.tick(dt, motion_dt) | self.sheets.capture.tick(dt, motion_dt);
+        let moving = self.sheets.panel.tick(dt, motion_dt) | self.sheets.capture.tick(dt, motion_dt) | self.sheets.keys.tick(motion_dt);
         if !self.sheets.visible() && self.sheets.under.is_some() {
             self.sheets.under = None;
             self.dirty = true;
@@ -337,7 +385,14 @@ impl Shell {
         };
         let began = std::time::Instant::now();
         let capture = self.sheets.capture.visible();
-        let dim = if capture { self.sheets.capture.dim() } else { self.sheets.panel.dim() };
+        let keys = !capture && self.sheets.keys.visible();
+        let dim = if capture {
+            self.sheets.capture.dim()
+        } else if keys {
+            self.sheets.keys.dim()
+        } else {
+            self.sheets.panel.dim()
+        };
         let dim = (dim.clamp(0.0, 1.0) * 256.0) as u32;
         if dim > 0 {
             bezel::simd::mix_into(&mut self.gfx.canvas.px, None, dim);
@@ -345,6 +400,8 @@ impl Shell {
         let island = self.island_rect();
         let (shape, shown) = if capture {
             (self.sheets.capture.glass(&self.gfx, island), self.sheets.capture.shown())
+        } else if keys {
+            (self.sheets.keys.glass(&self.gfx, island), self.sheets.keys.shown())
         } else {
             (self.sheets.panel.glass(&self.gfx, island), self.sheets.panel.shown())
         };
@@ -352,6 +409,8 @@ impl Shell {
         if capture {
             let talk = self.voice.island();
             self.sheets.capture.draw(&mut self.gfx, island, talk.as_ref());
+        } else if keys {
+            self.sheets.keys.draw(&mut self.gfx, island);
         } else {
             self.sheets.panel.draw(&mut self.gfx, island, foot);
         }

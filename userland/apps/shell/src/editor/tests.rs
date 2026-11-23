@@ -345,3 +345,52 @@ fn keys_change_rows_and_leave_the_photo_alone() {
     assert_eq!(std::fs::read(&photo).unwrap(), bytes);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn s_exports_and_each_states_keys_fit_the_sheet() {
+    crate::shell::tests::sandbox();
+    let dir = scratch("sheet");
+    let photo = dir.join("IMG_20261121_101500.jpg");
+    std::fs::write(&photo, crate::docscan::jpeg_bytes(&flat(64, 48, [90, 120, 150]), 90, false).unwrap()).unwrap();
+    let mut ed = Editor::open_now(photo);
+    let mut robot = crate::robot::Robot::none();
+    let mut settings = crate::shell::Settings::default();
+    let mut say = None;
+    let mut g = crate::gfx::Gfx::new(bezel::Tokens::dark());
+    let mut fits = |ed: &Editor| crate::keysheet::fits(&mut g, &ed.key_sheet()).unwrap();
+    for (panel, rows) in [(Panel::Adjust, 1), (Panel::Looks, 1), (Panel::Geometry, 4), (Panel::Markup, 1)] {
+        ed.set_panel(panel);
+        for row in 0..rows {
+            ed.lists[panel.index()].focus = row;
+            fits(&ed);
+        }
+    }
+    ed.edits.look = crate::filters::Look::Tint;
+    ed.set_panel(Panel::Looks);
+    fits(&ed);
+    for (tool, aspect) in [(CropTool::Move, Aspect::Free), (CropTool::Size, Aspect::Free), (CropTool::Size, edits::ASPECTS[1])] {
+        ed.edits.aspect = aspect;
+        ed.crop_tool = Some(tool);
+        fits(&ed);
+    }
+    ed.crop_tool = None;
+    for placing in [Placing::Start, Placing::End((0.2, 0.2)), Placing::Typing((0.2, 0.2), String::new())] {
+        ed.placing = Some(placing);
+        fits(&ed);
+    }
+    ed.placing = None;
+    ed.before = true;
+    fits(&ed);
+    ed.before = false;
+    // S exports (a bare X is the down arrow outside typing).
+    ed.edits.set(Adjust::Exposure, 10);
+    ed.key(Key::Char('s'), &mut Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true });
+    assert!(ed.export.is_some(), "s starts the export");
+    let began = std::time::Instant::now();
+    while ed.export.is_some() {
+        assert!(began.elapsed().as_secs() < 30, "the export never finished");
+        ed.tick(0.05);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}

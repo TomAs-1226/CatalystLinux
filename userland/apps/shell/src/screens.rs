@@ -53,6 +53,9 @@ pub fn severity_color(g: &Gfx, severity: &str) -> Color {
 }
 
 /// Up, Down and the page keys over a list of `len` rows.
+/// The keys `list_key` moves through a list with, for a key sheet.
+pub const LIST_KEYS: &[(&str, &str)] = &[("↑ ↓", "Move"), ("pg up · pg dn", "Page by page"), ("home · end", "First or last")];
+
 pub fn list_key(list: &mut ListState, key: Key, len: usize) {
     match key {
         Key::Up => list.up(),
@@ -1692,6 +1695,33 @@ impl Screen for Home {
         }
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        match &self.editing {
+            Some(e) if e.picker.is_some() => {
+                return vec![keys("adding a widget", &[("← →", "Choose one"), ("↑ ↓ · r", "Its size"), ("enter", "Add it"), ("e", "Don't add it")])];
+            }
+            Some(_) => {
+                return vec![keys(
+                    "editing widgets",
+                    &[("arrows", "Move the widget"), ("tab", "Next widget"), ("r", "Its size"), ("d twice", "Take it off"), ("a · +", "Add a widget"), ("enter · e", "Done")],
+                )];
+            }
+            None => {}
+        }
+        let search = keys("also", &[("space · /", "Search"), ("e", "Edit the widgets"), ("↑ at the top", "Control centre"), ("esc", "Back to the start")]);
+        if self.on_glance() {
+            return vec![keys("glance", &[("enter", "Open the widget"), ("arrows", "Move"), ("tab", "Next widget"), ("→ at the end", "The apps")]), search];
+        }
+        let apps = match self.style {
+            HomeStyle::Grid => keys("apps", &[("enter", "Open"), ("arrows", "Move"), ("tab", "Next"), ("← on the first", "Glance page")]),
+            HomeStyle::Carousel => keys("apps", &[("enter", "Open"), ("← →", "Turn"), ("tab", "Next"), ("pg up · pg dn", "Skip three"), ("← on the first", "Glance page")]),
+            HomeStyle::Flow if self.flow.is_open() => keys("apps", &[("enter", "Open"), ("esc", "Turn it back"), ("← →", "Turn the flow"), ("tab", "Next")]),
+            HomeStyle::Flow => keys("apps", &[("enter", "Turn the card over"), ("← →", "Turn the flow"), ("tab", "Next"), ("pg up · pg dn", "Skip six"), ("home · end", "First or last")]),
+        };
+        vec![apps, search]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let calm = cx.settings.calm;
         self.follow_arrangement(&cx.settings.arrangement());
@@ -2081,6 +2111,14 @@ impl Screen for RobotScreen {
         self.editing.clone().or_else(|| Some(robot.address.clone()))
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.editing.is_some() {
+            return vec![keys("the address", &[("enter", "Connect"), ("esc", "Cancel"), ("type demo", "A pretend robot")])];
+        }
+        vec![keys("robot", &[("enter", "Robot address"), ("→", "The field")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         if let Some(text) = &mut self.editing {
             match key {
@@ -2210,6 +2248,10 @@ pub struct Health {
 impl Screen for Health {
     fn title(&self) -> &str {
         "Health"
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        vec![crate::help::keys("faults", LIST_KEYS)]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -2347,6 +2389,11 @@ impl Screen for LogsScreen {
         })
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("logs", &[("enter", "Open the match")]), keys("moving", LIST_KEYS)]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let rows = cx.robot.logs.list();
         let trends = crate::trends::available(&rows);
@@ -2460,6 +2507,11 @@ impl LogDetail {
 impl Screen for LogDetail {
     fn title(&self) -> &str {
         "Match"
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("the match", &[("enter", "Replay from here")]), keys("moving", LIST_KEYS)]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -2591,6 +2643,17 @@ impl Screen for Tables {
         }
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![
+            keys(
+                "tables",
+                &[("enter · →", "Open the table"), ("enter", "Graph the value"), ("p", "Pin it to Glance"), ("g", "The graphs"), ("←", "Up a level")],
+            ),
+            keys("moving", LIST_KEYS),
+        ]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let nodes = self.nodes(cx.robot);
         match key {
@@ -2688,6 +2751,10 @@ impl Screen for LoopTime {
         "Loop"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        vec![crate::help::keys("loop time", &[("esc", "Done watching")])]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         if key == Key::Back { Nav::Pop } else { Nav::Stay }
     }
@@ -2746,6 +2813,10 @@ pub struct Motors {
 impl Screen for Motors {
     fn title(&self) -> &str {
         "Motors"
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        vec![crate::help::keys("motors", LIST_KEYS)]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -2866,6 +2937,10 @@ fn duration(seconds: i64) -> String {
 impl Screen for Console {
     fn title(&self) -> &str {
         "Console"
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        vec![crate::help::keys("console", &[("↑ ↓", "Scroll back"), ("pg up · pg dn", "Page by page")])]
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
@@ -3769,6 +3844,23 @@ impl Screen for SettingsApp {
         self.typing.is_some() || self.naming.is_some()
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.naming.is_some() {
+            return vec![keys("naming it", &[("enter", "Keep the name"), ("esc", "Leave it as it was"), ("bksp", "Delete a letter")])];
+        }
+        if self.typing.is_some() {
+            return vec![keys("the key", &[("enter", "Keep the key"), ("esc", "Leave it as it was"), ("bksp", "Delete a letter")])];
+        }
+        let here = match self.items.get(self.list.focus) {
+            Some(Item::AppTile(_)) => keys("this app", &[("enter", "Show or hide it"), ("space", "Favourite or not"), ("← →", "Move it")]),
+            Some(Item::DeviceName) => keys("this row", &[("enter", "Rename the handheld")]),
+            Some(Item::ClockNote) => keys("this row", &[("enter · →", "Set the clock now")]),
+            _ => keys("settings", &[("enter · →", "Open the page"), ("← →", "Change the value"), ("enter", "Next value")]),
+        };
+        vec![here, keys("moving", LIST_KEYS)]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         // A new name being typed: Enter keeps it, Esc leaves the one there was.
         if let Some(name) = &mut self.naming {
@@ -4096,6 +4188,19 @@ impl Screen for WifiScreen {
         self.entering.is_some()
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.entering.is_some() {
+            return vec![keys("the password", &[("enter", "Join"), ("esc", "Cancel"), ("bksp", "Delete a letter")])];
+        }
+        let here = if self.list.focus == 0 {
+            keys("wi-fi", &[("enter", "Wi-Fi on or off"), ("r", "Look again")])
+        } else {
+            keys("a network", &[("enter", "Join it"), ("tab", "Forget it"), ("r", "Look again")])
+        };
+        vec![here, keys("moving", LIST_KEYS)]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         if let Some((ssid, password)) = &mut self.entering {
             match key {
@@ -4233,6 +4338,27 @@ impl Screen for WifiScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `?` over any built-in app shows keys of its own, each row whole on
+    /// one line of the sheet at every text size.
+    #[test]
+    fn every_built_in_app_lists_its_keys_and_they_fit() {
+        let robot = Robot::demo();
+        let mut g = Gfx::new(bezel::Tokens::dark());
+        let mut missing = Vec::new();
+        for (i, app) in APPS.iter().enumerate() {
+            let screen = open_builtin(i, &robot);
+            let groups = screen.key_sheet();
+            if groups.is_empty() {
+                missing.push(app.name);
+                continue;
+            }
+            if let Err(why) = crate::keysheet::fits(&mut g, &groups) {
+                panic!("{}: {why}", app.name);
+            }
+        }
+        assert!(missing.is_empty(), "no keys listed for {missing:?}");
+    }
 
     #[test]
     fn name_and_time_rows_fit_at_every_text_size() {

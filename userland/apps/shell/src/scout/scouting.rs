@@ -1,7 +1,7 @@
 //! The form, filled in during a match: the page for the phase the match
 //! clock is in, its fields as tiles with their keys, and the whole-match
 //! ones (fouls) beneath. A key adds one; Shift, or the key under it, takes
-//! one away; Backspace undoes the last change. Space starts the clock as
+//! one away; Del (Fn + Backspace) undoes the last change. Space starts the clock as
 //! the match starts (or the first count in AUTO does), and the form turns
 //! with it from AUTO to TELEOP to END GAME, and to after the match for the
 //! ratings and notes. Left and Right turn it by hand.
@@ -264,6 +264,28 @@ impl Screen for Scouting {
         self.notes.is_some()
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.notes.is_some() {
+            return vec![keys("notes", &[("enter", "Keep them")])];
+        }
+        const COUNTS: &[(&str, &str)] = &[("its key", "Add one"), ("shift its key", "Take one away"), ("fn bksp", "Undo")];
+        if self.timed_page() {
+            let pages = keys("pages", &[("← →", "Another phase"), ("enter", "Next phase")]);
+            if !self.clock.started() {
+                return vec![keys("the clock", &[("space", "Start the clock")]), keys("counting", COUNTS), pages];
+            }
+            return vec![keys("counting", COUNTS), keys("the clock", &[("space", "Pause or go on")]), pages];
+        }
+        let row = match self.after_rows().get(self.list.focus).copied().flatten().map(|i| &self.form.fields[i].kind) {
+            Some(Kind::Rating(_)) => keys("a rating", &[("1 to 9", "Rate it"), ("0", "Not rated"), ("enter", "One higher")]),
+            Some(Kind::Text(_)) => keys("notes", &[("enter", "Write them")]),
+            Some(_) => keys("this row", &[("enter", "Change it")]),
+            None => keys("the points", &[("enter", "Done, it is kept")]),
+        };
+        vec![row, keys("after the match", &[("↑ ↓", "Another row"), ("← →", "Another page")]), keys("counting", COUNTS)]
+    }
+
     fn keeps_awake(&self) -> bool {
         self.running()
     }
@@ -346,7 +368,8 @@ impl Screen for Scouting {
                     self.save(false);
                 }
             }
-            Key::Backspace => match self.undo.pop() {
+            // Del (Fn + Backspace) on the handheld: Backspace alone is Esc here.
+            Key::Backspace | Key::Delete => match self.undo.pop() {
                 Some((column, before)) => {
                     self.set(&column, before);
                     if let Some(i) = self.form.fields.iter().position(|f| f.column(&self.form) == column) {

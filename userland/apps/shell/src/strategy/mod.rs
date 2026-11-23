@@ -48,6 +48,9 @@ pub use shots::shots;
 /// A cursor step in metres with the whole field in view: a plain arrow,
 /// and with Fn. Zoomed in, they shrink with the view. My own tuning: about
 /// eight pixels, and under two.
+/// The keys the board's two chips wear: the phase's, and the robots'.
+const PHASE_KEY: &str = "tab";
+const PICK_KEY: &str = "1-6";
 const COARSE: f32 = 0.5;
 const FINE: f32 = 0.1;
 /// How near the cursor a thing must be to be picked, in metres.
@@ -941,11 +944,13 @@ impl Strategy {
         let h = (style.size + 7.0).round();
         let y = (r.bottom() - 5.0 - h).round();
         let word_w = g.text.measure(phase.name(), &style).ceil();
-        let left = Rect::new(r.x + 5.0, y, (word_w + 40.0).round(), h);
-        let room = r.w - left.w - 20.0 - 24.0;
+        // Each chip wears its key (1.1): Tab the phase, 1 to 6 the robot.
+        let (tab_w, pick_w) = (g.text.measure(PHASE_KEY, &style).ceil() + 6.0, g.text.measure(PICK_KEY, &style).ceil() + 6.0);
+        let left = Rect::new(r.x + 5.0, y, (word_w + 40.0 + tab_w).round(), h);
+        let room = r.w - left.w - 20.0 - 24.0 - pick_w;
         let words = g.text.fit(&self.status(board), &style, room);
         let words_w = g.text.measure(&words, &style).ceil();
-        let right = Rect::new((r.right() - 5.0 - words_w - 27.0).round(), y, (words_w + 27.0).round(), h);
+        let right = Rect::new((r.right() - 5.0 - words_w - 27.0 - pick_w).round(), y, (words_w + 27.0 + pick_w).round(), h);
         ([left, right], words)
     }
 
@@ -965,10 +970,12 @@ impl Strategy {
             let on = *p == phase;
             g.canvas.circle(left.x + word_w + 16.0 + k as f32 * 7.0, cy, 2.3, if on { t.ink } else { t.faint }, a);
         }
+        g.text.draw(&mut g.canvas, left.x + word_w + 40.0, base, PHASE_KEY, &style, t.dim, a);
         let b = self.chips[1].value();
         g.canvas.rrect(right, h / 2.0, t.surface1, 0.95 * b);
         g.canvas.circle(right.x + 10.0, cy, 3.6, robot_color(board, self.picked, t.tone), b);
-        g.text.draw(&mut g.canvas, right.x + 18.0, base, &words, &style, t.ink, b);
+        let words_w = g.text.draw(&mut g.canvas, right.x + 18.0, base, &words, &style, t.ink, b);
+        g.text.draw(&mut g.canvas, right.x + 18.0 + words_w + 6.0, base, PICK_KEY, &style, t.dim, b);
         let o = Rect::new(r.x, r.y, 0.0, 0.0);
         self.chip_rects = [left.offset(-o.x, -o.y), right.offset(-o.x, -o.y)];
     }
@@ -1026,6 +1033,26 @@ impl Screen for Strategy {
     /// are letters too. Backspace removes; Esc leaves.
     fn wants_text(&self) -> bool {
         true
+    }
+
+    /// The keys KeysPage lists (`?` here, the board taking letters), on the
+    /// shell's sheet (Fn 1), with those of what is under way first.
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let mut v = match self.mode {
+            Mode::Typing { .. } => return vec![keys("a note", &[("enter", "Keep it"), ("bksp", "Take a letter back"), ("esc", "Leave it as it was")])],
+            Mode::Moving { .. } => vec![keys("a robot picked up", &[("enter", "Drop it here"), ("bksp · esc", "Put it back")])],
+            Mode::Drawing { .. } => vec![keys("a path", &[("enter", "Add a waypoint"), ("bksp", "Take a point off"), ("p · esc", "End the path")])],
+            Mode::Idle => Vec::new(),
+        };
+        if self.play.is_some() {
+            v.insert(0, keys("playing", &[("space · esc", "Stop")]));
+        }
+        v.push(keys("the cursor", &[("f · x · z · c", "Move the cursor"), ("↑ ↓ ← →", "Fine moves")]));
+        v.push(keys("robots", &[("1 to 6", "Pick a robot"), ("enter", "Pick up, drop"), ("r", "Put the robot here")]));
+        v.push(keys("paths and notes", &[("p", "Start or end a path"), ("enter", "Add a waypoint"), ("n · d", "Note, drop zone"), ("bksp", "Remove"), ("u", "Undo")]));
+        v.push(keys("phases", &[("a · t · e", "Auto, teleop, endgame"), ("tab", "Next phase"), ("space", "Play"), ("+ · -", "Zoom"), ("m", "Templates, share")]));
+        v
     }
 
     fn keeps_awake(&self) -> bool {
@@ -1303,6 +1330,11 @@ impl Screen for Menu {
         self.count();
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("board", &[("enter", "Open, or do it"), ("t", "Send to the team")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         match key {
             Key::Back => return Nav::Pop,
@@ -1434,6 +1466,11 @@ impl Screen for Matches {
         "Strategy"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("matches", &[("enter", "Open its board")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         match key {
             Key::Back => return Nav::Pop,
@@ -1497,7 +1534,7 @@ struct Templates {
     plan: Shared,
     list: ListState,
     all: Vec<Board>,
-    /// Backspace once asks; again removes.
+    /// Del (Fn + Backspace) once asks; again removes.
     removing: Option<usize>,
 }
 
@@ -1515,6 +1552,17 @@ impl Screen for Templates {
 
     fn app(&self) -> &str {
         "Strategy"
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.all.is_empty() {
+            return vec![keys("templates", &[("enter", "Back to the board")])];
+        }
+        if self.removing == Some(self.list.focus) {
+            return vec![keys("removing", &[("fn bksp", "Remove it now"), ("enter", "Use it instead")])];
+        }
+        vec![keys("templates", &[("enter", "Use it on the board"), ("fn bksp twice", "Remove it")])]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -1538,7 +1586,7 @@ impl Screen for Templates {
             }
             Key::Backspace | Key::Delete => {
                 self.removing = Some(self.list.focus);
-                *cx.say = Some(format!("backspace again removes {}", chosen.label));
+                *cx.say = Some(format!("del again removes {}", chosen.label));
             }
             other => {
                 self.removing = None;
@@ -1567,8 +1615,9 @@ impl Screen for Templates {
         }
         self.list.scrollbar(g, self.all.len(), top, bottom);
         let label = self.plan.borrow().board.label.clone();
-        let on = format!("enter: use on {label} · backspace: remove");
-        g.hint_any(&[&on, "enter: use · backspace: remove", "enter: use"]);
+        // Del is Fn + Backspace: Backspace alone is Esc here.
+        let on = format!("enter: use on {label} · del: remove");
+        g.hint_any(&[&on, "enter: use · del: remove", "enter: use"]);
     }
 }
 
@@ -1595,6 +1644,11 @@ impl Screen for Naming {
 
     fn wants_text(&self) -> bool {
         true
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("a template", &[("enter", "Keep it by this name")])]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -1652,6 +1706,11 @@ impl Screen for Codes {
 
     fn keeps_awake(&self) -> bool {
         true
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("codes", &[("← →", "Last, next code"), ("space", "The next code"), ("enter", "Done")])]
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
@@ -1735,6 +1794,11 @@ impl Screen for KeysPage {
 
     fn app(&self) -> &str {
         "Strategy"
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("keys", &[("enter", "Back to the board")])]
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
@@ -1939,6 +2003,36 @@ mod tests {
         for _ in 0..240 {
             s.tick(1.0 / 60.0);
         }
+    }
+
+    #[test]
+    fn each_modes_keys_fit_the_sheet_with_all_the_keys_page_lists() {
+        let mut g = crate::gfx::Gfx::new(bezel::Tokens::dark());
+        let mut fits = |screen: &dyn Screen| crate::keysheet::fits(&mut g, &screen.key_sheet()).unwrap();
+        let mut s = Strategy::with_board(full(), dir("sheet"));
+        fits(&s);
+        let rows: usize = s.key_sheet().iter().map(|g| g.keys.len()).sum();
+        assert!(rows >= KEYS.len(), "the keys page's (remove and undo on rows of their own)");
+        press(&mut s, &[Key::Char('p')]);
+        assert!(matches!(s.mode, Mode::Drawing { .. }));
+        fits(&s);
+        s.mode = Mode::Moving { robot: 0 };
+        fits(&s);
+        s.mode = Mode::Idle;
+        press(&mut s, &[Key::Char('n')]);
+        assert!(matches!(s.mode, Mode::Typing { .. }));
+        fits(&s);
+        s.mode = Mode::Idle;
+        press(&mut s, &[Key::Char(' ')]);
+        assert!(s.play.is_some());
+        fits(&s);
+        let robot = Robot::none();
+        fits(&Menu::new(s.plan.clone()));
+        fits(&Matches::new(s.plan.clone(), &robot));
+        fits(&Templates::new(s.plan.clone()));
+        fits(&Naming::new(s.plan.clone()));
+        fits(&Codes::new("Q12", &["one".to_owned()]));
+        fits(&KeysPage::default());
     }
 
     #[test]

@@ -320,6 +320,14 @@ impl Screen for Terminal {
         Some("ctrl-q returns home")
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.copying.is_some() {
+            return vec![keys("copying", &[("↑ ↓", "A line up or down"), ("space", "Mark from here"), ("enter", "Copy it"), ("esc", "Stop")])];
+        }
+        vec![keys("terminal", &[("ctrl shift c", "Copy mode"), ("ctrl shift v", "Paste"), ("pg up · pg dn", "Scroll back")])]
+    }
+
     fn busy(&self) -> bool {
         // The program may print at any time; look often while the screen is open.
         !self.ended

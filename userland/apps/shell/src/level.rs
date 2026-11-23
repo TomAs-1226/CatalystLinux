@@ -257,6 +257,18 @@ impl Screen for Level {
         "Level"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.held {
+            return vec![keys("held", &[("enter", "Go on measuring")])];
+        }
+        if self.zeroed() {
+            vec![keys("level", &[("enter", "Hold the reading"), ("space", "Clear the zero")])]
+        } else {
+            vec![keys("level", &[("enter", "Hold the reading"), ("space", "Zero on this")])]
+        }
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         match key {
             Key::Back => return Nav::Pop,
@@ -513,6 +525,15 @@ impl Drop for Compass {
 impl Screen for Compass {
     fn title(&self) -> &str {
         "Compass"
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.turning.is_some() {
+            vec![keys("calibrating", &[("enter", "Stop")])]
+        } else {
+            vec![keys("compass", &[("enter", "Calibrate it")])]
+        }
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {

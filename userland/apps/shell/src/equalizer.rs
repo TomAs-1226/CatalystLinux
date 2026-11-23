@@ -103,6 +103,16 @@ impl Screen for EqualizerPage {
         "Equalizer"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let here = if self.list.focus == 0 {
+            keys("preset", &[("enter · ← →", "Another preset")])
+        } else {
+            keys("this band", &[("← →", "Less or more")])
+        };
+        vec![here, keys("moving", crate::screens::LIST_KEYS)]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let i = self.list.focus.min(ROWS - 1);
         let step = if key == Key::Left { -1 } else { 1 };

@@ -417,6 +417,14 @@ impl Screen for CatalogueScreen {
         "Catalogue"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![
+            keys("catalogue", &[("enter", "Open the app"), ("u", "Update them all"), ("r", "Look again")]),
+            keys("moving", crate::screens::LIST_KEYS),
+        ]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let apps = self.state.borrow().apps();
         match key {
@@ -591,6 +599,17 @@ impl Screen for AppPage {
         &self.title
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let row = self.app().and_then(|app| self.rows(&app).get(self.list.focus).copied());
+        let here = match row {
+            Some(Row::Remove) => keys("remove", &[("enter twice", "Remove it")]),
+            Some(Row::About) => keys("about it", &[("enter", "Read it")]),
+            _ => keys("the app", &[("enter", "Get or update it")]),
+        };
+        vec![here, keys("moving", crate::screens::LIST_KEYS)]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let Some(app) = self.app() else { return Nav::Pop };
         let rows = self.rows(&app);
@@ -761,6 +780,10 @@ fn wrap(g: &mut Gfx, text: &str, style: bezel::TextStyle, width: f32) -> Vec<Str
 impl Screen for AboutApp {
     fn title(&self) -> &str {
         &self.title
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        vec![crate::help::keys("reading", &[("↑ ↓", "Read on"), ("pg up · pg dn", "Page by page"), ("enter", "Done")])]
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {

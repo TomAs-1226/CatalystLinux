@@ -753,6 +753,17 @@ impl Screen for ModelPage {
         Nav::Stay
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let here = match self.state(self.focused()) {
+            State::Away => keys("this model", &[("enter · →", "Download it")]),
+            State::Downloading => keys("this model", &[("d twice", "Stop the download")]),
+            State::Here => keys("this model", &[("enter · →", "Use it"), ("d twice", "Remove it")]),
+            State::InUse => keys("this model", &[("enter · →", "Ask it a question"), ("d twice", "Remove it")]),
+        };
+        vec![here, keys("models", &[("u", "Free its memory"), ("↑ ↓", "Another model")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let armed = self.armed.take();
         let model = self.focused();

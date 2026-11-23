@@ -170,6 +170,22 @@ impl Screen for Notes {
         self.notes = load(&self.dir);
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.search.is_some() {
+            return vec![keys("search", &[("type", "Notes narrow as you go"), ("enter", "Done"), ("esc", "Cancel")])];
+        }
+        let mut v = Vec::new();
+        if self.list.focus > 0 {
+            v.push(keys("a note", &[("enter · →", "Open it"), ("p", "Pin or unpin"), ("r", "Remind me of it"), ("d twice", "Delete it")]));
+        }
+        v.push(keys("notes", &[("n", "New note"), ("/", "Search"), ("↑ ↓", "Move")]));
+        if !self.query.is_empty() {
+            v.push(keys("searched", &[("esc", "Show every note")]));
+        }
+        v
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         if let Some(field) = &mut self.search {
             match field.key(key, |c| !c.is_control()) {

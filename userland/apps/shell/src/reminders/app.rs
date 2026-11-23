@@ -253,6 +253,22 @@ impl Screen for Reminders {
         Nav::Stay
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let lists = keys("lists", &[("← →", "Today, upcoming, done"), ("tab", "Pit, personal or both"), ("n", "New reminder"), ("p", "Pit routine")]);
+        if PAGES[self.page] == Page::Done {
+            return vec![keys("done", &[("enter", "Put it back"), ("d twice", "Delete it")]), lists];
+        }
+        if self.lists[self.page].focus < Self::first(self.page) {
+            return vec![keys("new", &[("enter", "New reminder")]), lists];
+        }
+        let one = keys(
+            "a reminder",
+            &[("enter", "Done"), ("s", "Snooze, again for longer"), ("e", "Edit it"), ("r", "How it repeats"), ("l", "Other list"), ("o", "Open its note or list"), ("d twice", "Delete it")],
+        );
+        vec![one, lists]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let h24 = cx.settings.clock24;
         let page = self.page;
@@ -701,6 +717,17 @@ impl Screen for Compose {
         false
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let rows: &'static [(&'static str, &'static str)] = match self.mode {
+            Mode::New => &[("type", "What, then when"), ("enter", "Add it"), ("esc", "Cancel")],
+            Mode::Edit(_) => &[("type", "What, then when"), ("enter", "Change it"), ("esc", "Leave it")],
+            Mode::Note { .. } => &[("type", "When it comes back"), ("enter", "Set it"), ("esc", "Cancel")],
+            Mode::Line(_) => &[("type", "What, then when"), ("enter", "Keep it"), ("esc", "Cancel")],
+        };
+        vec![keys("reminder", rows)]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         match self.field.key(key, |c| !c.is_control()) {
             Typed::Done(_) => {
@@ -873,6 +900,14 @@ impl Screen for Routine {
 
     fn resume(&mut self) {
         self.lines = load_routine();
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.list.focus == 0 {
+            return vec![keys("pit routine", &[("enter", "Add them all"), ("n", "New line"), ("↑ ↓", "Move")])];
+        }
+        vec![keys("a line", &[("enter", "Edit it"), ("d twice", "Take it off"), ("n", "New line"), ("↑ ↓", "Move")])]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {

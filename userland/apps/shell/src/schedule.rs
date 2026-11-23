@@ -494,6 +494,11 @@ impl Screen for ScheduleScreen {
         "Schedule"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("matches", &[("enter", "The alliances")]), keys("moving", crate::screens::LIST_KEYS)]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let view = cx.robot.schedule.view();
         let count = view.as_ref().map_or(0, |v| v.matches.len());
@@ -585,6 +590,10 @@ pub struct MatchScreen {
 impl Screen for MatchScreen {
     fn title(&self) -> &str {
         &self.m.label
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        vec![crate::help::keys("a match", &[("esc", "Back to the matches")])]
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {

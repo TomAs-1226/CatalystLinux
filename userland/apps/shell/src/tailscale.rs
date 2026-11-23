@@ -450,6 +450,22 @@ impl Screen for TailscaleScreen {
         "Tailscale"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let phase = self.phase();
+        let here = match self.rows(phase).get(self.list.focus).copied().unwrap_or(Row::Switch) {
+            Row::Switch => match phase {
+                Phase::Off => Some(keys("tailscale", &[("enter", "Switch on")])),
+                Phase::Paused => Some(keys("tailscale", &[("enter", "Connect again")])),
+                _ => Some(keys("tailscale", &[("enter", "Switch off")])),
+            },
+            Row::SignIn if self.qr.is_none() && phase == Phase::SignIn => Some(keys("signing in", &[("enter", "Ask for a link")])),
+            Row::SignOut => Some(keys("signing out", &[("enter twice", "Sign out")])),
+            _ => None,
+        };
+        here.into_iter().chain([keys("also", &[("r", "Read it again")]), keys("moving", crate::screens::LIST_KEYS)]).collect()
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let phase = self.phase();
         let rows = self.rows(phase);

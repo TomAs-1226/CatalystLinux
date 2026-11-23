@@ -4,12 +4,22 @@
 //! The viewfinder takes the panel's height at the photo's own shape (4:3),
 //! with the controls in a rail beside it: the modes (scan, photo, pro: a
 //! carousel, as a phone's camera has them), the shutter, and the last photo
-//! taken (↓ opens the album on it). Enter takes a photo; `c` sets the
-//! self-timer (2 or 10 s; `t` too, in photo mode), `g` lays a grid over the
-//! picture (thirds, or squares), `h` the level, `o` frames it 3:2, 16:9 or
-//! 1:1 (and crops the photo so), `n` lets the exposure run longer in low
-//! light, `f` opens the looks, `z` the 1:1 focus check. camkit.rs has the
-//! kit (0.9.4) and its keys in pro mode.
+//! taken (↓ opens the album on it). Enter or Space takes a photo.
+//!
+//! The controls are in sight along the viewfinder's foot (1.1, camera/bar.rs):
+//! chips for the mode, the look, the self-timer, the grid, detail and pro's
+//! controls (and the lens, with a smart camera), each wearing its key. Tab
+//! takes the keys into the bar (← → along it, Enter opens a chip's choices,
+//! Esc or ↑ gives the keys back), so none need remembering; the bar steps
+//! aside while photos are taken and is back at the next key.
+//!
+//! The keys themselves: `t` sets the self-timer (2 or 10 s), `g` lays a grid
+//! over the picture (thirds, or squares), `h` the level, `o` frames it 3:2,
+//! 16:9 or 1:1 (and crops the photo so), `n` lets the exposure run longer
+//! in low light, `k` opens the looks, `+` the 1:1 focus check, `p` pro's
+//! controls. (Before 1.1 the looks, focus check, timer and zebras were on
+//! `f`, `z`, `c` and `x`, which outside typing are the arrows, and never
+//! reached the camera.) camkit.rs has the kit (0.9.4) and its keys in pro mode.
 //!
 //! On the handheld the picture comes from `catalyst-camera --colour` (the
 //! image's own libcamera program): a 320 × 240 YUV 4:2:0 preview at up to 30
@@ -25,7 +35,7 @@
 //!
 //! Every photo is timed (camkit.rs's Timeline: the key, the order, the
 //! sensor exposing, done, the picture in, written), in the log and, in pro
-//! mode on `t`, a readout ("last shot: 0.42 s capture · 0.7 s save").
+//! mode on `j`, a readout ("last shot: 0.42 s capture · 0.7 s save").
 //! "Hold still" shows only while the sensor exposes, and only when that is
 //! long enough to matter (a slow shutter, detail's burst, a bracketing
 //! set), with the seconds left. 0.9.3 showed it from the key until the
@@ -43,18 +53,19 @@
 //! and white balance (`w`), dials in a bar along the bottom (← → turn the
 //! one chosen, ↑ ↓ go to the next, `a` gives it back to auto). The aperture
 //! is the lens's own f/2.0, said in the rail and never a dial. With them a
-//! live histogram, zebras on highlights at 98% (`x`), RAW (`r`: a DNG of the
+//! live histogram, zebras on highlights at 98% (`q`), RAW (`r`: a DNG of the
 //! sensor's own frame beside the JPEG, dng.rs), and the shutter time always
 //! in sight, a hand beside it when it is slower than 1/30 s (photo mode
 //! shows that too, when its own exposure gets that long).
 //!
-//! Looks (filters.rs, `f`): a strip of live thumbnails along the bottom, ←
-//! → to choose, the viewfinder showing the look as it will be saved, and
-//! Tint's colour on ↑ ↓. The camera program lays it over the photo in its
+//! Looks (filters.rs, `k`): a strip of live thumbnails along the bottom,
+//! each named, ← → to choose, the viewfinder showing the look as it will be
+//! saved, Tint's colour on ↑ ↓, Enter to keep it and Esc to go back to the
+//! look it opened on. The camera program lays it over the photo in its
 //! background save and writes it into the Exif; the photo as taken is kept
 //! beside it (Photos shows it with `o`).
 //!
-//! The focus check (`z`): the sensor's own pixels one to one on the panel
+//! The focus check (`+`): the sensor's own pixels one to one on the panel
 //! (the preview changes to the full sensor and is cropped), arrows to look
 //! around, focus peaking marking what is sharp. The lens is fixed-focus:
 //! 3.04 mm at f/2.0, set at its hyperfocal distance (about 2 m, for a
@@ -130,6 +141,14 @@ use crate::pro::{self, Metered, Pro};
 use crate::platform::Key;
 use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
+
+mod bar;
+
+/// The bar's pictures, for `--keys-shots` (keysheet.rs).
+#[cfg(not(target_arch = "aarch64"))]
+pub fn bar_shots() -> Vec<(String, Vec<bezel::Canvas>)> {
+    bar::shots()
+}
 
 /// The preview's size: the panel's height and a little more, at 4:3.
 const PREVIEW_W: usize = 320;
@@ -296,7 +315,9 @@ impl Default for Develop {
 }
 
 /// The strip's thumbnails: 4:3, small.
-const THUMB: (usize, usize) = (40, 30);
+/// The looks' live thumbnails: large enough to tell the looks apart (1.1;
+/// 40 × 30 before), even both ways for YUV 4:2:0.
+const THUMB: (usize, usize) = (64, 48);
 
 /// A frame developed as asked, with its histogram, into the shared state;
 /// the strip's thumbnails every third frame while it is open.
@@ -1143,6 +1164,10 @@ pub struct Camera {
     strip: bool,
     strip_at: Animated,
     strip_fade: Animated,
+    /// The look and colour the strip opened on, for Esc to go back to.
+    strip_from: Option<(Look, f32)>,
+    /// The controls along the viewfinder's foot (camera/bar.rs).
+    bar: bar::Bar,
     thumbs: Vec<Picture>,
     thumbs_seen: u64,
     raw: bool,
@@ -1316,6 +1341,8 @@ impl Camera {
             strip: false,
             strip_at: Animated::new(LOOKS.iter().position(|l| *l == prefs.look).unwrap_or(0) as f32, role::release()).with_rest(0.002),
             strip_fade: Animated::new(0.0, role::effect()).with_rest(0.002),
+            strip_from: None,
+            bar: bar::Bar::new(),
             thumbs: Vec::new(),
             thumbs_seen: 0,
             raw: prefs.raw,
@@ -1837,9 +1864,23 @@ impl Camera {
         self.strip_fade.set(if open { 1.0 } else { 0.0 });
         if open {
             self.set_dial(None);
-            self.say(if self.look == Look::Tint { "← →: looks · ↑ ↓: colour" } else { "← → looks · f: done" });
+            self.strip_from = Some((self.look, self.hue));
+            self.say(if self.look == Look::Tint { "← → looks · ↑ ↓ colour · enter: keep" } else { "← → looks · enter: keep · esc: cancel" });
         }
         self.tell_develop();
+    }
+
+    /// The looks put away, going back to the look (and colour) they opened on.
+    fn cancel_looks(&mut self) {
+        if let Some((look, hue)) = self.strip_from.take() {
+            if (look, hue) != (self.look, self.hue) {
+                (self.look, self.hue) = (look, hue);
+                self.strip_at.set(LOOKS.iter().position(|l| *l == look).unwrap_or(0) as f32);
+                self.keep_prefs();
+                self.say(format!("look left as {}", look.name().to_lowercase()));
+            }
+        }
+        self.set_strip(false);
     }
 
     /// The look `by` along the strip.
@@ -1942,6 +1983,10 @@ impl Screen for Camera {
 
     fn full_screen(&self) -> bool {
         true
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        self.keys_now()
     }
 
     /// Quick capture's photo is in: it gives way to what it opened over.
@@ -2062,15 +2107,28 @@ impl Screen for Camera {
             }
             return Nav::Stay;
         }
+        // The bar along the foot: Tab into it, its choices, and stepping
+        // aside while photos are taken (camera/bar.rs).
+        if let Some(nav) = self.bar_key(key, cx) {
+            return nav;
+        }
         let pro_mode = self.mode == Mode::Pro && main;
         match key {
             Key::Back | Key::Leave if self.countdown.is_some() => {
                 self.countdown = None;
                 self.say("timer stopped");
             }
-            // Esc puts away what is out first: a dial, the looks, the focus check.
+            // Esc puts away what is out first: a dial, the looks (going
+            // back to the look they opened on), the focus check.
             Key::Back if self.dial.is_some() => self.set_dial(None),
-            Key::Back if self.strip => self.set_strip(false),
+            Key::Back if self.strip => self.cancel_looks(),
+            // Enter keeps the look chosen.
+            Key::Enter if self.strip => {
+                self.strip_from = None;
+                self.set_strip(false);
+                let name = self.look.name().to_lowercase();
+                self.say(format!("look: {name}"));
+            }
             Key::Back if self.focus.is_some() => self.set_focus(None),
             // The card put away; the code not offered again while it stays
             // in sight.
@@ -2100,7 +2158,6 @@ impl Screen for Camera {
             Key::Char('a') if self.dial.is_some() => self.dial_auto(),
             Key::Left => self.set_mode(MODES[self.mode.index().saturating_sub(1)].0),
             Key::Right => self.set_mode(MODES[(self.mode.index() + 1).min(MODES.len() - 1)].0),
-            Key::Tab => self.set_mode(MODES[(self.mode.index() + 1) % MODES.len()].0),
             Key::Enter | Key::Char(' ') | Key::Ctrl('p' | 'P') if self.quick || matches!(key, Key::Enter | Key::Char(' ')) => match self.mode {
                 Mode::Scan => return self.act(),
                 Mode::Doc => self.shoot_doc(),
@@ -2119,33 +2176,19 @@ impl Screen for Camera {
                 self.say(if self.raw { "raw on: a .dng too" } else { "RAW off" });
             }
             // Exposure's aids, in turn: zebras, false colour, neither.
-            Key::Char('x') if self.mode == Mode::Pro => {
-                (self.zebras, self.kit.false_colour) = match (self.zebras, self.kit.false_colour) {
-                    (true, _) => (false, true),
-                    (false, true) => (false, false),
-                    (false, false) => (true, false),
-                };
-                self.tell_develop();
-                self.keep_prefs();
-                self.say(match (self.zebras, self.kit.false_colour) {
-                    (true, _) => "zebras: highlights at 98%",
-                    (_, true) => "false colour",
-                    _ => "exposure aids off",
-                });
+            Key::Char('q') if self.mode == Mode::Pro => self.step_aids(1),
+            Key::Char('k') if main && !self.quick => {
+                if self.strip {
+                    self.strip_from = None;
+                }
+                self.set_strip(!self.strip);
             }
-            Key::Char('f') if main && !self.quick => self.set_strip(!self.strip),
-            Key::Char('z') if main && !self.quick => self.set_focus(if self.focus.is_some() { None } else { Some((0.5, 0.5)) }),
+            Key::Char('+' | '=') if main && !self.quick => self.set_focus(if self.focus.is_some() { None } else { Some((0.5, 0.5)) }),
+            // Pro's controls, a row of their own in the bar (in pro mode).
+            Key::Char('p') if main && !self.quick => self.open_pro_row(),
             // The lens switch (↑, or l): this camera, or the smart camera's AI view.
             Key::Up | Key::Char('l') if !self.quick => self.set_lens(if self.lens == Lens::Main { Lens::Ai } else { Lens::Main }),
-            Key::Char('d') => {
-                cx.settings.detail = cx.settings.detail.step(1);
-                crate::save_settings(cx.settings);
-                self.say(match cx.settings.detail {
-                    crate::burst::DetailMode::Auto => "detail: auto · merged from a burst in dim light",
-                    crate::burst::DetailMode::On => "detail: on · every photo merged from a burst",
-                    crate::burst::DetailMode::Off => "detail: off · one frame a photo",
-                });
-            }
+            Key::Char('d') => self.set_detail(cx.settings.detail.step(1), cx),
             Key::Char('a') if self.lens == Lens::Ai => {
                 if matches!(self.smart_status, crate::smartcam::Status::Ready { .. }) && self.preview.is_some() {
                     self.aligning = true;
@@ -2166,25 +2209,14 @@ impl Screen for Camera {
                     None => photos::Album::new(),
                 }));
             }
-            // The readout of the last photo's timing (pro mode's `t`).
-            Key::Char('t') if pro_mode => {
+            // The readout of the last photo's timing (pro mode's `j`).
+            Key::Char('j') if pro_mode => {
                 self.kit.readout = !self.kit.readout;
                 self.keep_prefs();
                 self.say(if self.kit.readout { "timing readout on" } else { "timing readout off" });
             }
-            Key::Char('c' | 't') => {
-                self.timer = camkit::next_timer(self.timer);
-                self.say(if self.timer == 0 { "self-timer off".to_owned() } else { format!("self-timer {} s", self.timer) });
-            }
-            Key::Char('g') if main => {
-                self.kit.grid = self.kit.grid.next();
-                self.keep_prefs();
-                self.say(match self.kit.grid {
-                    Grid::Off => "grid off",
-                    Grid::Thirds => "grid: thirds",
-                    Grid::Square => "grid: squares",
-                });
-            }
+            Key::Char('t') => self.set_timer(camkit::next_timer(self.timer)),
+            Key::Char('g') if main => self.set_grid(self.kit.grid.next()),
             Key::Char('h') if main => self.set_level(!self.kit.level),
             Key::Char('o') if main && !self.quick => {
                 self.kit.aspect = self.kit.aspect.next();
@@ -2319,6 +2351,7 @@ impl Screen for Camera {
         self.clock += dt;
         let mut changed = self.mode_at.tick(dt) | self.flash.tick(dt) | self.press.tick(dt) | self.last_pop.tick(dt) | self.found_rise.tick(dt) | self.lens_at.tick(dt) | self.lens_fade.tick(dt);
         changed |= self.dial_at.tick(dt) | self.dial_fade.tick(dt) | self.strip_at.tick(dt) | self.strip_fade.tick(dt) | self.focus_fade.tick(dt);
+        changed |= self.bar.tick(dt);
         if let Some(f) = &mut self.doc {
             changed |= f.tick(dt);
         }
@@ -2693,11 +2726,13 @@ impl Screen for Camera {
         // Pro mode's histogram and dials, the looks' strip, the focus
         // check's chrome, and what the photo will wear (all on the main lens).
         let main = 1.0 - ka;
-        let mut bottom = 0.0;
+        // The controls along the foot (camera/bar.rs); the rest stands above them.
+        let mut bottom = self.draw_bar(g, vf);
+        let above = Rect::new(vf.x, vf.y, vf.w, vf.h - bottom);
         if main > 0.01 && self.mode.shoots() {
             // The top row gives way to a note while it shows.
             let note = self.note.as_ref().map_or(0.0, |(_, age)| ((NOTE_FOR + 0.4 - age) / 0.4).clamp(0.0, 1.0) * (age / 0.15).clamp(0.0, 1.0));
-            bottom = self.draw_overlays(g, vf, main, main * (1.0 - note));
+            bottom += self.draw_overlays(g, above, main, main * (1.0 - note));
         }
         // The shutter's flash.
         let flash = self.flash.value();
@@ -2774,8 +2809,9 @@ impl Screen for Camera {
             let words = forms.iter().find(|f| g.measure(f, ty.caption) <= room).unwrap_or(&forms[3]).clone();
             pill(g, Some("timer"), &words, &words);
         }
-        // The lens switch, when there is a smart camera to switch to.
-        if self.smart.is_some() && !self.quick {
+        // The lens switch, when there is a smart camera to switch to (the
+        // bar's lens chip says which, while it is in sight).
+        if self.smart.is_some() && !self.quick && self.bar.hidden {
             // Above the dials or the strip: glass apart from glass.
             self.draw_lens_switch(g, Rect::new(vf.x, vf.y, vf.w, vf.h - bottom));
         }
@@ -3036,7 +3072,7 @@ impl Camera {
         let mut foot = 0.0f32;
         if self.kit.panel.is_some() {
             foot = foot.max(self.draw_panel(g, vf, alpha));
-        } else if self.mode == Mode::Pro && strip < 0.99 {
+        } else if self.mode == Mode::Pro && strip < 0.99 && !self.bar.pro_open() {
             foot = foot.max(self.draw_dials(g, vf, alpha * (1.0 - strip)));
         }
         if strip > 0.01 {
@@ -3117,32 +3153,13 @@ impl Camera {
         let r = Rect::new(vf.x + m, vf.bottom() - m - bh, vf.w - 2.0 * m, bh);
         g.glass(&[bezel::GlassShape::new(r.offset(g.ox, 0.0), bh * 0.5, 12)]);
         let cell = (r.w - 2.0 * pad) / DIALS.len() as f32;
-        let metered = self.metered.unwrap_or_default();
-        let still = self.still_now();
-        let shutter_us = self.pro.shutter.map_or_else(|| still.map_or(metered.exposure_us, |s| s.exposure_us), |i| pro::SHUTTERS[i].us);
-        let iso = self.pro.iso.map_or_else(|| still.map_or(metered.iso(), |s| (s.gain * 100.0).round() as u32), |i| pro::ISOS[i]);
-        let iso_word = |long: bool| {
-            let n = pro::iso_words(iso).trim_start_matches("ISO ").to_owned();
-            if long { format!("iso {n}") } else { n }
-        };
-        let iso_text = if g.measure(&iso_word(true), cap) <= cell - 6.0 { iso_word(true) } else { iso_word(false) };
-        let wb = match self.pro.wb {
-            pro::Wb::Auto => "awb".to_owned(),
-            k => k.words(),
-        };
-        // Fully manual, the compensation's place shows the meter instead.
-        let ev = if self.pro.manual() {
-            let stops = pro::meter(&metered, shutter_us, iso as f32 / 100.0);
-            pro::ev_words((stops * 3.0).round().clamp(-9.0, 9.0) as i8)
-        } else {
-            self.pro.ev_words()
-        };
-        let cells = [
-            (pro::shutter_words(shutter_us), self.pro.shutter.is_some()),
-            (iso_text, self.pro.iso.is_some()),
-            (ev, self.pro.ev != 0 && !self.pro.manual()),
-            (wb, self.pro.wb != pro::Wb::Auto),
-        ];
+        // Fully manual, the compensation's place shows the meter instead;
+        // the ISO's word goes where it does not fit.
+        let mut cells = self.dial_words();
+        if g.measure(&cells[1].0, cap) > cell - 6.0 {
+            cells[1].0 = cells[1].0.trim_start_matches("iso ").to_owned();
+        }
+        let shutter_us = self.pro.shutter.map_or_else(|| self.still_now().map_or(self.metered.unwrap_or_default().exposure_us, |s| s.exposure_us), |i| pro::SHUTTERS[i].us);
         // The capsule behind the dial being turned.
         let fade = self.dial_fade.value().clamp(0.0, 1.0);
         if fade > 0.01 {
@@ -3199,9 +3216,12 @@ impl Camera {
         let cap = g.ty.caption;
         let m = 6.0;
         let (tw, th) = (THUMB.0 as f32, THUMB.1 as f32);
-        let gap = 6.0;
+        let gap = 8.0;
         let rise = (1.0 - alpha) * 12.0;
-        let y = vf.bottom() - m - th + rise;
+        // Each look named under its thumbnail (1.1).
+        let name_h = cap.size + 6.0;
+        let names_cy = vf.bottom() - m - name_h * 0.5 + rise;
+        let y = vf.bottom() - m - name_h - 4.0 - th + rise;
         let at = self.strip_at.value();
         g.canvas.set_clip(vf.offset(g.ox, 0.0));
         let chosen = LOOKS.iter().position(|l| *l == self.look).unwrap_or(0);
@@ -3231,22 +3251,38 @@ impl Camera {
                 None => g.canvas.rrect(part.offset(g.ox, 0.0), 6.0, t.surface1, alpha),
             }
         }
-        g.canvas.clear_clip();
-        // The chosen look's name (and Tint's colour), above the strip.
-        let name = self.look.name().to_lowercase();
-        let h = cap.size + 8.0;
-        let dot = if self.look == Look::Tint { cap.size } else { 0.0 };
-        let w = g.measure(&name, cap) + 16.0 + if dot > 0.0 { dot + 4.0 } else { 0.0 };
-        let ly = y - 7.0 - h;
-        g.canvas.rrect(Rect::new(vf.cx() - w * 0.5 + g.ox, ly, w, h), h * 0.5, Color(0, 0, 0), 0.55 * alpha);
-        let mut tx = vf.cx() - w * 0.5 + 8.0;
+        // The names: the chosen one whole (with Tint's colour), on the
+        // darker pill; the others as much as fits their place, quieter,
+        // where they leave the chosen one's whole.
+        let chosen_name = self.look.name().to_lowercase();
+        let dot = if self.look == Look::Tint { cap.size - 2.0 } else { 0.0 };
+        let cw = g.measure(&chosen_name, cap) + 12.0 + if dot > 0.0 { dot + 4.0 } else { 0.0 };
+        let ccx = vf.cx() + (chosen as f32 - at) * (tw + gap);
+        let chosen_pill = Rect::new((ccx - cw * 0.5).round(), (names_cy - name_h * 0.5).round(), cw.round(), name_h);
+        for (i, look) in LOOKS.iter().enumerate() {
+            let cx = vf.cx() + (i as f32 - at) * (tw + gap);
+            if i == chosen || cx + tw < vf.x || cx - tw > vf.right() {
+                continue;
+            }
+            let name = g.text.fit(&look.name().to_lowercase(), &cap, tw + gap - 14.0);
+            let w = g.measure(&name, cap) + 12.0;
+            let pill = Rect::new((cx - w * 0.5).round(), chosen_pill.y, w.round(), name_h);
+            if pill.right() + 3.0 > chosen_pill.x && pill.x - 3.0 < chosen_pill.right() || pill.x < vf.x + 2.0 || pill.right() > vf.right() - 2.0 {
+                continue;
+            }
+            g.canvas.rrect(pill.offset(g.ox, 0.0), name_h * 0.5, Color(0, 0, 0), 0.4 * alpha);
+            g.text_alpha(pill.x + 6.0, names_cy, &name, cap, Color(214, 216, 220), alpha);
+        }
+        g.canvas.rrect(chosen_pill.offset(g.ox, 0.0), name_h * 0.5, Color(0, 0, 0), 0.65 * alpha);
+        let mut tx = chosen_pill.x + 6.0;
         if dot > 0.0 {
             let c = crate::filters::tint_colour(self.hue).map(|v| (v * 255.0).round() as u8);
-            g.canvas.rrect(Rect::new(tx + g.ox, ly + (h - dot) * 0.5, dot, dot), dot * 0.5, Color(c[0], c[1], c[2]), alpha);
+            g.canvas.rrect(Rect::new(tx + g.ox, names_cy - dot * 0.5, dot, dot), dot * 0.5, Color(c[0], c[1], c[2]), alpha);
             tx += dot + 4.0;
         }
-        g.text_alpha(tx, ly + h * 0.5, &name, cap, Color(255, 255, 255), alpha);
-        th + m + 7.0 + h - rise
+        g.text_alpha(tx, names_cy, &chosen_name, cap, Color(255, 255, 255), alpha);
+        g.canvas.clear_clip();
+        th + m + 4.0 + name_h - rise
     }
 
     /// The shot flying from the viewfinder into the rail's corner.
@@ -3605,30 +3641,13 @@ impl Camera {
             let words = if g.measure(&full, cap) <= rail.w - 8.0 { full } else { format!("{fps:.0} fps") };
             g.text_at(rail.cx(), PAD + cap.size * 2.0 + 10.0, Align::Center, &words, cap, t.faint);
         }
-        // The choices, each with its key: on in ink, off faint.
+        // Night, with its key: on in ink, off faint. (The timer, the grid
+        // and detail are the bar's chips, 1.1.)
         let right = rail.right() - 9.0;
-        let row = |i: usize| thumb.y + 3.0 + i as f32 * (th / 2.0 - 1.0);
-        let choices = [("timer", "c", self.timer > 0), ("grid_on", "g", self.kit.grid != Grid::Off), ("bedtime", "n", self.night)];
-        for (i, (icon, key, on)) in choices.iter().enumerate().take(2) {
-            let y = row(i) + 2.0;
-            let color = if *on { t.ink } else { t.faint };
-            g.icon(icon, *on, right - 18.0, y, 11.0, color);
-            g.text_at(right - 6.0, y, Align::Center, key, cap, color);
-        }
-        let (icon, key, on) = choices[2];
-        let color = if on { t.ink } else { t.faint };
+        let color = if self.night { t.ink } else { t.faint };
         let y = thumb.y - 2.0 - cap.size * 0.5;
-        g.icon(icon, on, right - 18.0, y, 11.0, color);
-        g.text_at(right - 6.0, y, Align::Center, key, cap, color);
-        // Detail mode: on in ink, auto dimmer, off faint.
-        let color = match g.detail {
-            crate::burst::DetailMode::On => t.ink,
-            crate::burst::DetailMode::Auto => t.dim,
-            crate::burst::DetailMode::Off => t.faint,
-        };
-        let y = y - cap.size - 3.0;
-        g.icon("auto_awesome", g.detail == crate::burst::DetailMode::On, right - 18.0, y, 11.0, color);
-        g.text_at(right - 6.0, y, Align::Center, "d", cap, color);
+        g.icon("bedtime", self.night, right - 18.0, y, 11.0, color);
+        g.text_at(right - 6.0, y, Align::Center, "n", cap, color);
     }
 }
 
@@ -3739,6 +3758,10 @@ impl TextPage {
 impl Screen for TextPage {
     fn title(&self) -> &str {
         "QR code"
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        vec![crate::help::keys("qr code", &[("↑ ↓", "Scroll")])]
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
@@ -4864,12 +4887,13 @@ mod tests {
         assert!(camera.raw);
         press(&mut camera, Key::Back);
         assert_eq!(camera.dial, None, "esc puts the dial away first");
-        press(&mut camera, Key::Char('f'));
+        press(&mut camera, Key::Char('k'));
         assert!(camera.strip);
         press(&mut camera, Key::Right);
         assert_eq!(camera.look, Look::Vivid);
-        press(&mut camera, Key::Back);
-        assert!(!camera.strip && camera.mode == Mode::Pro, "esc closes the strip, not the camera");
+        press(&mut camera, Key::Enter);
+        assert!(!camera.strip && camera.mode == Mode::Pro && camera.look == Look::Vivid, "enter keeps the look and closes the strip");
+        assert!(camera.saving.is_none(), "and takes no photo");
         // The preview runs at the dial's time (the simulated camera says so).
         let started = Instant::now();
         while camera.metered.map(|m| m.exposure_us) != Some(4_000) && started.elapsed() < Duration::from_secs(3) {
@@ -4907,7 +4931,7 @@ mod tests {
         crate::shell::tests::sandbox();
         let _port = crate::smartcam::sim::exclusive(false);
         let mut camera = ready();
-        press(&mut camera, Key::Char('z'));
+        press(&mut camera, Key::Char('+'));
         assert_eq!(camera.focus, Some((0.5, 0.5)));
         let started = Instant::now();
         while !camera.cropped() && started.elapsed() < Duration::from_secs(3) {
@@ -4976,12 +5000,15 @@ mod tests {
         assert!(last.readout()[0].starts_with("last shot: ") && last.readout()[0].contains(" capture · "), "{:?}", last.readout());
         assert!(last.camera.contains("captured"), "the camera program's marks kept: {}", last.camera);
         std::fs::remove_file(&last.path).ok();
-        // The readout on pro mode's t; the self-timer on c (and t in photo mode).
-        press(&mut camera, Key::Char('c'));
+        // The readout on pro mode's j; the self-timer on t, in every mode.
+        press(&mut camera, Key::Char('t'));
         assert_eq!(camera.timer, 2);
         press(&mut camera, Key::Right);
+        press(&mut camera, Key::Char('j'));
+        assert!(camera.kit.readout && camera.timer == 2, "j in pro mode is the readout");
         press(&mut camera, Key::Char('t'));
-        assert!(camera.kit.readout && camera.timer == 2, "t in pro mode is the readout");
+        assert_eq!(camera.timer, 10, "t is the timer in pro mode too");
+        camera.timer = 2;
         // A one-second exposure by hand: "hold still" while it is taken, its seconds counting down.
         camera.pro.shutter = Some(pro::SHUTTERS.iter().position(|s| s.us == 1_000_000).unwrap());
         camera.timer = 0;

@@ -359,6 +359,15 @@ impl Screen for Reader {
         "AprilTag"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.paused {
+            vec![keys("held", &[("space · enter", "Go live again")])]
+        } else {
+            vec![keys("reading tags", &[("space · enter", "Hold the picture")])]
+        }
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         match key {
             Key::Back => Nav::Pop,

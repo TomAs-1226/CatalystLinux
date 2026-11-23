@@ -185,6 +185,17 @@ impl Screen for Remotes {
         self.list.focus = self.list.focus.min(self.remotes.len());
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.naming.is_some() {
+            return vec![keys("its name", &[("enter", "Done"), ("esc", "Cancel")])];
+        }
+        if self.list.focus < self.remotes.len() {
+            return vec![keys("remotes", &[("enter · →", "Its buttons"), ("e", "Rename it"), ("d twice", "Remove it"), ("n", "New remote"), ("↑ ↓", "Move")])];
+        }
+        vec![keys("remotes", &[("enter · n", "New remote"), ("↑ ↓", "Move")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         if let Some((field, which)) = &mut self.naming {
             let which = *which;
@@ -358,6 +369,20 @@ impl Screen for Buttons {
         }
         self.beams.retain(|(_, age)| *age < BEAM_SECONDS);
         true
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.naming.is_some() {
+            return vec![keys("its name", &[("enter", "Done"), ("esc", "Cancel")])];
+        }
+        if self.list.focus < self.buttons().len() {
+            return vec![keys(
+                "buttons",
+                &[("enter", "Send it"), ("enter held", "Keep sending"), ("e", "Rename it"), ("d twice", "Remove it"), ("l", "Learn a button"), ("↑ ↓", "Move")],
+            )];
+        }
+        vec![keys("buttons", &[("enter · l", "Learn a button"), ("↑ ↓", "Move")])]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -552,6 +577,17 @@ impl Screen for Learn {
             moving = true;
         }
         moving
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.naming.is_some() {
+            return vec![keys("its name", &[("enter", "Keep it"), ("esc", "Back")])];
+        }
+        if self.heard.is_some() {
+            return vec![keys("heard one", &[("enter", "Name it, keep it"), ("r · space", "Listen again")])];
+        }
+        vec![keys("learning", &[("esc", "Stop listening")])]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {

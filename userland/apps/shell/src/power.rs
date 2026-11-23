@@ -608,6 +608,10 @@ impl Screen for TryUndervolt {
         "Voltage"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        vec![crate::help::keys("lower voltage", &[("enter", "Restart to try it"), ("esc", "Not now")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         if self.restarting {
             return Nav::Stay;
@@ -923,6 +927,15 @@ impl Screen for Empty {
         true
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if !self.floor && !self.off && self.charging.is_none() {
+            vec![keys("battery empty", &[("esc", "Stay on until 2%"), ("plug in", "Charge it")])]
+        } else {
+            vec![keys("battery empty", &[("plug in", "Charge it")])]
+        }
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         if matches!(key, Key::Back | Key::Leave) && !self.floor && !self.off && self.charging.is_none() {
             POSTPONED.with(|p| p.set(true));
@@ -1184,6 +1197,16 @@ impl BatteryPage {
 impl Screen for BatteryPage {
     fn title(&self) -> &str {
         "Battery"
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let here = match ROWS[self.list.focus.min(ROWS.len() - 1)] {
+            Row::Deep => Some(keys("deep standby", &[("← →", "After how long"), ("enter", "What it does")])),
+            Row::Saver | Row::SaverAuto | Row::EmptyOff | Row::WifiSleeps | Row::RedLight => Some(keys("this row", &[("enter · ← →", "On or off")])),
+            _ => None,
+        };
+        here.into_iter().chain([keys("moving", crate::screens::LIST_KEYS)]).collect()
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {

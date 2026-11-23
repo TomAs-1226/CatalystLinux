@@ -498,11 +498,26 @@ impl Screen for WhatsNew {
         false
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let enter = match self.then {
+            Then::Install => keys("the update", &[("enter", "Install it")]),
+            Then::Restart => keys("the update", &[("enter", "Restart to update")]),
+            Then::Done | Then::Back => keys("the notes", &[("enter", "Done")]),
+        };
+        let reading = if self.history {
+            keys("reading", &[("↑ ↓ · space", "Scroll"), ("pg up · pg dn", "Page by page"), ("home · end", "Top or bottom"), ("← →", "Another version")])
+        } else {
+            keys("reading", &[("↑ ↓ · space", "Scroll"), ("pg up · pg dn", "Page by page"), ("home · end", "Top or bottom")])
+        };
+        vec![enter, reading]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         match key {
             Key::Back => return Nav::Pop,
             Key::Enter => {
-                let version = self.release().map(|r| r.version.clone()).unwrap_or_default();
+                let version =self.release().map(|r| r.version.clone()).unwrap_or_default();
                 let started = match self.then {
                     Then::Install => crate::sysupdate::run("install").map(|()| format!("downloading {version}")),
                     Then::Restart => crate::sysupdate::run("apply").map(|()| format!("restarting into {version}")),
@@ -668,6 +683,11 @@ impl Screen for History {
     fn title(&self) -> &str {
         // "Update history" would run into the island.
         "History"
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("versions", &[("enter · →", "Its notes"), ("←", "Back")]), keys("moving", crate::screens::LIST_KEYS)]
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {

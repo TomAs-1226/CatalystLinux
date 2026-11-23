@@ -254,6 +254,12 @@ impl Screen for Graphs {
         self.paused.is_none()
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let space = if self.paused.is_some() { keys("paused", &[("space", "Go live again")]) } else { keys("live", &[("space", "Pause")]) };
+        vec![space, keys("lines", &[("arrows", "Choose a line"), ("enter", "Its table"), ("d", "Take it off")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let count = cx.robot.graphs.keys().len();
         match key {

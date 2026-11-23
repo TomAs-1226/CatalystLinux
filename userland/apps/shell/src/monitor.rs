@@ -412,6 +412,17 @@ impl Screen for Monitor {
         self.now.simulated.then_some("simulated on this computer")
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.page == 0 {
+            return vec![keys("overview", &[("enter · →", "The processes")])];
+        }
+        vec![
+            keys("processes", &[("enter · k", "Open the process"), ("s", "Sort by CPU or memory"), ("←", "The overview")]),
+            keys("moving", crate::screens::LIST_KEYS),
+        ]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         match key {
             Key::Back => return Nav::Pop,
@@ -603,6 +614,14 @@ impl Screen for ProcessView {
     /// it heads the page instead.
     fn title(&self) -> &str {
         "Process"
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.gone {
+            return vec![keys("process", &[("esc", "Back to the list")])];
+        }
+        vec![keys("process", &[("k twice", "Ask it to end"), ("shift k twice", "Force it to stop"), ("+ · -", "Give way or go ahead")])]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {

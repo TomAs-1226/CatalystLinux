@@ -531,6 +531,38 @@ impl Screen for MusicScreen {
         self.typing || matches!(self.page, Page::Start | Page::Search | Page::Artists | Page::Albums(_) | Page::Songs(_) | Page::YoursList(_))
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        const PLAYING: &[(&str, &str)] = &[("enter · space", "Play or pause"), ("← →", "Last, next song"), (", · .", "Back, on 10 s")];
+        const NARROW: &[(&str, &str)] = &[("enter · →", "Open it"), ("type", "Narrow the list"), ("bksp", "Take a letter back")];
+        if self.typing {
+            return vec![keys("search", &[("enter", "Search"), ("tab", "Songs, albums…"), ("↓", "To the results")])];
+        }
+        match &self.page {
+            Page::Playing => vec![
+                keys("playing", PLAYING),
+                keys("go to", &[("↓ · u", "Up next"), ("y", "Lyrics"), ("l", "Library"), ("/", "Search"), ("↑ · tab", "Music's start")]),
+                keys("this song", &[("s", "Shuffle"), ("r", "Repeat"), ("d", "Download it"), ("t", "Sleep timer")]),
+                keys("from any app", &[("fn q", "Play or pause"), ("fn w · fn e", "Last, next song")]),
+            ],
+            Page::Lyrics => vec![keys("playing", PLAYING), keys("lyrics", &[("↑ ↓", "Scroll"), ("y", "Back to the song")])],
+            Page::Sleep => vec![keys("sleep timer", &[("enter · →", "Set it")])],
+            Page::Start => vec![keys("music", &[("enter · →", "Open, or play"), ("type", "Search"), ("tab", "Now playing"), ("ctrl n", "Play it next"), ("d", "Download it")])],
+            Page::Search if self.filter == Filter::Songs => {
+                vec![keys("results", &[("enter · →", "Play it"), ("ctrl n", "Play it next"), ("d", "Download it"), ("tab", "Songs, albums…"), ("type · /", "Search again")])]
+            }
+            Page::Search if self.searched_card => vec![keys("results", &[("enter · →", "Play it"), ("ctrl n", "Play it next"), ("tab", "Songs, albums…"), ("type · /", "Search again")])],
+            Page::Search => vec![keys("results", &[("enter · →", "Open it"), ("tab", "Songs, albums…"), ("type · /", "Search again")])],
+            Page::Queue => vec![keys("up next", &[("enter · →", "Play from here"), ("fn bksp", "Take it out")])],
+            Page::Account => vec![keys("account", &[("enter", "Update, or sign out")])],
+            Page::Library | Page::Yours => vec![keys("library", &[("enter · →", "Open it"), ("/", "Search")])],
+            Page::Artists | Page::Albums(_) | Page::YoursList(_) => vec![keys("the list", NARROW)],
+            Page::Songs(list) if list.songs.len() > 8 => vec![keys("songs", &[("enter · →", "Play"), ("ctrl n", "Play it next"), ("type", "Narrow the list"), ("bksp", "Take a letter back")])],
+            Page::Songs(_) => vec![keys("songs", &[("enter · →", "Play"), ("ctrl n", "Play it next")])],
+            Page::Downloads => vec![keys("downloads", &[("enter · →", "Choose"), ("fn bksp", "Take it out")])],
+        }
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         self.changed = true;
         let n = player::now();
@@ -1875,6 +1907,23 @@ mod tests {
                 assert!(g.measure(s, caption) <= W - 2.0 * PAD, "{s:?} at {size:?}");
             }
         }
+    }
+
+    #[test]
+    fn each_pages_keys_fit_the_sheet() {
+        let mut g = crate::gfx::Gfx::new(bezel::Tokens::dark());
+        let mut screen = MusicScreen::blank(true);
+        let songs = |n: usize| SongList { title: "Songs".into(), byline: String::new(), songs: vec![Track::default(); n], metas: Vec::new(), kind: ListKind::Card, playlist: None };
+        let pages = [Page::Start, Page::Search, Page::Playing, Page::Queue, Page::Account, Page::Library, Page::Artists, Page::Albums(None), Page::Songs(Box::new(songs(0))), Page::Songs(Box::new(songs(9))), Page::Downloads, Page::Yours, Page::YoursList(Kind::Album), Page::Lyrics, Page::Sleep];
+        for page in pages {
+            screen.page = page;
+            for (filter, card) in Filter::ALL.into_iter().zip([true, false, false, true]) {
+                (screen.filter, screen.searched_card) = (filter, card);
+                crate::keysheet::fits(&mut g, &screen.key_sheet()).unwrap();
+            }
+        }
+        screen.typing = true;
+        crate::keysheet::fits(&mut g, &screen.key_sheet()).unwrap();
     }
 
     #[test]

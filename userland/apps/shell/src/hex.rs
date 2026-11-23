@@ -157,6 +157,18 @@ impl Screen for HexView {
         self.asking.is_some()
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        match &self.asking {
+            Some((_, true)) => vec![keys("find", &[("type", "Hex, as de ad, or text"), ("enter", "Find it"), ("esc", "Cancel")])],
+            Some((_, false)) => vec![keys("go to", &[("type", "0x1f0 or 496"), ("enter", "Go there"), ("esc", "Cancel")])],
+            None => vec![
+                keys("bytes", &[("/", "Find"), ("n", "Find the next"), ("g", "Go to an offset")]),
+                keys("moving", &[("↑ ↓", "A row up or down"), ("← →", "A page at a time"), ("home · end", "Start or end")]),
+            ],
+        }
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let page = visible_rows(cx);
         if let Some((field, is_search)) = &mut self.asking {

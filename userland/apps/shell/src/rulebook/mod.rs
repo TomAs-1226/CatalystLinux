@@ -389,6 +389,17 @@ impl Screen for Rulebook {
         self.who = ask::who();
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.book.is_none() {
+            return vec![keys("the manual", &[("enter", "Download it")])];
+        }
+        vec![keys(
+            "rulebook",
+            &[("enter", "Open"), ("type g101", "Find that rule"), ("/", "Search"), ("tab", "Ask about the rules"), ("↑ ↓", "Move"), ("home · end", "First or last")],
+        )]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         if self.book.is_none() {
             return match key {
@@ -409,7 +420,8 @@ impl Screen for Rulebook {
                 None => Nav::Stay,
             },
             Key::Char('/') => self.open_row(Row::Search),
-            Key::Char('?') => self.open_row(Row::Ask),
+            // Tab: ask (? brings up the keys, and letters begin a search).
+            Key::Tab => self.open_row(Row::Ask),
             // A rule's ID, or words, typed straight away: the search, begun.
             Key::Char(c) if c.is_alphanumeric() => {
                 let book = self.book.clone().expect("a manual");
