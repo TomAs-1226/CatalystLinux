@@ -505,15 +505,13 @@ def tour(vm, folder):
     time.sleep(8)
 
     # A loose script: it runs, prints, and ends; any key returns.
-    vm.key("right")
-    vm.key("ret")
+    open_by_name(vm, "hello")
     time.sleep(14)
     check("a loose script runs in the terminal", shot("4-script-in-terminal") > 20)
     vm.key("ret")
     time.sleep(10)
 
-    vm.key("right")
-    vm.key("ret")
+    open_by_name(vm, "paint")
     check("an app with its own screen is started", until(running("sleep 600"), lambda out: out != "") != "")
     saw = vm.run("cat /tmp/paint-saw")
     check("it is told the look in use", saw == "rose 0", saw)
