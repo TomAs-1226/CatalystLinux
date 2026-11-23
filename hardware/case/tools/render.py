@@ -188,34 +188,33 @@ def camera(loc, target, lens=85):
 
 
 def assemble(mats, variant, explode=False):
-    """Night scheme: black PLA body, white PETG chassis, gold signal, light-blue link."""
+    """Revision 3: everything black PLA; the frozen chassis and plunger are white PETG."""
     rig = bpy.data.objects.new("rig", None)
     bpy.context.scene.collection.objects.link(rig)
     e = (lambda dz, dx=0: (dx, 0, dz)) if explode else (lambda dz, dx=0: (0, 0, 0))
-    cam = variant == "camera"
     tag = {}
-    tag["Frame"] = load(os.path.join(STL, "frame.stl"), mats["black"], rig, e(52))
+    tag["Frame (bezel)"] = load(os.path.join(STL, "frame.stl"), mats["black"], rig, e(34))
     tag["CardputerZero"] = load(os.path.join(REF, "cz_front.stl"), mats["dev"], rig, e(0))
     load(os.path.join(REF, "cz_back.stl"), mats["devback"], rig, e(0))
     load(os.path.join(STL, "keys.stl"), mats["key"], rig, e(0))
     screen_plane(mats["screen"], rig)
     load(os.path.join(STL, "glass_imx.stl"), mats["glass"], rig, e(0))
-    tag["Chassis"] = load(os.path.join(STL, "chassis.stl"), mats["petg"], rig, e(-42))
-    if cam:
-        load(os.path.join(STL, "lenses.stl"), mats["barrel"], rig, e(-84))
-        load(os.path.join(STL, "glass_k210.stl"), mats["glass"], rig, e(-84))
+    tag["Chassis"] = load(os.path.join(STL, "chassis.stl"), mats["petg"], rig, e(-18))
+    if variant == "camera":
+        load(os.path.join(STL, "lenses.stl"), mats["barrel"], rig, e(-42))
+        load(os.path.join(STL, "glass_k210.stl"), mats["glass"], rig, e(-42))
         um = unitv_matrix()
         for f, m in (("uv_front.stl", "uvf"), ("uv_back.stl", "uvb")):
-            tag["UnitV K210"] = load(os.path.join(REF, f), mats[m], rig, e(-84), matrix=um)
-        tag["Plunger"] = load(os.path.join(STL, "plunger.stl"), mats["petg"], rig, e(-104))
-        tag["Camera backplate"] = load(os.path.join(STL, "camera_back.stl"), mats["black"], rig, e(-128))
-        tag["Camera trim"] = load(os.path.join(STL, "trim.stl"), mats["gold"], rig, e(-160))
-        tag["Link cover"] = load(os.path.join(STL, "link.stl"), mats["ice"], rig, e(-20, 34))
-        load(os.path.join(STL, "screws_camera.stl"), mats["screw"], rig, e(-150))
+            tag["UnitV K210"] = load(os.path.join(REF, f), mats[m], rig, e(-42), matrix=um)
+        tag["UnitV pins"] = load(os.path.join(STL, "pins.stl"), mats["black"], rig, e(-56))
+        tag["Plunger"] = load(os.path.join(STL, "plunger.stl"), mats["petg"], rig, e(-62))
+        tag["Camera backplate"] = load(os.path.join(STL, "camera_back.stl"), mats["black"], rig, e(-80))
+        tag["Lens ring"] = load(os.path.join(STL, "lens_ring.stl"), mats["black"], rig, e(-104))
+        tag["Link cover"] = load(os.path.join(STL, "link.stl"), mats["black"], rig, e(-80, 30))
+        load(os.path.join(STL, "screw_heads.stl"), mats["screw"], rig, e(-98))
     else:
-        tag["Plain backplate"] = load(os.path.join(STL, "plain_back.stl"), mats["black"], rig, e(-84))
-        tag["Gold accent"] = load(os.path.join(STL, "accent.stl"), mats["gold"], rig, e(-110))
-        load(os.path.join(STL, "screws_plain.stl"), mats["screw"], rig, e(-104))
+        tag["Plain backplate"] = load(os.path.join(STL, "plain_back.stl"), mats["black"], rig, e(-48))
+        load(os.path.join(STL, "screw_heads.stl"), mats["screw"], rig, e(-62))
     return rig, tag
 
 
@@ -226,8 +225,8 @@ VIEWS_DEF = {
     "side": (-90, (0.0, -0.40, 0.040), (0, 0, 0.030), 88),
     "three-quarter": (-34, (-0.04, -0.38, 0.105), (0, 0, 0.027), 84),
     "back-three-quarter": (180 + 36, (0.04, -0.38, 0.12), (0, 0, 0.027), 84),
-    "exploded": (-60, (0.01, -0.50, 0.27), (0.047, 0.027, 0.03), 46),
-    "exploded-plain": (-60, (-0.01, -0.44, 0.24), (0.020, 0.012, 0.03), 50),
+    "exploded": (-60, (0.0, -0.50, 0.27), (0.030, 0.017, 0.03), 46),
+    "exploded-plain": (-60, (-0.01, -0.44, 0.24), (0.012, 0.007, 0.03), 50),
 }
 
 

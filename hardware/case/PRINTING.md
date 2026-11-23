@@ -1,199 +1,192 @@
-# Printing and assembling the Catalyst case
+# Printing and assembling the Catalyst case (revision 3)
 
-One **frame** and one **chassis** take either of two **backplates**. Swapping them takes a screwdriver and about two minutes.
+One **bezel**, one **chassis** and either of two **backplates**.
+
+## What changed after the first print
+
+The first print failed. Revision 3 fixes each cause:
+
+| Problem | Cause | Fix |
+| --- | --- | --- |
+| Frame turned to spaghetti | It stood 25.5 mm tall on about 1 mm of lip, and its port windows printed as 12-41 mm bridges | The frame is now a 4.9 mm bezel: the lip plus a flat cheek beside the screen. It prints face-down on a much bigger flat area. The side walls moved into the backplates, and every port window is a notch open at the top of the print on both parts. No bridges, no supports. |
+| Back cover came out "weird" | Big shallow pockets on the face that prints on the bed: a 0.5 mm grip panel over 69 × 18 mm and a 0.8 mm trim pocket. Both print as bridges just above the first layers. A 1.5 mm inward ledge inside the lip, 14.6 mm up, needed a ring of supports. The pins were printed upright and weak. | Nothing is recessed on the bed face except bridgeable details: a 0.8 mm groove outlines the grip panel, and the counterbores are 4.2 mm. No inward ledges. The rear edges start with a 45° chamfer. Walls are 2 mm, ribs stiffen the pod, and screw towers have 1.7 mm walls. |
+| UnitV pins didn't click | Short, and printed upright | Separate click pins, printed lying down |
+| Grove plug didn't fit the cable opening | The opening was 3.8 × 8.6 mm | 12 × 8 mm, with a proper channel inside |
+
+**Colour.** Everything new is **black PLA**. The gold trim, gold accent and blue link cover are gone:
+
+- The lens ring and link cover stay separate parts because their shape needs it. The lens ring can still be printed in gold if you like.
+- The plain backplate's accent is now a debossed line.
+
+**Frozen parts.** The **chassis and plunger are unchanged**. They are the white PETG parts from the first print, and their STLs are byte-for-byte the same.
 
 | | Camera backplate | Plain backplate |
 | --- | --- | --- |
-| What it adds | UnitV K210 pod, gold camera trim, light-blue Grove link cover | Slim protective back, camera/IR window, small gold accent |
-| Thickness | **40.1 mm** (42.5 at the gold lens ring) | **27.3 mm** |
-| Footprint | 88.5 × 58.5 mm (93.1 wide with the link cover) | 88.5 × 58.5 mm |
-| Printed parts | 39.5 g, 1 h 24 min | 32.0 g, 59 min |
-| Total weight with the CardputerZero (95 g) | about 152 g (adds the UnitV, cable and screws) | about 128 g |
-
-Renders are in `renders/`: `camera-*.png`, `plain-*.png` and `overview.png`.
-
-![overview](renders/overview.png)
+| Thickness | **40.5 mm** (42.9 at the lens ring) | **28.5 mm** |
+| Footprint | 88.5 × 58.5 mm (94.1 wide with the link cover) | 88.5 × 58.5 mm |
+| New black parts | 43.2 g, about 1 h 45 min | 26.9 g, about 55 min |
+| Weight with the CardputerZero (95 g), chassis, UnitV, cable and screws | about 165 g | about 132 g |
 
 ## 1. Parts
 
-All STLs in `stl/` are already oriented for the bed. Each file is named `part__material-colour`.
+All STLs in `stl/` are already oriented for the bed (z = 0 is the bed).
 
-**Profile:** 0.4 mm nozzle; PLA at 210-215 °C with the bed at 60 °C; PETG at 235-240 °C with the bed at 80 °C. Seam at the rear. **No supports anywhere.**
+**Profile:** 0.4 mm nozzle, PLA at 210-215 °C, bed at 60 °C. **No supports.**
 
-**Estimates:** sliced with PrusaSlicer 2.9.2 (`tools/estimate.py`) using a fast CoreXY profile (Bambu P1/X1 class). A bed-slinger at stock speeds takes about twice as long.
+**Brims:**
 
-| Part | File | Material | On the bed | Layer | Walls | Infill | Time | Filament |
+- **Bezel:** a 5 mm brim. Its contact is a 3 mm ring plus the cheek.
+- **Backplates:** a 3 mm brim on the corners if your bed lifts corners.
+
+**Estimates:** from `tools/estimate.py` (PrusaSlicer 2.9.2, fast CoreXY profile). A bed-slinger at stock speeds takes about twice as long. Five walls make every 2 mm wall solid.
+
+| Part | File | Material | **Print face (on the bed)** | Layer | Walls | Infill | Time | Filament |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Frame (both) | `frame__black-PLA.stl` | black PLA | front lip face down (best finish where you look) | 0.20 | 4 | 20% gyroid | 24 min | 12.8 g |
-| Chassis (both) | `chassis__white-PETG.stl` | white PETG | device side down | 0.20 | 4 | 40% gyroid | 15 min | 8.3 g |
-| Camera backplate | `back-camera__black-PLA.stl` | black PLA | back face down | 0.20 | 4 | 20% gyroid | 36 min | 16.6 g |
-| Camera trim | `trim-camera__gold-PLA.stl` | gold PLA (silk is fine) | flat side down, ring up | 0.12 | 3 | 100% | 3 min | 0.6 g |
-| Link cover | `link-cover-camera__light-blue-PLA.stl` | light-blue PLA | flat inner face down | 0.16 | 4 | 30% | 4.5 min | 1.1 g |
-| Button-B plunger | `plunger-camera__white-PETG.stl` | white PETG | flat side down | 0.12 | 4 | 100% | 1.5 min | 0.1 g |
-| Plain backplate | `back-plain__black-PLA.stl` | black PLA | back face down | 0.20 | 4 | 20% gyroid | 19 min | 10.9 g |
-| Gold accent | `accent-plain__gold-PLA.stl` | gold PLA | flat | 0.12 | 3 | 100% | 1 min | 0.03 g |
-| **Fit test** | `fit-test__black-PLA.stl` | black PLA (any) | as placed | 0.20 | 3 | 15% | **19 min** | 8.9 g |
+| Bezel (both versions) | `frame__black-PLA.stl` | black PLA | the **front face** (lip and cheek) | 0.20 | 5 | 25% | 6 min | 3.1 g |
+| Camera backplate | `back-camera__black-PLA.stl` | black PLA | the **outer back face** | 0.20 | 5 | 25% | 1 h 24 min | 36.4 g |
+| Plain backplate | `back-plain__black-PLA.stl` | black PLA | the **outer back face** | 0.20 | 5 | 25% | 49 min | 23.8 g |
+| Lens ring (camera) | `lens-ring-camera__black-PLA.stl` | black PLA (gold optional) | the **ring's top face**, spigot up | 0.16 | 4 | 100% | 2 min | 0.5 g |
+| Link cover (camera) | `link-cover-camera__black-PLA.stl` | black PLA | the **flat outer face**, hooks up | 0.16 | 4 | 30% | 8 min | 2.3 g |
+| UnitV pins ×4 (2 + 2 spare) | `pins-camera__black-PLA.stl` | black PLA | **lying on their flats** (the split stands vertical) | 0.12 | 4 | 100% | 6 min | 0.9 g |
+| **Fit test** | `fit-test__black-PLA.stl` | black PLA | as placed | 0.20 | 2 | 15% | **30 min** | 13.9 g |
+| Chassis (both) | `chassis__white-PETG.stl` | white PETG | **already printed, not on the black plate** | | | | | |
+| Plunger (camera) | `plunger-camera__white-PETG.stl` | white PETG | **already printed, not on the black plate** | | | | | |
 
-**Total for everything** (fit test, frame, chassis, both backplates and all small parts): **about 2 h 2 min and 59 g.**
-
-**Plates by colour:**
-
-- **Black PLA:** frame, the backplate(s) and the fit test all fit together on a 256 × 256 bed.
-- **Gold:** trim and accent together.
-- **Light blue:** link cover.
-- **White PETG:** chassis and plunger.
-
-**Ready-to-print plates for the Creality SPARKX i7.** `plates/` has one Creality Print project per colour. Each is set up for the i7 with a 0.4 mm nozzle, the 260 × 260 mm textured PEI plate and the CFS Lite. Every setting in the table above is already in the file. Times and weights come from Creality Print 7.3.2 slicing each file.
-
-| Plate | File | Material | Parts | Time | Filament |
-| --- | --- | --- | --- | --- | --- |
-| 1 | `plates/01-black-PLA.3mf` | black PLA | frame, camera backplate, plain backplate | 1 h 28 min | 38.1 g |
-| 2 | `plates/02-white-PETG.3mf` | white PETG | chassis, plunger (brim) | 20 min | 8.1 g |
-| 3 | `plates/03-gold-PLA.3mf` | gold PLA | camera trim, accent (brim) | 6.5 min | 0.6 g |
-| 4 | `plates/04-light-blue-PLA.3mf` | light-blue PLA | link cover | 8 min | 1.1 g |
-
-- **Total:** about 2 h 3 min and 48 g.
-- **To print:** open the file in Creality Print. Check that the printer is **SPARKX i7 0.4 nozzle** and that the filament points at the CFS slot holding that colour. Press **Slice**, then **Print**.
-- **Settings in the files:**
-  - PLA at 215 °C (220 °C first layer), bed 60 °C.
-  - PETG at 240 °C, bed 80 °C, fan 30-50 %, first layer at 30 mm/s.
-  - Outer walls and top surfaces at 120 mm/s, seam at the rear, no supports.
-- **PETG plate:** print it on the textured PEI plate as it is. On a smooth plate, wipe on glue stick first so the PETG does not bond to the PEI.
-- **`plates/all-plates.3mf`:** the same four plates in one project. The filaments are slots 1-4: black, white PETG, gold, light blue. Every plate gets PETG's slow first layer, so plate 1 takes about 3 minutes longer.
-- **Fit test:** optional. Its STL is still in `stl/`.
-- **Rebuilding:** after changing the model, run `py -3 -I plates/make_plates.py`. It needs Creality Print 7.3.2 and OrcaSlicer 2.5.2 unpacked in `plates/.tools/`, as described at the top of the script.
-
-**Notes:**
-
-- The frame's side windows print as bridges up to 43 mm long. Keep the bridge fan on at about 40 mm/s, as the profile does.
-- The rear edges of both backplates start with a 45° chamfer that blends into the radius, so the bed-side edge does not droop.
-- Print the chassis in PETG. It carries the screws and nuts and sits against the warm back of the device.
+**Total of the new black parts:** both backplates, bezel, small parts and fit test come to **about 3 h 04 min and 81 g**.
 
 ## 2. Hardware
 
-**Shared parts (frame and chassis; stay in place when you swap backplates)**
+| Qty | Part | Goes | Notes |
+| --- | --- | --- | --- |
+| 2 | M2 × 4 countersunk (ISO 7046/10642) | Chassis into the device's two shallow holes (X28, X56) | **As before**, already in place if the chassis is fitted |
+| 2 | M2 hex nut (4 mm across flats, 1.6 mm) | Captive in the chassis, bottom corners | **As before** |
+| 2 | **M2 × 3 button head** (ISO 7380) | Backplate into the chassis nuts, bottom corners | Same screws for both backplates. The head sits in a counterbore over a 1.2 mm floor; the tip stops 0.4 mm short of the device; 1.25 mm of thread (3 turns) in the nut |
+| 1 | M5Stack Grove (HY2.0-4P) cable, 10 cm | UnitV to the device's Grove port | About 80 mm of path. A longer cable works too: coil the slack under the channel lips |
 
-| Qty | Part | Goes |
-| --- | --- | --- |
-| 2 | M2 × 4 countersunk (ISO 7046 / 10642) | Chassis into the device's blind M2 holes at X28/X56 (flush) |
-| 2 | M2 hex nut (ISO 4032, 4 mm across flats, 1.6 mm thick) | Captive in the chassis, at the bottom corners |
+**Fixings: what's used and why.**
 
-**Camera backplate**
+- **Shallow holes.** The device's two shallow M2 holes (X28/X56, Ø2 × 3.5 mm) hold the chassis with M2 × 4. Both backplates then screw into the chassis's nuts with M2 × 3. That stays within your short screws.
+- **Deep slots: why no screw tubes.** The other two holes (X14/X70) sit at the floor of 4.4 mm wide slots, 13.7 mm deep (measured in M5's STL). A tube that takes an M2 head needs at least 3.5 mm for the head plus 2 × 0.8 mm of wall, so 5.1 mm. That doesn't fit 4.4 mm. The chassis also already covers the slots, apart from 2.4 mm holes.
+- **Slot hooks instead.** Each backplate has two **hooks that go into those slots** and click over the chassis's top edge. The back snaps into place and can't slide.
+- **M5's own shell screws** (two through screws on the back) are never touched.
 
-| Qty | Part | Goes |
-| --- | --- | --- |
-| 1 | **M2 × 25** socket head (ISO 4762) | Through the pod into the device's X14 slot hole |
-| 2 | **M2 × 6** button head (ISO 7380) | Into the chassis nuts, bottom corners |
-| 1 | M2 × 6 self-tapping screw for plastic (pan head) | Link cover into its rib |
-| 1 | M5Stack Grove (HY2.0-4P) cable, 10 cm | UnitV to the device's Grove port |
-| 2 | 6 × 6 mm thin double-sided tape (about 0.1-0.2 mm) | Under the gold trim, so it can be lifted for a lens swap |
+**Named parameters in `case.scad`:**
 
-**Plain backplate**
+- **Screws:** `screw_len`, `tip_gap`, `screw_head`, `cb_d`. The counterbore depth and the floor are worked out from them, and OpenSCAD prints the thread engagement on export.
+- **Hooks:** `slots`, `slot_w`, `hook_barb`.
+- **Nut positions:** `fz_nuts` (frozen).
 
-| Qty | Part | Goes |
-| --- | --- | --- |
-| 2 | **M2 × 16** button head (ISO 7380) | Into the device's X14 and X70 slot holes (about 2 mm of thread) |
-| 2 | **M2 × 3** countersunk (ISO 7046) | Into the chassis nuts, bottom corners |
-| 1 | A drop of glue or a scrap of tape | Under the gold accent |
+## 3. UnitV pins (camera)
 
-**About the CardputerZero's screws.**
+**The holes.** The UnitV's mounting holes are LEGO-style: a **Ø4.85 bore straight through its 8.2 mm tail**, with a **Ø6.2 × 1.0 mm counterbore at both faces**. This was measured from M5's UnitV-M12 STL with `tools/measure_holes.py`.
 
-- **Holes used.** The case uses only the device's **four M2 mounting holes on the top strip of its back**:
-  - two blind holes at X28 and X56, about 3.5 mm deep;
-  - two at the floor of the 11.7 mm slots at X14 and X70.
-- **Holes not used.** M5's own **shell screws**, the two through screws at (13, 30) and (70, 40), hold the CardputerZero together. The case never touches them.
-- **Why the camera backplate reaches only X14.** The UnitV sits over X70, and the camera bay's walls sit over X28 and X56. That backplate therefore uses X14 plus the two chassis nuts, while the chassis's own screws hold X28 and X56.
+**The pin** works like a LEGO friction pin:
 
-Every hole position and screw length is a named parameter at the top of `case.scad`:
+- **Collar:** Ø6.0 × 0.9 mm, sits in the near counterbore.
+- **UnitV end:** Ø4.7 shaft, 7.1 mm long, split 0.9 mm. Its barb (+0.3 mm per side, 0.8 mm long, square back) passes the 4.85 mm bore and **clicks into the far counterbore**. The pin reaches full depth.
+- **Other end:** has the same barb, and clicks into a groove in the backplate's socket.
+- **Printing:** the pins print **lying down**, so the layers run along the pin. That makes them strong in bending. Print spares.
+- **Parameters:** `pin_clear` (0.15), `pin_barb` (0.30), `pin_slot` (0.9), `pin_flat` (0.35). Lengths and the groove position are derived from the measured hole.
 
-- **Hole positions:** `m2_blind`, `m2_pocket`, `nut_pos`, `hole_shift`.
-- **Screw lengths:** `L_chassis`, `L_pocket_plain`, `L_pocket_camera`, `L_nut_plain`, `L_nut_camera`.
+## 4. Grove cable routing (camera)
 
-The counterbores and seats follow the lengths automatically, and OpenSCAD reports the resulting thread engagement when you export.
+**Size.** The pass-through in the backplate's right wall is **12 × 8 mm**:
 
-## 3. Assembly
+- **Plug envelope:** the HY2.0-4P plug is about 10 mm wide and 6 mm tall with its latch.
+  - The width comes from the JST-PH-compatible 2.0 mm 4-way housing (9.9 mm).
+  - The matching board receptacle is 10 × 5.1 mm (LCSC C7429580).
+  - The latch adds about 1 mm.
+- **Margin:** 1 mm all round on top of that envelope.
+- **Roof:** the opening has a 45° pointed top, so it prints without a bridge.
 
-**Both versions: frame and chassis**
+If your plug is bigger, measure it and set `plug` in `case.scad`.
 
-1. Press the two M2 nuts into the hex pockets on the chassis's flat side, the side that faces the device. A touch of a soldering iron seats them.
-2. Lay the chassis on the device's back, flat side down, with the camera opening over the IMX219. Fit the two M2 × 4 countersunk screws at X28/X56. Snug them, don't force them.
-3. Slide the device and chassis into the frame from the back until the front lip sits on the face.
+**Inside the pod**, the cable has its own path:
 
-**Camera backplate**
+- **From the UnitV.** It leaves the UnitV's far end (its Grove socket), U-turns there (about 8 mm of room), and runs up a **5 mm channel over the UnitV's thin tail**, between the two pin bosses.
+- **Turn and exit.** It turns right on a 4 mm radius and leaves through the pass-through.
+- **Clips.** Five **1.2 mm lips** clip it into the channel, so it doesn't rattle.
+- **Covered.** The **link cover** clips into the pass-through with two hooks. It covers the cable from there up to the device's Grove plug, and the plug end has room to bend.
 
-1. Plug the Grove cable into the UnitV. Lay the UnitV on the chassis with its lens end at the top and its long side against the right wall's lane.
-2. Run the cable out of the UnitV's far end, turn it right, and run it up the 3.8 mm lane along the right wall. Lay it flat, below the button-A key.
-3. Drop the plunger into its guide in the backplate, pin first through the small hole.
-4. Thread the cable end out through the slot in the backplate's right wall. Lower the backplate so the UnitV's LEGO holes land on the two pins. Press around the rim until the lip clicks into the frame.
-5. Fit the M2 × 25 into the top bore at X14 and the two M2 × 6 at the bottom corners.
-6. Lay the cable in the link cover's channel and plug it into the Grove port. Screw the cover on with the M2 × 6 self-tapping screw.
-7. Stick two small squares of thin tape in the trim pocket and press the gold trim in.
-   - To change the M12 lens, lift the trim at the notch under the ring. About 1.8 mm of barrel then stands proud to unscrew.
+**Routing steps** (backplate on the table, inside up):
 
-**Plain backplate**
+1. Lay the cable in the channel, pressing it under the lips. Leave the UnitV end at the bottom of the pod.
+2. Push the other plug out through the pass-through from the inside.
+3. Plug the cable into the UnitV.
 
-1. Set the plain backplate on and press until the lip clicks in.
-2. Fit the two M2 × 16 at the top corners (X14/X70) and the two M2 × 3 countersunk at the bottom corners.
-3. Glue or tape the gold accent into its pocket under the window.
+## 5. Assembly
 
-**Swapping backplates.** Remove that backplate's screws (camera: 3, plain: 4), lift it at the bottom edge, and fit the other one. The frame, chassis and their two screws stay put.
+**Chassis (already done in the first build):**
 
-**USB-C2 note.** The CardputerZero's Grove socket sits right under USB-C2. With the Grove cable plugged in, USB-C2 takes only slim plugs (overmold about 5.5 mm thick or less). The link cover stops below the plug, so the case adds nothing to this.
+1. Two M2 nuts in its hex pockets on the flat side.
+2. Chassis on the device's back, camera opening over the IMX219.
+3. Two M2 × 4 countersunk screws into X28/X56.
 
-## 4. What is measured and what is estimated
+**Camera backplate:**
 
-- **Measured from M5's model.** The device outline, all ports, the screen and keys, the four M2 holes and the UnitV come from M5's published STLs. Sources are in `CONCEPT.md`.
-- **Estimated.** These have named parameters in section 2 of `case.scad`, with generous clearance:
+1. Press two pins into the pin bosses until they click. Drop the plunger into its guide, pin first.
+2. Route the Grove cable (section 4) and plug it into the UnitV.
+3. Lay the UnitV on the bosses, lens end up and lens over the round well. Press until both pins click into its holes.
+4. Press the CardputerZero (with its chassis) into the backplate from the front until both slot hooks click over the chassis's top edge. Plug the Grove cable into the device's Grove port.
+5. Fit the two M2 × 3 screws in the bottom corners.
+6. Snap the bezel on from the front: five clicks.
+7. Clip the link cover over the pass-through.
+8. Press the lens ring's spigot into the lens well. To swap the M12 lens, pull the ring off.
 
-| Parameter | Estimate | What it covers |
-| --- | --- | --- |
-| `key_top` | 23.2 | Keycap height |
-| `imx_fov` | 62.2° × 48.8° plus `fov_margin` 3° | IMX219 field of view |
-| `ir_win`, `ir_shave` | 30-54 mm, minus 0.8 at each outer edge | The two windows beside the camera, taken as IR |
-| `side_ctrl` | Y40.2-46, Z2-5.4 | The recessed control on the right side |
-| `pwr_slide` | X8.6-14.4 | Top slot, taken as the power slide |
-| `m2_engage` | 3.0 | Thread depth in the slot holes |
-| `ctrl_room` | 1.2 mm | Extra room around unconfirmed controls |
+**Plain backplate:**
 
-- **Plunger.** The button-B plunger's wedge is a best guess. If the button doesn't click, sand the wedge or adjust the `plunger` module by 0.2 mm.
+1. Press the CardputerZero (with its chassis) in from the front until both slot hooks click.
+2. Fit the two M2 × 3 screws in the bottom corners.
+3. Snap the bezel on.
 
-## 5. Fit test (do this first, about 19 min)
+**Swapping backplates:**
 
-`fit-test__black-PLA.stl` prints four pieces on one plate:
+1. Unclip the bezel.
+2. Remove the two M2 × 3 screws.
+3. Lift the device out: rock it at the top to free the hooks.
+
+The chassis and its screws stay on the device.
+
+**USB-C2 note.** The device's Grove socket sits right under USB-C2. With a Grove cable plugged in, USB-C2 takes only slim plugs (about 5.5 mm thick or less). The case adds nothing to this.
+
+## 6. Fit test (do this first, about 30 min)
+
+`fit-test__black-PLA.stl`. Use it with your already-printed chassis fitted to the device.
 
 | Piece | How to use it | Parameters it checks |
 | --- | --- | --- |
-| **Front ring** (the frame's front 6 mm) | Press the CardputerZero in from the back. It should go in with light pressure and not rattle. The lip should sit flat on the face, clear of every key and of the raised screen bezel at the right edge. Nothing should bind at the corners. | `gap`, `lip_over`, `dev_r`, `key_top`, `dev_w`/`dev_h` |
-| **Left and right side strips** (full-height walls with the port windows) | Hook the strip's lip over the device's front edge. Its rear end should stand 1.6 mm past the device's back, where the chassis goes. Then plug in every cable: USB-C1, USB-A, RJ45 (press the latch), HDMI, TRRS, Grove and USB-C2. Reach the USB switch, the power slide and the side control. | `port_room`, `ctrl_room`, `dev_t`, the window positions |
-| **M2 hole strip** (backplate hole pattern) | Hook it over the device's top edge, flat on the back. Push an M2 screw through each of the four holes into the device: X14 and X70 go down the slots, X28 and X56 straight in. The camera and both IR windows must show fully through the opening. | `m2_blind`, `m2_pocket`, `hole_shift`, `ir_win`, `ir_shave`, `imx_fov` |
+| **Bezel** (the real part) | Press it onto the device's face. The lip should sit flat, clear of the keys and of the raised screen plate, with the cheek flat on the face left of the screen. | `lip_over`, `cheek`, `key_top`, `gap`, `dev_r` |
+| **Left and right wall strips** (plain backplate walls) | Hold each against the device's side, floor under the chassis. Plug every cable in: USB-C1, USB-A, RJ45 with its latch, HDMI, TRRS, Grove, USB-C2. Reach the USB switch, the power slide and the side control. | `port_room`, `ctrl_room`, `gap`, window positions |
+| **Top strip** (plain backplate's top edge, both slot hooks, camera window) | Push the device and chassis onto it. Both hooks should click into the slots over the chassis's top edge. The camera and IR windows should show fully. | `slots`, `slot_w`, `hook_barb`, `ir_win`, `imx_fov` |
+| **Bottom strip** (both nut-screw seats) | Fit two M2 × 3 screws into the chassis nuts. The heads should sit below the surface and the screws should bite without touching the device. | `screw_len`, `tip_gap`, `fz_nuts` |
+| **Two UnitV pins** | Push one through a UnitV hole. It should click and seat its collar in the counterbore. | `pin_clear`, `pin_barb` |
 
-**Adjusting.** Edit the parameter at the top of `case.scad`, then run `python tools/build.py print`. Or open `case.scad` in OpenSCAD, set `part` (for example `"fit_print"`), press F6 and export the STL.
+**Adjusting.** Edit the parameter at the top of `case.scad`, then run `python tools/build.py print`. `python tools/check_fit.py` reports any collision with the device, the chassis or the UnitV.
 
 | Symptom | Change |
 | --- | --- |
-| Device too tight in the ring | `gap` += 0.05 to 0.1 |
-| Device rattles | `gap` -= 0.05 |
-| Lip rubs keys or the screen bezel | `lip_over` -= 0.2 |
-| Lip too thin to hold | `lip_over` += 0.2 |
-| Corners bind but sides are fine | `dev_r` += 0.2 |
-| A plug's overmold rubs a window edge | `port_room` += 0.2 (grows every window). For one port, edit that rectangle in `left_windows()`, `right_windows()` or `top_windows()` |
-| Side control or power slide hard to reach | `ctrl_room` += 0.5 |
-| All four screws miss by the same amount | `hole_shift` = [dx, dy] (in mm, + is toward the right / top seen from the screen) |
-| One screw misses | Edit its entry in `m2_blind` / `m2_pocket` |
-| IR window edge covered | `ir_shave` -= 0.4 (the screw heads beside it then sit closer) |
-| Backplate clicks in too hard / too loose | `snap` -= / += 0.1 |
+| Device tight in the walls | `gap` += 0.05 to 0.1 |
+| Device loose | `gap` -= 0.05 |
+| Lip rubs keys or the screen plate | `lip_over` -= 0.2 |
+| A plug's overmold rubs | `port_room` += 0.2 (or that window's rectangle) |
+| Control hard to reach | `ctrl_room` += 0.5 |
+| Hooks don't click, or too hard | `hook_barb` += / -= 0.2 |
+| Bezel clicks too hard / too loose | `snap` -= / += 0.1 |
+| Pin too tight / loose in the UnitV | `pin_clear` += / -= 0.05 |
+| Pin doesn't click | `pin_barb` += 0.1 |
+| Screw touches the device | `tip_gap` += 0.2 (seats move up) |
+| Grove plug doesn't pass | Measure it and set `plug = [w, h, l]` |
 
-Then print the full parts. Reprint the fit test only if you changed `gap` or `dev_*`.
-
-## 6. Files
+## 7. Files
 
 | Path | What |
 | --- | --- |
-| `case.scad` | Parametric model. Every part, the fit test and print orientations (`*_print`) |
-| `stl/` | Print-ready STLs (this guide) |
-| `plates/` | Creality Print projects for the SPARKX i7, one per colour, and `make_plates.py`, which builds them |
-| `renders/` | Final renders, both backplates |
-| `tools/build.py` | Exports every STL with the portable OpenSCAD (`render`, `print` or `all`) |
-| `tools/estimate.py` | Slices `stl/` with PrusaSlicer and prints time and filament |
+| `case.scad` | Parametric model. Frozen chassis/plunger modules, print orientations (`*_print`), fit test, interference checks (`part="chk"`) |
+| `stl/` | Print-ready STLs (section 1) |
+| `renders/` | Renders of both backplates |
+| `tools/build.py` | Exports the STLs. Never rewrites the frozen chassis or plunger |
+| `tools/estimate.py` | Slices `stl/` with PrusaSlicer for times and grams |
+| `tools/check_fit.py` | Collision check against the device, chassis and UnitV |
+| `tools/measure_holes.py` | UnitV hole and device slot measurements |
 | `tools/render.py`, `tools/finish.py` | Blender renders and the overview |
 | `CONCEPT.md` | Measurements, sources and design rationale |

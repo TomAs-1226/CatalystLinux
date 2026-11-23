@@ -7,10 +7,10 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FONT = os.path.join(HERE, "..", "..", "userland", "assets", "fonts", "GoogleSansCode.ttf")
-MATERIAL = {   # label -> material, Night scheme (Bezel labels are lowercase)
-    "Frame": "black pla", "Chassis": "white petg", "Camera backplate": "black pla",
-    "Plain backplate": "black pla", "Camera trim": "gold pla", "Gold accent": "gold pla",
-    "Link cover": "light blue pla", "Plunger": "white petg",
+MATERIAL = {   # label -> material (Bezel labels are lowercase)
+    "Frame (bezel)": "black pla", "Camera backplate": "black pla", "Plain backplate": "black pla",
+    "Lens ring": "black pla", "Link cover": "black pla", "UnitV pins": "black pla",
+    "Chassis": "white petg, already printed", "Plunger": "white petg, already printed",
 }
 
 

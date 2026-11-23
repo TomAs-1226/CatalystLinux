@@ -57,16 +57,16 @@ MATERIAL = {
     "PETG": "filament_density = 1.27\nfilament_cost = 22\nmax_volumetric_speed = 12\ntemperature = 240\nbed_temperature = 80\n",
 }
 # per part: layer height, walls, infill
-PART = {
-    "frame": (0.2, 4, "20%"),
-    "chassis": (0.2, 4, "40%"),
-    "back-camera": (0.2, 4, "20%"),
-    "back-plain": (0.2, 4, "20%"),
-    "trim-camera": (0.12, 3, "100%"),
-    "accent-plain": (0.12, 3, "100%"),
+PART = {   # layer height, walls, infill. 5 walls make the 2 mm walls solid.
+    "frame": (0.2, 5, "25%"),
+    "back-camera": (0.2, 5, "25%"),
+    "back-plain": (0.2, 5, "25%"),
+    "lens-ring-camera": (0.16, 4, "100%"),
     "link-cover-camera": (0.16, 4, "30%"),
-    "plunger-camera": (0.12, 4, "100%"),
-    "fit-test": (0.2, 3, "15%"),
+    "pins-camera": (0.12, 4, "100%"),
+    "fit-test": (0.2, 2, "15%"),
+    "chassis": (0.2, 4, "40%"),            # frozen, already printed
+    "plunger-camera": (0.12, 4, "100%"),   # frozen, already printed
 }
 
 

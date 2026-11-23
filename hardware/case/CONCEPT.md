@@ -1,16 +1,21 @@
 # Catalyst case for the CardputerZero: concept and measurements
 
-> **Status: built.** The concept below was approved with these choices:
+> **Status: revision 3, built.** The concept below was approved with these choices:
 >
-> - **Colours:** Night (black PLA body, gold trim, light-blue link cover, white PETG chassis).
-> - **Battery:** none. The battery, charge board and light pipe were dropped.
-> - **Backplates:** two interchangeable backplates on one frame and chassis, fixed with the CardputerZero's own M2 holes:
->   - the camera backplate (UnitV K210, Grove link);
->   - the plain backplate.
+> - **Colours:** Night colours at first. Since revision 3 the case is all black PLA, apart from the chassis and plunger, which are white PETG and already printed.
+> - **Battery:** none.
+> - **K210 link:** the Grove port.
+> - **Look:** a soft slab.
 >
-> The build is in `case.scad`, `stl/`, `renders/` and **`PRINTING.md`**, which covers parts, times, hardware, assembly and the fit test.
+> After the first print failed, revision 3 changed the build:
 >
-> Sections 4 (battery) and 6-8 (parts, hardware, printing) are the phase 1 proposal; `PRINTING.md` replaces them. Measurements, sources and the port map below still apply.
+> - **Bezel and trays.** The frame became a 4.9 mm bezel, and the side walls moved into two interchangeable backplate trays.
+> - **Fixings.** M2 × 3 screws into the chassis nuts, plus hooks into the device's top slots.
+> - **UnitV and cable.** Click pins for the UnitV, and a 12 × 8 mm Grove pass-through with an inside cable channel.
+>
+> **`PRINTING.md`** has the parts, print faces, times, hardware, assembly and fit test.
+>
+> Sections 4 (battery) and 6-8 (parts, hardware, printing) are the phase 1 proposal; `PRINTING.md` replaces them. The measurements, sources and port map still apply.
 
 ![overview](renders/overview.png)
 

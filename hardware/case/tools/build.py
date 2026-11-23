@@ -8,17 +8,17 @@ OpenSCAD: $OPENSCAD, else the portable copy in hardware/case/.tools, else PATH.
 import concurrent.futures as cf, glob, os, shutil, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RENDER = ["frame", "chassis", "camera_back", "plain_back", "trim", "accent", "link", "plunger",
-          "keys", "lenses", "glass_imx", "glass_k210", "screws_camera", "screws_plain"]
+RENDER = ["frame", "chassis", "camera_back", "plain_back", "lens_ring", "link", "plunger", "pins",
+          "keys", "lenses", "glass_imx", "glass_k210", "screw_heads"]
+# The chassis and plunger are frozen (already printed in white PETG from revision 2):
+# stl/chassis__white-PETG.stl and stl/plunger-camera__white-PETG.stl are never rewritten.
 PRINT = {  # scad part -> file name in stl/
     "frame_print": "frame__black-PLA",
-    "chassis_print": "chassis__white-PETG",
     "camera_back_print": "back-camera__black-PLA",
     "plain_back_print": "back-plain__black-PLA",
-    "trim_print": "trim-camera__gold-PLA",
-    "accent_print": "accent-plain__gold-PLA",
-    "link_print": "link-cover-camera__light-blue-PLA",
-    "plunger_print": "plunger-camera__white-PETG",
+    "lens_ring_print": "lens-ring-camera__black-PLA",
+    "link_print": "link-cover-camera__black-PLA",
+    "pins_print": "pins-camera__black-PLA",
     "fit_print": "fit-test__black-PLA",
 }
 
