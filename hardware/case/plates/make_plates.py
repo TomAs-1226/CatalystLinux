@@ -43,7 +43,7 @@ BED = 260.0
 BED_TYPE = 'Textured PEI Plate'   # the i7's stock plate
 PLATE_GAP = 1 / 5                 # Creality Print's LOGICAL_PART_PLATE_GAP
 EDGE = 6.0                        # keep brims this far from the bed edge
-CLEAR = 10.0                      # clear space between neighbouring brims (room for tree supports)
+CLEAR = 10.0                      # clear space between neighbouring brims
 
 # ---- the black-PLA profile ---------------------------------------------------------------
 BRIM, SMALL_BRIM = 7, 5
@@ -59,12 +59,13 @@ PROCESS = {
     'brim_width': str(BRIM),
     'brim_object_gap': '0.1',
     'skirt_loops': '0',
-    # supports: organic tree, auto, interface layers so surfaces come off clean
-    'enable_support': '1',
+    # supports: off. A part that truly needs them turns them on in PARTS and gets organic
+    # tree supports from the build plate, with interface layers so surfaces come off clean.
+    'enable_support': '0',
     'support_type': 'tree(auto)',
     'support_style': 'organic',
     'support_threshold_angle': str(SUPPORT_ANGLE),
-    'support_on_build_plate_only': '0',          # set per part, see support_mode()
+    'support_on_build_plate_only': '1',
     'support_interface_top_layers': '3',
     'support_interface_bottom_layers': '2',
     'support_top_z_distance': '0.2',
@@ -84,14 +85,15 @@ PROCESS = {
     'bridge_speed': '30',
     # look and strength
     'seam_position': 'back',
-    'wall_loops': '4',
+    'wall_loops': '5',
     'sparse_infill_pattern': 'gyroid',
     'bottom_shell_layers': '4',
 }
 FILAMENT = {
-    # cooler nozzle against stringing; flow capped to what 205 C melts cleanly
-    'nozzle_temperature': '205',
-    'nozzle_temperature_initial_layer': '210',
+    # cool against stringing (210 C sits in both PRINTING.md's range and the anti-stringing
+    # one), a little hotter for the first layer; flow capped to what 210 C melts cleanly
+    'nozzle_temperature': '210',
+    'nozzle_temperature_initial_layer': '215',
     'filament_max_volumetric_speed': '11',
     'textured_plate_temp': '60', 'textured_plate_temp_initial_layer': '60',
     'hot_plate_temp': '60', 'hot_plate_temp_initial_layer': '60',
@@ -109,39 +111,32 @@ FILAMENT = {
     'fan_max_speed': '100',
 }
 
-LOW = 3.0   # mm: overhangs below this are pocket and recess ceilings, bridged instead
-
-def part(name, layer='0.2', walls=4, infill='20%', brim=BRIM, block=0.0):
-    """block: height of a support blocker over the whole footprint, from the bed up. Creality
-    Print's organic supports otherwise fill shallow recesses, screw counterbores and nut
-    pockets on the bed side, where a support 0.2-3 mm tall can never be removed. The slicer
-    bridges those ceilings instead. Supports above the blocker are generated as usual."""
+def part(name, layer='0.2', walls=5, infill='25%', brim=BRIM, support=None):
+    """support: None (off), 'plate' (from the build plate only) or 'everywhere'."""
     s = {'layer_height': layer, 'wall_loops': str(walls), 'sparse_infill_density': infill}
     if infill != '100%':
         s['sparse_infill_pattern'] = 'gyroid'
     if brim != BRIM:
         s['brim_width'] = str(brim)
-    return name, s, block
+    if support:
+        s['enable_support'] = '1'
+        s['support_on_build_plate_only'] = '1' if support == 'plate' else '0'
+    return name, s
 
-# per part, by STL name before "__" (PRINTING.md). Re-check the notes after a CAD change.
+# per part, by STL name before "__" (PRINTING.md, revision 3). The script prints each part's
+# overhang area; re-check these after a CAD change. Revision 3 needs no supports: the only
+# overhangs are 0.4 mm grip-recess ceilings on the backplates' bed side (bridged), the
+# bezel's shallow inner edge in its first millimetre, and slivers elsewhere.
 PARTS = {
-    # side-window tops bridge 12-41 mm over the sills: tree supports from the sills hold them
-    'frame': part('Frame'),
-    # nut-pocket and opening ceilings 1.6 mm up
-    'chassis': part('Chassis', infill='40%', block=LOW),
-    # bed side: 0.5 mm grip recess (62 x 18), 0.8 mm trim pocket (52 x 22), screw counterbores.
-    # Higher up, a 1 mm inner ledge under the locating lip keeps a ring of tree supports.
-    'back-camera': part('Camera backplate', block=LOW),
-    # bed side: 0.4 mm grip recess (64 x 18) and screw counterbores
-    'back-plain': part('Plain backplate', block=LOW),
-    'trim-camera': part('Camera trim', '0.12', 3, '100%', SMALL_BRIM),
-    # cable-channel ceiling 2.6 mm up, a few mm wide
-    'link-cover-camera': part('Link cover', '0.16', 4, '30%', block=LOW),
-    'plunger-camera': part('Button-B plunger', '0.12', 4, '100%', SMALL_BRIM),
-    'accent-plain': part('Accent', '0.12', 3, '100%', SMALL_BRIM),
+    'frame': part('Bezel'),
+    'back-camera': part('Camera backplate'),
+    'back-plain': part('Plain backplate'),
+    'lens-ring-camera': part('Lens ring', '0.16', 4, '100%', SMALL_BRIM),
+    'link-cover-camera': part('Link cover', '0.16', 4, '30%', SMALL_BRIM),
+    'pins-camera': part('UnitV pins', '0.12', 4, '100%', SMALL_BRIM),
 }
-# not on the black plate: the fit test, and the chassis and plunger (printed separately in
-# white PETG from the current STLs; their geometry does not change)
+# not on the black plate: the fit test, and the chassis and plunger (printed in white PETG;
+# their geometry does not change)
 SKIP = ('fit-test', 'chassis', 'plunger-camera')
 
 def default_part(key):
@@ -205,10 +200,9 @@ def load_stl(path):
     rec = np.frombuffer(d, dtype=np.dtype([('n', '<3f4'), ('v', '<9f4'), ('a', '<u2')]), count=n, offset=84)
     return d, rec['v'].reshape(-1, 3, 3).astype(np.float64)
 
-def support_mode(T):
-    """'plate' when every overhang has the bed under it, else 'everywhere' (PRINTING: supports
-    from the build plate only where that reaches every overhang). Overhangs over the part
-    totalling under 5 mm2 (snap bumps and the like) print without support and do not count."""
+def overhangs(T):
+    """Overhang area (mm2) flatter than SUPPORT_ANGLE above the first layer: (over the bed,
+    over the part), by a ray straight down from each face. For the report only."""
     T = T - [0, 0, T[:, :, 2].min()]
     e1, e2 = T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]
     c = np.cross(e1, e2)
@@ -221,16 +215,18 @@ def support_mode(T):
     det = (e1 * pv).sum(1)
     ok = np.abs(det) > 1e-12
     inv = np.where(ok, 1 / np.where(ok, det, 1), 0)
-    over_model = 0.0
-    for o, area in zip(T[over].mean(1), a2[over] / 2):   # ray straight down from each overhang
+    bed = part = 0.0
+    for o, area in zip(T[over].mean(1), a2[over] / 2):
         tv = o - T[:, 0] - [0, 0, 1e-3]
         u = (tv * pv).sum(1) * inv
         q = np.cross(tv, e1)
         v = (q * d).sum(1) * inv
         t = (q * e2).sum(1) * inv
         if (ok & (u >= 0) & (v >= 0) & (u + v <= 1) & (t > 0.05)).any():
-            over_model += area
-    return 'everywhere' if over_model >= 5 else 'plate'
+            part += area
+        else:
+            bed += area
+    return bed, part
 
 def placed_stl(raw, T, centre, dst):
     """Write a binary STL moved so its footprint is centred on `centre` and it sits on z=0."""
@@ -248,12 +244,12 @@ def collect_parts():
         key = stl.split('__')[0]
         if key.startswith(SKIP):
             continue
-        name, settings, block = PARTS.get(key) or default_part(key)
+        name, settings = PARTS.get(key) or default_part(key)
         raw, T = load_stl(path)
         size = T.reshape(-1, 3).max(0) - T.reshape(-1, 3).min(0)
-        settings = dict(settings, support_on_build_plate_only='1' if support_mode(T) == 'plate' else '0')
         brim = float(settings.get('brim_width', BRIM))
-        parts.append(dict(stl=stl, name=name, settings=settings, block=block, raw=raw, T=T, size=size, brim=brim))
+        parts.append(dict(stl=stl, name=name, settings=settings, raw=raw, T=T, size=size, brim=brim,
+                          overhangs=overhangs(T)))
     return parts
 
 def pack(parts):
@@ -350,23 +346,6 @@ def model_header(model, title):
         model = re.sub(rf'<metadata name="{tag}">[^<]*</metadata>', f'<metadata name="{tag}">{today}</metadata>', model)
     return model[:model.index('<resources>')]
 
-def blocker_model(sub_xml, oid, height):
-    """A support-blocker box over the part's footprint, from just under the bed to `height`,
-    in the same local frame as the part's mesh in `sub_xml`."""
-    v = np.array(re.findall(r'<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"/>', sub_xml), dtype=float)
-    (x0, y0, z0), (x1, y1, _) = v.min(0) - [1, 1, 0.1], v.max(0) + [1, 1, 0]
-    z1 = z0 + 0.1 + height
-    corners = [(x, y, z) for z in (z0, z1) for y in (y0, y1) for x in (x0, x1)]
-    tris = [(0, 2, 1), (1, 2, 3), (4, 5, 6), (5, 7, 6), (0, 1, 4), (1, 5, 4),
-            (2, 6, 3), (3, 6, 7), (0, 4, 2), (2, 4, 6), (1, 3, 5), (3, 7, 5)]
-    head = sub_xml[:sub_xml.index('<resources>')]
-    return (head + '<resources>\n'
-            f'  <object id="{oid}" p:UUID="{oid:04x}0000-81cb-4c03-9d28-80fed5dfa1dc" type="model">\n   <mesh>\n    <vertices>\n'
-            + ''.join(f'     <vertex x="{x:.4f}" y="{y:.4f}" z="{z:.4f}"/>\n' for x, y, z in corners)
-            + '    </vertices>\n    <triangles>\n'
-            + ''.join(f'     <triangle v1="{a}" v2="{b}" v3="{c}"/>\n' for a, b, c in tris)
-            + '    </triangles>\n   </mesh>\n  </object>\n </resources>\n <build/>\n</model>\n').encode()
-
 def build_project(plates):
     """One project, one plate per entry of `plates`; plate i sits in Creality Print's slot i."""
     cols = int(np.ceil(np.sqrt(len(plates))))
@@ -384,9 +363,7 @@ def build_project(plates):
         model = pf['3D/3dmodel.model'].decode()
         ms = pf['Metadata/model_settings.config'].decode()
         by_stl = {part['stl']: part for part, _ in placed}
-        idmap, blockers = {}, {}
-        comp = lambda path, oid, tf: (f'    <component p:path="{path}" objectid="{oid}" '
-                                      f'p:UUID="{oid:04x}0000-b206-40ff-9872-83e8017abed1" transform="{tf}"/>\n')
+        idmap = {}
         for m in re.finditer(r'<object id="(\d+)"[^>]*>\s*<components>\s*<component p:path="([^"]+)" objectid="\d+"[^>]*transform="([^"]+)"/>', model):
             oid, path, tf = m.groups()
             sub, new = next_id, next_id + 1
@@ -396,18 +373,9 @@ def build_project(plates):
                              pf[path.lstrip('/')].decode(), count=1)
             files[path.lstrip('/')] = sub_xml.encode()
             rels.append(path)
-            comps = comp(path, sub, tf)
-            part = by_stl[re.fullmatch(r'/3D/Objects/(.+)_\d+\.model', path).group(1)]
-            if part['block']:
-                blk = next_id
-                next_id += 1
-                bpath = path[:-len('.model')] + '_blocker.model'
-                files[bpath.lstrip('/')] = blocker_model(sub_xml, blk, part['block'])
-                rels.append(bpath)
-                comps += comp(bpath, blk, tf)
-                blockers[new] = (blk, part['block'])
             objects.append(f'  <object id="{new}" p:UUID="{new:08x}-61cb-4c03-9d28-80fed5dfa1dc" type="model">\n'
-                           f'   <components>\n{comps}   </components>\n  </object>')
+                           f'   <components>\n    <component p:path="{path}" objectid="{sub}" '
+                           f'p:UUID="{sub:04x}0000-b206-40ff-9872-83e8017abed1" transform="{tf}"/>\n   </components>\n  </object>')
         for m in re.finditer(r'<item objectid="(\d+)"[^>]*transform="([^"]+)"[^>]*/>', model):
             t = m.group(2).split()
             t[9], t[10] = f'{float(t[9]) + ox:.6g}', f'{float(t[10]) + oy:.6g}'
@@ -423,14 +391,6 @@ def build_project(plates):
             x = x.replace(f'<metadata key="name" value="{stl}"/>', f'<metadata key="name" value="{esc(part["name"])}"/>', 1)
             x = x.replace('<metadata key="extruder" value="1"/>', '<metadata key="extruder" value="1"/>'
                           + ''.join(f'\n    <metadata key="{k}" value="{v}"/>' for k, v in part['settings'].items()), 1)
-            if new in blockers:
-                blk, h = blockers[new]
-                x = x.replace('</object>', f'''  <part id="{blk}" subtype="support_blocker">
-      <metadata key="name" value="No supports below {h:g} mm"/>
-      <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>
-      <mesh_stat edges_fixed="0" degenerate_facets="0" facets_removed="0" facets_reversed="0" backwards_edges="0"/>
-    </part>
-  </object>''')
             ms_objects.append('  ' + x)
         pl = re.search(r'<plate>.*?</plate>', ms, flags=re.S).group(0)
         pl = re.sub(r'<metadata key="plater_id" value="\d+"/>', f'<metadata key="plater_id" value="{i + 1}"/>', pl)
@@ -489,8 +449,13 @@ if __name__ == '__main__':
     os.makedirs(WORK, exist_ok=True)
     plates = pack(collect_parts())
     for i, placed in enumerate(plates):
-        print(f'plate {i + 1}:', ', '.join(f"{p['name']} ({'supports from plate' if p['settings']['support_on_build_plate_only'] == '1' else 'supports everywhere'})"
-                                          for p, _ in placed))
+        print(f'plate {i + 1}:')
+        for p, _ in placed:
+            sup = p['settings'].get('enable_support') == '1'
+            sup = ('supports from plate' if p['settings']['support_on_build_plate_only'] == '1'
+                   else 'supports everywhere') if sup else 'no supports'
+            print(f"  {p['name']}: {sup}; overhangs {p['overhangs'][0]:.0f} mm2 over the bed, "
+                  f"{p['overhangs'][1]:.0f} mm2 over the part")
     path = build_project(plates)
     print('wrote', os.path.relpath(path, HERE))
     if '--no-slice' not in sys.argv:

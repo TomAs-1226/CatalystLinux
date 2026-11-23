@@ -54,6 +54,51 @@ All STLs in `stl/` are already oriented for the bed (z = 0 is the bed).
 
 **Total of the new black parts:** both backplates, bezel, small parts and fit test come to **about 3 h 04 min and 81 g**.
 
+### Ready-to-print plate: `plates/black-PLA.3mf`
+
+**One plate for the Creality SPARKX i7**, all in black PLA:
+
+- the bezel;
+- both backplates;
+- the link cover;
+- the lens ring;
+- the UnitV pins.
+
+It takes **about 3 h 18 min and 66.6 g**, brims included, as sliced by Creality Print 7.3.2. The fit test is not on it. Nor are the chassis and plunger, which are the white PETG parts.
+
+**Settings.** The file uses Creality Print's own SPARKX i7 0.4 nozzle presets ("0.20mm Standard", "Generic PLA"). Each part keeps its layer height, walls and infill from the table above. On top of that:
+
+- **Adhesion:**
+  - first layer 0.25 mm thick and 0.44 mm wide, at 30 mm/s;
+  - a 7 mm outer brim on the bezel and backplates, and 5 mm on the small parts, with a 0.1 mm gap so it peels off;
+  - bed 60 °C; no fan for the first 2 layers, full fan from layer 4.
+- **Supports:** none; revision 3 needs none. Organic tree supports from the build plate are set up in case a part ever needs them.
+- **Stringing:**
+  - 210 °C (215 °C first layer), flow capped at 11 mm³/s;
+  - retraction 1.0 mm at 40 mm/s (the i7 is direct drive), wipe on, 0.2 mm z-hop;
+  - avoid crossing walls, travel at 400 mm/s.
+- **Speed:** outer walls 70 mm/s, inner walls 150, top 100, bridges 30. Overhang walls slow to 50, 30, 20 and 10 mm/s as they get steeper.
+- **Look:** seam at the rear, gyroid infill, 4 bottom layers.
+
+**To print:**
+
+1. Clean the plate.
+2. Open the file in Creality Print. Check that the printer is **SPARKX i7 0.4 nozzle** and that the filament points at the CFS slot holding the black PLA.
+3. Press **Slice**, then **Print**.
+
+**If a print fails:**
+
+- **Parts lift or come loose:**
+  - Wash the plate with dish soap and water, or wipe it with IPA, and don't touch it afterwards.
+  - Watch the first layer: lines should be flat and touching, with no gaps or ridges. If not, re-run the printer's auto-levelling or adjust the Z offset.
+  - If a brim corner still lifts, put a little glue stick under it.
+- **Stringing, popping or a rough, bubbly surface:** the filament is damp. Dry PLA at 45-50 °C for 4-6 h.
+
+**Rebuilding.** After a change to the model, run `py -3 -I plates/make_plates.py`.
+
+- It needs numpy, plus Creality Print 7.3.2 and OrcaSlicer 2.5.2 unpacked in `plates/.tools/` (see the top of the script).
+- It prints each part's overhang area. If that grows, re-check the part's support setting in `PARTS`.
+
 ## 2. Hardware
 
 | Qty | Part | Goes | Notes |
@@ -183,6 +228,7 @@ The chassis and its screws stay on the device.
 | --- | --- |
 | `case.scad` | Parametric model. Frozen chassis/plunger modules, print orientations (`*_print`), fit test, interference checks (`part="chk"`) |
 | `stl/` | Print-ready STLs (section 1) |
+| `plates/` | `black-PLA.3mf`, the ready-to-print SPARKX i7 plate, and `make_plates.py`, which builds and check-slices it |
 | `renders/` | Renders of both backplates |
 | `tools/build.py` | Exports the STLs. Never rewrites the frozen chassis or plunger |
 | `tools/estimate.py` | Slices `stl/` with PrusaSlicer for times and grams |
