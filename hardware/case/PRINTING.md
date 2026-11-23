@@ -28,6 +28,14 @@ The first print failed. Revision 3 fixes each cause, and revision 3.1 fixes the 
 | New black parts | 57.6 g, about 2 h 04 min | 36.0 g, about 1 h 07 min |
 | Weight with the CardputerZero (95 g), chassis, UnitV, cable and screws | about 180 g | about 140 g |
 
+> **Known issue (camera backplate, revision 3.1): do not print it yet.** The
+> Grove cable channel comes out as a solid ridge, not a channel:
+> `channel2d()`'s `round2d(4.0)` deletes the 5 mm-wide channel, leaving an
+> 8.2 mm-wide, 3.5 mm-tall ridge with the cable lips buried in it and only
+> 1.3 mm under the UnitV. `check_fit.py` and `check_thin.py` do not catch
+> it. The plain backplate is not affected. Fix the model before the camera
+> back is printed.
+
 ## 1. Parts
 
 All STLs in `stl/` are already oriented for the bed (z = 0 is the bed).
