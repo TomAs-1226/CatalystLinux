@@ -1912,7 +1912,10 @@ mod tests {
         press(&mut screen, Key::Back);
         assert!(matches!(screen.page, Page::Yours) && screen.list.focus == 1, "back where it was");
         // Offline, a list none of which is on the card says so (and asks nothing).
-        assert!(card_copy(&lists.playlists[1]).is_none());
+        // (A list of its own: the tests share one library, and others save
+        // songs to the demo's playlists.)
+        let none_here = Collection { title: "Nothing On The Card Here".into(), ..lists.playlists[1].clone() };
+        assert!(card_copy(&none_here).is_none());
         // Signed out again: gone, and forgotten.
         super::super::signed_in_for_shots(false);
         assert!(account::lists().is_empty() && !screen.start_rows().contains(&StartRow::Yours));

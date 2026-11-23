@@ -421,7 +421,7 @@ struct Made {
     songs: Option<Vec<Song>>,
     albums: Option<Vec<Album>>,
     artists: Option<Vec<(String, usize, usize)>>,
-    playlists: Option<(std::time::SystemTime, Vec<(String, Vec<Song>)>)>,
+    playlists: Option<((PathBuf, std::time::SystemTime), Vec<(String, Vec<Song>)>)>,
 }
 
 static MADE: Mutex<Made> = Mutex::new(Made { of: None, songs: None, albums: None, artists: None, playlists: None });
@@ -485,7 +485,10 @@ pub fn playlist_count() -> usize {
 }
 
 fn with_playlists<T>(f: impl FnOnce(&[(String, Vec<Song>)]) -> T) -> T {
-    let folder = std::fs::metadata(store::library_dir().join("Playlists")).and_then(|m| m.modified()).ok();
+    // Which folder, and when it last changed: another library (a test's)
+    // is never taken for this one.
+    let dir = store::library_dir().join("Playlists");
+    let folder = std::fs::metadata(&dir).and_then(|m| m.modified()).ok().map(|at| (dir, at));
     made(|m, idx| {
         match (folder, &m.playlists) {
             (Some(at), Some((made_at, lists))) if *made_at == at => f(lists),
