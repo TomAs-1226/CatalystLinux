@@ -946,30 +946,34 @@ Developer options › **Tear-free panel** drives it the panel's own way:
 - **Upright.** The `cardputerzero-portrait` overlay, applied after M5Stack's,
   gives the panel its own init sequence. That is
   `cardputerzero,st7789v_portrait.bin`, made from M5Stack's by
-  `scripts/panel-portrait-blob.py`, with MADCTL `0x00` and nothing else
-  changed. It also gives a framebuffer of 170 × 320 on the 170 of the
+  `scripts/panel-portrait-blob.py`, with MADCTL `0x00` and FRCTRL2 `0x10`
+  (59.9 refreshes a second, just under the shell's 60 frames, where the
+  panel's own 61.8 showed one frame in 33 twice). It also gives a framebuffer of 170 × 320 on the 170 of the
   controller's 240 columns that the glass shows: the same pixels as
   M5Stack's landscape mode, one for one. The shell turns its 320 × 170
   picture a quarter as it sends it, and sends only the columns that changed
   (now a run of the panel's rows).
-- **Timed from the scan.** The panel's tearing-effect line (GPIO5, wired by
-  M5Stack, its code in their driver but switched off) is switched on by
-  patch 0003. Its interrupt stays on while the panel is on, and each rising
-  edge (the scan leaving the last row) only notes the time: that gives the
-  scan's phase, and between two edges its speed (16.2 ms a refresh, 49 µs a
-  row over 320 rows and 10 of porch).
-- **Never crossed.** A frame is 108,800 bytes (320 × 170 at 16 bits). The SPI
-  clock is the core clock over an even divisor, so the 60 MHz asked for is
-  about 42 MHz (core at 250 MHz) to 50 MHz (400): 17 to 21 ms a frame, 54 to
-  65 µs a row. That is slower than the scan, so a band of rows follows it:
-  the driver starts it just after the scan has passed its first row. That
-  refresh shows the old rows, the next shows the new ones whole, provided
-  the band is done before the scan comes round behind it. The gap closes at
-  5 to 16 µs a row, at most 5.2 ms over the whole height against a 16.2 ms
-  period, so a flush can usually start at once and otherwise waits for the
-  scan. Were writing ever faster than the scan, the driver would lead it
-  instead (start while the scan is above the band, or once it is past). The
-  time a row takes to write is measured on the flushes themselves.
+- **Timed from the scan.** The panel's tearing-effect line is wired: the
+  panel's connector JP2 pin 7, net `G5_LCD_TE`, through R69 (0 Ω) to the
+  CM0's pin 85, GPIO5 (schematic V0.6.1, sheets 7, 5 and the pin table on
+  1). M5Stack left `te-gpios` commented out and its code switched off;
+  patch 0003 switches it on. Its interrupt stays on while the panel is on,
+  and each rising edge (the scan leaving the last row) only notes the time:
+  that gives the scan's phase, and between two edges its speed (16.7 ms a
+  refresh, 50.6 µs a row over 320 rows and 10 of porch).
+- **Never crossed.** A frame is 108,800 bytes (320 × 170 at 16 bits): at
+  62.5 MHz (patch 0007) about 44 µs a row, a little faster than the scan.
+  Each flush lands its first row a time *d* after the scan has passed that
+  row, with every row of the band written after this refresh's scan has
+  read it and before the next one's does: this refresh shows the old rows,
+  the next the new ones whole. Over the band *d* changes by rows × (the
+  write's row time − the scan's), about 2 ms over a whole frame, so the
+  window is most of the period: all but about 3.3 ms of 16.7, margins
+  included (0.3 ms behind this refresh's scan, 1 ms ahead of the next, as a
+  write held up on its way only falls back). Most flushes go at once; the
+  rest wait a few milliseconds at most. The pixels' bytes are swapped before
+  the wait, so the wait ends where the first pixel goes out, and the time a
+  row takes is measured on the wire (patch 0008).
 
 The first version of this mode tore all the same and looked worse. Each
 flush enabled the interrupt, waited for one edge and disabled it again. The
@@ -981,8 +985,15 @@ the panel to 40 refreshes a second, which made motion look rougher. Now the
 interrupt is disabled for real (`IRQ_DISABLE_UNLAZY`) and the panel keeps
 its own 60.
 
+The second version tore once the link reached 62.5 MHz. It had been written
+for a link slower than the scan, so a band followed it; faster, a whole frame
+led instead, from the blank. It waited almost a refresh for it, then spent
+its 10 rows of porch, and more, swapping its bytes before the first one went
+out: the write set off behind the scan, caught it up 60 or so rows down and
+tore there, every frame. Patch 0008 has one rule for either speed (above).
+
 `/sys/bus/spi/devices/spi0.0/tearing_effect` says how it is doing:
-`state=in-step period_ns=… write_ps=… followed=… led=… unsynced=…`. The
+`state=in-step period_ns=… write_ps=… at_once=… waited=… unsynced=…`. The
 Tear-free panel row reads it: *on · in step*, *on · timing* while it times
 the first edges, or *on · no sync* if the line never moves. After three
 flushes with no edge, flushes go out as before until the panel is next

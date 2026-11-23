@@ -5,8 +5,8 @@
 //! and columns exchanged), so the panel refreshes its gate lines across the
 //! picture's columns while frames arrive row by row, and anything moving
 //! tears on a diagonal. The tear-free mode (the `cardputerzero-portrait`
-//! overlay, its init sequence and the driver's tearing-effect line, patch
-//! 0003) drives it upright, in its own order, at its own 60 refreshes a
+//! overlay, its init sequence and the driver's tearing-effect line, patches
+//! 0003 and 0008) drives it upright, in its own order, at 59.9 refreshes a
 //! second, each flush timed from the panel's scan so the scan never crosses
 //! the rows being written; the shell turns the picture a quarter as it sends
 //! it (`platform::Turn`), pixel for pixel.
@@ -133,7 +133,7 @@ pub fn sync() -> Sync {
     found.map_or(Sync::Unknown, |text| parse_sync(&text))
 }
 
-/// `state=in-step period_ns=16650000 write_ps=… followed=… led=… unsynced=…`
+/// `state=in-step period_ns=16698000 write_ps=… at_once=… waited=… unsynced=…`
 pub fn parse_sync(text: &str) -> Sync {
     let field = |name: &str| text.split_whitespace().find_map(|w| w.strip_prefix(name)?.strip_prefix('='));
     let period = field("period_ns").and_then(|p| p.parse::<f64>().ok()).filter(|p| *p > 0.0);

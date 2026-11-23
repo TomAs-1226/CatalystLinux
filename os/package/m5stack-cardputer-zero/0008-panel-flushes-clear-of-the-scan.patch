@@ -1,0 +1,377 @@
+From: Catalyst Linux
+Subject: [PATCH] panel-mipi-dbi-m: flushes clear of the scan at the link's full speed
+
+Patch 0003 timed each flush from the tearing-effect line for a link slower
+than the panel's scan (54 to 65 us a row against 49), and led the scan from
+above the band otherwise. Patch 0007 then took the link to 62.5 MHz: about
+44 us a row, faster than the scan. A whole frame then always led: it waited
+for the next blank (8 ms on average, almost a refresh at worst), then spent
+its 10 rows of porch, and more, on the swap of every pixel's bytes, so the
+write set off behind the scan, caught it up 60 or so rows down, and tore
+there, every frame.
+
+- One rule, whichever is faster: the band's first row lands a time d after
+  the scan has passed it, with d such that every row of the band is
+  written after this refresh's scan has read it and before the next one's
+  does. Over the band d changes by rows x (write's row time - scan's), so
+  the window is most of a period: at 62.5 MHz and 59.9 Hz, all but about
+  3.3 ms of 16.7. Most flushes go at once; the rest wait for the window's
+  start (worked through on 20,000 random flushes: none torn, one in six
+  waited, the longest 3.4 ms; patch 0003's timing tore all of them).
+- The pixels' bytes are swapped, and the window set, before the wait, so
+  that the wait ends where the first pixel goes out and the time measured
+  per pixel is the wire's alone.
+- A larger margin ahead of the next refresh's scan (1 ms) than behind this
+  one's (0.3 ms): a write held up on its way can only fall back towards
+  the next.
+- The edge's time as best known: an interrupt is only ever late, so an
+  edge sooner than due is taken as it is and a later one only eases the
+  timing on.
+- A wake-up late past its window waits again (three tries).
+- Before the first flush is measured, a row's time comes from link_hz.
+- tearing_effect counts at_once, waited and unsynced flushes (the shell
+  reads only state and period_ns).
+
+The panel's rate is set by its init sequence: 59.9 Hz in the portrait one
+(FRCTRL2 0x10, scripts/panel-portrait-blob.py). Without `te-gpios` nothing
+changes.
+
+--- a/modules/st7789v-1.0/panel-mipi-dbi-m.c
++++ b/modules/st7789v-1.0/panel-mipi-dbi-m.c
+@@ -25,6 +25,7 @@
+ #include <drm/drm_damage_helper.h>
+ #include <drm/drm_drv.h>
+ #include <drm/drm_fbdev_dma.h>
++#include <drm/drm_fourcc.h>
+ #include <drm/drm_framebuffer.h>
+ #include <drm/drm_gem_atomic_helper.h>
+ #include <drm/drm_gem_dma_helper.h>
+@@ -32,6 +33,7 @@
+ #include <drm/drm_mipi_dbi.h>
+ #include <drm/drm_modes.h>
+ #include <drm/drm_modeset_helper.h>
++#include <drm/drm_print.h>
+ 
+ #include <soc/bcm2835/raspberrypi-firmware.h>
+ #include <video/mipi_display.h>
+@@ -50,20 +52,35 @@
+  * each edge only notes the time.
+  *
+  * A band of rows written in the scan's direction cannot tear unless the scan
+- * crosses it while it is being written. So each flush is started where it
+- * will not be crossed:
++ * crosses it while it is being written. So each flush lands its first row a
++ * time d after the scan has passed that row, with d such that every row of
++ * the band is written after this refresh's scan has read it and before the
++ * next refresh's does: this refresh shows the old rows, the next the new
++ * ones whole. Over the band, d changes by rows x (the write's row time - the
++ * scan's), so a flush goes at once when
+  *
+- * - Writing slower than the scan (this panel: SPI at about 42 to 50 MHz is
+- *   54 to 65 us a row, the scan 49 us a row at 60 Hz), the band follows the
+- *   scan: it starts just after the scan has passed its first row. This
+- *   refresh shows the old rows, the next the new ones whole, provided the
+- *   band is done before the scan comes round again behind it: (rows x the
+- *   difference in row time) under a period, at most 5 ms of 16.7 here, so
+- *   most of the time a flush can go at once.
+- * - Writing faster than the scan, it leads: it starts while the scan is above
+- *   the band, or once the scan has gone past it.
++ *   trail margin + (what the write gains on the scan, if it is faster)
++ *     <= d <=
++ *   period - lead margin - (what it loses, if it is slower)
+  *
+- * How long a row takes to write is measured on the flushes themselves.
++ * and otherwise waits for the d where that begins (patch 0008). Whichever is
++ * faster, the window is most of a period: at 62.5 MHz (patch 0007) a row of
++ * 170 pixels takes about 44 us, the scan 50.6 at 59.9 Hz, and a whole frame
++ * gains 2 ms of the 16.7. Most flushes go at once; the rest wait a few
++ * milliseconds at most. The lead margin is the larger: a write held up on its way (the
++ * processor busy, the bus shared) falls back towards the next refresh's
++ * scan, never towards this one's.
++ *
++ * How long a row takes to write is measured on the flushes themselves. The
++ * pixels' bytes are swapped into the transmit buffer before the wait, so
++ * that what follows the wait, and what is measured, is the wire's time.
++ *
++ * (The first timing, patch 0003's, chose between following the scan, for a
++ * link slower than it, and leading it from above the band. At 62.5 MHz the
++ * write outruns the scan, so a whole frame led: it waited for the blank,
++ * almost a whole refresh, and then lost the 10 rows of porch it had to the
++ * swap of its bytes, so the write set off behind the scan, caught it up 60
++ * or so rows down, and tore there.)
+  *
+  * (Before, each flush enabled the interrupt, waited for an edge, and
+  * disabled it again. The BCM2835's GPIO interrupts have no disable of their
+@@ -74,8 +91,19 @@
+ #define CATALYST_TEAR_MODE_VBLANK	0x00
+ /* Rows the panel scans in each refresh besides the picture's: PORCTRL's 5 + 5. */
+ #define CATALYST_PORCH_ROWS		10
+-/* Rows kept between a band and the scan: the interrupt's and the commands' lateness. */
+-#define CATALYST_MARGIN_ROWS		6
++/*
++ * Time kept between a band and this refresh's scan, which it trails, and the
++ * next refresh's, which it leads: the edge's and the commands' lateness, and
++ * for the lead a write held up on its way.
++ */
++#define CATALYST_TRAIL_NS		(300 * NSEC_PER_USEC)
++#define CATALYST_LEAD_NS		(1000 * NSEC_PER_USEC)
++/* From the end of the wait to the band's first pixel: the write command. */
++#define CATALYST_START_NS		(50 * NSEC_PER_USEC)
++/* Waits a flush tries before it goes anyway (each woken late past its window). */
++#define CATALYST_WAIT_TRIES		3
++/* An edge this far from when one was due starts the timing afresh. */
++#define CATALYST_EDGE_SLIP_NS		(2 * NSEC_PER_MSEC)
+ /* How long a flush waits for an edge to time itself from before going anyway. */
+ #define CATALYST_TE_WAIT_MS		50
+ /* Flushes in a row that saw no edge before the line is taken to be silent. */
+@@ -109,12 +137,18 @@
+     bool te_silent;		/* no edges came: flushes no longer wait */
+     unsigned int te_missed;	/* flushes in a row that saw no edge */
+     wait_queue_head_t te_wait;
+-    spinlock_t te_lock;		/* the three below, written by the interrupt */
++    spinlock_t te_lock;		/* the four below, written by the interrupt */
+     u64 te_edges;		/* rising edges seen since the interrupt went on */
+     ktime_t te_last;		/* the latest */
++    /*
++     * When the latest came, as best known: an interrupt is only ever late,
++     * so an edge sooner than due is taken as it is, a later one only
++     * eases this on (patch 0008).
++     */
++    ktime_t te_anchor;
+     s64 te_period_ns;		/* time between two, smoothed; 0 until known */
+     u64 write_ps;		/* time a flush takes a pixel, smoothed; 0 until known */
+-    unsigned int te_followed, te_led, te_unsynced;	/* flushes, by how they went */
++    unsigned int te_at_once, te_waited, te_unsynced;	/* flushes, by how they went */
+     struct mutex display_lock;		/* Serialize reset and display transfers */
+     u32 link_hz;		/* Catalyst Linux: the link's speed when the core clock is held, else 0 */
+ };
+@@ -384,7 +418,8 @@
+  * Catalyst Linux: how the tearing-effect line is doing, for the shell
+  * (Settings > Developer options > Tear-free panel):
+  * "state=none|off|starting|in-step|silent period_ns=... write_ps=...
+- * followed=... led=... unsynced=...".
++ * at_once=... waited=... unsynced=...": flushes that went at once, that
++ * waited for the scan, and that went untimed (patch 0008).
+  */
+ static ssize_t tearing_effect_show(struct device *dev,
+                    struct device_attribute *attr, char *buf)
+@@ -414,9 +449,9 @@
+     else
+         state = "in-step";
+ 
+-    return sysfs_emit(buf, "state=%s period_ns=%lld write_ps=%llu followed=%u led=%u unsynced=%u\n",
+-              state, period, panel->write_ps, panel->te_followed,
+-              panel->te_led, panel->te_unsynced);
++    return sysfs_emit(buf, "state=%s period_ns=%lld write_ps=%llu at_once=%u waited=%u unsynced=%u\n",
++              state, period, panel->write_ps, panel->te_at_once,
++              panel->te_waited, panel->te_unsynced);
+ }
+ 
+ static DEVICE_ATTR_RO(tearing_effect);
+@@ -464,6 +499,16 @@
+             panel->te_period_ns = panel->te_period_ns ?
+                 (panel->te_period_ns * 7 + period) / 8 : period;
+     }
++    /* When it came, as best known (see te_anchor). */
++    if (panel->te_edges && panel->te_period_ns) {
++        ktime_t due = ktime_add_ns(panel->te_anchor, panel->te_period_ns);
++        s64 late = ktime_to_ns(ktime_sub(now, due));
++
++        panel->te_anchor = late > 0 && late < CATALYST_EDGE_SLIP_NS ?
++            ktime_add_ns(due, late / 8) : now;
++    } else {
++        panel->te_anchor = now;
++    }
+     panel->te_last = now;
+     panel->te_edges++;
+     spin_unlock_irqrestore(&panel->te_lock, flags);
+@@ -498,6 +543,15 @@
+     panel->te_on = on;
+ }
+ 
++/* x as a time within one period: 0 <= result < period. */
++static s64 panel_mipi_dbi_in_period(s64 x, s64 period)
++{
++    s32 rem;
++
++    div_s64_rem(x, (s32)period, &rem);
++    return rem < 0 ? rem + period : rem;
++}
++
+ /*
+  * Wait until rows y0..y1 (as wide as `width`) of a picture `rows` tall can
+  * be written without the scan crossing them (see the top of the file).
+@@ -505,11 +559,10 @@
+ static void panel_mipi_dbi_wait_for_te(struct panel_mipi_dbi_device *panel,
+                        const struct drm_rect *band, unsigned int rows)
+ {
+-    s64 y0 = band->y1, y1 = band->y2, period, scan, write, phase, wait = 0;
++    s64 y0 = band->y1, y1 = band->y2, period, scan, write, drift, lo, hi, d, wait;
+     unsigned long flags;
+-    ktime_t last, now;
+-    u64 edges;
+-    s32 rem;
++    ktime_t last, anchor, now;
++    u64 edges, ps;
+     int tries;
+ 
+     if (!panel->te || !panel->te_on || panel->te_silent)
+@@ -543,38 +596,47 @@
+     }
+ 
+     scan = div_s64(period, rows + CATALYST_PORCH_ROWS);
+-    write = div_u64((u64)drm_rect_width(band) * panel->write_ps, 1000);
+-    div_s64_rem(ktime_to_ns(ktime_sub(now, last)), (s32)period, &rem);
+-    phase = rem;	/* since the latest edge, in this refresh */
+-
+-    if (!write || write >= scan) {
+-        /* Follow: start once the scan has passed the first row... */
+-        s64 start = (CATALYST_PORCH_ROWS + y0 + CATALYST_MARGIN_ROWS) * scan;
+-        /* ...and soon enough to be done before it comes round again. */
+-        s64 slack = period - (y1 - y0) * (write > scan ? write - scan : 0)
+-            - 2 * CATALYST_MARGIN_ROWS * scan;
+-        s64 late = phase - start;
+-
+-        if (late < 0)
+-            late += period;
+-        if (late > max_t(s64, slack, 0))
+-            wait = period - late;
+-        panel->te_followed++;
+-    } else {
+-        /* Lead: start while the scan is above the band, or once it is past. */
+-        s64 above = (CATALYST_PORCH_ROWS + y0 - CATALYST_MARGIN_ROWS) * scan;
+-        s64 past = (CATALYST_PORCH_ROWS + y1 + CATALYST_MARGIN_ROWS) * scan;
++    /* A row's write: as measured, else as the link's speed says, else as the scan. */
++    ps = panel->write_ps;
++    if (!ps && panel->link_hz)
++        ps = div_u64(drm_format_info(panel->dbidev.pixel_format)->cpp[0] * 8ULL *
++                     1000000000000ULL, panel->link_hz);
++    write = ps ? (s64)div_u64((u64)drm_rect_width(band) * ps, 1000) : scan;
+ 
+-        if (phase >= above && phase <= past)
+-            wait = min(past, period) - phase;
+-        panel->te_led++;
++    /*
++     * The window for d (see the top of the file): over the band, the write
++     * gains on this refresh's scan when faster than it, and loses towards
++     * the next one's when slower.
++     */
++    drift = (y1 - y0) * (write - scan);
++    lo = CATALYST_TRAIL_NS + max_t(s64, -drift, 0);
++    hi = period - CATALYST_LEAD_NS - max_t(s64, drift, 0);
++    if (lo > hi) {
++        /* A band so long the scan laps it: no time is clean. */
++        panel->te_unsynced++;
++        return;
+     }
+ 
+-    if (wait > 0) {
+-        u64 us = div_u64(wait, NSEC_PER_USEC);
+-
+-        usleep_range(us, us + 50);
++    for (tries = 0; tries < CATALYST_WAIT_TRIES; tries++) {
++        spin_lock_irqsave(&panel->te_lock, flags);
++        anchor = panel->te_anchor;
++        spin_unlock_irqrestore(&panel->te_lock, flags);
++        now = ktime_get();
++        /* d: since the scan passed the band's first row, as that row lands. */
++        d = panel_mipi_dbi_in_period(ktime_to_ns(ktime_sub(now, anchor)) + CATALYST_START_NS -
++                                     (CATALYST_PORCH_ROWS + y0) * scan, period);
++        if (d >= lo && d <= hi) {
++            if (tries)
++                panel->te_waited++;
++            else
++                panel->te_at_once++;
++            return;
++        }
++        wait = panel_mipi_dbi_in_period(lo - d, period);
++        usleep_range(div_u64(wait, NSEC_PER_USEC), div_u64(wait, NSEC_PER_USEC) + 50);
+     }
++    /* Woken late past the window every time: as it is. */
++    panel->te_unsynced++;
+ }
+ 
+ /* Catalyst Linux: how long a flush took a pixel, for timing the next. */
+@@ -625,6 +687,55 @@
+     drm_dev_exit(idx);
+ }
+ 
++/*
++ * Catalyst Linux: a flush timed from the panel's scan (patch 0008). As
++ * mipi_dbi_pipe_update would, but with the pixels' bytes swapped into the
++ * transmit buffer and the window set before the wait, so that the band's
++ * first pixel goes out right as the wait ends (the swap of a whole frame
++ * is most of a millisecond: 20 rows of the scan).
++ */
++static void panel_mipi_dbi_timed_update(struct panel_mipi_dbi_device *panel,
++                                        struct drm_plane_state *state,
++                                        struct drm_rect *band)
++{
++    struct mipi_dbi_dev *dbidev = &panel->dbidev;
++    struct mipi_dbi *dbi = &dbidev->dbi;
++    struct drm_shadow_plane_state *shadow = to_drm_shadow_plane_state(state);
++    struct drm_framebuffer *fb = state->fb;
++    const struct drm_format_info *format = fb->format;
++    unsigned int xs = band->x1 + dbidev->left_offset, xe = band->x2 - 1 + dbidev->left_offset;
++    unsigned int ys = band->y1 + dbidev->top_offset, ye = band->y2 - 1 + dbidev->top_offset;
++    ktime_t start;
++    size_t len;
++    int idx, ret;
++
++    if (!drm_dev_enter(fb->dev, &idx))
++        return;
++
++    ret = mipi_dbi_buf_copy(dbidev->tx_buf, &shadow->data[0], fb, band,
++                            dbi->swap_bytes, &shadow->fmtcnv_state);
++    if (ret)
++        goto out;
++    mipi_dbi_command(dbi, MIPI_DCS_SET_COLUMN_ADDRESS, (xs >> 8) & 0xff, xs & 0xff,
++                     (xe >> 8) & 0xff, xe & 0xff);
++    mipi_dbi_command(dbi, MIPI_DCS_SET_PAGE_ADDRESS, (ys >> 8) & 0xff, ys & 0xff,
++                     (ye >> 8) & 0xff, ye & 0xff);
++
++    panel_mipi_dbi_wait_for_te(panel, band, fb->height);
++
++    if (format->format == DRM_FORMAT_XRGB8888)
++        format = drm_format_info(dbidev->pixel_format);
++    len = drm_format_info_min_pitch(format, 0, drm_rect_width(band)) * drm_rect_height(band);
++    start = ktime_get();
++    ret = mipi_dbi_command_buf(dbi, MIPI_DCS_WRITE_MEMORY_START, (u8 *)dbidev->tx_buf, len);
++    if (!ret)
++        panel_mipi_dbi_note_write(panel, band, ktime_sub(ktime_get(), start));
++out:
++    if (ret)
++        drm_err_once(fb->dev, "Failed to update display %d\n", ret);
++    drm_dev_exit(idx);
++}
++
+ /* Update callback remains locked to serialize normal transfers with reset. */
+ static void panel_mipi_dbi_pipe_update(struct drm_simple_display_pipe *pipe,
+                        struct drm_plane_state *old_state)
+@@ -633,20 +744,15 @@
+     struct panel_mipi_dbi_device *panel = to_panel_mipi_dbi_device(dbidev);
+     struct drm_plane_state *state = pipe->plane.state;
+     struct drm_rect band;
+-    bool timed = false;
+-    ktime_t start;
+ 
+     mutex_lock(&panel->display_lock);
+     /* Catalyst Linux: in step with the panel's scan, where it says where that is. */
+-    if (panel->te && pipe->crtc.state && pipe->crtc.state->active && state->fb &&
+-        drm_atomic_helper_damage_merged(old_state, state, &band)) {
+-        panel_mipi_dbi_wait_for_te(panel, &band, state->fb->height);
+-        timed = true;
+-    }
+-    start = ktime_get();
+-    mipi_dbi_pipe_update(pipe, old_state);
+-    if (timed)
+-        panel_mipi_dbi_note_write(panel, &band, ktime_sub(ktime_get(), start));
++    if (panel->te && panel->te_on && !panel->te_silent &&
++        pipe->crtc.state && pipe->crtc.state->active && state->fb &&
++        drm_atomic_helper_damage_merged(old_state, state, &band))
++        panel_mipi_dbi_timed_update(panel, state, &band);
++    else
++        mipi_dbi_pipe_update(pipe, old_state);
+     mutex_unlock(&panel->display_lock);
+ }
+ 
