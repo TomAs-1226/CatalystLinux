@@ -6,11 +6,12 @@
 
 # Raised with each change to the program: a new version is a new build
 # directory, so the next image build compiles it afresh by itself.
-CATALYST_CAMERA_VERSION = 1.3
+CATALYST_CAMERA_VERSION = 1.4
 CATALYST_CAMERA_SITE = $(BR2_EXTERNAL_CATALYST_PATH)/package/catalyst-camera/src
 CATALYST_CAMERA_SITE_METHOD = local
 CATALYST_CAMERA_LICENSE = MIT
-# Photos are written as JPEG through libjpeg (libjpeg-turbo, with NEON).
+# Photos are written as JPEG through libjpeg (libjpeg-turbo, with NEON), on
+# three cores (src/photo.h; test/photo-test.cpp checks it under qemu).
 CATALYST_CAMERA_DEPENDENCIES = libcamera jpeg host-pkgconf
 
 # libcamera's flags are asked for when it is built, not when this file is read.

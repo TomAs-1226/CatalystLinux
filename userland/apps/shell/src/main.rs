@@ -56,6 +56,9 @@ mod apriltags;
 mod brand;
 mod burst;
 mod camera;
+mod dng;
+mod filters;
+mod pro;
 mod smartcam;
 mod unitv;
 mod calc;
@@ -465,6 +468,11 @@ fn main() {
     if args.iter().any(|a| a == "--merge-burst") {
         std::process::exit(burst::run(&args));
     }
+    // A RAW photo's frame (dng.rs), handed over by catalyst-camera the same
+    // way: written as a DNG, and it ends.
+    if args.iter().any(|a| a == "--write-dng") {
+        std::process::exit(dng::run(&args));
+    }
     // The packed simulator is always the simulator, double-clicked or started
     // from a terminal with options of its own (`--no-intro`, `--light`). It
     // runs at the computer's full speed, in step with its screen, unless asked
@@ -653,6 +661,11 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--camera-shots") {
         return camera::shots(std::path::Path::new(&dir));
+    }
+    // Pro mode, the looks, the focus check and the instant shot (0.9.2).
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--camera-pro-shots") {
+        return camera::pro_shots(std::path::Path::new(&dir));
     }
     // The smart camera's install over USB-A, and Settings › Camera (0.9.1).
     #[cfg(not(target_arch = "aarch64"))]

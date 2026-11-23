@@ -670,15 +670,19 @@ pub fn expect_ms(frames: usize, w: usize, h: usize) -> u64 {
 }
 
 /// Refine `photo` from `frames`: the marker written while it runs, the
-/// merged photo put in its place, the time kept for the next estimate.
-pub fn refine(photo: &Path, frames: &[&[u8]], w: usize, h: usize, faces: &[Face], threads: usize) -> Result<Report, String> {
+/// merged photo put in its place, the time kept for the next estimate. For
+/// a photo wearing a look (filters.rs), the merged frame is written first
+/// as the photo as taken (`original`), then with the look's table over it
+/// as the photo.
+#[allow(clippy::too_many_arguments)]
+pub fn refine_with(photo: &Path, frames: &[&[u8]], w: usize, h: usize, faces: &[Face], threads: usize, look: Option<&[u8]>, original: Option<&Path>) -> Result<Report, String> {
     let began = Instant::now();
     let mut marking = Refining { began_ms: now_ms(), expect_ms: expect_ms(frames.len(), w, h), progress: 0.0 };
     write_marker(photo, &marking);
     let result = (|| {
         let exif = std::fs::read(photo).ok().and_then(|j| exif_of(&j));
         let mut last = Instant::now();
-        let (merged, report) = merge(frames, w, h, faces, threads, &mut |p| {
+        let (mut merged, report) = merge(frames, w, h, faces, threads, &mut |p| {
             if last.elapsed().as_millis() > 400 {
                 marking.progress = p;
                 write_marker(photo, &marking);
@@ -687,6 +691,12 @@ pub fn refine(photo: &Path, frames: &[&[u8]], w: usize, h: usize, faces: &[Face]
         });
         if !photo.exists() {
             return Err("the photo was deleted while it was refined".to_owned());
+        }
+        if let Some(table) = look {
+            if let Some(original) = original.filter(|o| o.exists()) {
+                write_jpeg(original, &merged, w, h, exif.clone())?;
+            }
+            crate::filters::apply_yuv420(table, &mut merged, w, h);
         }
         write_jpeg(photo, &merged, w, h, exif)?;
         Ok(report)
@@ -713,6 +723,7 @@ pub fn run(args: &[String]) -> i32 {
         return 2;
     };
     let mut faces = Vec::new();
+    let (mut look, mut original) = (None, None);
     let mut words = head[3..].iter();
     while let Some(word) = words.next() {
         if word == "face" {
@@ -720,6 +731,11 @@ pub fn run(args: &[String]) -> i32 {
             if v.len() == 4 {
                 faces.push([v[0], v[1], v[2], v[3]]);
             }
+        } else if word == "look" {
+            // The look the photo wears (its table's file), laid over the merge too.
+            look = words.next().and_then(|f| std::fs::read(f).ok()).and_then(|b| crate::filters::read_lut_file(&b));
+        } else if word == "orig" {
+            original = words.next().map(PathBuf::from);
         }
     }
     let size = w * h * 3 / 2;
@@ -737,7 +753,7 @@ pub fn run(args: &[String]) -> i32 {
         return 1;
     }
     let frames: Vec<&[u8]> = held.iter().map(|f| f.bytes()).collect();
-    match refine(&photo, &frames, w, h, &faces, 3) {
+    match refine_with(&photo, &frames, w, h, &faces, 3, look.as_deref(), original.as_deref()) {
         Ok(r) => {
             println!("merged {} frames ({:.0}% kept, noise {:.1}) in {} + {} + {} ms", r.frames, r.kept * 100.0, r.noise, r.align_ms, r.merge_ms, r.finish_ms);
             0
