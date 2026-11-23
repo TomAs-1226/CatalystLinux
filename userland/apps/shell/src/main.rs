@@ -621,6 +621,13 @@ fn main() {
         shell.settings.accent = accent;
     }
     shell.apply_settings();
+    // The brightness kept, set at every start: the backlight keeps whatever
+    // it was left at across a restart, and a restart with the screen off (an
+    // update installed overnight) left it at its least, so the handheld
+    // started all but dark and stayed so.
+    if cfg!(target_os = "linux") && !flag("--sim") {
+        crate::sys::set_brightness(shell.settings.brightness);
+    }
 
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--shots") {
