@@ -99,6 +99,8 @@ const APPS: [App; 40] = [
     App { icon: "checklist", name: "Pit", open: |_| Box::new(crate::pit::Pit::default()) },
     // The robot batteries: which went in for each match, their health from the logs, the next to use.
     App { icon: "battery_charging_full", name: "Batteries", open: crate::batteries::open },
+    // Match scouting at speed on the keyboard, shared by QR with no internet.
+    App { icon: "fact_check", name: "Scout", open: |_| Box::new(crate::scout::Scout::new()) },
     App { icon: "settings_remote", name: "Remote", open: |_| Box::new(crate::irremote::Remotes::new()) },
     App { icon: "straighten", name: "Level", open: |_| Box::new(crate::level::Level::new()) },
     App { icon: "explore", name: "Compass", open: |_| Box::new(crate::level::Compass::new()) },
@@ -564,6 +566,7 @@ impl Home {
             },
             "Pit" => crate::pit::tile(robot),
             "Batteries" => crate::batteries::tile(),
+            "Scout" => ("matches · picks".into(), None),
             "Console" => ("robot log".into(), None),
             "Terminal" => ("shell".into(), None),
             "Files" => ("storage".into(), None),

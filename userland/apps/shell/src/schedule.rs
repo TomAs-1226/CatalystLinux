@@ -386,7 +386,7 @@ fn fetch_tba(team: u32, key: &str) -> Result<View, String> {
 }
 
 /// One HTTPS GET with `curl`, as JSON. curl checks the server's certificate.
-fn get(url: &str, headers: &[(&str, &str)]) -> Result<Value, String> {
+pub(crate) fn get(url: &str, headers: &[(&str, &str)]) -> Result<Value, String> {
     let mut command = std::process::Command::new("curl");
     command.args(["-fsS", "--max-time", "15", "--proto", "=https"]);
     for (name, value) in headers {
