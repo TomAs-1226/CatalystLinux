@@ -41,6 +41,11 @@ dtoverlay=dwc2
 # and off again five seconds after the last sound.
 gpio=24=op,dl
 
+# The Grove port's lines on the UART from the first instant (GPIO4 low): out
+# of reset GPIO4 is high, which puts them on the I2C bus the I/O expander is
+# on, and a device on the port then hid the expander and darkened the panel.
+gpio=4=op,dl
+
 # The board: I/O expander, panel, backlight, keyboard, fuel gauge.
 dtoverlay=cardputerzero-v5-overlay
 dtoverlay=bq27220_v5

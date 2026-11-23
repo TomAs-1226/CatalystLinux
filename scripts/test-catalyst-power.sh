@@ -52,6 +52,10 @@ core_freq=250
 core_freq_min=250
 # catalyst-power: end
 
+# catalyst-power: the Grove port's lines on the UART from the first instant
+gpio=4=op,dl
+# catalyst-power: end
+
 # Which system starts: written by catalyst-update. [all] is the system in
 # use; [tryboot] the one an update is tried in, once, after reboot "0 tryboot".
 [all]
@@ -140,7 +144,7 @@ rm -f "$T/tryboot"
 echo "== both trials at once"
 $P panel on
 $P undervolt on
-check "both blocks in, with the clock's" "$(grep -c '^# catalyst-power: end$' "$T/boot/config.txt")" "3"
+check "both blocks in, with the clock's and the Grove's" "$(grep -c '^# catalyst-power: end$' "$T/boot/config.txt")" "4"
 $P panel off
 check "the panel's out, the voltage's stays" "$(grep -c '^over_voltage=-1$' "$T/boot/config.txt"):$(grep -c '^dtoverlay=cardputerzero-portrait$' "$T/boot/config.txt")" "1:0"
 $P undervolt off
@@ -162,6 +166,24 @@ check "above the system block" "$([ "$clock" -lt "$slots" ] && echo yes)" "yes"
 $P boot >/dev/null
 check "the next start leaves it be" "$(grep -c '^core_freq=250$' "$T/boot/config.txt")" "1"
 check "the system block untouched" "$(sed -n '/^\[all\]$/,$p' "$T/boot/config.txt" | tr '\n' ' ')" "[all] os_prefix=slot-a/ [tryboot] os_prefix=slot-b/ "
+cp "$T/original.txt" "$T/boot/config.txt"
+
+echo "== the Grove port's lines on the UART, on a handheld updated from before it"
+awk '
+	skip == 1 { if ($0 == "# catalyst-power: end") skip = 2; next }
+	skip == 2 { skip = 0; if ($0 == "") next }
+	index($0, "# catalyst-power: the Grove port") == 1 { skip = 1; next }
+	{ print }
+' "$T/original.txt" >"$T/boot/config.txt"
+check "without it to begin with" "$(grep -c '^gpio=4=op,dl$' "$T/boot/config.txt")" "0"
+check "a start puts it in, and nothing else happens" "$($P boot)" ""
+check "GPIO4 low from the first instant, once" "$(grep -c '^gpio=4=op,dl$' "$T/boot/config.txt")" "1"
+$P boot >/dev/null
+check "the next start leaves it be" "$(grep -c '^gpio=4=op,dl$' "$T/boot/config.txt")" "1"
+# Put in by hand (as on 23 November), without the marker: not twice.
+grep -v '^# catalyst-power: the Grove port' "$T/original.txt" >"$T/boot/config.txt"
+$P boot >/dev/null
+check "a line put in by hand is not doubled" "$(grep -c '^gpio=4=op,dl$' "$T/boot/config.txt")" "1"
 cp "$T/original.txt" "$T/boot/config.txt"
 
 # Deep standby, against a sysfs laid out as the handheld's: Wi-Fi running,

@@ -61,6 +61,7 @@ begin_of() {
 	undervolt) echo "# catalyst-power: lower voltage (Settings > Developer options)" ;;
 	panel) echo "# catalyst-power: tear-free panel (Settings > Developer options)" ;;
 	clock) echo "# catalyst-power: the core clock held, so the panel's link holds 62.5 MHz" ;;
+	grove) echo "# catalyst-power: the Grove port's lines on the UART from the first instant" ;;
 	esac
 }
 
@@ -69,6 +70,7 @@ lines_of() {
 	undervolt) printf 'over_voltage=-1\nover_voltage_min=-2\n' ;;
 	panel) printf 'dtoverlay=cardputerzero-portrait\n' ;;
 	clock) printf 'core_freq=250\ncore_freq_min=250\n' ;;
+	grove) printf 'gpio=4=op,dl\n' ;;
 	esac
 }
 
@@ -212,13 +214,30 @@ boot_trial() {
 # clock block, if config.txt has none yet. Looked for with the partition
 # read-only; written only when it is missing, so once.
 ensure_clock() {
+	ensure_block clock
+}
+
+# The Grove port's two lines go through a switch (GPIO4, grove_fun) to the
+# PL011 or to the I2C bus the I/O expander is on. GPIO4 comes out of reset
+# pulled high, the I2C side: a device on the port (the smart camera, powered
+# or not) then held the bus while the expander was looked for, the expander
+# was never there, and with it the panel stayed dark (23 November 2026).
+# Driven low by the firmware from the first instant, the lines are the
+# UART's before anything looks for the expander.
+ensure_grove() {
+	ensure_block grove "gpio=4=op,dl"
+}
+
+# A block, if config.txt has neither its marker nor (given) its line yet.
+ensure_block() {
 	mkdir -p "$MNT"
 	mount -t vfat -o ro "$BOOT_DEV" "$MNT" || return 1
-	grep -qxF "$(begin_of clock)" "$MNT/config.txt"
-	found=$?
+	found=1
+	grep -qxF "$(begin_of "$1")" "$MNT/config.txt" && found=0
+	[ -n "$2" ] && grep -qxF "$2" "$MNT/config.txt" && found=0
 	umount "$MNT"
 	[ $found = 0 ] && return 0
-	with_boot add_block clock
+	with_boot add_block "$1"
 }
 
 # Deep standby: as near off as the handheld can be while a key can still wake
@@ -409,6 +428,7 @@ boot)
 	boot_trial undervolt
 	boot_trial panel
 	ensure_clock
+	ensure_grove
 	;;
 *)
 	echo "usage: $0 wifi-sleep|wifi-wake|undervolt ...|panel ...|deep ...|boot" >&2
