@@ -43,29 +43,48 @@ All STLs in `stl/` are already oriented for the bed. Each file is named `part__m
 - **Light blue:** link cover.
 - **White PETG:** chassis and plunger.
 
-**Ready-to-print plates for the Creality SPARKX i7.** `plates/` has one Creality Print project per colour. Each is set up for the i7 with a 0.4 mm nozzle, the 260 × 260 mm textured PEI plate and the CFS Lite. Every setting in the table above is already in the file. Times and weights come from Creality Print 7.3.2 slicing each file.
+**Ready-to-print plate for the Creality SPARKX i7.** `plates/make_plates.py` builds `plates/black-PLA.3mf`. Every part prints in black PLA, packed onto as few 260 × 260 mm plates as fit (one for the current parts). Each part keeps its layer height, walls and infill from the table above. The file uses Creality Print's own SPARKX i7 presets ("0.20mm Standard", "Generic PLA") with these changes:
 
-| Plate | File | Material | Parts | Time | Filament |
-| --- | --- | --- | --- | --- | --- |
-| 1 | `plates/01-black-PLA.3mf` | black PLA | frame, camera backplate, plain backplate | 1 h 28 min | 38.1 g |
-| 2 | `plates/02-white-PETG.3mf` | white PETG | chassis, plunger (brim) | 20 min | 8.1 g |
-| 3 | `plates/03-gold-PLA.3mf` | gold PLA | camera trim, accent (brim) | 6.5 min | 0.6 g |
-| 4 | `plates/04-light-blue-PLA.3mf` | light-blue PLA | link cover | 8 min | 1.1 g |
+- **Adhesion:**
+  - first layer 0.25 mm thick and 0.44 mm wide, at 30 mm/s (35 mm/s infill);
+  - a 7 mm outer brim on every part (5 mm on the trim, plunger and accent), with a 0.1 mm gap so it peels off;
+  - bed 60 °C; no fan for the first 2 layers, full fan from layer 4.
+- **Supports:**
+  - organic tree, auto, for faces under 40°, with 3 top and 2 bottom interface layers and 0.2 mm gaps;
+  - from the build plate only where that reaches every overhang, otherwise everywhere (the frame's window tops sit over the sills);
+  - a support blocker keeps supports out of the bottom 3 mm of the backplates, chassis and link cover. Those are shallow recesses, screw counterbores and nut pockets, so they are bridged instead.
+- **Stringing:**
+  - 205 °C (210 °C first layer), flow capped at 11 mm³/s;
+  - retraction 1.0 mm at 40 mm/s (the i7 is direct drive), wipe on, 0.2 mm z-hop;
+  - avoid crossing walls, travel at 400 mm/s.
+- **Speed:** outer walls 70 mm/s, inner walls 150, top 100, bridges 30. Overhangs slow to 50, 30, 20 and 10 mm/s as they get steeper.
+- **Look:** seam at the rear, 4 walls, gyroid infill, 4 bottom layers.
 
-- **Total:** about 2 h 3 min and 48 g.
-- **To print:** open the file in Creality Print. Check that the printer is **SPARKX i7 0.4 nozzle** and that the filament points at the CFS slot holding that colour. Press **Slice**, then **Print**.
-- **Settings in the files:**
-  - PLA at 215 °C (220 °C first layer), bed 60 °C.
-  - PETG at 240 °C, bed 80 °C, fan 30-50 %, first layer at 30 mm/s.
-  - Outer walls and top surfaces at 120 mm/s, seam at the rear, no supports.
-- **PETG plate:** print it on the textured PEI plate as it is. On a smooth plate, wipe on glue stick first so the PETG does not bond to the PEI.
-- **`plates/all-plates.3mf`:** the same four plates in one project. The filaments are slots 1-4: black, white PETG, gold, light blue. Every plate gets PETG's slow first layer, so plate 1 takes about 3 minutes longer.
+**To print:**
+
+1. Clean the plate.
+2. Open the file in Creality Print. Check that the printer is **SPARKX i7 0.4 nozzle** and that the filament points at the CFS slot holding the black PLA.
+3. Press **Slice**, then **Print**.
+
 - **Fit test:** optional. Its STL is still in `stl/`.
-- **Rebuilding:** after changing the model, run `py -3 -I plates/make_plates.py`. It needs Creality Print 7.3.2 and OrcaSlicer 2.5.2 unpacked in `plates/.tools/`, as described at the top of the script.
+- **Chassis:** PLA is fine for a first case. PETG holds up better against the warm back of the device.
+
+**If a print fails:**
+
+- **Parts lift or come loose:**
+  - Wash the plate with dish soap and water, or wipe it with IPA, and don't touch it afterwards.
+  - Watch the first layer: lines should be flat and touching, with no gaps or ridges. If not, re-run the printer's auto-levelling or adjust the Z offset.
+  - If a brim corner still lifts, put a little glue stick under it. Use glue stick under PETG on smooth PEI, as a release layer.
+- **Stringing, popping or a rough, bubbly surface:** the filament is damp. Dry PLA at 45-50 °C for 4-6 h, or PETG at 65 °C.
+
+**Rebuilding:** run `py -3 -I plates/make_plates.py` after any change to the model.
+
+- It needs numpy, plus Creality Print 7.3.2 and OrcaSlicer 2.5.2 unpacked in `plates/.tools/` (see the top of the script).
+- After a geometry change, re-check the per-part support notes in the script.
 
 **Notes:**
 
-- The frame's side windows print as bridges up to 43 mm long. Keep the bridge fan on at about 40 mm/s, as the profile does.
+- The frame's side windows have tops up to 43 mm long. The plate profile holds them up with tree supports from the sills.
 - The rear edges of both backplates start with a 45° chamfer that blends into the radius, so the bed-side edge does not droop.
 - Print the chassis in PETG. It carries the screws and nuts and sits against the warm back of the device.
 
@@ -191,7 +210,7 @@ Then print the full parts. Reprint the fit test only if you changed `gap` or `de
 | --- | --- |
 | `case.scad` | Parametric model. Every part, the fit test and print orientations (`*_print`) |
 | `stl/` | Print-ready STLs (this guide) |
-| `plates/` | Creality Print projects for the SPARKX i7, one per colour, and `make_plates.py`, which builds them |
+| `plates/` | `make_plates.py`: builds the black-PLA Creality Print project for the SPARKX i7 |
 | `renders/` | Final renders, both backplates |
 | `tools/build.py` | Exports every STL with the portable OpenSCAD (`render`, `print` or `all`) |
 | `tools/estimate.py` | Slices `stl/` with PrusaSlicer and prints time and filament |
