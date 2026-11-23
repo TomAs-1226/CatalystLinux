@@ -35,6 +35,9 @@ scanner, and makes the handheld safe to recover when something goes wrong.
 - Pages are straightened to their true shape (A4 or Letter found), in colour, grey or black and white. Gather several, reorder or delete them, and save one PDF with a PNG for each page in Scans; Catalyst Companion downloads them.
 
 ### Fixed
+- A device on the Grove port (the smart camera, powered or not) no longer keeps the screen dark at start. The port's two lines were switched to the I2C bus the board's I/O expander is on until the system set them, and a device there hid the expander, which the screen needs. They are on the serial port from the first instant now.
+- The smart camera answers: MaixPy as M5Stack ships it for the UnitV starts boot.py and not main.py, so the camera's program never ran. boot.py starts it now, and a camera with the old one is offered the update.
+- Photos no longer end with "the camera gave no picture": a photo's first frame is waited for up to 4 seconds (8 on the last try), not 1.
 - The screen's brightness is set from Settings at every start. The backlight keeps whatever it was left at across a restart, so an update installed overnight with the screen off left the next start all but dark.
 
 ### Recovery
