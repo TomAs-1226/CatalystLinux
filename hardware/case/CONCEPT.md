@@ -13,6 +13,8 @@
 > - **Fixings.** M2 × 3 screws into the chassis nuts, plus hooks into the device's top slots.
 > - **UnitV and cable.** Click pins for the UnitV, and a 12 × 8 mm Grove pass-through with an inside cable channel.
 >
+> Revision 3.1 gives the side walls 3.3 mm all the way to a flat 2 mm tray rim, which takes a 1.2 mm bezel tongue.
+>
 > **`PRINTING.md`** has the parts, print faces, times, hardware, assembly and fit test.
 >
 > Sections 4 (battery) and 6-8 (parts, hardware, printing) are the phase 1 proposal; `PRINTING.md` replaces them. The measurements, sources and port map still apply.

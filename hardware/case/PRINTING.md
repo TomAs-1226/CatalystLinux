@@ -1,17 +1,18 @@
-# Printing and assembling the Catalyst case (revision 3)
+# Printing and assembling the Catalyst case (revision 3.1)
 
 One **bezel**, one **chassis** and either of two **backplates**.
 
 ## What changed after the first print
 
-The first print failed. Revision 3 fixes each cause:
+The first print failed. Revision 3 fixes each cause, and revision 3.1 fixes the thin tray rim found in the slicer:
 
 | Problem | Cause | Fix |
 | --- | --- | --- |
-| Frame turned to spaghetti | It stood 25.5 mm tall on about 1 mm of lip, and its port windows printed as 12-41 mm bridges | The frame is now a 4.9 mm bezel: the lip plus a flat cheek beside the screen. It prints face-down on a much bigger flat area. The side walls moved into the backplates, and every port window is a notch open at the top of the print on both parts. No bridges, no supports. |
-| Back cover came out "weird" | Big shallow pockets on the face that prints on the bed: a 0.5 mm grip panel over 69 × 18 mm and a 0.8 mm trim pocket. Both print as bridges just above the first layers. A 1.5 mm inward ledge inside the lip, 14.6 mm up, needed a ring of supports. The pins were printed upright and weak. | Nothing is recessed on the bed face except bridgeable details: a 0.8 mm groove outlines the grip panel, and the counterbores are 4.2 mm. No inward ledges. The rear edges start with a 45° chamfer. Walls are 2 mm, ribs stiffen the pod, and screw towers have 1.7 mm walls. |
+| Frame turned to spaghetti | It stood 25.5 mm tall on about 1 mm of lip, and its port windows printed as 12-41 mm bridges | The frame is now a bezel: the 4.9 mm lip and a flat cheek beside the screen, plus a 1.2 mm tongue underneath. It prints face-down on 1,286 mm². The side walls moved into the backplates, and every port window is a notch open at the top of the print on both parts. No bridges, no supports. |
+| Back cover came out "weird" | Big shallow pockets on the face that prints on the bed: a 0.5 mm grip panel over 69 × 18 mm and a 0.8 mm trim pocket. Both print as bridges just above the first layers. A 1.5 mm inward ledge inside the lip, 14.6 mm up, needed a ring of supports. The pins were printed upright and weak. | Nothing is recessed on the bed face except bridgeable details: a 0.8 mm groove outlines the grip panel, and the counterbores are 4.2 mm. No inward ledges. The rear edges start with a 45° chamfer. Side walls are 3.3 mm and skins 2 mm, ribs stiffen the pod, and screw towers have 1.7 mm walls. |
 | UnitV pins didn't click | Short, and printed upright | Separate click pins, printed lying down |
 | Grove plug didn't fit the cable opening | The opening was 3.8 × 8.6 mm | 13 × 9 mm, with a proper channel inside |
+| Tray rim was "a thin line" (revision 3) | The trays ended in a 1.0 mm tongue (the inner half of a 2 mm wall) above a 0.3 mm-rounded edge. The slot-hook pocket left 0.8 mm of top wall, and the snap dimples sat 0.7 mm under the rim. | **Revision 3.1.** Side walls are 3.3 mm right up to the rim. The rim is a **flat, square 2.0 mm face**. Its inner 1.3 mm steps down 2.5 mm, and the bezel's **1.2 mm tongue** drops into the step and clicks in with five snaps. Hook pockets now leave 1.7 mm of wall, and the dimples sit 1 mm+ below the rim. `tools/check_thin.py` finds nothing thinner than 1 mm that isn't intentional (section 7). |
 
 **Colour.** Everything new is **black PLA**. The gold trim, gold accent and blue link cover are gone:
 
@@ -23,9 +24,9 @@ The first print failed. Revision 3 fixes each cause:
 | | Camera backplate | Plain backplate |
 | --- | --- | --- |
 | Thickness | **40.5 mm** (42.9 at the lens ring) | **28.5 mm** |
-| Footprint | 88.5 × 58.5 mm (94.1 wide with the link cover) | 88.5 × 58.5 mm |
-| New black parts | 43.0 g, about 1 h 44 min | 26.9 g, about 55 min |
-| Weight with the CardputerZero (95 g), chassis, UnitV, cable and screws | about 165 g | about 132 g |
+| Footprint | 91.1 × 61.1 mm (97.1 wide with the link cover) | 91.1 × 61.1 mm |
+| New black parts | 57.6 g, about 2 h 04 min | 36.0 g, about 1 h 07 min |
+| Weight with the CardputerZero (95 g), chassis, UnitV, cable and screws | about 180 g | about 140 g |
 
 ## 1. Parts
 
@@ -35,24 +36,24 @@ All STLs in `stl/` are already oriented for the bed (z = 0 is the bed).
 
 **Brims:**
 
-- **Bezel:** a 5 mm brim. Its contact is a 3 mm ring plus the cheek.
+- **Bezel:** a 5 mm brim. Its contact is a 4.4 mm ring plus the cheek: 1,286 mm².
 - **Backplates:** a 3 mm brim on the corners if your bed lifts corners.
 
-**Estimates:** from `tools/estimate.py` (PrusaSlicer 2.9.2, fast CoreXY profile). A bed-slinger at stock speeds takes about twice as long. Five walls make every 2 mm wall solid.
+**Estimates:** from `tools/estimate.py` (PrusaSlicer 2.9.2, fast CoreXY profile). A bed-slinger at stock speeds takes about twice as long. Five walls make the 2 mm skins and the walls' 2 mm outer band solid.
 
 | Part | File | Material | **Print face (on the bed)** | Layer | Walls | Infill | Time | Filament |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Bezel (both versions) | `frame__black-PLA.stl` | black PLA | the **front face** (lip and cheek) | 0.20 | 5 | 25% | 6 min | 3.1 g |
-| Camera backplate | `back-camera__black-PLA.stl` | black PLA | the **outer back face** | 0.20 | 5 | 25% | 1 h 23 min | 36.2 g |
-| Plain backplate | `back-plain__black-PLA.stl` | black PLA | the **outer back face** | 0.20 | 5 | 25% | 49 min | 23.8 g |
+| Bezel (both versions) | `frame__black-PLA.stl` | black PLA | the **front face** (lip and cheek; tongue up) | 0.20 | 5 | 25% | 10 min | 5.8 g |
+| Camera backplate | `back-camera__black-PLA.stl` | black PLA | the **outer back face** | 0.20 | 5 | 25% | 1 h 35 min | 47.4 g |
+| Plain backplate | `back-plain__black-PLA.stl` | black PLA | the **outer back face** | 0.20 | 5 | 25% | 57 min | 30.2 g |
 | Lens ring (camera) | `lens-ring-camera__black-PLA.stl` | black PLA (gold optional) | the **ring's top face**, spigot up | 0.16 | 4 | 100% | 2 min | 0.5 g |
-| Link cover (camera) | `link-cover-camera__black-PLA.stl` | black PLA | the **flat outer face**, hooks up | 0.16 | 4 | 30% | 8 min | 2.2 g |
+| Link cover (camera) | `link-cover-camera__black-PLA.stl` | black PLA | the **flat outer face**, hooks up | 0.16 | 4 | 30% | 10 min | 3.0 g |
 | UnitV pins ×4 (2 + 2 spare) | `pins-camera__black-PLA.stl` | black PLA | **lying on their flats** (the split stands vertical) | 0.12 | 4 | 100% | 6 min | 0.9 g |
-| **Fit test** | `fit-test__black-PLA.stl` | black PLA | as placed | 0.20 | 2 | 15% | **30 min** | 13.9 g |
+| **Fit test** | `fit-test__black-PLA.stl` | black PLA | as placed | 0.20 | 2 | 15% | **33 min** | 14.6 g |
 | Chassis (both) | `chassis__white-PETG.stl` | white PETG | **already printed, not on the black plate** | | | | | |
 | Plunger (camera) | `plunger-camera__white-PETG.stl` | white PETG | **already printed, not on the black plate** | | | | | |
 
-**Total of the new black parts:** both backplates, bezel, small parts and fit test come to **about 3 h 03 min and 81 g**.
+**Total of the new black parts:** both backplates, bezel, small parts and fit test come to **about 3 h 34 min and 102 g**.
 
 ### Ready-to-print plate: `plates/black-PLA.3mf`
 
@@ -175,7 +176,7 @@ If your plug is bigger, measure it and set `plug` in `case.scad`.
 3. Lay the UnitV on the bosses, lens end up and lens over the round well. Press until both pins click into its holes.
 4. Press the CardputerZero (with its chassis) into the backplate from the front until both slot hooks click over the chassis's top edge. Plug the Grove cable into the device's Grove port.
 5. Fit the two M2 × 3 screws in the bottom corners.
-6. Snap the bezel on from the front: five clicks.
+6. Snap the bezel on from the front. Its tongue drops into the tray's step and clicks five times.
 7. Clip the link cover over the pass-through.
 8. Press the lens ring's spigot into the lens well. To swap the M12 lens, pull the ring off.
 
@@ -195,7 +196,7 @@ The chassis and its screws stay on the device.
 
 **USB-C2 note.** The device's Grove socket sits right under USB-C2. With a Grove cable plugged in, USB-C2 takes only slim plugs (about 5.5 mm thick or less). The case adds nothing to this.
 
-## 6. Fit test (do this first, about 30 min)
+## 6. Fit test (do this first, about 33 min)
 
 `fit-test__black-PLA.stl`. Use it with your already-printed chassis fitted to the device.
 
@@ -207,7 +208,7 @@ The chassis and its screws stay on the device.
 | **Bottom strip** (both nut-screw seats) | Fit two M2 × 3 screws into the chassis nuts. The heads should sit below the surface and the screws should bite without touching the device. | `screw_len`, `tip_gap`, `fz_nuts` |
 | **Two UnitV pins** | Push one through a UnitV hole. It should click and seat its collar in the counterbore. | `pin_clear`, `pin_barb` |
 
-**Adjusting.** Edit the parameter at the top of `case.scad`, then run `python tools/build.py print`. `python tools/check_fit.py` reports any collision with the device, the chassis or the UnitV.
+**Adjusting.** Edit the parameter at the top of `case.scad`, then run `python tools/build.py print`. `python tools/check_fit.py` reports any collision with the device, the chassis or the UnitV. `python tools/check_thin.py` reports any wall thinner than 1 mm.
 
 | Symptom | Change |
 | --- | --- |
@@ -234,6 +235,21 @@ The chassis and its screws stay on the device.
 | `tools/build.py` | Exports the STLs. Never rewrites the frozen chassis or plunger |
 | `tools/estimate.py` | Slices `stl/` with PrusaSlicer for times and grams |
 | `tools/check_fit.py` | Collision check against the device, chassis and UnitV |
+| `tools/check_thin.py` | Wall-thickness check: anything under 1 mm on every part (section 7) |
 | `tools/measure_holes.py` | UnitV hole and device slot measurements |
 | `tools/render.py`, `tools/finish.py` | Blender renders and the overview |
 | `CONCEPT.md` | Measurements, sources and design rationale |
+
+## 7. Wall-thickness check (`tools/check_thin.py`)
+
+**How it works.** The check samples each part's surface and shoots a ray inward to measure the local wall. It reports any area thinner than 1.0 mm. The bezel and the lens ring come back clean.
+
+These remaining flags are intentional:
+
+| Part | Where | Thickness | Why it stays |
+| --- | --- | --- | --- |
+| Both backplates | Slot-hook barbs | 0.4-0.6 mm | The barb's 45° lead-in tip; the arm behind it is 1.2 × 3.6 mm |
+| Camera backplate | Pin-socket floor | 1.0 mm | At the limit; 1.4 mm of skin under the socket |
+| Link cover | Clip-hook barbs | 0.7 mm | Lead-in wedges on 1.2 mm fingers |
+| UnitV pins | Collar, barbs, split | 0.9 mm collar; 0.3 mm barbs | The collar must fit the UnitV's 1.0 mm counterbore. The barbs and the 0.9 mm split are what make the pin click. |
+| Chassis (frozen) | Nut-pocket shoulders and countersinks | 0.55-0.8 mm | Already printed in revision 2; not changed |
