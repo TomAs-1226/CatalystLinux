@@ -147,7 +147,7 @@ def main():
             time.sleep(max(0, t0 + 625 - time.time()))
             print(vm.run("cat /run/catalyst-deep 2>/dev/null; echo checked"))
             spell(vm, "deep standby", max(opts.seconds, 180))
-        print(vm.run("tail -n 5 /tmp/catalyst-shell.log"))
+        print(vm.run("tail -n 5 /data/catalyst/shell.log"))
     finally:
         vm.stop()
 

@@ -329,6 +329,16 @@ def main():
 
 # Home's built-in apps, and Terminal's place among them (screens.rs, APPS).
 BUILT_IN = 43
+
+
+def open_by_name(vm, name, enter=True):
+    """Find an app through search (Ctrl-Enter, its name) and open it."""
+    vm.key("ctrl-ret", 2)
+    for ch in name.lower():
+        vm.key("spc" if ch == " " else ch, 0.3)
+    time.sleep(2)
+    if enter:
+        vm.key("ret")
 TERMINAL = 8
 
 
@@ -482,12 +492,9 @@ def tour(vm, folder):
     time.sleep(8)
     check("Home draws", shot("1-home") > 50)
 
-    # Left and Right go through the apps in order: forty-two built in,
-    # Settings last; then the image's Processes (42) and the user's own by
-    # name: hello (43) and Paint (44).
-    for key in ["right"] * BUILT_IN:
-        vm.key(key)
-    time.sleep(6)
+    # The image's Processes, opened by name as a person would (counting
+    # tiles broke each time an app was added: 0.9.4 landed on the wrong one).
+    open_by_name(vm, "processes", enter=False)
     shot("2-home-apps")
     vm.key("ret")
     check("an app in the terminal runs its program", until(running(" top$"), lambda out: out != "") != "")
@@ -525,10 +532,8 @@ def tour(vm, folder):
     vm.key("esc")
     time.sleep(10)
 
-    # The built-in terminal has a real shell behind it: from Paint's tile,
-    # Left back through the apps to Terminal's.
-    for key in ["left"] * (BUILT_IN + 2 - TERMINAL) + ["ret"]:
-        vm.key(key)
+    # The built-in terminal has a real shell behind it.
+    open_by_name(vm, "terminal")
     time.sleep(14)
     for key in ["e", "c", "h", "o", "spc", "o", "k", "spc", "shift-dot", "slash", "t", "m", "p", "slash", "t", "y", "p", "e", "d", "ret"]:
         vm.key(key, 0.3)
@@ -547,7 +552,7 @@ def tour(vm, folder):
     # processor and says why. With Mesa's software renderer allowed, the
     # image's own Mesa loads into the dynamically linked shell, and its test
     # frame of glass and a growing window comes out as the processor's.
-    log = vm.run("grep -m1 'drawing with' /tmp/catalyst-shell.log")
+    log = vm.run("grep -m1 'drawing with' /data/catalyst/shell.log")
     check("with no gpu device, the processor draws", "drawing with the processor" in log, log)
     soft = vm.run("CATALYST_GPU=software catalyst-shell --about 2>&1 | grep -E 'drawing with|graphics|this shell'")
     check("the image's Mesa opens in the shell and draws as the processor does", "drawing with the gpu (softpipe" in soft, " | ".join(soft.splitlines()))

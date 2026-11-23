@@ -150,7 +150,7 @@ music-dark)
 	ask "Play a song in Music, then leave it: the screen goes off, and music standby comes 30 s later. Starting in 5 s, measuring for $seconds s (give it 120)."
 	measure "music, screen dark"
 	say "(xruns: what catalyst-play said, from the shell's log)"
-	grep -c 'xrun' /tmp/catalyst-shell.log 2>/dev/null | sed 's/^/xrun lines   /'
+	grep -c 'xrun' /data/catalyst/shell.log 2>/dev/null | sed 's/^/xrun lines   /'
 	;;
 model)
 	ask "Ask the on-device model something with a long answer, and leave it answering."

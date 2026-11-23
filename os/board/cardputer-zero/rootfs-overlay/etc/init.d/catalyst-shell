@@ -9,8 +9,10 @@ command=/usr/bin/catalyst-shell
 respawn_delay=1
 respawn_max=0
 supervise_daemon_args="--env CATALYST_CONF=/data/catalyst/robot --env CATALYST_LOGS=/data/logs"
-output_log=/tmp/catalyst-shell.log
-error_log=/tmp/catalyst-shell.log
+# On /data, so a start that went wrong leaves its log behind (and the one
+# before it): /tmp is gone at the next start, as it was on 23 November 2026.
+output_log=/data/catalyst/shell.log
+error_log=/data/catalyst/shell.log
 
 depend() {
 	need catalyst-early
@@ -18,6 +20,14 @@ depend() {
 
 start_pre() {
 	mkdir -p /data/catalyst /data/apps 2>/dev/null
+	# This start's log, and the last start's kept beside it. Without /data,
+	# in /tmp as before.
+	if [ -w /data/catalyst ]; then
+		[ -f /data/catalyst/shell.log ] && mv -f /data/catalyst/shell.log /data/catalyst/shell.prev.log
+	else
+		output_log=/tmp/catalyst-shell.log
+		error_log=/tmp/catalyst-shell.log
+	fi
 	# Give the panel driver a moment to bind before the first frame.
 	local n=0
 	while ! ls /dev/fb[0-9] >/dev/null 2>&1 && [ $n -lt 30 ]; do

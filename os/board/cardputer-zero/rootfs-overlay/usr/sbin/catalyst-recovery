@@ -1,0 +1,54 @@
+#!/bin/sh
+# catalyst-recovery: a way back in from any computer.
+#
+# With the Grove port given to the smart camera and USB on charging only, the
+# handheld has no console at all; if its screen then shows nothing there is
+# no way in to see why (as happened on 23 November 2026, a loose display
+# cable). So: a file named catalyst-recovery.txt put on the card's boot drive
+# (the small FAT one any computer can write to) asks, at the next start, for
+#
+#   - the Grove port back to the console (its login, and the system's
+#     messages from the start after),
+#   - USB back to the serial console (USB-C2, the switch on its side),
+#   - the logs copied to the boot drive, in catalyst-logs/: the shell's
+#     own log and the one before it, the kernel's messages so far, the
+#     update's state and the settings,
+#
+# and the file is then taken away, so it is done once. Nothing is touched on
+# the boot drive unless the file is there.
+#
+# Run by catalyst-early once /data is mounted. Always returns 0.
+
+BOOT_DEV=/dev/mmcblk0p1
+MNT=/run/catalyst-recovery-boot
+ASK=catalyst-recovery.txt
+
+mkdir -p "$MNT" 2>/dev/null || exit 0
+mount -t vfat -o ro "$BOOT_DEV" "$MNT" 2>/dev/null || exit 0
+if [ ! -f "$MNT/$ASK" ]; then
+	umount "$MNT" 2>/dev/null
+	exit 0
+fi
+umount "$MNT" 2>/dev/null
+mount -t vfat -o rw "$BOOT_DEV" "$MNT" 2>/dev/null || exit 0
+
+echo console >/data/catalyst/grove-port.new 2>/dev/null && mv /data/catalyst/grove-port.new /data/catalyst/grove-port
+echo serial >/data/catalyst/usb-mode.new 2>/dev/null && mv /data/catalyst/usb-mode.new /data/catalyst/usb-mode
+
+out="$MNT/catalyst-logs"
+mkdir -p "$out" 2>/dev/null
+for f in /data/catalyst/shell.log /data/catalyst/shell.prev.log /data/update/status.json /data/catalyst/settings /etc/catalyst/version; do
+	[ -f "$f" ] || continue
+	# The last 2000 lines at most: the boot drive is small.
+	tail -n 2000 "$f" >"$out/$(basename "$f").txt" 2>/dev/null
+done
+dmesg >"$out/dmesg.txt" 2>/dev/null
+{
+	echo "catalyst-recovery ran at $(date -u '+%Y-%m-%d %H:%M:%S') UTC"
+	echo "grove port: console · usb: serial console"
+} >"$out/README.txt"
+
+rm -f "$MNT/$ASK"
+sync
+umount "$MNT" 2>/dev/null
+exit 0

@@ -43,6 +43,9 @@ start() {
 	/usr/sbin/catalyst-grow-data
 	# A lower voltage being tried that never held is taken out (and restarts).
 	/usr/sbin/catalyst-power boot
+	# A way back in from any computer: catalyst-recovery.txt on the boot
+	# drive turns the consoles back on and copies the logs there (once).
+	/usr/sbin/catalyst-recovery
 	# The Grove port as chosen: as the smart camera's, its 5 V off and this
 	# system's console kept off it (see catalyst-grove).
 	/usr/sbin/catalyst-grove boot
