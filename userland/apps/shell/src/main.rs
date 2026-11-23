@@ -57,6 +57,7 @@ mod batteries;
 mod brand;
 mod burst;
 mod camera;
+mod camkit;
 mod dng;
 mod filters;
 mod pro;
@@ -667,6 +668,12 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--camera-pro-shots") {
         return camera::pro_shots(std::path::Path::new(&dir));
+    }
+    // The kit: grids, the level, aspects, "hold still", bracketing, the
+    // intervalometer and the rest (0.9.4).
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--camera-kit-shots") {
+        return camera::kit_shots(std::path::Path::new(&dir));
     }
     // The smart camera's install over USB-A, and Settings › Camera (0.9.1).
     #[cfg(not(target_arch = "aarch64"))]

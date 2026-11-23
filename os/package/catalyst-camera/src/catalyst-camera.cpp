@@ -23,7 +23,14 @@
 //           width << 16 | height
 //   kind 3  a photo could not be taken: why, in a line
 //   kind 4  a photo's picture is in (the preview runs again while it is
-//           written); the number is width << 16 | height
+//           written); the number is width << 16 | height, the line its path,
+//           a tab and its timing marks (milliseconds since the order came:
+//           "room 0 stop 28 config 81 start 199 frame 377 copy 405")
+//   kind 6  the sensor is exposing the photo now: "<ms> <frames> <what>",
+//           how long that should take at most, how many frames, and
+//           "still", "detail" or "bracket" (the shell's "hold still")
+//   kind 7  the sensor is done with the photo (or its burst or set): it
+//           may move now; the line is the timing marks so far
 //   kind 5  what the camera said of the frame that follows, a line:
 //           "exp=16000 ag=2.000 dg=1.000 r=1.9000 b=1.6000 ct=4800
 //           lux=210.0 ae=1 fom=1234 zoom=0.00" (exposure µs, analogue and
@@ -52,6 +59,15 @@
 //                       orig=<path>        the photo as taken, kept there
 //                       raw=<path>         the sensor's own frame as a DNG
 //                                          (catalyst-shell --write-dng)
+//                       aspect=<a>:<b>     cropped to 3:2, 16:9 or 1:1 from
+//                                          the middle (4:3: the whole frame)
+//                       bias=<thirds>      its exposure compensation (Exif)
+//                       program=<n>        Exif's ExposureProgram (1 manual,
+//                                          2 normal, 4 shutter priority)
+//                       also=<µs>,<g>,<thirds>,<path>
+//                                          bracketing: one more frame of the
+//                                          same session at that exposure,
+//                                          saved there (a word for each)
 //   detail auto|on <path>[\t<word>…]
 //                     detail mode: the photo as above, then up to five more
 //                     full-size frames with its exposure and white balance
@@ -66,8 +82,10 @@
 //   night on|off      longer exposures allowed (down to 5 frames a second,
 //                     a fifth of a second for a photo) when the light is low
 //   pro exp=<µs|auto> gain=<g|auto> ev=<stops> ct=<K|auto> max=<µs>
+//       [gains=<r>,<b>]
 //                     the preview's exposure and white balance (pro mode's
-//                     dials): fixed where given, the camera's own where auto
+//                     dials): fixed where given, the camera's own where auto;
+//                     white balance gains (the grey card's) before ct
 //   focus on <x> <y>  the focus check: the preview from the full sensor,
 //   focus off         cropped one pixel to one around (x, y) (0 to 1 of
 //                     the picture); the binned mode cropped (half scale)
@@ -111,6 +129,14 @@
 // pipeline keeps no raw frame of its own then (vc4.yaml), so it takes no
 // more of the pool than a JPEG photo.
 //
+// Bounded (1.5, 0.9.4): every wait in a photo is a few frames long, not six
+// seconds; a request the pipeline refuses, or frames that come back bad,
+// end a try at once; the held frame, once it fails, is not tried again
+// this boot (/run/catalyst-camera.held-off); waiting for room to keep a
+// photo is bounded too. Each photo's timing marks go to the shell (kind 4)
+// and to standard error, as does any wait that ran out. still.h has the
+// decisions, checked without a camera.
+//
 // Frames come at up to --fps a second, and no slower than --slowest: in dim
 // light the exposure may take longer than a frame at --fps allows.
 //
@@ -134,6 +160,7 @@
 #include <libcamera/libcamera.h>
 
 #include "photo.h"
+#include "still.h"
 
 #include <fcntl.h>
 #include <linux/dma-buf.h>
@@ -192,6 +219,8 @@ struct ProControls {
 	float ev = 0;
 	int ct = 0;
 	int64_t max_us = 0;
+	// White balance gains fixed (red, blue: the grey card's), else 0.
+	float gains[2] = { 0, 0 };
 };
 std::mutex pro_lock;
 ProControls pro;
@@ -379,9 +408,29 @@ struct Held {
 		size = 0;
 	}
 
+	// Given up for good: for this program, and (its mark in /run) for the
+	// rest of this boot, so the next Camera does not try it again first.
+	void give_up(const std::string &why)
+	{
+		if (!failed)
+			std::fprintf(stderr, "still: the held frame failed (%s); photos take the allocator's from now on\n", why.c_str());
+		failed = true;
+		release();
+		int mark = open(OFF_MARK, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+		if (mark >= 0) {
+			ssize_t ignored = write(mark, why.data(), why.size());
+			(void)ignored;
+			::close(mark);
+		}
+	}
+
+	static constexpr const char *OFF_MARK = "/run/catalyst-camera.held-off";
+
 	// At least `want` bytes of it; false if it cannot be had.
 	bool get(size_t want)
 	{
+		if (!failed && access(OFF_MARK, F_OK) == 0)
+			failed = true;
 		if (failed)
 			return false;
 		if (fd >= 0 && size >= want)
@@ -445,6 +494,18 @@ void copy_plane(const uint8_t *plane, unsigned int stride, unsigned int w, unsig
 	}
 }
 
+// A `W` x `H` frame's crop `c` (the right way up) into `out`, packed: Y,
+// then U, then V. Turned half round here, the crop's place in the buffer
+// is the opposite corner's.
+void copy_frame(const Mapped &m, unsigned int stride, unsigned int W, unsigned int H, still::Crop c, bool turned, uint8_t *out)
+{
+	unsigned int x = turned ? W - c.x - c.w : c.x, y = turned ? H - c.y - c.h : c.y;
+	copy_plane(m.y + size_t(y) * stride + x, stride, c.w, c.h, out, turned);
+	const size_t cs = stride / 2, at = size_t(y / 2) * cs + x / 2;
+	copy_plane(m.u + at, unsigned(cs), c.w / 2, c.h / 2, out + size_t(c.w) * c.h, turned);
+	copy_plane(m.v + at, unsigned(cs), c.w / 2, c.h / 2, out + size_t(c.w) * c.h * 5 / 4, turned);
+}
+
 // What the camera thread does with a finished request.
 enum class Phase { Preview, Still, Burst, Stopped };
 
@@ -462,18 +523,13 @@ std::atomic<Phase> phase{Phase::Stopped};
 // changes it (a photo stops the preview, takes a still, starts it again).
 std::atomic<Session *> current{nullptr};
 
-// A photo being taken: frames let through for the exposure to settle, and
-// the request holding the one kept.
+// A photo being taken: each frame judged as it comes (still.h), and the
+// request holding the one kept, or why none will come this way.
 std::mutex still_lock;
 std::condition_variable still_ready;
-int still_frames = 0;
+still::Judge still_judge;
 Request *still_request = nullptr;
-// Frames let go by before the one kept: at least one (the first can carry
-// the preview's controls), until the exposure says it has settled on the new
-// mode, at most this many (the pipeline has already dropped the frames its
-// algorithms asked for at the start).
-const int SETTLE_MIN = 1;
-const int SETTLE_MAX = 8;
+std::string still_failed;
 // The photo's exposure when the shell fixed it (µs), else 0.
 int64_t still_fixed_us = 0;
 
@@ -601,10 +657,14 @@ void pro_into(ControlList &c, bool with_limits)
 	}
 	// The face's lean rides on the compensation asked for.
 	c.set(controls::ExposureValue, p.ev + ev);
-	if (p.ct > 0)
+	if (p.gains[0] > 0 && p.gains[1] > 0) {
+		c.set(controls::AwbEnable, false);
+		c.set(controls::ColourGains, Span<const float, 2>({ p.gains[0], p.gains[1] }));
+	} else if (p.ct > 0) {
 		c.set(controls::ColourTemperature, int32_t(p.ct));
-	else
+	} else {
 		c.set(controls::AwbEnable, true);
+	}
 	if (with_limits) {
 		int64_t longest = std::max<int64_t>(preview_longest(), p.exposure_us);
 		c.set(controls::FrameDurationLimits, { int64_t(1000000 / fps), longest });
@@ -633,42 +693,73 @@ Rectangle focus_crop()
 	return Rectangle(left, top, cw, ch);
 }
 
+// A frame's state, as still.h judges it.
+still::Status status_of(Request *request, Stream *stream)
+{
+	if (request->status() == Request::RequestCancelled)
+		return still::Cancelled;
+	FrameBuffer *buffer = request->findBuffer(stream);
+	if (!buffer)
+		return still::Error;
+	switch (buffer->metadata().status) {
+	case FrameMetadata::FrameSuccess:
+		return still::Success;
+	case FrameMetadata::FrameStartup:
+		return still::Startup;
+	default:
+		return still::Error;
+	}
+}
+
+// A photo's frame, judged: kept, let go (the request straight back for the
+// next), or the try given up at once (a refused request is cancelled, and
+// nothing more would ever come of it: 0.9.3 waited six seconds for one).
+void judge_still(Request *request, Session *session)
+{
+	std::lock_guard<std::mutex> hold(still_lock);
+	if (still_request || !still_failed.empty())
+		return;
+	still::Status status = status_of(request, session->stream);
+	bool matches = false, converged = false;
+	if (status != still::Cancelled) {
+		const ControlList &said = request->metadata();
+		matches = still::matches(said.get(controls::ExposureTime).value_or(0), still_fixed_us);
+		auto ae = said.get(controls::AeState);
+		converged = ae && *ae == controls::AeStateConverged;
+	}
+	bool long_exposure = still_fixed_us > 1000000;
+	switch (still_judge.see(status, still_fixed_us > 0, long_exposure, matches, converged)) {
+	case still::Take:
+		still_request = request;
+		still_ready.notify_one();
+		return;
+	case still::Fail:
+		still_failed = still_judge.why;
+		still_ready.notify_one();
+		return;
+	case still::Wait:
+		break;
+	}
+	request->reuse(Request::ReuseBuffers);
+	if (camera->queueRequest(request) < 0) {
+		still_failed = "request refused";
+		still_ready.notify_one();
+	}
+}
+
 // On the camera's thread: copy the frame and give the buffer straight back
-// (a photo's frame is kept until it is written).
+// (a photo's frame is kept until it is copied out).
 void completed(Request *request)
 {
 	Session *session = current.load();
-	if (request->status() == Request::RequestCancelled || !running || !session)
+	if (!running || !session)
 		return;
-	FrameBuffer *buffer = request->findBuffer(session->stream);
-	if (!buffer)
-		return;
-	bool good = buffer->metadata().status == FrameMetadata::FrameSuccess;
 	if (phase == Phase::Still) {
-		std::lock_guard<std::mutex> hold(still_lock);
-		// Kept once the exposure has settled on the new mode (or, in light
-		// that keeps it searching, after a few frames whatever it says).
-		// With the exposure fixed by the shell, the first frame taken with
-		// it is the photo (a frame or two more only if the sensor says it
-		// had not yet, as an IMX219 may of one frame at a mode switch).
-		auto ae = request->metadata().get(controls::AeState);
-		bool settled = ae && *ae == controls::AeStateConverged;
-		int least = SETTLE_MIN, most = SETTLE_MAX;
-		if (still_fixed_us > 0) {
-			auto took = request->metadata().get(controls::ExposureTime);
-			settled = took && std::llabs(int64_t(*took) - still_fixed_us) <= std::max<int64_t>(still_fixed_us / 10, 200);
-			least = 0;
-			most = 2;
-		}
-		if (good && !still_request && (++still_frames > most || (settled && still_frames > least))) {
-			still_request = request;
-			still_ready.notify_one();
-			return;
-		}
-		request->reuse(Request::ReuseBuffers);
-		camera->queueRequest(request);
+		judge_still(request, session);
 		return;
 	}
+	// A burst's or a bracketing set's frames, judged on the main thread
+	// (a cancelled one too: it ends them).
 	if (phase == Phase::Burst) {
 		{
 			std::lock_guard<std::mutex> hold(burst_lock);
@@ -677,6 +768,12 @@ void completed(Request *request)
 		burst_ready.notify_one();
 		return;
 	}
+	if (request->status() == Request::RequestCancelled)
+		return;
+	FrameBuffer *buffer = request->findBuffer(session->stream);
+	if (!buffer)
+		return;
+	bool good = buffer->metadata().status == FrameMetadata::FrameSuccess;
 	if (phase != Phase::Preview)
 		return;
 	// What the camera said of the frame, for the shell (kind 5).
@@ -947,6 +1044,8 @@ ControlList limits(unsigned int fastest, int64_t longest_us)
 	return controls;
 }
 
+void stop_camera();
+
 bool start(Session &s, ControlList controls, Phase as, std::string &why)
 {
 	current.store(&s);
@@ -957,8 +1056,15 @@ bool start(Session &s, ControlList controls, Phase as, std::string &why)
 		current.store(nullptr);
 		return false;
 	}
-	for (std::unique_ptr<Request> &request : s.requests)
-		camera->queueRequest(request.get());
+	// A request refused here would never come back: said now, not waited on.
+	for (std::unique_ptr<Request> &request : s.requests) {
+		int r = camera->queueRequest(request.get());
+		if (r < 0) {
+			why = "the camera refused a request (" + std::string(std::strerror(-r)) + ")";
+			stop_camera();
+			return false;
+		}
+	}
 	return true;
 }
 
@@ -1025,6 +1131,18 @@ struct Asked {
 	float sharpness = 0;
 	std::string denoise;
 	std::string look, look_name, original, raw;
+	// The aspect's crop (0:0 the whole frame), the compensation and the
+	// exposure program for Exif, and a bracketing set's other frames.
+	unsigned aspect_a = 0, aspect_b = 0;
+	int bias_thirds = 0;
+	int program = 2;
+	struct Also {
+		int64_t exposure_us = 0;
+		float gain = 1.0f;
+		int bias_thirds = 0;
+		std::string path;
+	};
+	std::vector<Also> also;
 };
 
 Asked asked_of(const std::string &words)
@@ -1059,6 +1177,23 @@ Asked asked_of(const std::string &words)
 			a.original = value;
 		else if (key == "raw")
 			a.raw = value;
+		else if (key == "aspect")
+			still::read_aspect(value, a.aspect_a, a.aspect_b);
+		else if (key == "bias")
+			a.bias_thirds = std::atoi(value.c_str());
+		else if (key == "program")
+			a.program = std::clamp(std::atoi(value.c_str()), 0, 8);
+		else if (key == "also") {
+			Asked::Also more;
+			int used = 0;
+			long long e = 0;
+			if (std::sscanf(value.c_str(), "%lld,%f,%d,%n", &e, &more.gain, &more.bias_thirds, &used) >= 3 && used > 0 && e > 0) {
+				more.exposure_us = std::min<int64_t>(e, still::LONGEST_US);
+				more.path = value.substr(size_t(used));
+				if (!more.path.empty() && a.also.size() < 4)
+					a.also.push_back(more);
+			}
+		}
 	}
 	return a;
 }
@@ -1088,6 +1223,9 @@ struct Shot {
 	std::string raw_format;
 	int black = 4096;
 	bool raw_skipped = false;
+	// Its compensation (Exif), and its timing marks.
+	int bias_thirds = 0;
+	still::Marks marks;
 };
 
 // ------------------------------------------------------------------ exif ---
@@ -1207,7 +1345,7 @@ std::vector<uint8_t> exif(const Shot &s)
 	uint32_t g = std::gcd(us, 1000000u);
 	sub.rational(0x829a, us / g, 1000000 / g);
 	sub.rational(0x829d, 20, 10);
-	sub.shorts(0x8822, 2);
+	sub.shorts(0x8822, uint16_t(s.with.program));
 	sub.shorts(0x8827, uint16_t(std::clamp(std::lround(100.0f * s.gain), 1L, 65535L)));
 	sub.undefined(0x9000, { '0', '2', '3', '2' });
 	sub.ascii(0x9003, when);
@@ -1215,6 +1353,12 @@ std::vector<uint8_t> exif(const Shot &s)
 	sub.ascii(0x9010, zone);
 	sub.ascii(0x9011, zone);
 	sub.undefined(0x9101, { 1, 2, 3, 0 });
+	// The compensation (a bracketing set's step among it), in thirds: SRATIONAL.
+	if (s.bias_thirds != 0) {
+		std::vector<uint8_t> bias = le32(uint32_t(int32_t(s.bias_thirds))), three = le32(3);
+		bias.insert(bias.end(), three.begin(), three.end());
+		sub.add(0x9204, 10, 1, std::move(bias));
+	}
 	sub.shorts(0x9207, 2);
 	sub.shorts(0x9209, 0x20);
 	sub.rational(0x920a, 304, 100);
@@ -1297,14 +1441,15 @@ long ms_since(std::chrono::steady_clock::time_point t)
 }
 
 // One of a burst's frames in a memory file of its own (packed planes, the
-// right way up), for the merge to map: -1 if there is no room for it.
-int frame_file(const Mapped &m, unsigned int w, unsigned int h, unsigned int stride, bool turned)
+// right way up, cropped as the photo is), for the merge to map: -1 if there
+// is no room for it.
+int frame_file(const Mapped &m, unsigned int w, unsigned int h, unsigned int stride, bool turned, still::Crop c)
 {
 	// MFD_CLOEXEC: only the merge is given it, under a number of its own.
 	int fd = int(syscall(SYS_memfd_create, "catalyst-burst", 1u));
 	if (fd < 0)
 		return -1;
-	size_t size = size_t(w) * h * 3 / 2;
+	size_t size = size_t(c.w) * c.h * 3 / 2;
 	if (ftruncate(fd, off_t(size)) != 0) {
 		close(fd);
 		return -1;
@@ -1314,60 +1459,172 @@ int frame_file(const Mapped &m, unsigned int w, unsigned int h, unsigned int str
 		close(fd);
 		return -1;
 	}
-	uint8_t *out = static_cast<uint8_t *>(at);
-	copy_plane(m.y, stride, w, h, out, turned);
-	copy_plane(m.u, stride / 2, w / 2, h / 2, out + size_t(w) * h, turned);
-	copy_plane(m.v, stride / 2, w / 2, h / 2, out + size_t(w) * h * 5 / 4, turned);
+	copy_frame(m, stride, w, h, c, turned, static_cast<uint8_t *>(at));
 	munmap(at, size);
 	return fd;
 }
 
-// The rest of a burst after its first frame (`first`, settled): the
-// exposure and white balance held where the first had them, `extra` more
-// frames into memory files.
-void take_burst(Session &s, Request *first, int extra, std::vector<int> &files)
+// A burst's or a set's next frame as the camera gives it back, or null if
+// none came by `until`.
+Request *next_done(std::chrono::steady_clock::time_point until)
 {
-	const ControlList &said = first->metadata();
+	std::unique_lock<std::mutex> lock(burst_lock);
+	burst_ready.wait_until(lock, until, [] { return !burst_done.empty() || !running; });
+	if (burst_done.empty())
+		return nullptr;
+	Request *request = burst_done.front();
+	burst_done.pop_front();
+	return request;
+}
+
+// An exposure, gain and white balance held fixed in a request.
+ControlList held_controls(int64_t exposure_us, float gain, const float wb[2])
+{
 	ControlList hold;
 	hold.set(controls::ExposureTimeMode, controls::ExposureTimeModeManual);
-	hold.set(controls::ExposureTime, said.get(controls::ExposureTime).value_or(20000));
+	hold.set(controls::ExposureTime, int32_t(exposure_us));
 	hold.set(controls::AnalogueGainMode, controls::AnalogueGainModeManual);
-	hold.set(controls::AnalogueGain, said.get(controls::AnalogueGain).value_or(1.0f));
-	if (auto gains = said.get(controls::ColourGains)) {
+	hold.set(controls::AnalogueGain, gain);
+	if (wb[0] > 0 && wb[1] > 0) {
 		hold.set(controls::AwbEnable, false);
-		hold.set(controls::ColourGains, *gains);
+		hold.set(controls::ColourGains, Span<const float, 2>({ wb[0], wb[1] }));
 	}
+	return hold;
+}
+
+// The first frame's exposure, analogue gain and white balance: what a
+// burst holds and a set brackets around.
+struct Held_as {
+	int64_t exposure_us = 20000;
+	float analogue = 1.0f;
+	float wb[2] = { 0, 0 };
+};
+
+// The rest of a burst after its first frame (`first`, copied out): `extra`
+// more frames into memory files, cropped as the photo is, the exposure and
+// white balance held as the first had them. Bounded by its frames' time:
+// whatever came by then is the burst.
+void take_burst(Session &s, Request *first, int extra, std::vector<int> &files, still::Crop crop, const Held_as &as)
+{
+	{
+		std::lock_guard<std::mutex> lock(burst_lock);
+		burst_done.clear();
+	}
+	ControlList hold = held_controls(as.exposure_us, as.analogue, as.wb);
+	phase = Phase::Burst;
+	first->reuse(Request::ReuseBuffers);
+	first->controls().merge(hold);
+	if (camera->queueRequest(first) < 0)
+		return;
+	auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(still::deadline_ms(as.exposure_us, extra));
+	int bad = 0;
+	while (int(files.size()) < extra && running) {
+		Request *request = next_done(until);
+		if (!request) {
+			std::fprintf(stderr, "still: the burst's wait ran out after %d of %d frames\n", int(files.size()), extra);
+			break;
+		}
+		still::Status status = status_of(request, s.stream);
+		if (status == still::Cancelled)
+			break;
+		if (status == still::Success || status == still::Startup) {
+			auto m = s.planes.find(request->findBuffer(s.stream));
+			if (m != s.planes.end()) {
+				dma_sync(s.external_fd, true);
+				int fd = frame_file(m->second, s.w, s.h, s.stride, turn_here, crop);
+				dma_sync(s.external_fd, false);
+				if (fd < 0)
+					break;
+				files.push_back(fd);
+			}
+		} else if (++bad >= 3) {
+			break;
+		}
+		request->reuse(Request::ReuseBuffers);
+		if (camera->queueRequest(request) < 0)
+			break;
+	}
+}
+
+// A bracketing set's other frames after its first (`first`, copied out):
+// each asked at its own exposure and kept once a frame says it was taken
+// with it (the sensor takes a new exposure a frame or two after it is
+// asked; after four frames whatever comes), each a Shot of its own for the
+// writer, cropped and named as the shell said.
+void take_set(Session &s, Request *first, const Shot &base, still::Crop crop, const Held_as &as, std::vector<Shot> &set)
+{
 	{
 		std::lock_guard<std::mutex> lock(burst_lock);
 		burst_done.clear();
 	}
 	phase = Phase::Burst;
-	first->reuse(Request::ReuseBuffers);
-	first->controls().merge(hold);
-	camera->queueRequest(first);
-	auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-	while (int(files.size()) < extra && running && std::chrono::steady_clock::now() < until) {
-		Request *request = nullptr;
-		{
-			std::unique_lock<std::mutex> lock(burst_lock);
-			burst_ready.wait_until(lock, until, [] { return !burst_done.empty() || !running; });
-			if (burst_done.empty())
-				break;
-			request = burst_done.front();
-			burst_done.pop_front();
-		}
-		FrameBuffer *buffer = request->findBuffer(s.stream);
-		auto m = buffer ? s.planes.find(buffer) : s.planes.end();
-		if (m != s.planes.end() && buffer->metadata().status == FrameMetadata::FrameSuccess) {
-			dma_sync(s.external_fd, true);
-			int fd = frame_file(m->second, s.w, s.h, s.stride, turn_here);
-			dma_sync(s.external_fd, false);
-			if (fd < 0)
-				break;
-			files.push_back(fd);
-		}
+	Request *request = first;
+	for (size_t i = 0; i < base.with.also.size() && running; i++) {
+		const Asked::Also &more = base.with.also[i];
+		ControlList want = held_controls(more.exposure_us, more.gain, as.wb);
 		request->reuse(Request::ReuseBuffers);
-		camera->queueRequest(request);
+		request->controls().merge(want);
+		if (camera->queueRequest(request) < 0)
+			return;
+		auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(still::deadline_ms(more.exposure_us, 5));
+		Request *got = nullptr;
+		int seen = 0, bad = 0;
+		while (running && !got) {
+			Request *done = next_done(until);
+			if (!done) {
+				std::fprintf(stderr, "still: the set's wait ran out at its frame %zu\n", i + 2);
+				return;
+			}
+			request = done;
+			still::Status status = status_of(done, s.stream);
+			if (status == still::Cancelled)
+				return;
+			if (status == still::Success || status == still::Startup) {
+				const ControlList &said = done->metadata();
+				float ag = said.get(controls::AnalogueGain).value_or(0.0f);
+				bool right = still::matches(said.get(controls::ExposureTime).value_or(0), more.exposure_us) && std::fabs(ag - more.gain) <= 0.08f * more.gain + 0.05f;
+				if (right || ++seen > 4) {
+					got = done;
+					break;
+				}
+			} else if (++bad >= 3) {
+				return;
+			}
+			done->reuse(Request::ReuseBuffers);
+			done->controls().merge(want);
+			if (camera->queueRequest(done) < 0)
+				return;
+		}
+		if (!got)
+			return;
+		auto m = s.planes.find(got->findBuffer(s.stream));
+		if (m == s.planes.end())
+			return;
+		Shot shot;
+		shot.path = more.path;
+		shot.at = base.at;
+		shot.asked = base.asked;
+		shot.with = base.with;
+		shot.with.also.clear();
+		shot.with.raw.clear();
+		// Its own original beside it, as filters.rs names one.
+		if (!base.with.original.empty()) {
+			size_t slash = base.with.original.rfind('/'), name = more.path.rfind('/');
+			shot.with.original = base.with.original.substr(0, slash + 1) + more.path.substr(name == std::string::npos ? 0 : name + 1);
+		}
+		shot.bias_thirds = more.bias_thirds;
+		const ControlList &said = got->metadata();
+		shot.exposure_us = said.get(controls::ExposureTime).value_or(0);
+		shot.gain = said.get(controls::AnalogueGain).value_or(1.0f) * said.get(controls::DigitalGain).value_or(1.0f);
+		shot.gains[0] = as.wb[0];
+		shot.gains[1] = as.wb[1];
+		shot.w = crop.w;
+		shot.h = crop.h;
+		shot.yuv.resize(size_t(crop.w) * crop.h * 3 / 2);
+		dma_sync(s.external_fd, true);
+		copy_frame(m->second, s.stride, s.w, s.h, crop, turn_here, shot.yuv.data());
+		dma_sync(s.external_fd, false);
+		set.push_back(std::move(shot));
 	}
 }
 
@@ -1393,30 +1650,56 @@ int bytes_file(const char *name, const uint8_t *data, size_t size)
 	return fd;
 }
 
-// A photo's picture at `size` into `shot`: the camera set up for a still
-// (one frame of ours, in the held memory when `use_held`; the sensor's own
-// frame too when `want_raw`), taken with what the shell asked (`shot.with`:
-// the exposure fixed, so the first frame is the photo; else let settle), the
-// frame copied out; and for detail mode `extra` more frames into `files`.
-bool take_still_at(Size size, Shot &shot, std::string &why, bool want_raw, bool use_held, int extra = 0, std::vector<int> *files = nullptr)
+// One try at a photo's picture at `size` into `shot`: the camera set up for
+// a still (one frame of ours, in the held memory when `use_held`; the
+// sensor's own frame too when `want_raw`), taken with what the shell asked
+// (`shot.with`: the exposure fixed, so the first frame is the photo; else
+// let settle), the frame copied out (cropped to its aspect); for detail
+// mode `extra` more frames into `files`, for bracketing the set's other
+// frames into `set`. Bounded: given up as soon as nothing will come, and
+// after a few frames' time at most. `held_suspect` says the held frame was
+// in use and no frame came: it is the first thing to doubt.
+bool last_try_held = false;
+
+bool take_still_at(Size size, Shot &shot, std::string &why, bool want_raw, bool use_held, int extra, std::vector<int> *files, std::vector<Shot> *set, bool &held_suspect)
 {
+	held_suspect = false;
+	last_try_held = false;
 	Opening how;
 	how.raw = how.map_raw = want_raw;
 	how.use_held = use_held;
 	std::unique_ptr<Session> s = open_session(StreamRole::StillCapture, size, 1, how, why);
+	shot.marks.mark("config");
 	if (!s)
 		return false;
+	const bool held_in_use = s->external != nullptr;
+	last_try_held = held_in_use;
 	{
 		std::lock_guard<std::mutex> hold(still_lock);
-		still_frames = 0;
+		still_judge = still::Judge();
 		still_request = nullptr;
+		still_failed.clear();
 	}
 	const Asked &a = shot.with;
-	still_fixed_us = a.exposure_us > 0 && a.gain > 0 ? a.exposure_us : 0;
-	ControlList controls = limits(15, std::max<int64_t>(night ? 200000 : 66666, still_fixed_us + 1000));
-	if (still_fixed_us > 0) {
+	// The longest exposure this mode allows, as the pipeline says (the
+	// driver's 11.77 s at the full sensor).
+	int64_t longest_allowed = still::LONGEST_US;
+	auto info = camera->controls().find(&controls::ExposureTime);
+	if (info != camera->controls().end() && info->second.max().type() == ControlTypeInteger32 && info->second.max().get<int32_t>() > 0)
+		longest_allowed = info->second.max().get<int32_t>();
+	const int64_t fixed = a.exposure_us > 0 && a.gain > 0 ? std::min(a.exposure_us, longest_allowed) : 0;
+	if (fixed > 0 && fixed < a.exposure_us)
+		std::fprintf(stderr, "still: %lld us asked, %lld us is this mode's longest\n", (long long)a.exposure_us, (long long)fixed);
+	still_fixed_us = fixed;
+	const bool is_set = set && !a.also.empty() && extra <= 0;
+	int64_t longest = fixed;
+	if (is_set)
+		for (const Asked::Also &more : a.also)
+			longest = std::max(longest, std::min(more.exposure_us, longest_allowed));
+	ControlList controls = limits(15, std::max<int64_t>(night ? 200000 : 66666, longest + 1000));
+	if (fixed > 0) {
 		controls.set(controls::ExposureTimeMode, controls::ExposureTimeModeManual);
-		controls.set(controls::ExposureTime, int32_t(a.exposure_us));
+		controls.set(controls::ExposureTime, int32_t(fixed));
 		controls.set(controls::AnalogueGainMode, controls::AnalogueGainModeManual);
 		controls.set(controls::AnalogueGain, a.gain);
 	} else {
@@ -1437,44 +1720,73 @@ bool take_still_at(Size size, Shot &shot, std::string &why, bool want_raw, bool 
 	else if (a.denoise == "fast")
 		denoise = controls::draft::NoiseReductionModeFast;
 	controls.set(controls::draft::NoiseReductionMode, denoise);
-	if (!start(*s, std::move(controls), Phase::Still, why))
+	if (!start(*s, std::move(controls), Phase::Still, why)) {
+		shot.marks.mark("refused");
+		still_fixed_us = 0;
 		return false;
+	}
+	shot.marks.mark("start");
+	// The shell's "hold still", from now for as long as its frames take at
+	// most: the first frame (the sensor's start, then the frame), a burst's
+	// more at every other frame, a set's each a few frames (a new exposure
+	// takes a frame or two to arrive).
+	const int64_t f0 = still::frame_us(fixed > 0 ? fixed : 66667);
+	int64_t expect_us = 2 * f0 + std::max(0, extra) * 2 * f0;
+	int frames = 1 + std::max(0, extra);
+	if (is_set)
+		for (const Asked::Also &more : a.also) {
+			expect_us += 5 * still::frame_us(std::min(more.exposure_us, longest_allowed));
+			frames++;
+		}
+	char exposing[64];
+	std::snprintf(exposing, sizeof exposing, "%lld %d %s", (long long)(expect_us / 1000), frames, is_set ? "bracket" : extra > 0 ? "detail" : "still");
+	tell(6, 0, exposing);
+	const long wait = still::deadline_ms(fixed, still::Judge::most(fixed > 0, fixed > 1000000) + 1);
 	Request *got = nullptr;
 	{
 		std::unique_lock<std::mutex> hold(still_lock);
-		auto wait = std::chrono::seconds(6) + std::chrono::microseconds(4 * still_fixed_us);
-		still_ready.wait_for(hold, wait, [] { return still_request != nullptr || !running; });
+		bool ended = still_ready.wait_for(hold, std::chrono::milliseconds(wait), [] { return still_request != nullptr || !still_failed.empty() || !running; });
 		got = still_request;
+		if (!got)
+			why = !ended ? "no frame within " + std::to_string(wait) + " ms" : !still_failed.empty() ? still_failed : "stopped";
 	}
 	bool ok = false;
 	if (!got) {
-		why = "the camera gave no picture for the photo";
+		held_suspect = held_in_use;
+		shot.marks.mark("gave-up");
+		std::fprintf(stderr, "still: %s (%s frame, %ux%u) %s\n", why.c_str(), held_in_use ? "the held" : "the allocator's", size.width, size.height, shot.marks.line.c_str());
+		why = "the camera gave no picture for the photo (" + why + ")";
 	} else {
+		shot.marks.mark("frame");
 		FrameBuffer *buffer = got->findBuffer(s->stream);
 		auto m = buffer ? s->planes.find(buffer) : s->planes.end();
 		if (m == s->planes.end()) {
 			why = "the photo's picture cannot be read";
 		} else {
-			unsigned int w = s->w, h = s->h, st = s->stride;
-			shot.w = w;
-			shot.h = h;
-			shot.yuv.resize(size_t(w) * h * 3 / 2);
-			uint8_t *out = shot.yuv.data();
-			dma_sync(s->external_fd, true);
-			copy_plane(m->second.y, st, w, h, out, turn_here);
-			copy_plane(m->second.u, st / 2, w / 2, h / 2, out + size_t(w) * h, turn_here);
-			copy_plane(m->second.v, st / 2, w / 2, h / 2, out + size_t(w) * h * 5 / 4, turn_here);
-			dma_sync(s->external_fd, false);
 			const ControlList &said = got->metadata();
-			shot.exposure_us = said.get(controls::ExposureTime).value_or(0);
-			shot.gain = said.get(controls::AnalogueGain).value_or(1.0f) * said.get(controls::DigitalGain).value_or(1.0f);
+			Held_as as;
+			as.exposure_us = said.get(controls::ExposureTime).value_or(fixed > 0 ? fixed : 20000);
+			as.analogue = said.get(controls::AnalogueGain).value_or(1.0f);
+			shot.exposure_us = as.exposure_us;
+			shot.gain = as.analogue * said.get(controls::DigitalGain).value_or(1.0f);
 			if (auto gains = said.get(controls::ColourGains)) {
-				shot.gains[0] = (*gains)[0];
-				shot.gains[1] = (*gains)[1];
+				shot.gains[0] = as.wb[0] = (*gains)[0];
+				shot.gains[1] = as.wb[1] = (*gains)[1];
 			}
 			if (auto black = said.get(controls::SensorBlackLevels))
 				shot.black = (*black)[0];
-			// The sensor's own frame, as it came, for the DNG.
+			// A single photo: the sensor is done with it, the hand may move.
+			if (extra <= 0 && !is_set)
+				tell(7, 0, shot.marks.line);
+			const still::Crop crop = still::crop_for(s->w, s->h, a.aspect_a, a.aspect_b);
+			shot.w = crop.w;
+			shot.h = crop.h;
+			shot.yuv.resize(size_t(crop.w) * crop.h * 3 / 2);
+			dma_sync(s->external_fd, true);
+			copy_frame(m->second, s->stride, s->w, s->h, crop, turn_here, shot.yuv.data());
+			dma_sync(s->external_fd, false);
+			shot.marks.mark("copy");
+			// The sensor's own frame, as it came, for the DNG (never cropped).
 			if (want_raw) {
 				FrameBuffer *raw = s->raw ? got->findBuffer(s->raw) : nullptr;
 				auto rp = raw ? s->raw_planes.find(raw) : s->raw_planes.end();
@@ -1489,7 +1801,13 @@ bool take_still_at(Size size, Shot &shot, std::string &why, bool want_raw, bool 
 			}
 			ok = true;
 			if (extra > 0 && files)
-				take_burst(*s, got, extra, *files);
+				take_burst(*s, got, extra, *files, crop, as);
+			else if (is_set)
+				take_set(*s, got, shot, crop, as, *set);
+			if (extra > 0 || is_set) {
+				shot.marks.mark("frames");
+				tell(7, 0, shot.marks.line);
+			}
 		}
 	}
 	stop_camera();
@@ -1556,7 +1874,7 @@ void start_merge(const Shot &shot)
 		m.y = shot.yuv.data();
 		m.u = m.y + size_t(shot.w) * shot.h;
 		m.v = m.u + size_t(shot.w / 2) * (shot.h / 2);
-		int fd = frame_file(m, shot.w, shot.h, shot.w, false);
+		int fd = frame_file(m, shot.w, shot.h, shot.w, false, still::Crop{ 0, 0, shot.w, shot.h });
 		if (fd < 0) {
 			for (int f : shot.burst)
 				close(f);
@@ -1725,10 +2043,12 @@ void take_still(const std::string &path, const std::string &words, int detail = 
 // "detail auto|on <path>": a burst merged in the background, or (auto, out
 // of real low light) a photo as usual. The shell decides "auto" itself from
 // the preview's own frames (pro.rs's low_light) and asks "on" or a still;
-// this is for anything that asks "auto".
+// this is for anything that asks "auto". Real low light only: under 25 lux
+// with the gain well up too, both saying so (0.9.3 took "or a gain of 8",
+// which the preview reaches under about 50 lux: an evening room).
 void take_detail(const std::string &how, const std::string &path, const std::string &words)
 {
-	bool dim = seen_lux.load() < 25.0f || seen_gain.load() >= 8.0f;
+	bool dim = seen_lux.load() < 25.0f && seen_gain.load() >= 6.0f;
 	int frames = (how == "on" || dim) ? burst_frames(3280, 2464) : 0;
 	take_still(path, words, frames);
 }
@@ -1736,61 +2056,89 @@ void take_detail(const std::string &how, const std::string &path, const std::str
 void take_still(const std::string &path, const std::string &words, int detail)
 {
 	auto asked = std::chrono::steady_clock::now();
-	// Room to keep it: one photo being written and none waiting, and the
-	// system not short.
+	Shot shot;
+	shot.marks.t0 = asked;
+	// Room to keep it: two photos at most waiting in memory (12 MB each),
+	// and the system not short. Bounded: 0.9.3 could wait twenty seconds
+	// here behind a photo being written, the shell saying "hold still".
 	{
 		std::unique_lock<std::mutex> hold(write_lock);
-		write_done.wait_for(hold, std::chrono::seconds(20), [] {
+		bool roomy = write_done.wait_for(hold, std::chrono::seconds(4), [] {
 			size_t busy = to_write.size() + (writing_one ? 1 : 0);
-			return !running || busy == 0 || (busy < 2 && available_mb() > 120);
+			if (!running || busy == 0)
+				return true;
+			long mb = available_mb();
+			return busy < 2 && (mb < 0 || mb > 64);
 		});
+		if (!roomy)
+			std::fprintf(stderr, "still: no room to keep it after 4 s of waiting (photos being written); taken anyway\n");
 	}
+	shot.marks.mark("room");
 	stop_camera();
 	preview.reset();
-	Shot shot;
+	shot.marks.mark("stop");
 	shot.path = path;
 	shot.asked = asked;
 	shot.at = std::time(nullptr);
 	shot.with = asked_of(words);
+	shot.bias_thirds = shot.with.bias_thirds;
 	std::string why;
 	{
 		std::lock_guard<std::mutex> hold(face_lock);
 		shot.face = face_on && std::chrono::steady_clock::now() - face_seen < std::chrono::milliseconds(800);
 		std::copy(face_box, face_box + 4, shot.face_box);
 	}
-	// The full sensor, in the held frame, with the RAW if asked. Should
-	// that not run: without the RAW (the pool may not stretch to it), then
-	// without the held frame (given up if that was it), then once more after
-	// a breath (pages being moved out of the pool's way), and only then the
-	// binned half each way, so a photo is never lost.
+	// A bracketing set's frames each wait in memory to be written: as many
+	// as there is room for.
+	if (!shot.with.also.empty()) {
+		long mb = available_mb();
+		size_t fit = mb < 0 ? shot.with.also.size() : size_t(std::max(0L, (mb - 96) / 13));
+		if (fit < shot.with.also.size()) {
+			std::fprintf(stderr, "still: room for %zu of the set's %zu more frames\n", fit, shot.with.also.size());
+			shot.with.also.resize(fit);
+		}
+		detail = 0;
+	}
+	// The full sensor, in the held frame, with the RAW if asked. Should that
+	// not run: without the RAW (the pool may not stretch to it), then
+	// without the held frame (given up for good if no frame came in it),
+	// then once more after a breath if memory was short (pages being moved
+	// out of the pool's way), and only then the binned half each way, so a
+	// photo is never lost. Each try is bounded by its frames' time.
 	const Size full(3280, 2464);
-	bool want_raw = !shot.with.raw.empty() && detail <= 1;
-	bool ok = take_still_at(full, shot, why, want_raw, true, detail - 1, &shot.burst);
+	std::vector<Shot> set;
+	bool want_raw = !shot.with.raw.empty() && detail <= 1 && shot.with.also.empty();
+	bool suspect = false;
+	bool ok = take_still_at(full, shot, why, want_raw, !held.failed, detail - 1, &shot.burst, &set, suspect);
+	// Whether a try has already run as the plainest would (no RAW, no held
+	// frame): no use running it again.
+	bool plain_tried = !want_raw && !last_try_held;
+	if (!ok && suspect)
+		held.give_up(why);
 	if (!ok && running && want_raw) {
 		want_raw = false;
 		shot.raw_skipped = true;
-		ok = take_still_at(full, shot, why, false, true, detail - 1, &shot.burst);
+		ok = take_still_at(full, shot, why, false, !held.failed, detail - 1, &shot.burst, &set, suspect);
+		plain_tried = !last_try_held;
+		if (!ok && suspect)
+			held.give_up(why);
 	}
-	if (!ok && running && !held.failed) {
-		ok = take_still_at(full, shot, why, false, false, detail - 1, &shot.burst);
-		if (ok) {
-			held.failed = true;
-			held.release();
-		}
-	}
-	if (!ok && running) {
+	if (!ok && running && !plain_tried)
+		ok = take_still_at(full, shot, why, false, false, detail - 1, &shot.burst, &set, suspect);
+	if (!ok && running && why.find("memory") != std::string::npos) {
 		std::this_thread::sleep_for(std::chrono::milliseconds(150));
-		ok = take_still_at(full, shot, why, false, false, detail - 1, &shot.burst);
+		ok = take_still_at(full, shot, why, false, false, detail - 1, &shot.burst, &set, suspect);
 	}
 	if (!ok && running) {
 		std::string again;
-		ok = take_still_at(Size(1640, 1232), shot, again, false, false);
+		ok = take_still_at(Size(1640, 1232), shot, again, false, false, 0, nullptr, &set, suspect);
 	}
 	// Its picture is in: the shell may take the next as soon as the preview
 	// is back.
 	if (ok) {
 		shot.shot_ms = ms_since(asked);
-		tell(4, shot.w << 16 | shot.h, path);
+		shot.marks.mark("captured");
+		tell(4, shot.w << 16 | shot.h, path + "\t" + shot.marks.line);
 	}
 	std::string restart;
 	if (running && !start_preview(restart)) {
@@ -1798,6 +2146,8 @@ void take_still(const std::string &path, const std::string &words, int detail)
 		running = false;
 		fresh.notify_all();
 	}
+	shot.marks.mark("preview");
+	std::fprintf(stderr, "still: %s %s %s\n", ok ? "took" : "failed", path.c_str(), shot.marks.line.c_str());
 	if (!ok) {
 		tell(3, 0, why);
 		return;
@@ -1805,6 +2155,8 @@ void take_still(const std::string &path, const std::string &words, int detail)
 	{
 		std::lock_guard<std::mutex> hold(write_lock);
 		to_write.push_back(std::move(shot));
+		for (Shot &more : set)
+			to_write.push_back(std::move(more));
 	}
 	write_ready.notify_one();
 }
@@ -1980,6 +2332,8 @@ int main(int argc, char **argv)
 				p.ev = std::clamp(stops, -3.0f, 3.0f);
 				p.ct = std::strcmp(ct, "auto") ? std::atoi(ct) : 0;
 				p.max_us = longest;
+				if (const char *g = std::strstr(order.c_str(), " gains="))
+					std::sscanf(g, " gains=%f,%f", &p.gains[0], &p.gains[1]);
 				{
 					std::lock_guard<std::mutex> hold(pro_lock);
 					pro = p;

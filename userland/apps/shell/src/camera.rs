@@ -4,10 +4,12 @@
 //! The viewfinder takes the panel's height at the photo's own shape (4:3),
 //! with the controls in a rail beside it: the modes (scan, photo, pro: a
 //! carousel, as a phone's camera has them), the shutter, and the last photo
-//! taken (↓ opens the album on it). Enter takes a photo; `t` sets a timer
-//! (3 or 10 s), `g` lays a rule-of-thirds grid over the picture, `n` lets
-//! the exposure run longer in low light, `f` opens the looks, `z` the 1:1
-//! focus check.
+//! taken (↓ opens the album on it). Enter takes a photo; `c` sets the
+//! self-timer (2 or 10 s; `t` too, in photo mode), `g` lays a grid over the
+//! picture (thirds, or squares), `h` the level, `o` frames it 3:2, 16:9 or
+//! 1:1 (and crops the photo so), `n` lets the exposure run longer in low
+//! light, `f` opens the looks, `z` the 1:1 focus check. camkit.rs has the
+//! kit (0.9.4) and its keys in pro mode.
 //!
 //! On the handheld the picture comes from `catalyst-camera --colour` (the
 //! image's own libcamera program): a 320 × 240 YUV 4:2:0 preview at up to 30
@@ -20,6 +22,16 @@
 //! frame is the photo and nothing settles again, copies the frame out and
 //! starts the preview again ("captured"), then writes the JPEG (quality 95,
 //! with Exif) on three cores behind it.
+//!
+//! Every photo is timed (camkit.rs's Timeline: the key, the order, the
+//! sensor exposing, done, the picture in, written), in the log and, in pro
+//! mode on `t`, a readout ("last shot: 0.42 s capture · 0.7 s save").
+//! "Hold still" shows only while the sensor exposes, and only when that is
+//! long enough to matter (a slow shutter, detail's burst, a bracketing
+//! set), with the seconds left. 0.9.3 showed it from the key until the
+//! picture was in, which could be ten seconds and more when the camera
+//! program waited out a try that would never give a frame (catalyst-camera
+//! 1.5 now gives such a try up at once).
 //!
 //! The shutter answers at once: the frame in the viewfinder as the key went
 //! down, with the look over it, is the photo's thumbnail straight away (it
@@ -63,7 +75,8 @@
 //! and merges the rest into it in the background (burst.rs): the thumbnail
 //! wears a "refining" badge with the seconds left until the merged photo
 //! takes its place. Its "auto" is for real low light only (pro.rs's
-//! `low_light`: under 25 lux, or most of the gain at a slow shutter).
+//! `low_light`: under 25 lux and the photo out of gain at 1/20 s, both;
+//! 0.9.3 took either, so an evening room was a burst every time).
 //!
 //! Scan mode reads QR codes from the preview's brightness, a few times a
 //! second on a thread of its own: a Wi-Fi code offers to join the network, a
@@ -86,8 +99,10 @@
 //!
 //! Frames are developed on the camera's thread (colour conversion, look,
 //! zebras and histogram in one pass, filters.rs), drawn as they arrive (the
-//! thread wakes the main loop), and nothing here keeps the frame beat but
-//! motion: a camera at rest is drawn at its own frame rate, not the panel's.
+//! thread wakes the main loop) and taken in as ambient change, not motion
+//! (0.9.4): a camera at rest is drawn at its own frame rate, not the
+//! panel's, and its waits (the timer, "hold still", the intervalometer)
+//! look in only as often as what they show changes.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -100,6 +115,7 @@ use std::time::{Duration, Instant};
 use bezel::{Align, Color, Rect};
 use detent::{role, Animated};
 
+use crate::camkit::{self, Aspect, Grid, HistMode, Kit, Mark, Program, Timeline};
 use crate::filters::{Compiled, Look, LOOKS};
 use crate::gfx::{Gfx, H, PAD, W};
 use crate::photos::{self, draw_picture, whole, Photo, Picture};
@@ -201,8 +217,13 @@ struct Found {
 /// What happened that the screen is told of.
 #[derive(Debug)]
 enum Event {
-    /// The photo's picture is in: the preview runs again while it is written.
-    Captured,
+    /// The sensor is exposing the photo (catalyst-camera's "<ms> <frames>
+    /// <what>"), and done with it.
+    Exposing(String),
+    Exposed,
+    /// The photo's picture is in: the preview runs again while it is
+    /// written; the camera program's timing marks.
+    Captured(String),
     /// Saved: its size, and whether a detail merge now refines it (what it
     /// took, "shot 812 write 640", goes to the shell's log), and whether a
     /// RAW asked for found no room in the camera's memory.
@@ -232,6 +253,8 @@ struct Live {
     /// frame itself as it came (for the shutter's instant thumbnail).
     meta: Option<Metered>,
     histogram: pro::Histogram,
+    /// Its red, green and blue, when the RGB histogram shows.
+    rgb: Option<camkit::RgbHistogram>,
     yuv: Vec<u8>,
     yuv_size: (usize, usize),
     /// The looks' live thumbnails (while the strip is open), in its order.
@@ -248,11 +271,14 @@ struct Develop {
     peaking: Option<[u8; 3]>,
     /// The strip's looks, for their thumbnails.
     strip: Option<Arc<Vec<Compiled>>>,
+    /// False colour in place of the picture; the RGB histogram counted.
+    false_colour: bool,
+    rgb: bool,
 }
 
 impl Default for Develop {
     fn default() -> Self {
-        Develop { look: Arc::new(Look::Original.compiled(0.0)), zebras: false, peaking: None, strip: None }
+        Develop { look: Arc::new(Look::Original.compiled(0.0)), zebras: false, peaking: None, strip: None, false_colour: false, rgb: false }
     }
 }
 
@@ -264,9 +290,15 @@ const THUMB: (usize, usize) = (40, 30);
 fn develop_frame(live: &Mutex<Live>, develop: &Mutex<Develop>, yuv: &[u8], w: usize, h: usize, pic: &mut Picture, meta: Option<Metered>) {
     let opts = develop.lock().map(|d| d.clone()).unwrap_or_default();
     let frames = live.lock().map(|l| l.frames).unwrap_or(0);
-    let clipped = opts.look.develop(yuv, w, h, pic, opts.zebras.then_some(frames as usize % 8));
+    let zebras = opts.zebras && !opts.false_colour;
+    let clipped = opts.look.develop(yuv, w, h, pic, zebras.then_some(frames as usize % 8));
+    // False colour: the brightness's bands over the whole picture.
+    if opts.false_colour {
+        camkit::paint_false_colour(&yuv[..w * h], &mut pic.rgb);
+    }
     let mut histogram = pro::Histogram::of_luma(&yuv[..w * h], w, h, 2);
-    histogram.clipped = if opts.zebras { clipped as f32 / (w * h) as f32 } else { histogram.clipped };
+    histogram.clipped = if zebras { clipped as f32 / (w * h) as f32 } else { histogram.clipped };
+    let rgb = opts.rgb.then(|| camkit::RgbHistogram::of_yuv420(yuv, w, h, 2));
     if let Some(colour) = opts.peaking {
         let marks = pro::peaks(&yuv[..w * h], w, h);
         for (px, on) in pic.rgb.chunks_exact_mut(3).zip(marks) {
@@ -291,6 +323,7 @@ fn develop_frame(live: &Mutex<Live>, develop: &Mutex<Develop>, yuv: &[u8], w: us
         l.frames += 1;
         l.trouble = None;
         l.histogram = histogram;
+        l.rgb = rgb;
         l.yuv.clear();
         l.yuv.extend_from_slice(yuv);
         l.yuv_size = (w, h);
@@ -461,6 +494,9 @@ fn run_program(live: &Mutex<Live>, stop: &AtomicBool, slot: &Mutex<Option<ChildS
                 use std::io::BufRead;
                 for line in std::io::BufReader::new(err).lines().map_while(Result::ok) {
                     if !line.trim().is_empty() {
+                        // Into the shell's log as well: each photo's marks,
+                        // any wait that ran out (catalyst-camera 1.5).
+                        eprintln!("catalyst-camera: {}", line.trim());
                         said.lock().map(|mut s| *s = line).ok();
                     }
                 }
@@ -513,7 +549,16 @@ fn run_program(live: &Mutex<Live>, stop: &AtomicBool, slot: &Mutex<Option<ChildS
                 live.lock().map(|mut l| l.events.push(Event::Failed(why))).ok();
             }
             4 => {
-                live.lock().map(|mut l| l.events.push(Event::Captured)).ok();
+                let text = String::from_utf8_lossy(&frame).into_owned();
+                let marks = text.split_once('\t').map_or(String::new(), |(_, m)| m.to_owned());
+                live.lock().map(|mut l| l.events.push(Event::Captured(marks))).ok();
+            }
+            6 => {
+                let line = String::from_utf8_lossy(&frame).trim().to_owned();
+                live.lock().map(|mut l| l.events.push(Event::Exposing(line))).ok();
+            }
+            7 => {
+                live.lock().map(|mut l| l.events.push(Event::Exposed)).ok();
             }
             _ => {}
         }
@@ -668,45 +713,94 @@ fn still_word<'a>(words: &'a [String], key: &str) -> Option<&'a str> {
 /// dim, noisy scene (the robot still driving), merged on a thread of its own.
 fn sim_photo(live: &Arc<Mutex<Live>>, path: PathBuf, t: f32, scan: bool, burst: usize, face: Option<[f32; 4]>, words: &[String]) {
     let asked = Instant::now();
-    let (w, h) = FULL;
+    let (fw, fh) = FULL;
     let exposure = still_word(words, "exp").and_then(|v| v.parse::<f32>().ok());
     let gain = still_word(words, "gain").and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0);
     let bright = exposure.map_or(1.0, |e| e * gain / sim_needs(0.0));
     let ct = still_word(words, "ct").and_then(|v| v.parse().ok()).unwrap_or(SIM_CT);
+    // The aspect's crop, and a bracketing set's other frames ("also=µs,gain,thirds,path").
+    let crop = Aspect::from_name(still_word(words, "aspect").unwrap_or("4:3")).crop(fw as u32, fh as u32);
+    let (w, h) = (crop.2 as usize, crop.3 as usize);
+    let also: Vec<(f32, PathBuf)> = words
+        .iter()
+        .filter_map(|w| w.strip_prefix("also="))
+        .filter_map(|v| {
+            let mut parts = v.splitn(4, ',');
+            let (e, g) = (parts.next()?.parse::<f32>().ok()?, parts.next()?.parse::<f32>().ok()?);
+            parts.next()?;
+            Some((e * g / sim_needs(0.0), PathBuf::from(parts.next()?)))
+        })
+        .collect();
+    // The sensor exposing it, as catalyst-camera says: a frame (or a burst,
+    // or a set) at its exposure, two frame lengths each at the most.
+    let frames_n = burst.max(1) + also.len();
+    let frame_ms = exposure.map_or(66.7, |e| (e / 1000.0).max(66.7));
+    let what = if !also.is_empty() { "bracket" } else if burst > 0 { "detail" } else { "still" };
+    live.lock().map(|mut l| l.events.push(Event::Exposing(format!("{:.0} {frames_n} {what}", 2.0 * frame_ms * frames_n as f32)))).ok();
+    crate::platform::wake();
     let mut noise = 0x2545_F491_4F6C_DD1Du64 ^ (t.to_bits() as u64);
     let mut frames = Vec::new();
     let mut raw_rgb = None;
+    let cut = |yuv: Vec<u8>| if (w, h) == (fw, fh) { yuv } else { camkit::crop_yuv420(&yuv, fw, fh, crop) };
     for i in 0..burst.max(1) {
         // About 8 frames a second at full size, a hand's drift between them.
-        let mut pic = scene(w, h, t + i as f32 * 0.12, scan);
+        let mut pic = scene(fw, fh, t + i as f32 * 0.12, scan);
         sim_expose(&mut pic, bright, ct);
         let mut yuv = rgb_to_yuv420(&pic);
         if burst > 0 {
-            dim_and_noisy(&mut yuv, w * h, &mut noise);
+            dim_and_noisy(&mut yuv, fw * fh, &mut noise);
         }
         if i == 0 && still_word(words, "raw").is_some() {
             raw_rgb = Some(pic);
         }
-        frames.push(yuv);
+        frames.push(cut(yuv));
     }
-    live.lock().map(|mut l| l.events.push(Event::Captured)).ok();
-    crate::platform::wake();
+    let set: Vec<(PathBuf, Vec<u8>)> = also
+        .into_iter()
+        .enumerate()
+        .map(|(i, (b, p))| {
+            let mut pic = scene(fw, fh, t + (i + 1) as f32 * 0.12, scan);
+            sim_expose(&mut pic, b, ct);
+            (p, cut(rgb_to_yuv420(&pic)))
+        })
+        .collect();
     let shot = asked.elapsed().as_millis();
+    let marks = format!("room 0 stop 0 config 0 start 0 frame {shot} copy {shot} captured {shot}");
+    {
+        let Ok(mut l) = live.lock() else { return };
+        l.events.push(Event::Exposed);
+        l.events.push(Event::Captured(marks));
+    }
+    crate::platform::wake();
     let (live, words) = (live.clone(), words.to_vec());
     std::thread::Builder::new()
         .name("photo-write".into())
         .spawn(move || {
-            let event = sim_write(&path, frames, burst, face, &words, raw_rgb, shot);
+            let event = sim_write(&path, frames, burst, face, &words, raw_rgb, shot, (w, h));
             live.lock().map(|mut l| l.events.push(event)).ok();
             crate::platform::wake();
+            // The set's others, each a photo of its own, the look over each.
+            let table = still_word(&words, "look").and_then(|f| std::fs::read(f).ok()).and_then(|b| crate::filters::read_lut_file(&b));
+            let exif = still_word(&words, "lookname").map(crate::filters::exif_with_look);
+            for (p, mut yuv) in set {
+                if let Some(table) = &table {
+                    crate::filters::apply_yuv420(table, &mut yuv, w, h);
+                }
+                let event = match crate::burst::write_jpeg(&p, &yuv, w, h, exif.clone()) {
+                    Ok(()) => Event::Saved { path: p, size: (w as u32, h as u32), detail: false, raw_skipped: false },
+                    Err(why) => Event::Failed(why),
+                };
+                live.lock().map(|mut l| l.events.push(event)).ok();
+                crate::platform::wake();
+            }
         })
         .ok();
 }
 
 /// The simulator's photo written: the look over it, the photo as taken
 /// kept beside it, the DNG, and a detail merge started.
-fn sim_write(path: &std::path::Path, mut frames: Vec<Vec<u8>>, burst: usize, face: Option<[f32; 4]>, words: &[String], raw_rgb: Option<Picture>, shot: u128) -> Event {
-    let (w, h) = FULL;
+#[allow(clippy::too_many_arguments)]
+fn sim_write(path: &std::path::Path, mut frames: Vec<Vec<u8>>, burst: usize, face: Option<[f32; 4]>, words: &[String], raw_rgb: Option<Picture>, shot: u128, (w, h): (usize, usize)) -> Event {
     let began = Instant::now();
     let table = still_word(words, "look").and_then(|f| std::fs::read(f).ok()).and_then(|b| crate::filters::read_lut_file(&b));
     let name = still_word(words, "lookname").map(str::to_owned);
@@ -954,23 +1048,21 @@ impl Dial {
     }
 }
 
-/// The timer's choices, in turn.
-const TIMERS: [u32; 3] = [0, 3, 10];
-
 /// What the Camera keeps between visits (its own file beside the settings):
-/// the dials, the look, RAW and the zebras. It always opens in photo mode.
-#[derive(Clone, Debug, PartialEq)]
+/// the dials, the look, RAW and the zebras, and the kit's settings and
+/// presets (camkit.rs). It always opens in photo mode.
 struct Prefs {
     pro: Pro,
     look: Look,
     hue: f32,
     raw: bool,
     zebras: bool,
+    kit: Kit,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { pro: Pro::default(), look: Look::Original, hue: 32.0, raw: false, zebras: true }
+        Prefs { pro: Pro::default(), look: Look::Original, hue: 32.0, raw: false, zebras: true, kit: Kit::default() }
     }
 }
 
@@ -989,7 +1081,7 @@ impl Prefs {
                 "hue" => p.hue = v.parse().unwrap_or(p.hue),
                 "raw" => p.raw = v == "1",
                 "zebras" => p.zebras = v != "0",
-                _ => {}
+                _ => p.kit.read(k, v),
             }
         }
         p
@@ -997,12 +1089,13 @@ impl Prefs {
 
     fn save(&self) {
         let text = format!(
-            "pro={}\nlook={}\nhue={:.0}\nraw={}\nzebras={}\n",
+            "pro={}\nlook={}\nhue={:.0}\nraw={}\nzebras={}\n{}",
             self.pro.to_line().replace(' ', ","),
             self.look.id(),
             self.hue,
             u8::from(self.raw),
-            u8::from(self.zebras)
+            u8::from(self.zebras),
+            self.kit.lines()
         );
         crate::sys::write_atomic(&Self::file(), text.as_bytes()).ok();
     }
@@ -1060,8 +1153,10 @@ pub struct Camera {
     timer: u32,
     /// When the timer's photo is taken (kept by the clock, not the frames).
     countdown: Option<Instant>,
-    grid: bool,
     night: bool,
+    /// The kit (camkit.rs): grids, level, aspect, bracketing, the readout,
+    /// presets, the intervalometer, and the photo under way, timed.
+    kit: Kit,
     /// The shutter's flash over the picture, and its button pressed in.
     flash: Animated,
     press: Animated,
@@ -1217,8 +1312,8 @@ impl Camera {
             trouble: None,
             timer: 0,
             countdown: None,
-            grid: false,
             night: false,
+            kit: prefs.kit,
             flash: Animated::new(0.0, role::smooth()).with_rest(0.01),
             press: Animated::new(0.0, role::layer()).with_rest(0.01),
             saving: None,
@@ -1257,6 +1352,10 @@ impl Camera {
             frozen: false,
         };
         camera.hold_smart();
+        // The level, if it was on when the Camera was last left.
+        if camera.kit.level {
+            camera.kit.imu = Some(crate::imu::hold(crate::imu::Use::Motion));
+        }
         camera.tell_develop();
         camera.tell_pro();
         // The simulator's album has a few photos to begin with.
@@ -1267,7 +1366,19 @@ impl Camera {
     }
 
     fn prefs(&self) -> Prefs {
-        Prefs { pro: self.pro, look: self.look, hue: self.hue, raw: self.raw, zebras: self.zebras }
+        let kit = Kit {
+            grid: self.kit.grid,
+            aspect: self.kit.aspect,
+            level: self.kit.level,
+            bracket: self.kit.bracket,
+            false_colour: self.kit.false_colour,
+            hist: self.kit.hist,
+            readout: self.kit.readout,
+            presets: self.kit.presets.clone(),
+            interval: self.kit.interval,
+            ..Kit::default()
+        };
+        Prefs { pro: self.pro, look: self.look, hue: self.hue, raw: self.raw, zebras: self.zebras, kit }
     }
 
     /// How the camera's thread is to develop frames now: the look, the
@@ -1275,10 +1386,13 @@ impl Camera {
     fn tell_develop(&mut self) {
         let strip = self.strip.then(|| Arc::new(LOOKS.iter().map(|l| l.compiled(self.hue)).collect::<Vec<_>>()));
         let look = Arc::new(self.look.compiled(self.hue));
-        let zebras = self.mode == Mode::Pro && self.zebras;
+        let pro = self.mode == Mode::Pro;
+        let zebras = pro && self.zebras;
         let peaking = self.focus.map(|_| self.peak);
+        let false_colour = pro && self.kit.false_colour && self.focus.is_none();
+        let rgb = pro && self.kit.hist == HistMode::Rgb;
         if let Ok(mut d) = self.develop.lock() {
-            *d = Develop { look, zebras, peaking, strip };
+            *d = Develop { look, zebras, peaking, strip, false_colour, rgb };
         }
     }
 
@@ -1421,24 +1535,38 @@ impl Camera {
     /// settled on (or the dials), split for a steady hand, its white
     /// balance, the look's table and where the photo as taken goes, the RAW;
     /// and whether detail mode merges a burst for it.
-    fn still_words(&self, path: &std::path::Path, detail: crate::burst::DetailMode) -> (Vec<String>, Option<bool>) {
-        use crate::burst::DetailMode;
-        let pro = (self.mode == Mode::Pro).then_some(&self.pro);
+    fn still_words(&self, path: &std::path::Path, detail: crate::burst::DetailMode) -> (Vec<String>, Option<bool>, Vec<PathBuf>) {
+        let in_pro = self.mode == Mode::Pro;
+        let pro = in_pro.then_some(&self.pro);
         let mut words = Vec::new();
-        // Some(auto) for a burst: decided here from the metering when there
-        // is any, else left to the camera program ("auto").
-        let mut burst = match detail {
-            DetailMode::Off => None,
-            DetailMode::On => Some(false),
-            DetailMode::Auto => Some(true),
-        };
-        if let Some(m) = &self.metered {
-            let s = pro::still(pro, m, self.night);
+        let mut set = Vec::new();
+        let still = self.metered.map(|m| pro::still(pro, &m, self.night));
+        if let Some(s) = &still {
             words = s.words();
-            if detail == DetailMode::Auto {
-                burst = pro::low_light(m, &s).then_some(false);
+            if in_pro {
+                let program = Program::of(&self.pro);
+                words.push(format!("program={}", program.exif()));
+                if self.pro.ev != 0 && !self.pro.manual() {
+                    words.push(format!("bias={}", self.pro.ev));
+                }
+                // Bracketing: the set's other frames, each its exposure and file.
+                if let Some(b) = self.kit.bracket {
+                    for (ev, us, gain) in b.exposures(s, program).into_iter().skip(1) {
+                        let p = camkit::set_path(path, ev);
+                        let bias = ev * 3 + if self.pro.manual() { 0 } else { i32::from(self.pro.ev) };
+                        words.push(format!("also={us},{gain:.3},{bias},{}", p.display()));
+                        set.push(p);
+                    }
+                }
             }
         }
+        if let Some(word) = self.kit.aspect.word() {
+            words.push(word);
+        }
+        // Some(auto) for a burst: decided here from the metering when there
+        // is any, else left to the camera program ("auto").
+        let raw = in_pro && self.raw;
+        let mut burst = camkit::detail_burst(detail, self.metered.as_ref(), still.as_ref(), raw, !set.is_empty());
         if self.look != Look::Original {
             if let Some(table) = crate::filters::ensure_lut(self.look, self.hue) {
                 words.push(format!("look={}", table.display()));
@@ -1447,12 +1575,12 @@ impl Camera {
                 words.push(format!("orig={}", crate::filters::original_of(path).display()));
             }
         }
-        if self.mode == Mode::Pro && self.raw {
+        if raw && set.is_empty() {
             words.push(format!("raw={}", path.with_extension("dng").display()));
             // A RAW needs the camera's memory a burst would.
             burst = None;
         }
-        (words, burst)
+        (words, burst, set)
     }
 
     /// A name for the next photo, never one already taken and not yet written.
@@ -1468,6 +1596,11 @@ impl Camera {
     }
 
     fn shoot(&mut self, calm: bool, detail: crate::burst::DetailMode) {
+        self.shoot_at(calm, detail, Instant::now());
+    }
+
+    /// A photo asked for, timed from `key` (the shutter's key going down).
+    fn shoot_at(&mut self, calm: bool, detail: crate::burst::DetailMode, key: Instant) {
         // One photo's picture at a time: the next as soon as the camera has
         // the last one's, while that is still being written.
         if self.saving.is_some() && !self.captured {
@@ -1481,20 +1614,25 @@ impl Camera {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).ok();
         }
-        let (words, burst) = self.still_words(&path, detail);
+        let (words, burst, set) = self.still_words(&path, detail);
         let order = match burst {
             None => Order::Still(path.clone(), words),
             Some(auto) => Order::Detail(path.clone(), auto, words),
         };
+        // Timed from the key (or the timer, or the intervalometer) on.
+        let mut timeline = Timeline::new(path.clone(), key);
         if !self.control.send(order) {
             self.say("the camera is not ready yet");
             return;
         }
+        timeline.mark(Mark::Request, Instant::now());
+        self.kit.shot = Some(timeline);
         self.instant_shot(&path, calm);
         self.saving = Some(Instant::now());
         self.captured = false;
-        self.pending += 1;
+        self.pending += 1 + set.len();
         self.pending_paths.push(path);
+        self.pending_paths.extend(set);
         self.press.jump(1.0);
         self.press.set(0.0);
         if !calm {
@@ -1557,6 +1695,9 @@ impl Camera {
         }
         if self.dial != Some(dial) {
             self.set_dial(Some(dial));
+            if dial == Dial::Wb {
+                self.say("y: from a grey card");
+            }
             return;
         }
         match dial {
@@ -1595,7 +1736,7 @@ impl Camera {
             Some(Dial::Wb) => {
                 let from = match self.pro.wb {
                     pro::Wb::Kelvin(k) => k,
-                    pro::Wb::Auto => (m.ct + pro::KELVIN_STEP / 2) / pro::KELVIN_STEP * pro::KELVIN_STEP,
+                    pro::Wb::Auto | pro::Wb::Grey(..) => (m.ct + pro::KELVIN_STEP / 2) / pro::KELVIN_STEP * pro::KELVIN_STEP,
                 };
                 let k = (from as i32 + by * pro::KELVIN_STEP as i32).clamp(pro::KELVIN_MIN as i32, pro::KELVIN_MAX as i32) as u32;
                 self.pro.wb = pro::Wb::Kelvin(k);
@@ -1727,10 +1868,53 @@ impl Screen for Camera {
         true
     }
 
-    /// Only the countdown's pulse keeps the frame beat: frames are drawn as
-    /// they arrive (the camera wakes the loop), springs as they move.
+    /// Nothing here keeps the frame beat but springs moving: frames are
+    /// drawn as they arrive (the camera wakes the loop) and the waits look
+    /// in through [`Screen::ambient`] (0.9.4).
     fn busy(&self) -> bool {
-        self.countdown.is_some()
+        false
+    }
+
+    /// How soon what time alone changes needs looking at again: a note
+    /// fading, the timer's second landing, "hold still"'s tenths, the saving
+    /// dots, the intervalometer's next, the level. None: nothing does.
+    fn ambient(&self) -> Option<Duration> {
+        let now = Instant::now();
+        let mut soonest: Option<Duration> = None;
+        let mut want = |d: Duration| soonest = Some(soonest.map_or(d, |s| s.min(d)));
+        let frame = Duration::from_millis(16);
+        if let Some((_, age)) = &self.note {
+            want(if *age < 0.2 || *age > NOTE_FOR { frame } else { Duration::from_secs_f32((NOTE_FOR - age).max(0.016)) });
+        }
+        if let Some(at) = self.countdown {
+            // Each second's number lands large and eases back over 0.35 s.
+            let left = at.saturating_duration_since(now).as_secs_f32();
+            let into = 1.0 - (left - left.floor());
+            want(if into < 0.4 { frame } else { Duration::from_secs_f32((1.0 - into).max(0.016)) });
+        }
+        if self.kit.shot.as_ref().is_some_and(|t| t.hold_still(now).is_some()) {
+            want(Duration::from_millis(100));
+        }
+        if self.saving.is_some() {
+            want(Duration::from_millis(333));
+        }
+        if let Some(run) = &self.kit.run {
+            want(run.next.saturating_duration_since(now).min(Duration::from_secs(1)).max(Duration::from_millis(50)));
+        }
+        if self.kit.level && self.kit.imu.is_some() {
+            // My own tuning: 15 a second follows a hand turning it.
+            want(Duration::from_millis(66));
+        }
+        if self.refining.is_some() {
+            want(Duration::from_millis(500));
+        }
+        soonest
+    }
+
+    /// The intervalometer running: the screen dims (and never goes off),
+    /// the handheld stays awake.
+    fn holds_dim(&self) -> bool {
+        self.kit.run.is_some()
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -1761,6 +1945,30 @@ impl Screen for Camera {
             return Nav::Stay;
         }
         let main = self.lens == Lens::Main && self.mode.shoots();
+        // The intervalometer running: Enter or Esc stops it, and nothing
+        // else is taken (a stray key must not change what it is taking).
+        if self.kit.run.is_some() {
+            if matches!(key, Key::Enter | Key::Char(' ') | Key::Back | Key::Leave | Key::Char('v')) {
+                self.stop_run("stopped");
+            }
+            return Nav::Stay;
+        }
+        // Its panel: ← → the value, ↑ ↓ the row, Enter starts, Esc or v closes.
+        if let Some(row) = self.kit.panel {
+            match key {
+                Key::Left | Key::Right => {
+                    let by = if key == Key::Right { 1 } else { -1 };
+                    if row == 0 { self.kit.interval.step_every(by) } else { self.kit.interval.step_count(by) }
+                    self.keep_prefs();
+                }
+                Key::Up | Key::Down => self.kit.panel = Some(1 - row),
+                Key::Enter | Key::Char(' ') => self.start_run(),
+                Key::Back | Key::Leave | Key::Char('v') => self.kit.panel = None,
+                _ => {}
+            }
+            return Nav::Stay;
+        }
+        let pro_mode = self.mode == Mode::Pro && main;
         match key {
             Key::Back | Key::Leave if self.countdown.is_some() => {
                 self.countdown = None;
@@ -1815,11 +2023,20 @@ impl Screen for Camera {
                 self.keep_prefs();
                 self.say(if self.raw { "raw on: a .dng too" } else { "RAW off" });
             }
+            // Exposure's aids, in turn: zebras, false colour, neither.
             Key::Char('x') if self.mode == Mode::Pro => {
-                self.zebras = !self.zebras;
+                (self.zebras, self.kit.false_colour) = match (self.zebras, self.kit.false_colour) {
+                    (true, _) => (false, true),
+                    (false, true) => (false, false),
+                    (false, false) => (true, false),
+                };
                 self.tell_develop();
                 self.keep_prefs();
-                self.say(if self.zebras { "zebras: highlights at 98%" } else { "zebras off" });
+                self.say(match (self.zebras, self.kit.false_colour) {
+                    (true, _) => "zebras: highlights at 98%",
+                    (_, true) => "false colour",
+                    _ => "exposure aids off",
+                });
             }
             Key::Char('f') if main && !self.quick => self.set_strip(!self.strip),
             Key::Char('z') if main && !self.quick => self.set_focus(if self.focus.is_some() { None } else { Some((0.5, 0.5)) }),
@@ -1848,14 +2065,81 @@ impl Screen for Camera {
                     None => photos::Album::new(),
                 }));
             }
-            Key::Char('t') => {
-                let at = TIMERS.iter().position(|t| *t == self.timer).unwrap_or(0);
-                self.timer = TIMERS[(at + 1) % TIMERS.len()];
-                self.say(if self.timer == 0 { "timer off".to_owned() } else { format!("timer {} s", self.timer) });
+            // The readout of the last photo's timing (pro mode's `t`).
+            Key::Char('t') if pro_mode => {
+                self.kit.readout = !self.kit.readout;
+                self.keep_prefs();
+                self.say(if self.kit.readout { "timing readout on" } else { "timing readout off" });
             }
-            Key::Char('g') => {
-                self.grid = !self.grid;
-                self.say(if self.grid { "grid on" } else { "grid off" });
+            Key::Char('c' | 't') => {
+                self.timer = camkit::next_timer(self.timer);
+                self.say(if self.timer == 0 { "self-timer off".to_owned() } else { format!("self-timer {} s", self.timer) });
+            }
+            Key::Char('g') if main => {
+                self.kit.grid = self.kit.grid.next();
+                self.keep_prefs();
+                self.say(match self.kit.grid {
+                    Grid::Off => "grid off",
+                    Grid::Thirds => "grid: thirds",
+                    Grid::Square => "grid: squares",
+                });
+            }
+            Key::Char('h') if main => self.set_level(!self.kit.level),
+            Key::Char('o') if main && !self.quick => {
+                self.kit.aspect = self.kit.aspect.next();
+                self.kit.overlay = camkit::Overlay::default();
+                self.keep_prefs();
+                let (_, _, cw, ch) = self.kit.aspect.crop(FULL.0 as u32, FULL.1 as u32);
+                self.say(format!("{} · {cw} × {ch}", self.kit.aspect.name()));
+            }
+            // Pro mode's kit (camkit.rs).
+            Key::Char('m') if pro_mode => {
+                let program = Program::of(&self.pro).next();
+                let still = self.still_now();
+                program.apply(&mut self.pro, still.as_ref(), self.metered.as_ref());
+                self.pro_changed();
+                self.say(program.words());
+            }
+            Key::Char('b') if pro_mode => {
+                self.kit.bracket = camkit::next_bracket(self.kit.bracket);
+                self.keep_prefs();
+                self.say(match self.kit.bracket {
+                    Some(b) => format!("bracketing {} × ±{} ev", b.frames, b.stops),
+                    None => "bracketing off".to_owned(),
+                });
+            }
+            Key::Char('y') if pro_mode => self.grey_card(),
+            Key::Char('u') if pro_mode => {
+                self.kit.hist = self.kit.hist.next();
+                self.tell_develop();
+                self.keep_prefs();
+                self.say(match self.kit.hist {
+                    HistMode::Luma => "histogram: brightness",
+                    HistMode::Rgb => "histogram: rgb",
+                    HistMode::Off => "histogram off",
+                });
+            }
+            Key::Char('v') if pro_mode && !self.quick => {
+                self.set_dial(None);
+                self.set_strip(false);
+                self.kit.panel = Some(0);
+                self.say("enter: start");
+            }
+            Key::Char(c) if pro_mode && camkit::preset_key(c).is_some() => {
+                let Some((i, keep)) = camkit::preset_key(c) else { return Nav::Stay };
+                if keep {
+                    let setup = self.setup();
+                    eprintln!("camera: c{} kept: {}", i + 1, setup.summary());
+                    self.kit.presets[i] = Some(setup);
+                    self.keep_prefs();
+                    self.say(format!("kept as c{}", i + 1));
+                } else if let Some(setup) = self.kit.presets[i].clone() {
+                    self.recall(&setup);
+                    eprintln!("camera: c{} recalled: {}", i + 1, setup.summary());
+                    self.say(format!("c{} recalled", i + 1));
+                } else {
+                    self.say(format!("c{} is empty", i + 1));
+                }
             }
             Key::Char('n') => {
                 self.night = !self.night;
@@ -1874,17 +2158,48 @@ impl Screen for Camera {
     }
 
     fn update(&mut self, cx: &mut Cx) -> Nav {
-        // The timer ran out: the photo now.
-        if self.countdown.is_some_and(|at| Instant::now() >= at) {
+        let now = Instant::now();
+        // The timer ran out: the photo now, timed from then.
+        if let Some(at) = self.countdown.filter(|at| now >= *at) {
             self.countdown = None;
-            self.shoot(cx.settings.calm, cx.settings.detail);
+            self.shoot_at(cx.settings.calm, cx.settings.detail, at);
         }
-        // The camera never answered (its program gone quiet): say so rather
-        // than saving for ever.
-        if self.saving.is_some_and(|at| at.elapsed() > Duration::from_secs(20)) {
+        // The intervalometer: the next photo when it is due and the camera
+        // has the last one's picture (a beat missed is skipped, not made up).
+        if let Some(run) = &self.kit.run {
+            if run.finished() {
+                let n = run.taken;
+                self.stop_run(&format!("done · {n} taken"));
+            } else if run.due(now) && !(self.saving.is_some() && !self.captured) && self.preview.is_some() {
+                self.shoot_at(true, crate::burst::DetailMode::Off, now);
+                if let Some(run) = &mut self.kit.run {
+                    run.took(now);
+                }
+            }
+        }
+        // A photo the camera never finished: given up on at the step it
+        // stopped at (each bounded: catalyst-camera's own waits are shorter),
+        // said, and logged with its marks.
+        if let Some(why) = self.kit.shot.as_ref().and_then(|t| t.overdue(now)) {
+            if let Some(t) = self.kit.shot.take() {
+                eprintln!("{} · given up: {why}", t.log_line());
+            }
             self.saving = None;
             self.pending = 0;
             self.pending_paths.clear();
+            self.captured = true;
+            if self.instant.take().is_some() {
+                self.load_last(None);
+            }
+            self.say(format!("{why}: no photo"));
+        }
+        // Taken, and never written (its program gone quiet): said rather
+        // than saving for ever.
+        if self.kit.shot.is_none() && self.saving.is_some_and(|at| at.elapsed() > Duration::from_secs(45)) {
+            self.saving = None;
+            self.pending = 0;
+            self.pending_paths.clear();
+            self.kit.writing.clear();
             self.say("the camera did not answer: no photo");
         }
         Nav::Stay
@@ -1906,16 +2221,20 @@ impl Screen for Camera {
             self.last_pop.set(1.0);
             changed = true;
         }
-        // The countdown pulses on the frame beat; the saving dots and the
-        // seconds left are drawn only when they change.
-        changed |= self.countdown.is_some();
-        if self.saving.is_some() {
-            let dots = (self.clock * 3.0) as usize % 3 + 1;
-            changed |= dots != self.dots_drawn;
-            self.dots_drawn = dots;
+        changed
+    }
+
+    /// What arrives from outside and what time alone changes, drawn as it
+    /// comes and never holding the frame beat (0.9.4): the camera's frames
+    /// and news, a note fading, the timer, "hold still", the saving dots,
+    /// the intervalometer, the level.
+    fn ambient_tick(&mut self, dt: f32, _robot: &Robot) -> bool {
+        if self.frozen {
+            return false;
         }
+        let mut changed = false;
         if let Some((_, age)) = &mut self.note {
-            *age += dt;
+            *age += dt.min(0.25);
             // Drawn while it fades in and out; held still between.
             let fading = *age < 0.2 || *age > NOTE_FOR;
             changed |= fading;
@@ -1924,6 +2243,7 @@ impl Screen for Camera {
                 changed = true;
             }
         }
+        changed |= self.tick_kit(dt);
         changed |= self.tick_smart();
         changed |= self.tick_refining();
         if let Some(rx) = &self.last_rx {
@@ -1955,6 +2275,9 @@ impl Screen for Camera {
                     self.metered = l.meta;
                 }
                 self.histogram.clone_from(&l.histogram);
+                if let Some(rgb) = l.rgb.take() {
+                    self.kit.rgb = rgb;
+                }
                 if l.thumbs_made != self.thumbs_seen {
                     self.thumbs_seen = l.thumbs_made;
                     self.thumbs = std::mem::take(&mut l.thumbs);
@@ -2014,12 +2337,37 @@ impl Screen for Camera {
         self.shaky_said = shaky;
         for event in events {
             match event {
-                Event::Captured => self.captured = true,
+                Event::Exposing(line) => {
+                    if let Some(t) = &mut self.kit.shot {
+                        t.exposing = Some(camkit::read_exposing(&line));
+                        t.mark(Mark::Exposing, Instant::now());
+                    }
+                }
+                Event::Exposed => {
+                    if let Some(t) = &mut self.kit.shot {
+                        t.mark(Mark::Exposed, Instant::now());
+                    }
+                }
+                Event::Captured(marks) => {
+                    self.captured = true;
+                    // Timed on to its writing, out of the way of the next.
+                    if let Some(mut t) = self.kit.shot.take() {
+                        t.mark(Mark::Captured, Instant::now());
+                        t.camera = marks;
+                        self.kit.writing.push(t);
+                    }
+                }
                 Event::Saved { path, size, detail, raw_skipped } => {
                     self.pending = self.pending.saturating_sub(1);
                     self.pending_paths.retain(|p| *p != path);
                     if self.pending == 0 {
                         self.saving = None;
+                    }
+                    if let Some(at) = self.kit.writing.iter().position(|t| t.path == path) {
+                        let mut t = self.kit.writing.remove(at);
+                        t.mark(Mark::Written, Instant::now());
+                        eprintln!("{}", t.log_line());
+                        self.kit.last_shot = Some(t);
                     }
                     if raw_skipped {
                         self.say("raw skipped: no room");
@@ -2037,7 +2385,7 @@ impl Screen for Camera {
                         self.say(format!("saved · refining, about {} s", marking.left_s(crate::burst::now_ms())));
                         self.refining = Some((path.clone(), marking));
                         self.refine_look = Instant::now();
-                    } else if size.0 < 3000 {
+                    } else if size.0.max(size.1) < 2000 {
                         self.say(format!("saved · {} × {} (memory was short)", size.0, size.1));
                     }
                     self.load_last(Some(path));
@@ -2051,6 +2399,9 @@ impl Screen for Camera {
                     // The instant thumbnail was of a photo that never came.
                     if self.instant.take().is_some() {
                         self.load_last(None);
+                    }
+                    if let Some(t) = self.kit.shot.take() {
+                        eprintln!("{} · failed: {why}", t.log_line());
                     }
                     self.captured = true;
                     self.say(why);
@@ -2126,12 +2477,31 @@ impl Screen for Camera {
             let r = Self::on_viewfinder(vf, face);
             brackets(g, r, t.signal, 0.85 * (1.0 - 2.0 * ka));
         }
-        if self.grid && self.mode.shoots() && whole_view {
-            for i in 1..3 {
-                let x = vf.x + vf.w * i as f32 / 3.0;
-                let y = vf.y + vf.h * i as f32 / 3.0;
-                g.canvas.fill_rect(Rect::new(x.round() + g.ox, vf.y, 1.0, vf.h), white, 0.35);
-                g.canvas.fill_rect(Rect::new(vf.x + g.ox, y.round(), vf.w, 1.0), white, 0.35);
+        // The white balance dial out in pro mode: where the grey card is read
+        // (the middle sixth of the picture each way, camkit's middle_mean).
+        if self.mode == Mode::Pro && self.dial == Some(Dial::Wb) && whole_view && ka < 0.5 {
+            let r = Self::on_viewfinder(vf, [5.0 / 12.0, 5.0 / 12.0, 7.0 / 12.0, 7.0 / 12.0]);
+            brackets(g, r, white, 0.85 * self.dial_fade.value().clamp(0.0, 1.0));
+        }
+        // The aspect's frame (the rest dimmed), its grid and the level: the
+        // shapes worked out once for the viewfinder and kept until a setting
+        // changes (camkit's Overlay), the level only as it turns.
+        if self.mode.shoots() && whole_view && ka < 0.999 {
+            let a = 1.0 - ka;
+            self.kit.overlay.update(self.kit.grid, self.kit.aspect, (vf.x, vf.y, vf.w, vf.h));
+            for &(x, y, w, h) in &self.kit.overlay.bars {
+                g.canvas.fill_rect(Rect::new(x + g.ox, y, w, h), Color(0, 0, 0), 0.55 * a);
+            }
+            let (fx, fy, fw, fh) = self.kit.overlay.frame;
+            let frame = Rect::new(fx, fy, fw, fh);
+            if self.kit.aspect != Aspect::Full {
+                outline(g, frame, 1.0, white, 0.5 * a);
+            }
+            for &(x, y, w, h) in &self.kit.overlay.lines {
+                g.canvas.fill_rect(Rect::new(x + g.ox, y, w, h), white, 0.35 * a);
+            }
+            if let (true, Some(h)) = (self.kit.level, self.kit.horizon) {
+                draw_level(g, frame, h, a);
             }
         }
         // Scan mode: a square to aim with, the code outlined once read.
@@ -2220,19 +2590,38 @@ impl Screen for Camera {
             }
             g.text_at(vf.x + 15.0 + lead, base - h * 0.5, Align::Left, words, ty.caption, white);
         };
-        if self.saving.is_some() {
-            let dots = ".".repeat(self.dots_drawn.max(1));
-            if self.captured {
-                pill(g, None, &format!("saving{dots}"), "saving...");
-            } else {
-                pill(g, None, &format!("hold still{dots}"), "hold still...");
-            }
-        } else if let (Some(us), true) = (self.shutter_now(), self.mode == Mode::Photo && main > 0.5 && !self.strip) {
+        // "Hold still" only while the sensor exposes something long enough
+        // to matter, with the seconds left; else the camera at it, then
+        // saving; then a slow shutter's warning; then the timing readout.
+        let now = Instant::now();
+        let dots = ".".repeat(self.dots_drawn.max(1));
+        let mut said = true;
+        let room = vf.w - 14.0 - 16.0 - (h - 2.0);
+        if let Some((words, left)) = self.kit.shot.as_ref().and_then(|t| t.hold_still(now)) {
+            // The longest form that fits at this text size (its width kept
+            // as the seconds count down).
+            let forms = [(format!("{words} · {left:.1} s"), format!("{words} · 88.8 s")), (format!("hold still · {left:.1} s"), "hold still · 88.8 s".to_owned()), (format!("{left:.1} s"), "88.8 s".to_owned())];
+            let (shown, widest) = forms.iter().find(|(_, w)| g.measure(w, ty.caption) <= room).unwrap_or(&forms[2]);
+            pill(g, Some("back_hand"), shown, widest);
+        } else if self.kit.shot.as_ref().is_some_and(|t| self.waiting_long(t, now)) {
+            pill(g, None, &format!("taking it{dots}"), "taking it...");
+        } else if self.saving.is_some() && (self.captured || self.kit.shot.is_none()) {
+            pill(g, None, &format!("saving{dots}"), "saving...");
+        } else if let (Some(us), true) = (self.shutter_now(), self.mode == Mode::Photo && main > 0.5 && !self.strip && self.saving.is_none()) {
             // Photo mode's own exposure, when it gets too slow to hold.
-            if pro::shaky(us) {
+            said = pro::shaky(us);
+            if said {
                 let words = pro::shutter_words(us);
                 pill(g, Some("back_hand"), &words, &words);
             }
+        } else {
+            said = self.saving.is_some();
+        }
+        // Pro mode's `t`: the last photo's timing, to report real numbers.
+        if !said && self.kit.readout && self.mode == Mode::Pro && main > 0.5 && !self.strip && self.kit.panel.is_none() {
+            let forms = self.kit.last_shot.as_ref().map_or_else(|| ["last shot: none yet".to_owned(), "no shot yet".to_owned(), "no shot yet".to_owned(), "none".to_owned()], Timeline::readout);
+            let words = forms.iter().find(|f| g.measure(f, ty.caption) <= room).unwrap_or(&forms[3]).clone();
+            pill(g, Some("timer"), &words, &words);
         }
         // The lens switch, when there is a smart camera to switch to.
         if self.smart.is_some() && !self.quick {
@@ -2246,6 +2635,164 @@ impl Screen for Camera {
 }
 
 impl Camera {
+    /// The level on (the motion sensor held at its full rate while it is)
+    /// or off.
+    fn set_level(&mut self, on: bool) {
+        self.kit.level = on;
+        self.kit.imu = on.then(|| crate::imu::hold(crate::imu::Use::Motion));
+        self.kit.horizon = None;
+        self.keep_prefs();
+        self.say(match (on, crate::imu::has_motion()) {
+            (false, _) => "level off",
+            (true, true) => "level on",
+            (true, false) => "no motion sensor",
+        });
+    }
+
+    /// The white balance from a grey card: what is in the middle of the
+    /// picture now, made as red and blue as it is green.
+    fn grey_card(&mut self) {
+        let (Some(pic), Some(m)) = (&self.preview, self.metered) else {
+            self.say("the camera is not ready yet");
+            return;
+        };
+        let mean = camkit::middle_mean(&pic.rgb, pic.w, pic.h);
+        // The preview's own gains, or the card's if one is set already.
+        let current = self.pro.wb.gains().unwrap_or(m.gains);
+        match camkit::grey_gains(mean, current) {
+            Ok(gains) => {
+                self.pro.wb = pro::Wb::grey(gains);
+                self.pro_changed();
+                eprintln!("camera: grey card: gains r {:.3} b {:.3}", gains[0], gains[1]);
+                self.say("wb from the grey card");
+            }
+            Err(why) => self.say(why),
+        }
+    }
+
+    /// Everything as set now, for a preset.
+    fn setup(&self) -> camkit::Setup {
+        camkit::Setup {
+            pro: self.pro,
+            look: self.look,
+            hue: self.hue,
+            raw: self.raw,
+            zebras: self.zebras,
+            false_colour: self.kit.false_colour,
+            hist: self.kit.hist,
+            grid: self.kit.grid,
+            aspect: self.kit.aspect,
+            bracket: self.kit.bracket,
+            timer: self.timer,
+            level: self.kit.level,
+            night: self.night,
+        }
+    }
+
+    /// A preset recalled: everything as it was kept.
+    fn recall(&mut self, s: &camkit::Setup) {
+        self.pro = s.pro;
+        self.look = s.look;
+        self.hue = s.hue;
+        self.raw = s.raw;
+        self.zebras = s.zebras;
+        self.kit.false_colour = s.false_colour;
+        self.kit.hist = s.hist;
+        self.kit.grid = s.grid;
+        self.kit.aspect = s.aspect;
+        self.kit.bracket = s.bracket;
+        self.timer = s.timer;
+        if self.kit.level != s.level {
+            self.kit.level = s.level;
+            self.kit.imu = s.level.then(|| crate::imu::hold(crate::imu::Use::Motion));
+            self.kit.horizon = None;
+        }
+        if self.night != s.night {
+            self.night = s.night;
+            self.control.send(Order::Night(self.night));
+        }
+        self.strip_at.set(LOOKS.iter().position(|l| *l == self.look).unwrap_or(0) as f32);
+        self.tell_develop();
+        self.pro_changed();
+    }
+
+    /// The intervalometer started: its first photo at once, the panel put
+    /// away, the screen dimming after a few seconds.
+    fn start_run(&mut self) {
+        self.kit.panel = None;
+        self.set_dial(None);
+        self.kit.run = Some(camkit::Run::start(self.kit.interval, Instant::now()));
+        self.keep_prefs();
+        self.say(format!("every {} · {}", self.kit.interval.every_words(), self.kit.interval.count_words()));
+    }
+
+    fn stop_run(&mut self, words: &str) {
+        let taken = self.kit.run.take().map_or(0, |r| r.taken);
+        self.say(if words.contains("taken") { words.to_owned() } else { format!("{words} · {taken} taken") });
+    }
+
+    /// The kit's share of what time changes: the level's reading, and the
+    /// words that count down (only a change is a new frame).
+    fn tick_kit(&mut self, dt: f32) -> bool {
+        let mut changed = false;
+        if self.kit.level {
+            if let Some(read) = crate::imu::reading().and_then(|r| camkit::Horizon::of(r.up)) {
+                let before = self.kit.horizon;
+                match &mut self.kit.horizon {
+                    Some(h) => h.ease(read, dt.clamp(0.0, 0.25)),
+                    None => self.kit.horizon = Some(read),
+                }
+                // Redrawn when it has turned a tenth of a degree, or crossed level.
+                changed |= match (before, self.kit.horizon) {
+                    (Some(a), Some(b)) => (a.roll - b.roll).abs() > 0.1 || (a.pitch - b.pitch).abs() > 0.3 || a.level() != b.level() || a.flat != b.flat,
+                    (a, b) => a.is_some() != b.is_some(),
+                };
+            }
+        }
+        // The words that change with time, as they would be drawn now.
+        let now = Instant::now();
+        let mut words = String::new();
+        if let Some(at) = self.countdown {
+            words.push_str(&format!("t{}", at.saturating_duration_since(now).as_millis() / 1000));
+        }
+        if let Some((w, left)) = self.kit.shot.as_ref().and_then(|t| t.hold_still(now)) {
+            words.push_str(&format!("h{w}{left:.1}"));
+        }
+        if let Some(run) = &self.kit.run {
+            words.push_str(&run.words(now));
+        }
+        if let Some(since) = self.saving {
+            let dots = (now.saturating_duration_since(since).as_secs_f32() * 3.0) as usize % 3 + 1;
+            self.dots_drawn = dots;
+            words.push_str(&format!("d{dots}"));
+        }
+        if self.kit.shot.as_ref().is_some_and(|t| self.waiting_long(t, now)) {
+            words.push('w');
+        }
+        if words != self.kit.drawn {
+            self.kit.drawn = words;
+            changed = true;
+        }
+        // The countdown's pulse is motion of a kind: drawn while it lands.
+        if let Some(at) = self.countdown {
+            let left = at.saturating_duration_since(now).as_secs_f32();
+            changed |= 1.0 - (left - left.floor()) < 0.4;
+        }
+        changed
+    }
+
+    /// A photo asked for and not yet exposing (or exposed, not yet in) for
+    /// long enough to say the camera is at it.
+    fn waiting_long(&self, t: &Timeline, now: Instant) -> bool {
+        let since = |m: Mark| t.at(m).map_or(Duration::ZERO, |at| now.saturating_duration_since(at));
+        match t.reached() {
+            Mark::Key | Mark::Request => since(Mark::Key) > Duration::from_millis(600),
+            Mark::Exposed => since(Mark::Exposed) > Duration::from_millis(600),
+            Mark::Exposing => t.hold_still(now).is_none() && since(Mark::Exposing) > Duration::from_millis(600),
+            _ => false,
+        }
+    }
+
     /// The focus check's frames are in (a crop, not the whole picture).
     fn cropped(&self) -> bool {
         self.focus.is_some() && self.metered.is_some_and(|m| m.zoom > 0.0)
@@ -2300,16 +2847,45 @@ impl Camera {
                 let name = self.look.name().to_lowercase();
                 x += Self::chip(g, x, vf.y + m, Some("photo_filter"), &name, t.ice, top) + 4.0;
             }
-            if self.mode == Mode::Pro && self.raw {
-                Self::chip(g, x, vf.y + m, None, "raw", t.ink, top);
+            if self.mode == Mode::Pro && self.raw && self.kit.bracket.is_none() {
+                x += Self::chip(g, x, vf.y + m, None, "raw", t.ink, top) + 4.0;
             }
-            if self.mode == Mode::Pro {
+            // The kit's state, as far as there is room before the histogram:
+            // the intervalometer first (it is running), the aspect, the set.
+            let cap = g.ty.caption;
+            let mut hist = self.mode == Mode::Pro && self.kit.hist != HistMode::Off;
+            let run_w = self.kit.run.as_ref().map_or(0.0, |r| g.measure(&r.words(Instant::now()), cap) + 16.0 + cap.size);
+            // The intervalometer's count comes before the histogram, where
+            // there is no room for both (it is running: that matters most).
+            if hist && x + run_w > vf.right() - 6.0 - pro::BINS as f32 - 8.0 - 4.0 {
+                hist = false;
+            }
+            let limit = if hist { vf.right() - 6.0 - pro::BINS as f32 - 8.0 - 4.0 } else { vf.right() - m };
+            let mut chips: Vec<(Option<&str>, String, Color)> = Vec::new();
+            if let Some(run) = &self.kit.run {
+                chips.push((Some("timer"), run.words(Instant::now()), t.signal));
+            }
+            if self.kit.aspect != Aspect::Full {
+                chips.push((None, self.kit.aspect.name().to_owned(), t.ink));
+            }
+            if let (Some(b), Mode::Pro) = (self.kit.bracket, self.mode) {
+                chips.push((None, b.words(), t.ink));
+            }
+            for (icon, words, color) in chips {
+                let w = g.measure(&words, cap) + 14.0 + if icon.is_some() { cap.size + 2.0 } else { 0.0 };
+                if x + w <= limit {
+                    x += Self::chip(g, x, vf.y + m, icon, &words, color, top) + 4.0;
+                }
+            }
+            if hist {
                 self.draw_histogram(g, vf, top);
             }
         }
         let strip = self.strip_fade.value().clamp(0.0, 1.0);
         let mut foot = 0.0f32;
-        if self.mode == Mode::Pro && strip < 0.99 {
+        if self.kit.panel.is_some() {
+            foot = foot.max(self.draw_panel(g, vf, alpha));
+        } else if self.mode == Mode::Pro && strip < 0.99 {
             foot = foot.max(self.draw_dials(g, vf, alpha * (1.0 - strip)));
         }
         if strip > 0.01 {
@@ -2339,10 +2915,33 @@ impl Camera {
         let b = Rect::new(vf.right() - 6.0 - hw - 2.0 * pad, vf.y + 6.0, hw + 2.0 * pad, hh + 2.0 * pad);
         g.canvas.rrect(b.offset(g.ox, 0.0), 8.0, Color(0, 0, 0), 0.55 * alpha);
         let base = b.bottom() - pad;
+        // Red, green and blue, each its own colour, laid over each other
+        // (where they agree they add toward white).
+        if self.kit.hist == HistMode::Rgb {
+            let colours = [Color(255, 86, 76), Color(92, 214, 112), Color(96, 150, 255)];
+            for (heights, colour) in self.kit.rgb.heights().iter().zip(colours) {
+                for (i, k) in heights.iter().enumerate() {
+                    let height = (k * hh).max(if *k > 0.0 { 1.0 } else { 0.0 });
+                    if height > 0.0 {
+                        g.canvas.fill_rect(Rect::new(b.x + pad + i as f32 + g.ox, base - height, 1.0, height), colour, 0.6 * alpha);
+                    }
+                }
+            }
+            return;
+        }
         for (i, k) in self.histogram.heights().iter().enumerate() {
             let height = (k * hh).max(if *k > 0.0 { 1.0 } else { 0.0 });
             if height > 0.0 {
                 g.canvas.fill_rect(Rect::new(b.x + pad + i as f32 + g.ox, base - height, 1.0, height), Color(236, 238, 242), 0.85 * alpha);
+            }
+        }
+        // False colour's key: each brightness's colour along the foot of
+        // the histogram, where that brightness is counted.
+        if self.kit.false_colour && self.focus.is_none() {
+            let table = camkit::false_colour();
+            for i in 0..pro::BINS {
+                let [r, gr, bl] = table[(i * 256 + 128) / pro::BINS];
+                g.canvas.fill_rect(Rect::new(b.x + pad + i as f32 + g.ox, base + 1.0, 1.0, 2.0), Color(r, gr, bl), alpha);
             }
         }
         if self.histogram.clipped > 0.002 {
@@ -2413,6 +3012,30 @@ impl Camera {
                 g.icon_alpha("back_hand", true, left + cap.size * 0.5, r.cy(), cap.size, mix(t.signal, t.on_ice, on), alpha);
             }
             g.text_alpha(left + icon, r.cy(), &words, cap, ink, alpha);
+        }
+        bh + m
+    }
+
+    /// The intervalometer's panel: how often and how many, in a bar of
+    /// glass along the foot as the dials are, the row being changed an ice
+    /// capsule. Gives its height with its margin.
+    fn draw_panel(&mut self, g: &mut Gfx, vf: Rect, alpha: f32) -> f32 {
+        let t = g.tokens;
+        let cap = g.ty.caption;
+        let m = 6.0;
+        let bh = (cap.size + 12.0).round();
+        let pad = 3.0;
+        let r = Rect::new(vf.x + m, vf.bottom() - m - bh, vf.w - 2.0 * m, bh);
+        g.glass(&[bezel::GlassShape::new(r.offset(g.ox, 0.0), bh * 0.5, 12)]);
+        let cell = (r.w - 2.0 * pad) / 2.0;
+        let row = self.kit.panel.unwrap_or(0);
+        g.canvas.rrect(Rect::new(r.x + pad + cell * row as f32 + g.ox, r.y + pad, cell, bh - 2.0 * pad), bh * 0.5 - pad, t.ice, alpha);
+        let count = if self.kit.interval.count == 0 { "no end".to_owned() } else { format!("{} photos", self.kit.interval.count) };
+        for (i, words) in [format!("every {}", self.kit.interval.every_words()), count].iter().enumerate() {
+            let ink = if i == row { t.on_ice } else { t.ink };
+            let words = g.text.fit(words, &cap, cell - 8.0);
+            let half = g.measure(&words, cap) * 0.5;
+            g.text_alpha(r.x + pad + cell * (i as f32 + 0.5) - half, r.cy(), &words, cap, ink, alpha);
         }
         bh + m
     }
@@ -2735,11 +3358,15 @@ impl Camera {
         let w = dot + (dot + gap) * (1.0 - stretch);
         let x = rail.cx() - row * 0.5 + at * (dot + gap) - (w - dot) * 0.5;
         g.canvas.rrect(Rect::new(x + g.ox, dy, w, dot), dot * 0.5, t.ink, 1.0);
-        // The lens's aperture: fixed, so said, never a dial.
+        // The lens's aperture: fixed, so said, never a dial; and who sets
+        // the exposure (p, s, iso, m), where there is room for both.
         let pro_k = (at - 1.0).clamp(0.0, 1.0);
         if pro_k > 0.01 && self.lens == Lens::Main {
-            let half = g.measure(pro::APERTURE, cap) * 0.5;
-            g.text_alpha(rail.cx() - half, dy + dot + 4.0 + cap.size * 0.5, pro::APERTURE, cap, t.dim, pro_k);
+            let program = Program::of(&self.pro).word();
+            let both = format!("{program} · {}", pro::APERTURE);
+            let words = if g.measure(&both, cap) <= rail.w - 8.0 { both } else { pro::APERTURE.to_owned() };
+            let half = g.measure(&words, cap) * 0.5;
+            g.text_alpha(rail.cx() - half, dy + dot + 4.0 + cap.size * 0.5, &words, cap, t.dim, pro_k);
         }
 
         // The shutter: a ring, and in it a disc that presses in.
@@ -2798,7 +3425,7 @@ impl Camera {
         // The choices, each with its key: on in ink, off faint.
         let right = rail.right() - 9.0;
         let row = |i: usize| thumb.y + 3.0 + i as f32 * (th / 2.0 - 1.0);
-        let choices = [("timer", "t", self.timer > 0), ("grid_on", "g", self.grid), ("bedtime", "n", self.night)];
+        let choices = [("timer", "c", self.timer > 0), ("grid_on", "g", self.kit.grid != Grid::Off), ("bedtime", "n", self.night)];
         for (i, (icon, key, on)) in choices.iter().enumerate().take(2) {
             let y = row(i) + 2.0;
             let color = if *on { t.ink } else { t.faint };
@@ -2838,6 +3465,58 @@ fn brackets(g: &mut Gfx, r: Rect, color: Color, alpha: f32) {
 }
 
 /// A box's outline, `width` thick.
+/// The level over the frame `r`: the true horizon through its middle (two
+/// arms either side of a gap, turned as the horizon lies in the picture)
+/// against short fixed marks at the frame's sides, ice once level, and the
+/// degrees off below it; lying flat, a ring and a bubble that settles in
+/// it. Sizes are my own tuning for the 227 px viewfinder.
+fn draw_level(g: &mut Gfx, r: Rect, h: camkit::Horizon, alpha: f32) {
+    let t = g.tokens;
+    let white = Color(255, 255, 255);
+    let level = h.level();
+    let color = if level { t.ice } else { white };
+    let (cx, cy) = (r.cx() + g.ox, r.cy());
+    let cap = g.ty.caption;
+    if h.flat {
+        let ring = 11.0;
+        g.canvas.stroke_rrect(Rect::new(cx - ring, cy - ring, ring * 2.0, ring * 2.0), ring, 1.5, white, 0.6 * alpha);
+        let (bx, by) = ((h.roll * 1.6).clamp(-30.0, 30.0), (-h.pitch * 1.6).clamp(-30.0, 30.0));
+        g.canvas.circle(cx + bx, cy + by, 4.0, color, 0.9 * alpha);
+        return;
+    }
+    // The handheld turned clockwise turns the picture's horizon the other way.
+    let a = h.roll.to_radians();
+    let (dx, dy) = (a.cos(), -a.sin());
+    let (gap, arm) = (10.0, (r.w * 0.3).round());
+    let width = if level { 2.0 } else { 1.5 };
+    for s in [-1.0f32, 1.0] {
+        let (x0, y0) = (cx + s * gap * dx, cy + s * gap * dy);
+        let (x1, y1) = (cx + s * (gap + arm) * dx, cy + s * (gap + arm) * dy);
+        // A shadow beneath, so it reads over a bright sky as over the ground.
+        stroke(g, (x0, y0 + 1.0), (x1, y1 + 1.0), width + 1.0, Color(0, 0, 0), 0.35 * alpha);
+        stroke(g, (x0, y0), (x1, y1), width, color, 0.95 * alpha);
+        // The fixed marks: where level would lie.
+        let mx = cx + s * (gap + arm + 6.0);
+        g.canvas.fill_rect(Rect::new(mx.min(mx + s * 8.0), cy - 0.5, 8.0, 1.0), white, 0.5 * alpha);
+    }
+    if !level {
+        // The degrees off, on a dark chip below the middle.
+        let words = format!("{:.1}°", h.roll.abs());
+        let (w, ch) = (g.measure(&words, cap) + 10.0, cap.size + 6.0);
+        let top = cy + 6.0;
+        g.canvas.rrect(Rect::new(cx - w * 0.5, top, w, ch), ch * 0.5, Color(0, 0, 0), 0.5 * alpha);
+        g.text_alpha(cx - g.ox - w * 0.5 + 5.0, top + ch * 0.5, &words, cap, white, alpha);
+    }
+}
+
+/// A line from `a` to `b` (already offset), `width` wide.
+fn stroke(g: &mut Gfx, a: (f32, f32), b: (f32, f32), width: f32, color: Color, alpha: f32) {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len = (dx * dx + dy * dy).sqrt().max(1e-3);
+    let (nx, ny) = (-dy / len * width * 0.5, dx / len * width * 0.5);
+    g.canvas.polygon(&[(a.0 + nx, a.1 + ny), (b.0 + nx, b.1 + ny), (b.0 - nx, b.1 - ny), (a.0 - nx, a.1 - ny)], color, alpha);
+}
+
 fn outline(g: &mut Gfx, r: Rect, width: f32, color: Color, alpha: f32) {
     for side in [Rect::new(r.x, r.y, r.w, width), Rect::new(r.x, r.bottom() - width, r.w, width), Rect::new(r.x, r.y, width, r.h), Rect::new(r.right() - width, r.y, width, r.h)] {
         g.canvas.fill_rect(side.offset(g.ox, 0.0), color, alpha);
@@ -3151,6 +3830,13 @@ pub fn shots(dir: &std::path::Path) {
             note(c, "woke in 1.4 s · 3.0 Mbaud");
         }))),
         ("5-hold-still", crate::burst::DetailMode::On, with(&base, Box::new(move |c| {
+            // Detail's burst being exposed: "hold still" with its seconds.
+            let now = Instant::now();
+            let mut tl = Timeline::new(PathBuf::from("IMG_burst.jpg"), now - Duration::from_millis(500));
+            tl.mark(Mark::Request, now - Duration::from_millis(490));
+            tl.exposing = Some((camkit::Exposing::Detail, Duration::from_millis(1_800), 6));
+            tl.mark(Mark::Exposing, now - Duration::from_millis(300));
+            c.kit.shot = Some(tl);
             c.saving = Some(Instant::now());
             c.dots_drawn = 3;
             c.flash.jump(0.0);
@@ -3481,6 +4167,193 @@ pub fn pro_shots(dir: &std::path::Path) {
     println!("camera 0.9.2 shots in {}", dir.display());
 }
 
+/// The kit's overlays and modes (0.9.4), each at the three text sizes in
+/// both tones: grids, the level, the aspects, "hold still" with its
+/// seconds, bracketing, the RGB histogram and the timing readout, false
+/// colour, the intervalometer, the grey card, a preset, the self-timer.
+#[cfg(not(target_arch = "aarch64"))]
+pub fn kit_shots(dir: &std::path::Path) {
+    use crate::gfx::TextSize;
+    use crate::shell::Shell;
+    std::fs::create_dir_all(dir).ok();
+    crate::smartcam::sim::choose(false);
+    let t = 3.1;
+    let sample = scene(PREVIEW_W, PREVIEW_H, t, false);
+    let yuv = rgb_to_yuv420(&sample);
+    let developed = |false_colour: bool| {
+        let mut out = Picture::default();
+        Look::Original.compiled(0.0).develop(&yuv, PREVIEW_W, PREVIEW_H, &mut out, None);
+        if false_colour {
+            camkit::paint_false_colour(&yuv[..PREVIEW_W * PREVIEW_H], &mut out.rgb);
+        }
+        out
+    };
+    let (plain, coloured) = (developed(false), developed(true));
+    let hist = pro::Histogram::of_luma(&yuv[..PREVIEW_W * PREVIEW_H], PREVIEW_W, PREVIEW_H, 2);
+    let rgb = camkit::RgbHistogram::of_yuv420(&yuv, PREVIEW_W, PREVIEW_H, 2);
+    let metered = Metered { exposure_us: 16_667, analogue: 2.0, digital: 1.0, gains: [1.82, 1.46], ct: 5200, lux: 320.0, settled: true, fom: 900, zoom: 0.0 };
+    // A photo under way: asked `asked` ago, the sensor exposing for `ms` since `since` ago.
+    let exposing = |what: camkit::Exposing, ms: u64, since: u64| {
+        let now = Instant::now();
+        let mut tl = Timeline::new(PathBuf::from("IMG_shot.jpg"), now - Duration::from_millis(since + 200));
+        tl.mark(Mark::Request, now - Duration::from_millis(since + 190));
+        tl.exposing = Some((what, Duration::from_millis(ms), 1));
+        tl.mark(Mark::Exposing, now - Duration::from_millis(since));
+        tl
+    };
+    type Setup = Box<dyn Fn(&mut Camera)>;
+    let level = |roll: f32, pitch: f32, flat: bool| Some(camkit::Horizon { roll, pitch, flat });
+    let screens: Vec<(&str, Setup)> = vec![
+        ("01-grid-thirds-level", Box::new(move |c: &mut Camera| {
+            c.kit.grid = Grid::Thirds;
+            c.kit.level = true;
+            c.kit.horizon = level(2.4, 0.0, false);
+        })),
+        ("02-grid-squares-level-true", Box::new(move |c: &mut Camera| {
+            c.kit.grid = Grid::Square;
+            c.kit.level = true;
+            c.kit.horizon = level(0.2, 0.0, false);
+        })),
+        ("03-aspect-16x9", Box::new(move |c: &mut Camera| {
+            c.kit.aspect = Aspect::SixteenNine;
+            c.kit.grid = Grid::Thirds;
+        })),
+        ("04-aspect-1x1-flat-level", Box::new(move |c: &mut Camera| {
+            c.kit.aspect = Aspect::Square;
+            c.kit.level = true;
+            c.kit.horizon = level(4.0, -3.0, true);
+        })),
+        ("05-hold-still-long-exposure", Box::new(move |c: &mut Camera| {
+            c.set_mode(Mode::Pro);
+            c.pro = Pro { shutter: Some(pro::nearest_shutter(2_000_000)), iso: Some(0), ..Pro::default() };
+            c.kit.shot = Some(exposing(camkit::Exposing::Still, 4_200, 2_600));
+            c.saving = Some(Instant::now());
+            c.note = None;
+        })),
+        ("06-detail-hold-still", Box::new(move |c: &mut Camera| {
+            c.kit.shot = Some(exposing(camkit::Exposing::Detail, 1_800, 600));
+            c.saving = Some(Instant::now());
+            c.note = None;
+        })),
+        ("07-bracketing-set", Box::new(move |c: &mut Camera| {
+            c.set_mode(Mode::Pro);
+            c.pro = Pro { shutter: Some(pro::nearest_shutter(4_000)), ..Pro::default() };
+            c.kit.bracket = Some(camkit::Bracket { frames: 5, stops: 1 });
+            c.kit.shot = Some(exposing(camkit::Exposing::Bracket, 2_000, 700));
+            c.saving = Some(Instant::now());
+            c.note = None;
+        })),
+        ("08-rgb-histogram-readout", {
+            let rgb = rgb.clone();
+            Box::new(move |c: &mut Camera| {
+                c.set_mode(Mode::Pro);
+                c.kit.hist = HistMode::Rgb;
+                c.kit.rgb = rgb.clone();
+                c.kit.readout = true;
+                let t0 = Instant::now() - Duration::from_secs(3);
+                let mut tl = Timeline::new(PathBuf::from("IMG_last.jpg"), t0);
+                tl.mark(Mark::Request, t0 + Duration::from_millis(2));
+                tl.mark(Mark::Captured, t0 + Duration::from_millis(420));
+                tl.mark(Mark::Written, t0 + Duration::from_millis(1120));
+                c.kit.last_shot = Some(tl);
+                c.note = None;
+            })
+        }),
+        ("09-false-colour", {
+            let coloured = coloured.clone();
+            Box::new(move |c: &mut Camera| {
+                c.set_mode(Mode::Pro);
+                c.zebras = false;
+                c.kit.false_colour = true;
+                c.preview = Some(coloured.clone());
+                c.note = Some(("false colour".into(), 1.0));
+            })
+        }),
+        ("10-intervalometer-panel", Box::new(move |c: &mut Camera| {
+            c.set_mode(Mode::Pro);
+            c.kit.panel = Some(0);
+            c.kit.interval = camkit::Interval { every_s: 10, count: 50 };
+            c.note = Some(("enter: start".into(), 1.0));
+        })),
+        ("11-intervalometer-running", Box::new(move |c: &mut Camera| {
+            c.set_mode(Mode::Pro);
+            c.kit.run = Some(camkit::Run { interval: camkit::Interval { every_s: 10, count: 50 }, taken: 3, next: Instant::now() + Duration::from_millis(6_600) });
+            c.note = None;
+        })),
+        ("12-grey-card", Box::new(move |c: &mut Camera| {
+            c.set_mode(Mode::Pro);
+            c.pro.wb = pro::Wb::grey([1.92, 1.55]);
+            c.set_dial(Some(Dial::Wb));
+            c.note = Some(("wb from the grey card".into(), 1.0));
+        })),
+        ("13-preset-recalled", Box::new(move |c: &mut Camera| {
+            c.set_mode(Mode::Pro);
+            let s = camkit::Setup { pro: Pro { shutter: Some(pro::nearest_shutter(4_000)), ..Pro::default() }, aspect: Aspect::ThreeTwo, bracket: Some(camkit::Bracket { frames: 3, stops: 1 }), grid: Grid::Thirds, ..camkit::Setup::default() };
+            c.pro = s.pro;
+            c.kit.aspect = s.aspect;
+            c.kit.bracket = s.bracket;
+            c.kit.grid = s.grid;
+            c.note = Some(("c2 recalled".into(), 1.0));
+        })),
+        ("14-self-timer", Box::new(move |c: &mut Camera| {
+            c.timer = 2;
+            c.countdown = Some(Instant::now() + Duration::from_millis(1_600));
+            c.note = None;
+        })),
+    ];
+    let mut sheets: Vec<Vec<bezel::Canvas>> = (0..screens.len()).map(|_| Vec::new()).collect();
+    for light in [false, true] {
+        for (size, tag) in [(TextSize::Compact, "compact"), (TextSize::Standard, "standard"), (TextSize::Large, "large")] {
+            let tone = if light { "light" } else { "dark" };
+            for (n, (name, setup)) in screens.iter().enumerate() {
+                let mut camera = Camera::new();
+                camera.frozen = true;
+                camera.flash.jump(0.0);
+                (camera.look, camera.hue, camera.raw, camera.zebras, camera.pro) = (Look::Original, 32.0, false, true, Pro::default());
+                camera.kit = Kit::default();
+                camera.last = None;
+                camera.last_rx = None;
+                camera.preview = Some(plain.clone());
+                camera.histogram = hist.clone();
+                camera.metered = Some(metered);
+                camera.note = None;
+                let mut shell = Shell::new(crate::robot::Robot::demo());
+                (shell.settings.text, shell.settings.light) = (size, light);
+                shell.apply_settings();
+                setup(&mut camera);
+                for a in [&mut camera.mode_at, &mut camera.dial_at, &mut camera.dial_fade, &mut camera.strip_at, &mut camera.strip_fade, &mut camera.focus_fade] {
+                    a.jump(a.target());
+                }
+                shell.show(Box::new(camera));
+                for _ in 0..90 {
+                    if shell.tick(1.0 / 60.0) {
+                        shell.draw();
+                    }
+                }
+                shell.draw();
+                crate::platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}-{tone}-{tag}.png")), 3);
+                sheets[n].push(shell.gfx.canvas.clone());
+            }
+        }
+    }
+    for ((name, _), shots) in screens.iter().zip(&sheets) {
+        let (w, h) = (W as i32, H as i32);
+        let gap = 6;
+        let mut sheet = bezel::Canvas::new(3 * w + 2 * gap, 2 * h + gap);
+        sheet.px.fill(0x0080_8080);
+        for (i, shot) in shots.iter().enumerate() {
+            let (ox, oy) = ((i % 3) as i32 * (w + gap), (i / 3) as i32 * (h + gap));
+            for y in 0..h {
+                let from = (y * shot.w) as usize;
+                let to = ((oy + y) * sheet.w + ox) as usize;
+                sheet.px[to..to + w as usize].copy_from_slice(&shot.px[from..from + w as usize]);
+            }
+        }
+        crate::platform::sim::save_png(&sheet, &dir.join(format!("sheet-{name}.png")), 2);
+    }
+    println!("camera 0.9.4 shots in {}", dir.display());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3549,12 +4422,27 @@ mod tests {
     }
 
     /// Frames for `ms` of real time (the simulated camera keeps it), as the
-    /// shell would tick the screen.
+    /// shell would tick the screen: its motion, then what arrived.
     fn run(camera: &mut Camera, ms: u64) {
         let until = Instant::now() + Duration::from_millis(ms);
+        let robot = Robot::none();
         while Instant::now() < until {
             std::thread::sleep(Duration::from_millis(16));
             camera.tick(1.0 / 60.0);
+            camera.ambient_tick(1.0 / 60.0, &robot);
+        }
+    }
+
+    /// Ticked and updated as the shell does (the timer, the intervalometer
+    /// and a photo given up on are seen to in `update`).
+    fn run_updating(camera: &mut Camera, ms: u64) {
+        let until = Instant::now() + Duration::from_millis(ms);
+        let (mut robot, mut settings, mut say) = (Robot::none(), crate::shell::Settings::default(), None);
+        while Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(16));
+            camera.tick(1.0 / 60.0);
+            camera.ambient_tick(1.0 / 60.0, &robot);
+            camera.update(&mut Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true });
         }
     }
 
@@ -3608,12 +4496,22 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         assert!(camera.control.send(Order::Still(path.clone(), Vec::new())));
         let mut saved = None;
-        let mut captured = false;
+        // What the camera says, in the order it says it: the sensor
+        // exposing, done, the picture in, then written.
+        let mut said = Vec::new();
         while saved.is_none() && started.elapsed() < Duration::from_secs(30) {
             std::thread::sleep(Duration::from_millis(30));
             saved = camera.live.lock().unwrap().events.drain(..).find_map(|e| match e {
-                Event::Captured => {
-                    captured = true;
+                Event::Exposing(line) => {
+                    said.push(if line.ends_with(" 1 still") { "exposing" } else { "exposing?" });
+                    None
+                }
+                Event::Exposed => {
+                    said.push("exposed");
+                    None
+                }
+                Event::Captured(marks) => {
+                    said.push(if marks.contains("captured") { "captured" } else { "captured?" });
                     None
                 }
                 Event::Saved { path, size, detail, .. } => Some((path, size, detail)),
@@ -3621,7 +4519,7 @@ mod tests {
             });
         }
         let (got, size, detail) = saved.expect("the photo is taken");
-        assert!(captured, "its picture was in before it was written");
+        assert_eq!(said, ["exposing", "exposed", "captured"], "its picture was in before it was written");
         assert_eq!(got, path);
         // Every photo at the sensor's full size.
         assert_eq!(size, (3280, 2464));
@@ -3686,6 +4584,8 @@ mod tests {
 
     /// A camera with its first metered frames in.
     fn ready() -> Camera {
+        // From the Camera's own defaults: what another test kept is not this one's.
+        Prefs::default().save();
         let mut camera = Camera::new();
         let started = Instant::now();
         while (camera.metered.is_none() || camera.preview.is_none()) && started.elapsed() < Duration::from_secs(5) {
@@ -3758,7 +4658,7 @@ mod tests {
             run(&mut camera, 40);
         }
         assert_eq!(camera.metered.map(|m| m.exposure_us), Some(4_000));
-        let (words, burst) = camera.still_words(std::path::Path::new("/x/IMG_1.jpg"), crate::burst::DetailMode::Auto);
+        let (words, burst, _) = camera.still_words(std::path::Path::new("/x/IMG_1.jpg"), crate::burst::DetailMode::Auto);
         assert!(words.iter().any(|w| w == "exp=4000") && words.iter().any(|w| w.starts_with("look=")) && words.iter().any(|w| w == "raw=/x/IMG_1.dng"), "{words:?}");
         assert_eq!(burst, None, "a RAW photo takes no burst");
         press(&mut camera, Key::Enter);
@@ -3824,5 +4724,177 @@ mod tests {
         assert!(shown.rgb.chunks_exact(3).any(|p| p == [36, 36, 36]), "zebra stripes");
         assert_eq!(l.histogram.bins.iter().sum::<u32>() as usize, PREVIEW_W * PREVIEW_H / 4);
         assert_eq!(l.yuv.len(), yuv.len(), "the frame kept for the shutter");
+    }
+
+    /// Waits (ticking as the shell does) until nothing is being saved.
+    fn until_saved(camera: &mut Camera) {
+        let started = Instant::now();
+        while (camera.pending > 0 || camera.saving.is_some()) && started.elapsed() < Duration::from_secs(60) {
+            run_updating(camera, 30);
+        }
+        assert_eq!(camera.pending, 0, "saved");
+    }
+
+    #[test]
+    fn a_photo_is_timed_along_the_still_path_and_hold_still_is_only_for_a_long_exposure() {
+        crate::shell::tests::sandbox();
+        let _port = crate::smartcam::sim::exclusive(false);
+        let mut camera = ready();
+        // A metered photo at a hand-held shutter: never a "hold still".
+        assert!(matches!(press(&mut camera, Key::Enter), Nav::Stay));
+        let shot = camera.kit.shot.as_ref().expect("timed from the key");
+        assert_eq!(shot.reached(), Mark::Request);
+        let mut held = false;
+        let started = Instant::now();
+        while (camera.pending > 0 || camera.kit.last_shot.is_none()) && started.elapsed() < Duration::from_secs(30) {
+            run_updating(&mut camera, 20);
+            held |= camera.kit.shot.as_ref().is_some_and(|t| t.hold_still(Instant::now()).is_some());
+        }
+        assert!(!held, "a short exposure says nothing to hold still for");
+        let last = camera.kit.last_shot.clone().expect("the last shot, timed");
+        let order: Vec<Mark> = last.since_key().iter().map(|(m, _)| *m).collect();
+        assert_eq!(order, [Mark::Key, Mark::Request, Mark::Exposing, Mark::Exposed, Mark::Captured, Mark::Written]);
+        assert!(last.capture_s().unwrap() <= last.since_key().last().unwrap().1);
+        assert!(last.readout()[0].starts_with("last shot: ") && last.readout()[0].contains(" capture · "), "{:?}", last.readout());
+        assert!(last.camera.contains("captured"), "the camera program's marks kept: {}", last.camera);
+        std::fs::remove_file(&last.path).ok();
+        // The readout on pro mode's t; the self-timer on c (and t in photo mode).
+        press(&mut camera, Key::Char('c'));
+        assert_eq!(camera.timer, 2);
+        press(&mut camera, Key::Right);
+        press(&mut camera, Key::Char('t'));
+        assert!(camera.kit.readout && camera.timer == 2, "t in pro mode is the readout");
+        // A one-second exposure by hand: "hold still" while it is taken, its seconds counting down.
+        camera.pro.shutter = Some(pro::SHUTTERS.iter().position(|s| s.us == 1_000_000).unwrap());
+        camera.timer = 0;
+        press(&mut camera, Key::Enter);
+        let started = Instant::now();
+        let mut left = None;
+        while left.is_none() && started.elapsed() < Duration::from_secs(20) {
+            run_updating(&mut camera, 10);
+            left = camera.kit.shot.as_ref().and_then(|t| t.hold_still(Instant::now())).map(|(_, s)| s);
+        }
+        assert!(left.is_some_and(|s| s > 0.5 && s <= 2.2), "{left:?}");
+        until_saved(&mut camera);
+        if let Some(t) = &camera.kit.last_shot {
+            std::fs::remove_file(&t.path).ok();
+        }
+    }
+
+    #[test]
+    fn a_photo_is_cropped_to_its_aspect_and_a_bracketing_set_is_saved_beside_it() {
+        crate::shell::tests::sandbox();
+        let _port = crate::smartcam::sim::exclusive(false);
+        let mut camera = ready();
+        // 3:2, on o (twice from 4:3 is 16:9; once is 3:2).
+        press(&mut camera, Key::Char('o'));
+        assert_eq!(camera.kit.aspect, Aspect::ThreeTwo);
+        press(&mut camera, Key::Enter);
+        let path = camera.instant.clone().expect("a photo");
+        until_saved(&mut camera);
+        assert_eq!(photos::dimensions(&path), Some((3280, 2188)));
+        std::fs::remove_file(&path).ok();
+        // Pro mode, bracketing 3 at ±1: three photos, a stop apart, named as a set.
+        press(&mut camera, Key::Right);
+        press(&mut camera, Key::Char('b'));
+        assert_eq!(camera.kit.bracket, Some(camkit::Bracket { frames: 3, stops: 1 }));
+        let (words, burst, set) = camera.still_words(std::path::Path::new("/p/IMG_9.jpg"), crate::burst::DetailMode::Auto);
+        assert_eq!(burst, None, "a set is never a burst");
+        assert_eq!(set, [PathBuf::from("/p/IMG_9_ev-1.jpg"), PathBuf::from("/p/IMG_9_ev+1.jpg")]);
+        let exp = |w: &str| still_word(&[w.to_owned()], "also").and_then(|v| v.split(',').next()?.parse::<f32>().ok());
+        let base = still_word(&words, "exp").and_then(|v| v.parse::<f32>().ok()).unwrap();
+        let alsos: Vec<f32> = words.iter().filter_map(|w| exp(w)).collect();
+        assert_eq!(alsos.len(), 2);
+        assert!((alsos[0] / base - 0.5).abs() < 0.01 && (alsos[1] / base - 2.0).abs() < 0.01, "{base} {alsos:?}");
+        press(&mut camera, Key::Enter);
+        let path = camera.instant.clone().expect("a photo");
+        assert_eq!(camera.pending, 3, "the set's three");
+        until_saved(&mut camera);
+        for p in [path.clone(), camkit::set_path(&path, -1), camkit::set_path(&path, 1)] {
+            assert_eq!(photos::dimensions(&p), Some((3280, 2188)), "{}", p.display());
+            std::fs::remove_file(&p).ok();
+        }
+    }
+
+    #[test]
+    fn presets_keep_and_recall_the_dials_and_the_kit() {
+        crate::shell::tests::sandbox();
+        let _port = crate::smartcam::sim::exclusive(false);
+        let mut camera = ready();
+        press(&mut camera, Key::Right);
+        press(&mut camera, Key::Char('m'));
+        assert_eq!(Program::of(&camera.pro), Program::Shutter, "shutter priority");
+        press(&mut camera, Key::Char('g'));
+        press(&mut camera, Key::Char('b'));
+        press(&mut camera, Key::Char('!'));
+        let kept = camera.setup();
+        assert_eq!(camera.kit.presets[0].as_ref(), Some(&kept));
+        // Changed, then C1 recalled: all of it back.
+        press(&mut camera, Key::Char('m'));
+        press(&mut camera, Key::Char('g'));
+        press(&mut camera, Key::Char('b'));
+        assert_ne!(camera.setup(), kept);
+        press(&mut camera, Key::Char('1'));
+        assert_eq!(camera.setup(), kept);
+        // And kept with the Camera's file.
+        assert_eq!(Prefs::load().kit.presets[0].as_ref(), Some(&kept));
+        press(&mut camera, Key::Char('2'));
+        assert!(camera.note.as_ref().is_some_and(|(n, _)| n.contains("empty")));
+    }
+
+    #[test]
+    fn the_intervalometer_dims_the_screen_and_keeps_shooting_until_its_count() {
+        crate::shell::tests::sandbox();
+        let _port = crate::smartcam::sim::exclusive(false);
+        let mut camera = ready();
+        assert!(!camera.busy() && !camera.holds_dim());
+        press(&mut camera, Key::Right);
+        press(&mut camera, Key::Char('v'));
+        assert_eq!(camera.kit.panel, Some(0));
+        // Every 2 s (the least), 2 photos.
+        for _ in 0..12 {
+            press(&mut camera, Key::Left);
+        }
+        press(&mut camera, Key::Down);
+        for _ in 0..12 {
+            press(&mut camera, Key::Left);
+        }
+        assert_eq!(camera.kit.interval, camkit::Interval { every_s: 2, count: 10 });
+        press(&mut camera, Key::Enter);
+        assert!(camera.kit.run.is_some() && camera.holds_dim(), "running: the screen dims, never off");
+        camera.kit.run.as_mut().unwrap().interval.count = 2;
+        // A stray key does nothing while it runs.
+        press(&mut camera, Key::Char('g'));
+        let started = Instant::now();
+        while camera.kit.run.is_some() && started.elapsed() < Duration::from_secs(30) {
+            run_updating(&mut camera, 30);
+        }
+        assert!(camera.kit.run.is_none() && !camera.holds_dim(), "done after its count");
+        until_saved(&mut camera);
+        assert!(camera.note.as_ref().is_some_and(|(n, _)| n.contains("2 taken")), "{:?}", camera.note);
+    }
+
+    #[test]
+    fn waiting_never_holds_the_frame_beat() {
+        crate::shell::tests::sandbox();
+        let _port = crate::smartcam::sim::exclusive(false);
+        let mut camera = ready();
+        camera.note = None;
+        assert!(!camera.busy());
+        // At rest, only the saving dots or nothing at all; the frames wake the loop themselves.
+        assert_eq!(camera.ambient(), None);
+        camera.countdown = Some(Instant::now() + Duration::from_millis(9500));
+        let wait = camera.ambient().expect("the timer looks in");
+        assert!(wait <= Duration::from_secs(1));
+        assert!(!camera.busy(), "and never by the frame beat");
+        camera.countdown = None;
+        // The level looks in 15 times a second while it shows.
+        press(&mut camera, Key::Char('h'));
+        camera.note = None;
+        assert!(camera.kit.level && camera.ambient() == Some(Duration::from_millis(66)));
+        run(&mut camera, 100);
+        assert!(camera.kit.horizon.is_some(), "read from the motion sensor");
+        press(&mut camera, Key::Char('h'));
+        assert!(camera.kit.imu.is_none(), "the sensor let go");
     }
 }
