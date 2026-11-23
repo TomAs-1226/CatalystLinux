@@ -3400,6 +3400,28 @@ says when the card is ready. `catalyst-flasher --shot DIR` renders its screens.
 rpi-imager --repo https://github.com/TomAs-1226/CatalystLinux/releases/latest/download/os_list_catalyst.json
 ```
 
+## When the handheld will not show anything
+
+The system on the card keeps the version before it in a second slot, and a
+handheld that will not start its new system goes back to the old one by
+itself. When it starts but shows nothing (as a loose display cable does:
+the backlight on, no picture, on any card), these work from any computer
+with a card reader. The card's small FAT partition (the boot drive) is all
+they touch; never let the computer format the others.
+
+- **Get a console back.** Put an empty file named `catalyst-recovery.txt` on
+  the boot drive and start the handheld. It turns the Grove port's console
+  and the USB serial console (USB-C2, the switch on its side) back on, copies
+  its logs to `catalyst-logs/` on the boot drive (the shell's log and the
+  start's before it, the kernel's messages, the update's state and the
+  settings), and removes the file.
+- **Start the other system.** In `config.txt`, the last lines say which slot
+  starts: under `[all]`, change `os_prefix=slot-a/` to `slot-b/` (or the
+  other way round). Every update installs into the slot not in use, so the
+  other is the version before.
+- **Read the logs.** The shell's log is `/data/catalyst/shell.log`, and the
+  start before's is `shell.prev.log` beside it.
+
 ## Build the SD card image
 
 Inside WSL (Ubuntu), nothing needs root:

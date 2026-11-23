@@ -10,6 +10,37 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 1.0.0
+
+Catalyst Linux 1.0: the handheld for an FRC team at an event. With 0.9's
+Scout, Strategy, Batteries, Mech, Gamepad and Rulebook, the field view and
+match replays, the pro camera and the smart camera, 1.0 adds a way for the
+team's handhelds to talk to each other, a photo editor and a document
+scanner, and makes the handheld safe to recover when something goes wrong.
+
+### Team
+- Team: messages between the team's handhelds at an event, over the pit's Wi-Fi or a phone's hotspot, with no server.
+- Make a team space and show its QR code; others join by scanning it in the Camera or typing a six-digit code. Everything in a team is sealed with its own key, made on the handheld that started it.
+- Six calls on the number keys (robot to queue, battery needed, bring the cart, need a driver, match in 5, all good), yours to change. Urgent calls break through Quiet and show on the island in the signal colour.
+- The Team page shows the next match, who is here and has read the newest, and the thread. Messages are resent until each handheld there has them, and one that was away gets what it missed.
+- Send a Strategy board or a match's scouting straight to the team: t in their share menus.
+
+### Photos
+- Edit a photo with e: exposure, contrast, highlights, shadows, saturation, warmth, tint, vibrance, sharpness and a vignette; any of the Camera's looks laid on after the fact.
+- Crop to free, 4:3, 3:2, 16:9 or 1:1, turn a quarter, straighten by up to 15° over a grid, and flip. Mark up a photo for the robot's notes: arrows, boxes, circles and short labels.
+- Edits are kept beside the photo and never change it; x exports a new full-size IMG_…_edit.jpg.
+
+### Document scanner
+- The Camera's new doc mode: the page is found and outlined, and taken by itself once held still for a second.
+- Pages are straightened to their true shape (A4 or Letter found), in colour, grey or black and white. Gather several, reorder or delete them, and save one PDF with a PNG for each page in Scans; Catalyst Companion downloads them.
+
+### Fixed
+- The screen's brightness is set from Settings at every start. The backlight keeps whatever it was left at across a restart, so an update installed overnight with the screen off left the next start all but dark.
+
+### Recovery
+- A way back in from any computer: put a file named catalyst-recovery.txt on the card's boot drive (the small one any computer can open) and start the handheld. It turns the Grove port's console and the USB serial console back on, copies its logs to catalyst-logs on the boot drive, and removes the file.
+- The shell's log is kept on the card, with the start before's beside it, so a start that went wrong leaves its story behind.
+
 ## 0.9.4
 
 ### Camera
