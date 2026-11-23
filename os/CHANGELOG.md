@@ -10,6 +10,31 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.9.0
+
+### Lock screen
+- The depth effect: Numbers, 5805's robot, stands in front of the time on the lock screen, covering no more than the lower part of the digits, with the date and the status above it. Settings › Lock screen › Depth effect turns it off.
+- Its pose follows the handheld: it turns slowly on its stand, rests docked over a soft light on the charger, slumps and dims when the battery is low, and stands ready facing you before a match, in your alliance's colour. Settings › Lock screen › Pose follows status keeps it idle.
+- StandBy has a robot clock too: ←→ on the clock to find it.
+- The turning robot draws a few frames a second and stops still in the battery saver, on StandBy and with reduced motion.
+
+### Field
+- The Robot app has a field: press → on the Robot page. This season's field, with the robot where its pose says, pointing the way it faces, and the last ten seconds of its path fading behind it. + and − zoom, the arrows move about, Enter follows the robot again.
+- The pose comes from AdvantageKit's odometry or WPILib's Field2d, as often as the robot sends it. Without one, the field says there is no pose on the link.
+- The field is drawn only while the robot moves, and not at all while it stands still.
+
+### Match replays
+- Replay a match from its log: Logs › a match › replay the match. The field with the robot's path, a timeline with auto, teleop and the endgame marked, and the battery, CAN and current under it. Space plays and pauses; 1, 2 and 4 set the speed; ←→ skip 5 seconds.
+- Brownouts and CAN spikes are marked, and ↑↓ jump between them. Each finding in a match's summary shows when it happened, and Enter replays the match from there: Q14's brownout opens at 1:18.
+
+### Camera
+- Every photo is the sensor's full 3280 × 2464. Until now they all came out at 1640 × 1232: the camera's memory could not hold a full-size frame. Photos are saved at quality 95 with their details (exposure, lens, time), and the preview comes back while the photo is written.
+- Detail mode (Settings › Camera, or d in the Camera): in dim light, or always, a quick burst merged into one clearer photo in the background. The photo is there at once; its thumbnail says how many seconds until the merged one replaces it.
+
+### Smart camera
+- An M5Stack UnitV on the Grove port can see for the handheld: it finds faces, QR codes, AprilTags and coloured game pieces on its own processor. Faces steer the exposure, scan mode reads its codes, and ↑ in the Camera shows what it sees.
+- Settings › Camera › Grove port: Console (as before) or Smart camera. As the camera's, the port carries no login and no boot messages, and its power is on only while the camera is in use. Setting it up once: tools/unitv in the README.
+
 ## 0.8.1
 
 ### Fixed
