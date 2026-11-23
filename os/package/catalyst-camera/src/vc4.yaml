@@ -1,0 +1,18 @@
+# catalyst-camera's settings for libcamera's Raspberry Pi (VC4) pipeline,
+# given it through LIBCAMERA_RPI_CONFIG_FILE.
+#
+# One raw frame kept by the pipeline itself, not the four it keeps by
+# default: at the IMX219's full 3280 x 2464 those four are 39 MB, which with
+# the ISP's frame and ours does not fit in the 64 MB the camera shares with
+# the GPU, so every photo came out binned at 1640 x 1232. The preview hands
+# the pipeline raw frames of its own in each request, so it never waits.
+{
+        "version": 1.0,
+        "target": "bcm2835",
+
+        "pipeline_handler":
+        {
+                "min_unicam_buffers": 1,
+                "min_total_unicam_buffers": 1
+        }
+}

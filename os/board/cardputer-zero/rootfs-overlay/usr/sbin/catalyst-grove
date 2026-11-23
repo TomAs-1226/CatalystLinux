@@ -1,0 +1,202 @@
+#!/bin/sh
+# catalyst-grove: what the Grove port is for (Settings > Camera > Grove port).
+# Its GPIO14/15 are the PL011, ttyAMA0, and it carries a switched 5 V
+# (the LED-class control grove_5v_out).
+#
+#   catalyst-grove mode            console | camera
+#   catalyst-grove console         the serial console and login, as shipped
+#   catalyst-grove camera          the smart camera's: no login, no console
+#   catalyst-grove boot            at start (catalyst-early): the choice kept
+#   catalyst-grove login           exit 0 if a login may listen on the port
+#   catalyst-grove ready           exit 0 if the camera may be powered and
+#                                  spoken to now
+#   catalyst-grove power on|off    the port's 5 V (on only when ready)
+#   catalyst-grove status          name=value lines
+#
+# Console (the default): the kernel's console and a login (root, no password)
+# on the port at 115200, for a USB serial adapter.
+#
+# Smart camera: the port is the camera's link, and nothing else ever uses it:
+#  - The kernel's console is not on it from the kernel's first line: this
+#    system's command line (its slot's cmdline.txt on the boot partition)
+#    says console=null (the kernel's ttynull, which keeps nothing) where it
+#    said console=ttyAMA0. Written when the choice is made, checked at every
+#    start, and carried by the updater into each system it installs (the
+#    boot pack's own cmdline.txt says ttyAMA0). config.txt is left alone:
+#    an update never rewrites it, and nothing in it needs to change.
+#  - No login listens: catalyst-serial starts its getty only in console mode.
+#  - The 5 V is off from early in every start, and on only while the shell
+#    uses the camera (and its short warm time after).
+#  - Until a start has run with console=null, the camera is never powered
+#    ("ready" says no): moving the port from the console takes one restart.
+#    In the meantime the kernel's messages are held back (dmesg -n 1).
+#  - A kernel without ttynull (CONFIG_NULL_TTY) refuses camera mode, since
+#    console=null would leave the system's first program without a console.
+# So the camera's bytes never reach a shell, and the boot log never reaches
+# the camera.
+
+BOOT_DEV=/dev/mmcblk0p1
+MNT=/run/catalyst-grove-boot
+SETTING=/data/catalyst/grove-port
+CMDLINE=/proc/cmdline
+TTY_DRIVERS=/proc/tty/drivers
+LED=/sys/class/leds/grove_5v_out/brightness
+PROC=/proc
+SERIAL_PID=/run/catalyst-serial.pid
+PORT=ttyAMA0
+# The console the shipped command line gives the port, and its loglevel.
+CONSOLE="console=ttyAMA0,115200"
+LOGLEVEL=3
+
+mode() {
+	[ "$(cat "$SETTING" 2>/dev/null)" = camera ] && echo camera || echo console
+}
+
+# Whether this start's kernel has its console on the port.
+console_on_port() {
+	tr ' ' '\n' <"$CMDLINE" | grep -Eq '^console=(ttyAMA0|serial0)'
+}
+
+has_ttynull() {
+	grep -q '^ttynull' "$TTY_DRIVERS" 2>/dev/null || grep -qw ttynull "$TTY_DRIVERS" 2>/dev/null
+}
+
+# The slot this system starts from: slot-a for the second partition, slot-b
+# for the third (catalyst-update's layout).
+slot() {
+	case " $(cat "$CMDLINE") " in
+	*" root=/dev/mmcblk0p3 "*) echo slot-b ;;
+	*) echo slot-a ;;
+	esac
+}
+
+# Run "$@" with the boot partition mounted read-write at $MNT.
+with_boot() {
+	mkdir -p "$MNT"
+	mount -t vfat -o rw "$BOOT_DEV" "$MNT" || return 1
+	"$@"
+	status=$?
+	sync
+	umount "$MNT"
+	return $status
+}
+
+# This system's cmdline.txt with its console as the choice wants it.
+write_cmdline() {
+	file="$MNT/$(slot)/cmdline.txt"
+	[ -f "$file" ] || return 1
+	if [ "$1" = camera ]; then
+		new=$(tr ' ' '\n' <"$file" | sed -E 's/^console=(ttyAMA0|serial0).*/console=null/' | tr '\n' ' ' | sed 's/ *$//')
+	else
+		new=$(tr ' ' '\n' <"$file" | sed "s/^console=null\$/$CONSOLE/" | tr '\n' ' ' | sed 's/ *$//')
+		case " $new " in *" console="*) ;; *) new="$new $CONSOLE" ;; esac
+	fi
+	[ "$new" = "$(cat "$file")" ] && return 0
+	printf '%s\n' "$new" >"$file.new" && mv "$file.new" "$file"
+}
+
+power() {
+	[ -e "$LED" ] || return 0
+	echo "$1" >"$LED"
+}
+
+# Every process with the port open, but the caller and its parent: its
+# login and whatever runs from it, hung up and then ended.
+free_port() {
+	for fd in "$PROC"/[0-9]*/fd/*; do
+		target=$(readlink "$fd" 2>/dev/null) || continue
+		case "$target" in
+		/dev/$PORT | /dev/serial0) ;;
+		*) continue ;;
+		esac
+		pid=${fd#"$PROC"/}
+		pid=${pid%%/*}
+		[ "$pid" = $$ ] || [ "$pid" = "$PPID" ] && continue
+		kill -HUP "$pid" 2>/dev/null
+		sleep 1
+		kill -KILL "$pid" 2>/dev/null
+	done
+}
+
+serial_running() {
+	[ -s "$SERIAL_PID" ] && kill -0 "$(cat "$SERIAL_PID")" 2>/dev/null
+}
+
+ready() {
+	[ "$(mode)" = camera ] && ! console_on_port && ! serial_running
+}
+
+to_camera() {
+	if ! has_ttynull; then
+		echo "this system's kernel cannot take its console off the Grove port" >&2
+		return 1
+	fi
+	mkdir -p "$(dirname "$SETTING")"
+	echo camera >"$SETTING.new" && mv "$SETTING.new" "$SETTING" || return 1
+	# Nobody listens from now: the login stopped, anything on the port ended,
+	# the kernel's messages held back until the restart moves its console.
+	rc-service catalyst-serial stop >/dev/null 2>&1
+	free_port
+	console_on_port && dmesg -n 1
+	power 0
+	with_boot write_cmdline camera || echo "the boot partition could not be written" >&2
+	console_on_port && echo restart
+	return 0
+}
+
+to_console() {
+	power 0
+	rm -f "$SETTING"
+	with_boot write_cmdline console || echo "the boot partition could not be written" >&2
+	dmesg -n "$LOGLEVEL"
+	rc-service catalyst-serial start >/dev/null 2>&1
+	return 0
+}
+
+boot() {
+	if [ "$(mode)" = camera ]; then
+		# The camera unpowered until the shell asks for it.
+		power 0
+		if console_on_port; then
+			# This start's kernel still has its console here (an update put
+			# it back, or the boot partition was not written): quiet now,
+			# right for the next start. The camera stays off until then.
+			dmesg -n 1
+			with_boot write_cmdline camera
+		fi
+	elif ! console_on_port && has_console_null; then
+		with_boot write_cmdline console
+	fi
+	return 0
+}
+
+has_console_null() {
+	tr ' ' '\n' <"$CMDLINE" | grep -qx 'console=null'
+}
+
+case "$1" in
+mode) mode ;;
+console) to_console ;;
+camera) to_camera ;;
+boot) boot ;;
+login) [ "$(mode)" = console ] ;;
+ready) ready ;;
+power)
+	case "$2" in
+	on) ready && power 1 ;;
+	off) power 0 ;;
+	*) exit 2 ;;
+	esac
+	;;
+status)
+	echo "mode=$(mode)"
+	ready && echo ready=yes || echo ready=no
+	if [ "$(mode)" = camera ] && console_on_port; then echo restart=yes; else echo restart=no; fi
+	has_ttynull && echo ttynull=yes || echo ttynull=no
+	echo "power=$(cat "$LED" 2>/dev/null || echo -)"
+	;;
+*)
+	echo "usage: catalyst-grove mode|console|camera|boot|login|ready|power on|off|status" >&2
+	exit 2
+	;;
+esac

@@ -364,12 +364,12 @@ fn install_locked(dev: &Device) -> Result<(), String> {
     // and config.txt set to try it once.
     dev.with_boot(|boot| {
         let root = device::root_of(spare);
+        let grove_camera = dev.grove_camera();
         let edit = |name: &str, bytes: Vec<u8>| -> Vec<u8> {
             if name != "cmdline.txt" {
                 return bytes;
             }
-            let line = String::from_utf8_lossy(&bytes);
-            line.split_whitespace().map(|a| if a.starts_with("root=") { format!("root={root}") } else { a.to_owned() }).collect::<Vec<_>>().join(" ").into_bytes()
+            device::kernel_args(&String::from_utf8_lossy(&bytes), root, grove_camera).into_bytes()
         };
         pack::unpack(&boot_pack, &boot.join(device::slot_dir(spare)), &edit)?;
         device::write_slots(boot, running, spare)

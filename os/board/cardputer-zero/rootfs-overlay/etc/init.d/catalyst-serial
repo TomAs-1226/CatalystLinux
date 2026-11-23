@@ -1,0 +1,34 @@
+#!/sbin/openrc-run
+# The login on the Grove port's serial line (ttyAMA0, 115200), as root with
+# no password, for a USB serial adapter: only while the port is the console
+# (catalyst-grove). With the port the smart camera's, nothing listens on it.
+# The USB serial console (ttyGS0, catalyst-usb) is apart and always there.
+
+description="Serial login on the Grove port (when it is the console)"
+supervisor=supervise-daemon
+command=/sbin/getty
+command_args_foreground="-L ttyAMA0 115200 vt100"
+pidfile=/run/catalyst-serial.pid
+respawn_period=60
+
+depend() {
+	after catalyst-early
+	keyword -prefix
+	provide getty
+}
+
+start() {
+	if ! /usr/sbin/catalyst-grove login; then
+		einfo "The Grove port is the smart camera's: no login on it"
+		return 0
+	fi
+	export EINFO_QUIET=yes
+	default_start
+}
+
+stop() {
+	# Nothing was started in camera mode.
+	[ -e "$pidfile" ] || return 0
+	export EINFO_QUIET=yes
+	default_stop
+}

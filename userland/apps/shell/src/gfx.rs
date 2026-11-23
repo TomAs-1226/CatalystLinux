@@ -123,6 +123,8 @@ pub struct Gfx {
     pub home: crate::shell::HomeStyle,
     /// Whether a robot linking opens the Robot app from Home.
     pub open_robot: bool,
+    /// Settings › Camera › Detail mode, as Settings shows it.
+    pub detail: crate::burst::DetailMode,
     /// Whether a match's summary opens once its log is pulled.
     pub match_report: bool,
     /// The widgets on the glance page and on Home, and the value pinned to
@@ -347,6 +349,7 @@ impl Gfx {
             calm: false,
             home: crate::shell::HomeStyle::Grid,
             open_robot: true,
+            detail: crate::burst::DetailMode::Auto,
             match_report: true,
             widgets: crate::widgets::Layout::starting(),
             pinned: None,

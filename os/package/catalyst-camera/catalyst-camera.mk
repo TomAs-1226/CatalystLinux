@@ -6,7 +6,7 @@
 
 # Raised with each change to the program: a new version is a new build
 # directory, so the next image build compiles it afresh by itself.
-CATALYST_CAMERA_VERSION = 1.2
+CATALYST_CAMERA_VERSION = 1.3
 CATALYST_CAMERA_SITE = $(BR2_EXTERNAL_CATALYST_PATH)/package/catalyst-camera/src
 CATALYST_CAMERA_SITE_METHOD = local
 CATALYST_CAMERA_LICENSE = MIT
@@ -23,6 +23,7 @@ endef
 
 define CATALYST_CAMERA_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/catalyst-camera $(TARGET_DIR)/usr/bin/catalyst-camera
+	$(INSTALL) -D -m 0644 $(@D)/vc4.yaml $(TARGET_DIR)/usr/share/catalyst-camera/vc4.yaml
 endef
 
 $(eval $(generic-package))

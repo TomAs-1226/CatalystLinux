@@ -54,7 +54,9 @@ mod browse;
 mod apps;
 mod apriltags;
 mod brand;
+mod burst;
 mod camera;
+mod smartcam;
 mod calc;
 mod capture;
 mod catalogue;
@@ -285,6 +287,7 @@ fn settings_text(s: &shell::Settings) -> String {
         ("columns", s.columns.to_string()),
         ("home", s.home.name().to_owned()),
         ("open_robot", s.open_robot.to_string()),
+        ("detail", s.detail.name().to_owned()),
         ("match_report", s.match_report.to_string()),
         ("pinned", s.pinned.clone().unwrap_or_default()),
         // App names cannot hold a line break, and commas are rare: a '|' between them.
@@ -341,6 +344,7 @@ fn parse_settings(text: &str, settings: &mut shell::Settings) {
             Some(("accent", v)) => settings.accent = bezel::Accent::from_name(v).unwrap_or(settings.accent),
             Some(("home", v)) => settings.home = shell::HomeStyle::from_name(v).unwrap_or(settings.home),
             Some(("open_robot", v)) => settings.open_robot = v != "false",
+            Some(("detail", v)) => settings.detail = burst::DetailMode::from_name(v).unwrap_or(settings.detail),
             Some(("match_report", v)) => settings.match_report = v != "false",
             Some(("glance", v)) => cards = Some(v),
             Some(("widgets", v)) => {
@@ -453,6 +457,12 @@ fn main() {
     if called.as_deref() == Some("catalyst-clip") || args.first().is_some_and(|a| a == "clip") {
         let rest = if called.as_deref() == Some("catalyst-clip") { &args[..] } else { &args[1..] };
         std::process::exit(clipboard::serve::cli(rest));
+    }
+    // Detail mode's merge (burst.rs), started by catalyst-camera at idle
+    // priority with the burst's frames: no window, no settings, just the
+    // merge, and it ends.
+    if args.iter().any(|a| a == "--merge-burst") {
+        std::process::exit(burst::run(&args));
     }
     // The packed simulator is always the simulator, double-clicked or started
     // from a terminal with options of its own (`--no-intro`, `--light`). It
@@ -638,6 +648,10 @@ fn main() {
         std::fs::create_dir_all(&own).ok();
         std::env::set_var("CATALYST_CONF", own.join("robot"));
         return field::shots(std::path::Path::new(&dir));
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--camera-shots") {
+        return camera::shots(std::path::Path::new(&dir));
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--standby-shots") {

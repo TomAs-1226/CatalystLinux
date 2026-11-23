@@ -139,6 +139,35 @@ pub fn slot_of_cmdline(cmdline: &str) -> Option<usize> {
     })
 }
 
+/// A system's kernel command line as it is installed: its own root, and
+/// with the Grove port the smart camera's (Settings › Camera › Grove port,
+/// catalyst-grove), no console on the port: `console=null` (the kernel's
+/// ttynull, which keeps nothing) for `console=ttyAMA0…` or `console=serial0…`,
+/// so the next system's boot log never reaches the camera either.
+pub fn kernel_args(line: &str, root: &str, grove_camera: bool) -> String {
+    line.split_whitespace()
+        .map(|a| {
+            if a.starts_with("root=") {
+                format!("root={root}")
+            } else if grove_camera && (a.starts_with("console=ttyAMA0") || a.starts_with("console=serial0")) {
+                "console=null".to_owned()
+            } else {
+                a.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+impl Device {
+    /// Whether the Grove port is the smart camera's (catalyst-grove keeps it
+    /// beside the updater's own state on /data).
+    pub fn grove_camera(&self) -> bool {
+        let file = self.state.parent().map(|d| d.join("catalyst/grove-port"));
+        file.and_then(|f| std::fs::read_to_string(f).ok()).is_some_and(|m| m.trim() == "camera")
+    }
+}
+
 /// The partition a system's root is on.
 pub fn root_of(slot: usize) -> &'static str {
     ["/dev/mmcblk0p2", "/dev/mmcblk0p3"][slot]
@@ -225,6 +254,25 @@ mod tests {
         assert_eq!(slot_of_cmdline("console=tty1 root=/dev/mmcblk0p2 ro rootwait"), Some(0));
         assert_eq!(slot_of_cmdline("root=/dev/mmcblk0p3 panic=10"), Some(1));
         assert_eq!(slot_of_cmdline("root=/dev/sda1"), None);
+    }
+
+    #[test]
+    fn the_grove_ports_choice_is_carried_into_the_next_system() {
+        let shipped = "root=/dev/mmcblk0p2 rootfstype=ext4 ro rootwait console=ttyAMA0,115200 loglevel=3 cma=64M panic=10";
+        // As the port's console: only the root changes.
+        assert_eq!(kernel_args(shipped, "/dev/mmcblk0p3", false), shipped.replace("p2", "p3"));
+        // As the smart camera's: no console on the port, whatever it was called.
+        let camera = kernel_args(shipped, "/dev/mmcblk0p3", true);
+        assert!(camera.contains("console=null") && !camera.contains("ttyAMA0") && camera.contains("root=/dev/mmcblk0p3"), "{camera}");
+        assert_eq!(kernel_args("root=x console=serial0,115200 console=tty1", "/dev/mmcblk0p2", true), "root=/dev/mmcblk0p2 console=null console=tty1");
+        // Read from /data beside the updater's state.
+        let root = std::env::temp_dir().join(format!("catalyst-grove-update-{}", std::process::id()));
+        let dev = Device::under(&root);
+        std::fs::create_dir_all(root.join("data/catalyst")).unwrap();
+        assert!(!dev.grove_camera());
+        std::fs::write(root.join("data/catalyst/grove-port"), "camera\n").unwrap();
+        assert!(dev.grove_camera());
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
