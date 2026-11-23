@@ -1,0 +1,33 @@
+What the handheld installs on the smart camera (an M5Stack UnitV, K210)
+over USB-A, and where each part comes from.
+
+maixpy.bin
+  MaixPy v0.6.3 (maixpy_v0.6.3_2_gd8901fd22_m5stickv.bin), Sipeed's
+  MicroPython for the K210, its build for the M5StickV, which M5Stack says
+  the UnitV runs. Released by Sipeed at
+  https://dl.sipeed.com/shareURL/MAIX/MaixPy/release/master (linked from
+  https://github.com/sipeed/MaixPy-v1/releases/tag/v0.6.3).
+  Source: https://github.com/sipeed/MaixPy-v1, tag v0.6.3.
+  Licence: MIT (MicroPython, OpenMV) and Apache-2.0 (Sipeed's own code);
+  licences/MaixPy-LICENSE.md.
+  Flashed only when the camera does not already run a MaixPy with what
+  main.py needs (QR codes, AprilTags, blobs, the KPU's YOLOv2).
+
+face.kmodel
+  Sipeed's YOLOv2 face detector (facedetect.kmodel from
+  machine_vision/models/face_model_at_0x300000.kfpkg), written to the
+  K210's flash at 0x300000, where main.py loads it.
+  Source: https://github.com/sipeed/MaixPy_scripts at
+  8d7c5f98ba654d226f433d31718d852674cab08d.
+  Licence: MIT; licences/MaixPy_scripts-LICENSE.
+
+isp.bin
+  The K210's flash-mode loader: kflash.py's ISP_PROG, loaded into the
+  K210's SRAM to write its flash, never kept on the camera.
+  Source: https://github.com/kendryte/kflash.py at
+  5783d8d85e7397007a3ba1394a93d3f9f8ad982f.
+  Licence: MIT; licences/kflash.py-LICENSE.
+
+main.py
+  Catalyst Linux's own program for the camera (tools/unitv/main.py in the
+  Catalyst Linux source), written to the camera's /flash.

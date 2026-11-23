@@ -6,9 +6,12 @@
 //! (QVGA), for the Camera's AI view.
 //!
 //! **The port.** Only when Settings › Camera › Grove port says Smart camera
-//! (catalyst-grove), which keeps the kernel's console and any login off the
-//! port from the first line of a start; until a start has run that way the
-//! camera is never powered (`catalyst-grove ready`).
+//! (catalyst-grove), which takes it at once: the login stopped and any
+//! session on the port hung up, the kernel's console quieted on it (and off
+//! it from the next start's first line). The camera is powered only while
+//! `catalyst-grove ready` says all of that holds. [`switch_grove`] runs it
+//! off the screen's thread, and gives the port back first when it goes to
+//! the console.
 //!
 //! **Power.** The port's 5 V is on only while something holds a [`Lease`]
 //! (the Camera, for its face-aware exposure, the AI view and scan mode; the
@@ -47,6 +50,9 @@ pub const RETRY_AFTER: Duration = Duration::from_secs(10);
 /// The rates tried, fastest first.
 pub const BAUDS: [u32; 7] = [3_000_000, 2_000_000, 1_500_000, 1_000_000, 921_600, 460_800, 115_200];
 pub const START_BAUD: u32 = 115_200;
+/// The 5 V stays off at least this long before it comes back (my own
+/// tuning: the UnitV's capacitors drained, the K210 reset).
+pub const OFF_FOR: Duration = Duration::from_millis(500);
 
 // ------------------------------------------------------------------ frames ---
 
@@ -320,9 +326,9 @@ impl Power {
 pub enum Status {
     /// The Grove port is the console (Settings › Camera › Grove port).
     PortIsConsole,
-    /// Chosen, but the console leaves the port only at the next start.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    NeedsRestart,
+    /// Chosen, but not free yet: a login or the kernel's console still on
+    /// it (catalyst-grove ready says no), or the port changing hands.
+    PortBusy,
     /// Not wanted: unpowered.
     Asleep,
     /// Powered, waiting for its first answer (since then).
@@ -407,9 +413,22 @@ impl Drop for Lease {
         let hub = hub();
         if let Ok(mut s) = hub.shared.lock() {
             s.leases.retain(|(id, _)| *id != self.0);
+            CHANGED.fetch_add(1, Ordering::AcqRel);
         }
         hub.wake.notify_all();
     }
+}
+
+/// Counted up, under the hub's lock, whenever what the link must act on
+/// changes (a lease, the port changing hands): its waits end at the next
+/// change even when the change lands just before it starts waiting.
+static CHANGED: AtomicU64 = AtomicU64::new(0);
+
+fn changed() {
+    let _held = hub().shared.lock();
+    CHANGED.fetch_add(1, Ordering::AcqRel);
+    drop(_held);
+    hub().wake.notify_all();
 }
 
 /// The camera, for `what`, while the lease is held.
@@ -420,14 +439,14 @@ pub fn lease(what: Use) -> Lease {
         let id = s.next_lease;
         s.next_lease += 1;
         s.leases.push((id, what));
+        CHANGED.fetch_add(1, Ordering::AcqRel);
         id
     };
     hub.wake.notify_all();
     Lease(id)
 }
 
-/// Whether the Grove port is the smart camera's (as chosen; it may still
-/// need a restart).
+/// Whether the Grove port is the smart camera's (as chosen).
 pub fn chosen() -> bool {
     if cfg!(target_arch = "aarch64") {
         std::fs::read_to_string("/data/catalyst/grove-port").is_ok_and(|m| m.trim() == "camera")
@@ -436,10 +455,78 @@ pub fn chosen() -> bool {
     }
 }
 
-/// Chosen, but this start's kernel still has its console on the port: the
-/// camera stays unpowered until the next start (catalyst-grove).
-pub fn restart_owed() -> bool {
-    cfg!(target_arch = "aarch64") && chosen() && std::fs::read_to_string("/proc/cmdline").is_ok_and(|c| c.split_whitespace().any(|a| a.starts_with("console=ttyAMA0") || a.starts_with("console=serial0")))
+// ------------------------------------------------------------ the switch ---
+
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+/// The port is changing hands: the link lets go of it and keeps off it.
+static HOLD_OFF: AtomicBool = AtomicBool::new(false);
+static SWITCHING: AtomicBool = AtomicBool::new(false);
+/// The link has ttyAMA0 open.
+static PORT_OPEN: AtomicBool = AtomicBool::new(false);
+static SAID: Mutex<Option<String>> = Mutex::new(None);
+
+/// The Grove port given to the smart camera, or back to the console, at
+/// once, on a thread of its own (catalyst-grove waits on OpenRC, a hung-up
+/// session and the boot partition). Going to the console, the link first
+/// lets go of the port and cuts the camera's power, so the getty starts on
+/// a port nobody else holds. The island says how it went.
+pub fn switch_grove(camera: bool) {
+    if SWITCHING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    HOLD_OFF.store(true, Ordering::Release);
+    changed();
+    crate::platform::wake();
+    std::thread::Builder::new()
+        .name("grove".into())
+        .spawn(move || {
+            // The link lets go (within its next turn: half a second at most).
+            let until = Instant::now() + Duration::from_secs(3);
+            while PORT_OPEN.load(Ordering::Acquire) && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let said = run_switch(camera);
+            HOLD_OFF.store(false, Ordering::Release);
+            SWITCHING.store(false, Ordering::Release);
+            changed();
+            *SAID.lock().unwrap_or_else(|e| e.into_inner()) = Some(said);
+            crate::platform::wake();
+        })
+        .ok();
+}
+
+fn run_switch(camera: bool) -> String {
+    if !cfg!(target_arch = "aarch64") {
+        sim::choose(camera);
+        return if camera { "Grove port: smart camera".into() } else { "Grove port: console · login on it again".into() };
+    }
+    match std::process::Command::new("catalyst-grove").arg(if camera { "camera" } else { "console" }).output() {
+        Ok(out) if out.status.success() => match (camera, String::from_utf8_lossy(&out.stdout).trim()) {
+            (true, "busy") => "Grove port: smart camera · the port is still busy".into(),
+            (true, _) => "Grove port: smart camera".into(),
+            (false, _) => "Grove port: console · login on it again".into(),
+        },
+        Ok(out) => {
+            let why = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+            if why.is_empty() {
+                "the Grove port could not be changed".into()
+            } else {
+                why
+            }
+        }
+        Err(_) => "the Grove port is set on the handheld".into(),
+    }
+}
+
+/// The port changing hands now.
+pub fn switching() -> bool {
+    SWITCHING.load(Ordering::Acquire)
+}
+
+/// What the island is to say of the switch, since the shell last asked.
+pub fn take_said() -> Option<String> {
+    SAID.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
 pub fn status() -> Status {
@@ -591,23 +678,38 @@ mod link {
             seq = seq.wrapping_add(1);
             port.write(&frame::encode(kind, seq, payload))
         };
+        // When the 5 V last went off: it stays off a moment before it comes
+        // back, so the K210 starts afresh (at 115 200) rather than riding a
+        // short gap on its capacitors at the rate it had.
+        let mut off_at: Option<Instant> = None;
         loop {
-            let (leases, chosen) = {
+            let (leases, chosen, gen) = {
                 let s = hub.shared.lock().unwrap_or_else(|e| e.into_inner());
-                (s.leases.clone(), super::chosen())
+                (s.leases.clone(), super::chosen() && !HOLD_OFF.load(Ordering::Acquire), CHANGED.load(Ordering::Acquire))
             };
+            // Not the camera's (any more, or for now): unpowered and let go
+            // of at once, no warm time.
+            if !chosen && power.powered() {
+                port.power(false);
+                off_at = Some(Instant::now());
+                power = Power::Off;
+                (answered, settled) = (false, false);
+            }
             let wanted = !leases.is_empty() && chosen;
-            // Not to be powered (the port is the console, or a restart is
-            // still owed): said so, and nothing more.
+            // Not to be powered (the port is the console, or not free yet:
+            // a login or the console still on it): said so, and nothing more.
             if wanted && power.would_power(Instant::now()) {
                 if let Err(why) = port.ready() {
                     set_status(hub, why);
-                    wait(hub, Duration::from_secs(2));
+                    wait(hub, Duration::from_secs(2), gen);
                     continue;
                 }
             }
             match power.step(Instant::now(), wanted, answered && matches!(power, Power::Waking { .. })) {
                 Switch::On => {
+                    if let Some(rest) = off_at.and_then(|at| OFF_FOR.checked_sub(at.elapsed())) {
+                        std::thread::sleep(rest);
+                    }
                     port.power(true);
                     port.set_baud(START_BAUD);
                     baud = START_BAUD;
@@ -617,6 +719,7 @@ mod link {
                 }
                 Switch::Off => {
                     port.power(false);
+                    off_at = Some(Instant::now());
                     (answered, settled) = (false, false);
                 }
                 Switch::Keep => {}
@@ -624,6 +727,7 @@ mod link {
             set_status(
                 hub,
                 match &power {
+                    Power::Off if HOLD_OFF.load(Ordering::Acquire) => Status::PortBusy,
                     Power::Off if !chosen => Status::PortIsConsole,
                     Power::Off => Status::Asleep,
                     Power::Waking { since } => Status::Waking { since: *since },
@@ -632,7 +736,7 @@ mod link {
                 },
             );
             if !power.powered() {
-                wait(hub, if wanted { Duration::from_millis(500) } else { Duration::from_secs(30) });
+                wait(hub, if wanted { Duration::from_millis(500) } else { Duration::from_secs(30) }, gen);
                 continue;
             }
             // Hello until it answers.
@@ -718,9 +822,10 @@ mod link {
         }
     }
 
-    fn wait(hub: &Hub, d: Duration) {
+    /// Up to `d`, or until something changed since `gen` was read.
+    fn wait(hub: &Hub, d: Duration, gen: u64) {
         if let Ok(s) = hub.shared.lock() {
-            hub.wake.wait_timeout(s, d).ok();
+            hub.wake.wait_timeout_while(s, d, |_| CHANGED.load(Ordering::Acquire) == gen).ok();
         }
     }
 
@@ -840,6 +945,7 @@ mod device {
                 libc::tcsetattr(fd, libc::TCSANOW, &t);
                 libc::tcflush(fd, libc::TCIOFLUSH);
                 self.fd = fd;
+                PORT_OPEN.store(true, Ordering::Release);
             }
             true
         }
@@ -852,20 +958,26 @@ mod device {
                 return Ok(());
             }
             if super::chosen() {
-                Err(Status::NeedsRestart)
+                Err(Status::PortBusy)
             } else {
                 Err(Status::PortIsConsole)
             }
         }
 
+        /// On: the port opened raw first (nothing the camera sends is ever
+        /// read as anything but bytes), then its 5 V, which catalyst-grove
+        /// gives only while the port is safely the camera's. Off: the 5 V,
+        /// then the port let go of.
         fn power(&mut self, on: bool) {
-            std::process::Command::new("catalyst-grove").args(["power", if on { "on" } else { "off" }]).status().ok();
             if on {
                 self.ensure_open();
-            } else if self.fd >= 0 {
+            }
+            let given = std::process::Command::new("catalyst-grove").args(["power", if on { "on" } else { "off" }]).status().is_ok_and(|s| s.success());
+            if (!on || !given) && self.fd >= 0 {
                 // SAFETY: the descriptor this opened, closed once.
                 unsafe { libc::close(self.fd) };
                 self.fd = -1;
+                PORT_OPEN.store(false, Ordering::Release);
             }
         }
 
@@ -1359,5 +1471,32 @@ mod tests {
         drop(lease);
         std::thread::sleep(Duration::from_millis(200));
         assert!(matches!(status(), Status::Ready { .. }), "warm: still answering a moment after");
+    }
+
+    /// The port changes hands at once, both ways: to the console, the
+    /// camera in use is let go of and unpowered at once (no warm time), and
+    /// nothing powers it while the port changes; back, it wakes again with
+    /// no restart.
+    #[test]
+    fn the_port_switches_at_once_and_lets_go_first() {
+        let _port = sim::exclusive(true);
+        let _lease = lease(Use::View);
+        let wait = |what: &dyn Fn() -> bool| {
+            let started = Instant::now();
+            while !what() && started.elapsed() < Duration::from_secs(10) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            what()
+        };
+        assert!(wait(&|| matches!(status(), Status::Ready { .. })), "{:?}", status());
+        switch_grove(false);
+        assert!(wait(&|| !switching()), "the switch finished");
+        assert!(!chosen());
+        assert!(!PORT_OPEN.load(Ordering::Acquire));
+        assert!(wait(&|| status() == Status::PortIsConsole), "unpowered at once, no warm time: {:?}", status());
+        switch_grove(true);
+        assert!(wait(&|| !switching()));
+        assert!(chosen());
+        assert!(wait(&|| matches!(status(), Status::Ready { .. })), "awake again without a restart: {:?}", status());
     }
 }

@@ -1,0 +1,10 @@
+# Locally computed: MaixPy v0.6.3's M5StickV build as dl.sipeed.com serves
+# it (the release's own download place), and the files at the pinned commits
+# of MaixPy_scripts and kflash.py.
+sha256  3f9554724c4397baeec2b1460aab2530ce7738c8d82970e8519181a3e05f22f2  maixpy_v0.6.3_2_gd8901fd22_m5stickv.bin
+sha256  ac3791805f138dd6a8b1858a6e67bac028fb89edeceda08824de6016d9a5227c  face_model_at_0x300000.kfpkg
+sha256  b6213a92090725841c47bb8c6203a631caa5a1db44bb0c746c358fd0fd7e4619  kflash.py
+# The licence texts kept with the package (copied from the same places).
+sha256  f7c46beb8d60047b7f4f7c6e00179240017415030fc4b6b22378aab5189cfe3c  licences/MaixPy-LICENSE.md
+sha256  620df7a325fba88d8fd7ba87e3b0e3f7ea0593e42c7e5165011c8998c25d15e5  licences/MaixPy_scripts-LICENSE
+sha256  50c370555b8b85c6626dbc33482a72d76b8de7e56767721171bd9b5abfbea012  licences/kflash.py-LICENSE

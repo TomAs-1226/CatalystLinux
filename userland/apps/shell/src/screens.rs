@@ -18,37 +18,23 @@ use crate::widgets::{Act, Board, Cell, Grid, Kind, Layout, Packed, Placed, Slot}
 use crate::wifi::Wifi;
 use crate::wpilog::Level;
 
-/// Settings › Camera › Grove port, as it stands.
+/// Settings › Camera › Grove port, as it stands (it changes at once).
 fn grove_words() -> String {
-    match (crate::smartcam::chosen(), crate::smartcam::restart_owed()) {
-        (false, _) => "Console".into(),
-        (true, true) => "Smart camera · restart".into(),
-        (true, false) => "Smart camera".into(),
+    match (crate::smartcam::switching(), crate::smartcam::chosen()) {
+        (true, _) => "changing over…".into(),
+        (false, false) => "Console".into(),
+        (false, true) => "Smart camera".into(),
     }
 }
 
-/// The Grove port given to the smart camera (or back to the console):
-/// catalyst-grove takes the login and the kernel's console off it, or puts
-/// them back. What to say of it.
-fn switch_grove(camera: bool) -> String {
-    if !cfg!(target_arch = "aarch64") {
-        crate::smartcam::sim::choose(camera);
-        return if camera { "Grove port: smart camera".into() } else { "Grove port: console".into() };
-    }
-    match std::process::Command::new("catalyst-grove").arg(if camera { "camera" } else { "console" }).output() {
-        Ok(out) if out.status.success() => {
-            let said = String::from_utf8_lossy(&out.stdout);
-            match (camera, said.contains("restart")) {
-                (true, true) => "Grove port: smart camera · restart once to finish".into(),
-                (true, false) => "Grove port: smart camera".into(),
-                (false, _) => "Grove port: console, login on it again".into(),
-            }
-        }
-        Ok(out) => {
-            let why = String::from_utf8_lossy(&out.stderr).trim().to_owned();
-            if why.is_empty() { "the Grove port could not be changed".into() } else { why }
-        }
-        Err(_) => "the Grove port is set on the handheld".into(),
+/// Settings › Camera's line along the bottom: what the row in focus does.
+fn camera_hint(item: Option<Item>) -> &'static [&'static str] {
+    match item {
+        Some(Item::GrovePort) if crate::smartcam::chosen() => &["enter: console now · kernel messages from the next start", "enter: console now · kernel log next start", "console now · kernel log next start", "enter: console now"],
+        Some(Item::GrovePort) => &["enter: smart camera now · login and console off it", "enter: smart camera now"],
+        Some(Item::CameraProgram) => &["enter: its program over USB-A, no microSD card", "enter: its program over USB-A", "enter: over USB-A"],
+        Some(Item::SmartCamera) => &["wakes with the Camera, sleeps 15 s after", "wakes with the Camera"],
+        _ => &["enter: auto, on or off · a photo of several frames", "enter: auto, on or off"],
     }
 }
 
@@ -3013,6 +2999,8 @@ enum Item {
     DetailModeRow,
     GrovePort,
     SmartCamera,
+    /// The camera's program, installed over USB-A (unitv.rs).
+    CameraProgram,
     /// Setup's page offered to a computer, outside first start.
     FromComputer,
     /// Settings › Computer companion: a page of its own (companion.rs).
@@ -3169,7 +3157,7 @@ fn nearest_hue(accent: bezel::Accent) -> u8 {
 
 /// Where everything in Settings is, for search: what it is called, the
 /// section it is in, and its place there (none: the section itself).
-const SETTING_PLACES: [(&str, Item, Option<usize>); 91] = [
+const SETTING_PLACES: [(&str, Item, Option<usize>); 92] = [
     ("Robot settings", Item::RobotSection, None),
     ("Open Robot on link", Item::RobotSection, Some(0)),
     ("Match report after a match", Item::RobotSection, Some(1)),
@@ -3236,6 +3224,7 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 91] = [
     ("Detail mode", Item::CameraSection, Some(0)),
     ("Grove port", Item::CameraSection, Some(1)),
     ("Smart camera", Item::CameraSection, Some(2)),
+    ("UnitV program (smart camera)", Item::CameraSection, Some(3)),
     ("Name & time", Item::NameSection, None),
     ("Handheld name", Item::NameSection, Some(0)),
     ("Time zone", Item::NameSection, Some(1)),
@@ -3359,6 +3348,13 @@ impl SettingsApp {
         Self::section(Item::CameraSection).unwrap_or_else(Self::new)
     }
 
+    /// For the screenshots: the focus on a row.
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn focused(mut self, at: usize) -> Self {
+        self.list.focus = at.min(self.items.len().saturating_sub(1));
+        self
+    }
+
     /// Settings › Keys on its own, for the assistant to send someone to.
     pub fn keys_page() -> Self {
         Self::section(Item::KeysSection).unwrap_or_else(Self::new)
@@ -3407,7 +3403,7 @@ impl SettingsApp {
             Help => Self::page("Help", vec![TakeTour, KeyboardShortcuts, KeyboardLesson]),
             NameSection => Self::page("Name & time", vec![DeviceName, TimeZone, ClockNote]),
             UsbSection => Self::page("USB", vec![UsbMode, UsbLink]),
-            CameraSection => Self::page("Camera", vec![DetailModeRow, GrovePort, SmartCamera]),
+            CameraSection => Self::page("Camera", vec![DetailModeRow, GrovePort, SmartCamera, CameraProgram]),
             DeveloperSection => Self::page("Developer", vec![DevMode, MotionScale, ShowKeys, Undervolt, TearFree]),
             _ => return None,
         })
@@ -3525,6 +3521,11 @@ impl SettingsApp {
             DetailModeRow => ("Detail mode".into(), g.detail.words().into(), g.detail != crate::burst::DetailMode::Off),
             GrovePort => ("Grove port".into(), grove_words(), crate::smartcam::chosen()),
             SmartCamera => ("Smart camera".into(), crate::camera::smart_words(), false),
+            CameraProgram => {
+                let words = crate::unitv::words();
+                let lit = words.starts_with("install") || words.starts_with("update");
+                ("UnitV".into(), words, lit)
+            }
             CompanionSection => section("Computer companion", crate::companion::summary()),
             Mode => ("Mode".into(), (if g.tokens.tone == bezel::Tone::Light { "light" } else { "dark" }).into(), true),
             AccentColor => ("Accent".into(), g.accent.name().into(), true),
@@ -3706,7 +3707,8 @@ impl SettingsApp {
             }
             OpenRobot => cx.settings.open_robot = !cx.settings.open_robot,
             DetailModeRow => cx.settings.detail = cx.settings.detail.step(step),
-            GrovePort => *cx.say = Some(switch_grove(!crate::smartcam::chosen())),
+            // At once, off the screen's thread; the island says how it went.
+            GrovePort => crate::smartcam::switch_grove(!crate::smartcam::chosen()),
             MatchReport => cx.settings.match_report = !cx.settings.match_report,
             LiftWake => cx.settings.lift_wake = !cx.settings.lift_wake,
             FaceDown => cx.settings.face_down = !cx.settings.face_down,
@@ -3851,6 +3853,7 @@ impl Screen for SettingsApp {
             Key::Enter | Key::Right if item == Item::LockSection => return Nav::Push(Box::new(crate::lockpages::LockPage::new())),
             Key::Enter | Key::Right if item == Item::StandBySection => return Nav::Push(Box::new(crate::lockpages::StandByPage::new())),
             Key::Enter | Key::Right if item == Item::OnDeviceModel => return Nav::Push(Box::new(crate::local::ModelPage::new())),
+            Key::Enter | Key::Right if item == Item::CameraProgram => return Nav::Push(Box::new(crate::unitv::InstallScreen::new())),
             Key::Enter | Key::Right if item == Item::SoundSection => return Nav::Push(Box::new(crate::sound::SoundScreen::new())),
             Key::Enter | Key::Right if item == Item::BluetoothSection => return Nav::Push(Box::new(crate::bluetooth::BluetoothScreen::new())),
             Key::Enter | Key::Right if item == Item::MusicSection => return Nav::Push(Box::new(crate::music::MusicSettings::new())),
@@ -3921,7 +3924,7 @@ impl Screen for SettingsApp {
         let items = self.items.clone();
         // Arrange apps says what its keys do along the bottom, USB what the
         // mode does, Name & time what the name is for; the rest run on to it.
-        let hinted = arranging || matches!(self.title, "USB" | "Name & time") || self.naming.is_some();
+        let hinted = arranging || matches!(self.title, "USB" | "Name & time" | "Camera") || self.naming.is_some();
         let bottom = if hinted { g.above_hint() } else { H };
         for (i, y) in self.list.layout(g, items.len(), top, row_h, 3.0, bottom) {
             let item = items[i];
@@ -4003,6 +4006,9 @@ impl Screen for SettingsApp {
         self.list.scrollbar(g, items.len(), top, bottom - 2.0);
         if arranging {
             g.hint("enter: hide · space: favourite · ←→: move");
+        }
+        if self.title == "Camera" {
+            g.hint_any(camera_hint(self.items.get(self.list.focus).copied()));
         }
         if self.title == "USB" {
             g.hint(crate::usb::MODES[crate::usb::mode()].2);

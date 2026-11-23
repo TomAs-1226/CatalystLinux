@@ -2384,18 +2384,31 @@ shows its AI view: what it sees, with what it found drawn on it.
   AprilTags are there for the field view (`smartcam::tags()`: id, place in
   its picture, pose in millimetres).
 - **The Grove port.** Settings › Camera › Grove port: Console (the serial
-  console and a root login, as shipped) or Smart camera. As the smart
-  camera's, nothing else ever uses the port (`catalyst-grove`): this
-  system's kernel command line says `console=null` (the kernel's ttynull,
-  built in since 0.9) for `console=ttyAMA0`, so from the kernel's first line
-  the boot log never goes there; no login listens (`catalyst-serial` starts
-  its getty only in console mode); the 5 V is off from early in every start.
-  Moving the port from the console takes one restart, and until then the
-  camera is never powered. The updater carries the choice into each system
-  it installs (the boot pack's command line still says ttyAMA0), and a start
-  that finds the console back on the port puts it right for the next and
-  keeps the camera off meanwhile. config.txt is left alone. The USB serial
-  console (ttyGS0) is untouched either way.
+  console and a root login, as shipped) or Smart camera, and either takes
+  effect at once (since 0.9.1; no restart). As the smart camera's, nothing
+  else uses the port (`catalyst-grove`): `catalyst-serial`'s getty is
+  stopped and any session on the port hung up; the kernel's console is
+  taken off the port where the kernel lets go of it at run time
+  (`/sys/class/tty/ttyAMA0/console`), held to emergencies (`dmesg -n 1`),
+  and SysRq is switched off (a serial console reads a break and a letter as
+  one); then the shell opens the port raw and powers the camera. The camera
+  is powered only while `catalyst-grove ready` finds all of that true, and
+  nobody else holding the port. Its link is framed with a CRC and resyncs on
+  junk, and main.py never sends until spoken to, so a kernel emergency line
+  that still got there is junk it drops, and nothing it sends can reach a
+  login. From the next start on, this system's kernel command line says
+  `console=null` (the kernel's ttynull, built in since 0.9) for
+  `console=ttyAMA0`, so the boot log never goes there; the 5 V is off from
+  early in every start. Back to Console is also at once: the shell lets go
+  of the port, its 5 V goes off, the kernel's log level and SysRq come back
+  and the getty starts; the kernel's own messages return to the port from
+  the next start. The updater carries the choice into each system it
+  installs (the boot pack's command line still says ttyAMA0), and a start
+  that finds the console back on the port quiets it at once and puts the
+  command line right for the next. A kernel without ttynull keeps its
+  console on the port at start and has it quieted early in each one.
+  config.txt is left alone. The USB serial console (ttyGS0) is untouched
+  either way.
 - **Power only when used.** The Grove 5 V is on while the Camera is open
   (or something else holds the camera), kept warm 15 s after, then off. The
   AI view says "waking the smart camera…" with the seconds, then how long it
@@ -2415,30 +2428,74 @@ shows its AI view: what it sees, with what it found drawn on it.
   `a` in the AI view lays its picture over the main one's at half strength:
   the arrows move it, `+`/`-` size it, `r` resets, Enter keeps it.
 
-**Setting it up, once.** The UnitV runs MaixPy (MicroPython) from its
-microSD card:
+**Setting it up, once, from the handheld (0.9.1).** Plug the UnitV's USB-C
+into the handheld's USB-A port. The shell notices a K210 board on its USB
+serial bridge (the UnitV's FTDI FT2232, which Sipeed's CH552 boards also
+present; a CH340 or CDC-ACM bridge such as WCH's CH9102 when it names itself
+M5Stack, UnitV, Sipeed or Maix), asks it over MaixPy's REPL what it runs,
+and the island offers "install on the camera" (also in Settings › Camera ›
+UnitV, which opens the same page). Enter, then about a minute
+(`unitv.rs`, on a thread of its own; the page shows each part and a bar):
+
+1. **MaixPy**, only if the camera does not already run one with what main.py
+   needs (QR codes, AprilTags, blobs, the KPU's YOLOv2): Sipeed's MaixPy
+   v0.6.3, its build for the M5StickV (which M5Stack says the UnitV runs),
+   written through the K210's ISP as kflash.py does it. DTR and RTS reset the
+   K210 into its boot ROM (both wirings kflash.py knows are tried), the ROM
+   takes kflash.py's flash loader into SRAM, and the loader writes the flash
+   at 1.5 Mbaud (115 200 if the bridge cannot), 64 KiB at a time, every
+   request SLIP-framed with a CRC-32 and answered.
+2. **The face model** at 0x300000, where main.py loads it, the same way.
+3. **main.py**, and a boot.py that does nothing (a firmware's own demo
+   boot.py can loop for ever), into the camera's `/flash` over the raw REPL
+   the way mpremote writes files (raw-paste mode where MicroPython has it,
+   which MaixPy's older one does not), each read back to check.
+4. **A version stamp** (`/flash/catalyst.json`: this release, main.py's and
+   the model's SHA-256), a soft reset, and a hello on the framed protocol
+   over the same USB line: main.py answers there as on the Grove port.
+
+The stamp is how a later Catalyst knows: when its main.py or model differs,
+Settings › Camera › UnitV says "update on the camera", read the
+next time the camera is on USB-A (or from main.py's hello on the Grove
+port), and only main.py (and the model, if it changed) is written again.
+Then Settings › Camera › Grove port › Smart camera, and the UnitV into the
+Grove port.
+
+What the image carries for this, in `/usr/share/catalyst/unitv`
+(`catalyst-unitv`, 2.6 MB, with `SOURCES` and the licences): MaixPy v0.6.3
+for the M5StickV (`maixpy_v0.6.3_2_gd8901fd22_m5stickv.bin`, Sipeed's
+release download, source github.com/sipeed/MaixPy-v1 at v0.6.3; MIT and
+Apache-2.0), Sipeed's face model (MaixPy_scripts, MIT), kflash.py's flash
+loader (its ISP_PROG; Kendryte, MIT) and main.py. The USB serial drivers
+are modules: FTDI and CH340 were already in the kernel; CDC-ACM is added in
+0.9.1 (`CONFIG_USB_ACM`). USB-A works while the handheld is the USB host
+(Settings › USB › charging only).
+
+**The microSD route still works,** without the handheld:
 
 1. The firmware: M5Stack's UnitV firmware (`M5StickV_Firmware_v5.1.2.kfpkg`)
    or a full MaixPy build (not a "minimum" one: it needs `find_qrcodes`,
    `find_apriltags` and KPU), flashed over its USB-C with kflash_gui (board
    "M5StickV") or `kflash -p COM5 -b 1500000 <firmware>`. Most UnitVs ship
    with it.
-2. The easy path: copy `tools/unitv/main.py` to the root of a FAT32 microSD
-   card (MBR, a card that works in SPI mode; M5Stack's page lists some that
-   do not), and for faces Sipeed's face model beside it as `face.kmodel`
-   (from MaixPy_scripts' `face_model_at_0x300000.kfpkg`, a zip: its
-   `.kmodel` inside). MaixPy runs `/sd/main.py` at every start.
-3. Without a card: MaixPy IDE over USB-C (open `main.py`, Tools › Save open
-   script to board), or `mpfshell -o ser:COM5 -c "put main.py"`; the face
-   model flashed with `kflash -p COM5 -b 1500000
+2. Copy `tools/unitv/main.py` to the root of a FAT32 microSD card (MBR, a
+   card that works in SPI mode; M5Stack's page lists some that do not), and
+   for faces Sipeed's face model beside it as `face.kmodel` (from
+   MaixPy_scripts' `face_model_at_0x300000.kfpkg`, a zip: its `.kmodel`
+   inside). MaixPy runs `/sd/main.py` at every start, ahead of `/flash`.
+3. Or from a computer without a card: MaixPy IDE over USB-C (open
+   `main.py`, Tools › Save open script to board), or `mpfshell -o ser:COM5
+   -c "put main.py"`; the face model flashed with `kflash -p COM5 -b 1500000
    face_model_at_0x300000.kfpkg` (main.py looks on the card, then at
    0x300000).
-4. On the handheld: Settings › Camera › Grove port › Smart camera, restart
-   once, plug the UnitV into the Grove port.
+4. On the handheld: Settings › Camera › Grove port › Smart camera (at once),
+   and the UnitV into the Grove port.
 
 main.py never sends a byte until the handheld speaks to it, and listens on
 both Grove pins (G34, G35) until the handheld's hello says which is its RX,
-so a crossed cable works and no pin is driven against the handheld's. Its
+so a crossed cable works and no pin is driven against the handheld's (and
+on its USB serial line, for the check after an install; a Ctrl-C there
+still stops it, which is why the handheld's hello never holds one). Its
 models: Sipeed's YOLOv2 face detector (MaixPy_scripts, MIT; 320 × 240 in,
 about 380 kB); no object model (Sipeed's 20-class VOC model states no
 licence). The rest is MaixPy's own vision (QR, AprilTag 36h11, LAB
@@ -2452,7 +2509,12 @@ In the simulator a stand-in camera answers behind the same bytes (a person
 drifting about, a scouting QR code, tag 7 on the wall, an orange game piece),
 starting 1.4 s after power and running at the baud rates' real pace.
 `tools/unitv/test_protocol.py` checks main.py's link on a computer against
-the same bytes the shell's tests check.
+the same bytes the shell's tests check. The install has a stand-in UnitV
+too (`unitv/stub.rs`: the boot ROM, the flash loader checking each CRC,
+MaixPy's REPL as its MicroPython has it), which the tests install on and
+`CATALYST_SIM_UNITV=bare|new|old|current` plugs into the simulator's USB-A;
+`scripts/test-catalyst-grove.sh` checks the port's switch with OpenRC and
+dmesg stood in for.
 
 ## Remote: a universal remote
 

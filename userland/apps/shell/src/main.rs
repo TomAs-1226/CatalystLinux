@@ -57,6 +57,7 @@ mod brand;
 mod burst;
 mod camera;
 mod smartcam;
+mod unitv;
 mod calc;
 mod capture;
 mod catalogue;
@@ -653,6 +654,11 @@ fn main() {
     if let Some(dir) = value("--camera-shots") {
         return camera::shots(std::path::Path::new(&dir));
     }
+    // The smart camera's install over USB-A, and Settings › Camera (0.9.1).
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--unitv-shots") {
+        return unitv::shots(std::path::Path::new(&dir));
+    }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--standby-shots") {
         return standby_shots(std::path::Path::new(&dir));
@@ -797,6 +803,8 @@ fn main() {
     // drew them, when asked (sched.rs, pacing.rs).
     let mut booster = sched::Booster::start();
     let mut slack = sched::LoopSlack::default();
+    // USB-A watched for the smart camera, to offer its program (unitv.rs).
+    unitv::start();
     let mut pacing = pacing::Pacing::default();
     loop {
         let moving = shell.animating();
