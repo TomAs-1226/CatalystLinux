@@ -165,3 +165,21 @@ pub fn inbox_words() -> Option<(String, String)> {
     let inbox = INBOX.lock().unwrap_or_else(|e| e.into_inner());
     (inbox.total > 0).then(|| (inbox.progress(), inbox.outcome()))
 }
+
+// ------------------------------------------------------------------- team ---
+
+/// A code's text sent over Team (team/) rather than shown: its records
+/// merged in as the camera's are, each change noted as from Team. How many
+/// came in new, and how many were newer; none if it would not read here.
+pub fn from_team(text: &str, by: &str) -> Option<(usize, usize)> {
+    let chunk = share::parse(&form(), text).ok()?;
+    let records: Vec<store::Record> = chunk
+        .records
+        .into_iter()
+        .map(|mut r| {
+            r.history.push(store::Version { at: r.updated, by: r.by.clone(), change: format!("sent over Team by {by}") });
+            r
+        })
+        .collect();
+    Some(with_store(|s| s.merge_in(&records)))
+}

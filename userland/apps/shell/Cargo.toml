@@ -43,6 +43,10 @@ argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "pa
 # `alloc` or `getrandom` of its own: it seals buffers in place, and nonces
 # come from `getrandom` below.
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"] }
+# Team (team/): joining with a six-digit code by Companion's own pairing,
+# SPAKE2, so a listener on the pit's Wi-Fi learns nothing to try codes
+# against. Its crates (spake2, hmac, sha2) are the workspace's already.
+catalyst-companion-proto = { workspace = true }
 # The kernel's random numbers (getrandom(2) on the handheld, the system's
 # generator on a computer): the vault's keys, salts, nonces and passwords.
 getrandom = "0.4"

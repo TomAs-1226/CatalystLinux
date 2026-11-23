@@ -158,6 +158,7 @@ mod standby;
 mod strategy;
 mod sys;
 mod tailscale;
+mod team;
 mod sysupdate;
 mod usb;
 mod term;
@@ -684,6 +685,12 @@ fn main() {
         tour_fixtures();
         return strategy::shots(std::path::Path::new(&dir));
     }
+    // Team: messages between handhelds at the event (1.0).
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--team-shots") {
+        tour_fixtures();
+        return team::shots::shots(std::path::Path::new(&dir));
+    }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--camera-shots") {
         return camera::shots(std::path::Path::new(&dir));
@@ -875,6 +882,8 @@ fn main() {
     let mut slack = sched::LoopSlack::default();
     // USB-A watched for the smart camera, to offer its program (unitv.rs).
     unitv::start();
+    // Team's listener, while this handheld is in a team (team/).
+    team::start();
     let mut pacing = pacing::Pacing::default();
     loop {
         let moving = shell.animating();

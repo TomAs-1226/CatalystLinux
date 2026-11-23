@@ -96,6 +96,19 @@ impl Screen for ShareMenu {
                 let n = self.matches.len() as i32;
                 self.chosen = (self.chosen as i32 + if key == Key::Left { -1 } else { 1 }).rem_euclid(n) as usize;
             }
+            // Straight to the team, over Team, rather than as codes.
+            Key::Char('t') if matches!(row, Row::Match | Row::Event) => {
+                let (label, texts) = match (row, self.matches.get(self.chosen)) {
+                    (Row::Match, Some((key, label, _))) => (format!("Scout {label}"), self.codes_of(Some(key))),
+                    (Row::Event, _) if self.records > 0 => (format!("Scout {}", self.event), self.codes_of(None)),
+                    _ => (String::new(), Vec::new()),
+                };
+                *cx.say = Some(match crate::team::share(crate::team::wire::ShareKind::Scout, &label, &texts) {
+                    _ if texts.is_empty() => "nothing scouted yet".into(),
+                    Ok(_) => "sent to the team".into(),
+                    Err(why) => why,
+                });
+            }
             Key::Enter => match row {
                 Row::Match => match self.matches.get(self.chosen) {
                     Some((key, label, _)) => return Nav::Push(Box::new(Codes::new(label.clone(), self.codes_of(Some(key))))),
@@ -147,10 +160,10 @@ impl Screen for ShareMenu {
         self.list.scrollbar(g, ROWS.len(), top, bottom);
         let row = ROWS[self.list.focus.min(ROWS.len() - 1)];
         g.hint_any(match row {
-            Row::Match => &["enter: show the codes · ←→: another match", "enter: show · ←→: match", "enter: show"],
+            Row::Match => &["enter: codes · t: to the team · ←→: match", "enter: show the codes · ←→: another match", "enter: show · ←→: match", "enter: show"],
             Row::Read => &["enter: the camera, codes import as they are read", "enter: open the camera", "enter: camera"],
             Row::Csv => &["enter: write it to scout/export for Files", "enter: write it", "enter: write"],
-            Row::Event => &["enter: show the codes, one after another", "enter: show the codes", "enter: show"],
+            Row::Event => &["enter: show the codes · t: send to the team", "enter: show the codes, one after another", "enter: show the codes", "enter: show"],
         });
     }
 }

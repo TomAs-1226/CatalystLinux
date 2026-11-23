@@ -152,6 +152,7 @@ impl Code {
             Code::Wifi { ssid, password, .. } => ("wifi", format!("Wi-Fi · {ssid}"), if password.is_some() { "enter: join" } else { "enter: join · open network" }),
             Code::Url(url) => ("language", url.trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/').to_owned(), "enter: open in Web"),
             Code::Text(text) if crate::strategy::is_board_code(text) => crate::strategy::card(text),
+            Code::Text(text) if crate::team::is_team_code(text) => crate::team::card(text),
             Code::Text(text) => match crate::scout::scan_words(text) {
                 // Scout's codes import as they are read.
                 Some((title, action)) => ("download", title, action),
@@ -1839,6 +1840,8 @@ impl Camera {
                 self.say("read in already · esc: back");
                 Nav::Stay
             }
+            // A team's code (Team): the page to join it.
+            Code::Text(text) if crate::team::is_team_code(&text) => Nav::Push(crate::team::scanned(&text)),
             Code::Text(text) if crate::strategy::is_board_code(&text) => match crate::strategy::scanned(&text) {
                 Ok(board) => Nav::Push(board),
                 Err(words) => {

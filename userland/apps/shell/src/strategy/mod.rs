@@ -1330,6 +1330,15 @@ impl Screen for Menu {
                     }
                 }
             },
+            // Straight to the team, over Team, rather than as codes.
+            Key::Char('t') => {
+                let plan = self.plan.borrow();
+                let label = format!("board {}", plan.board.label);
+                *cx.say = Some(match qr::chunks(&plan.board).and_then(|texts| crate::team::share(crate::team::wire::ShareKind::Strategy, &label, &texts)) {
+                    Ok(_) => "sent to the team".into(),
+                    Err(why) => why,
+                });
+            }
             other => crate::screens::list_key(&mut self.list, other, MENU.len()),
         }
         Nav::Stay
@@ -1374,7 +1383,7 @@ impl Screen for Menu {
                 n => format!("{n} kept"),
             },
             String::new(),
-            format!("{codes} {}", if codes == 1 { "code" } else { "codes" }),
+            format!("{codes} {} · t: team", if codes == 1 { "code" } else { "codes" }),
             "for companion".into(),
             format!("{} · {} paths", plan.phase.name(), layer.paths.len()),
         ];
@@ -1858,6 +1867,35 @@ pub fn is_board_code(text: &str) -> bool {
 pub fn card(text: &str) -> (&'static str, String, &'static str) {
     let line = qr::parse(text).map_or_else(String::new, |c| format!("Strategy board · code {} of {}", c.k, c.n));
     ("strategy", line, "enter: add to Strategy")
+}
+
+/// A board sent over Team (team/): its codes' texts, read as the camera
+/// reads them (but gathered apart from the camera's), and kept for its
+/// match.
+fn gather_team(texts: &[&str]) -> Result<Board, String> {
+    let mut gather = qr::Gather::default();
+    let mut last = None;
+    for t in texts {
+        last = Some(gather.add(qr::parse(t).ok_or("not a Strategy board")?));
+    }
+    match last {
+        Some(qr::Scan::Done(board)) => {
+            board::save_board(&board::home(), &board).map_err(|_| "could not keep the board".to_owned())?;
+            Ok(*board)
+        }
+        Some(qr::Scan::Broken) => Err("a board this handheld cannot read".into()),
+        _ => Err("part of a board is missing".into()),
+    }
+}
+
+/// A board from Team kept for its match; its label.
+pub fn take_team_board(texts: &[&str]) -> Result<String, String> {
+    gather_team(texts).map(|b| b.label)
+}
+
+/// A board from Team, opened (Enter on it in Team's thread).
+pub fn open_team_board(texts: &[&str]) -> Result<Box<dyn Screen>, String> {
+    gather_team(texts).map(|b| Box::new(Strategy::with_board(b, board::home())) as Box<dyn Screen>)
 }
 
 /// Enter on a board's code in the camera: kept, and with the last of them

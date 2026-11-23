@@ -35,7 +35,14 @@ pub struct Computer(Spake2<Ed25519Group>);
 impl Computer {
     /// Started with the code typed: this end and its first message.
     pub fn start(code: &str) -> (Computer, Vec<u8>) {
-        let (state, msg) = Spake2::<Ed25519Group>::start_a(&Password::new(code.as_bytes()), &Identity::new(COMPUTER), &Identity::new(HANDHELD));
+        Computer::start_as(code, COMPUTER, HANDHELD)
+    }
+
+    /// The same for another protocol's two ends (`a` asks, `b` answers), so
+    /// a code typed for one is never confused with the other's: Catalyst
+    /// Team's join by code (the shell's team/join.rs).
+    pub fn start_as(code: &str, a: &[u8], b: &[u8]) -> (Computer, Vec<u8>) {
+        let (state, msg) = Spake2::<Ed25519Group>::start_a(&Password::new(code.as_bytes()), &Identity::new(a), &Identity::new(b));
         (Computer(state), msg)
     }
 
@@ -47,7 +54,13 @@ impl Computer {
 
 /// The handheld's answer to the computer's first message, and the key.
 pub fn handheld_answer(code: &str, message: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
-    let (state, answer) = Spake2::<Ed25519Group>::start_b(&Password::new(code.as_bytes()), &Identity::new(COMPUTER), &Identity::new(HANDHELD));
+    answer_as(code, COMPUTER, HANDHELD, message)
+}
+
+/// The answering end's half for another protocol's two ends (as
+/// [`Computer::start_as`]): its answer, and the key.
+pub fn answer_as(code: &str, a: &[u8], b: &[u8], message: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let (state, answer) = Spake2::<Ed25519Group>::start_b(&Password::new(code.as_bytes()), &Identity::new(a), &Identity::new(b));
     let key = state.finish(message).map_err(|_| "that was not a pairing message".to_owned())?;
     Ok((answer, key))
 }

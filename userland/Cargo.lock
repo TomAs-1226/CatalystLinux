@@ -414,6 +414,7 @@ dependencies = [
  "audiofx",
  "bezel",
  "catalyst-appkg",
+ "catalyst-companion-proto",
  "chacha20poly1305",
  "chrono",
  "detent",

@@ -328,7 +328,7 @@ def main():
 
 
 # Home's built-in apps, and Terminal's place among them (screens.rs, APPS).
-BUILT_IN = 42
+BUILT_IN = 43
 TERMINAL = 8
 
 

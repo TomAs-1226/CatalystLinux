@@ -722,6 +722,9 @@ pub struct Shell {
     /// The notification the island is saying, where it leads somewhere:
     /// its words and id (Ctrl-Enter opens it while the island says it).
     message_leads: Option<(String, u64)>,
+    /// The words of the urgent notification the island is saying (a team's
+    /// call, queue time, a timer done): drawn with the signal while it does.
+    message_urgent: Option<String>,
     dirty: bool,
     /// Whether anything was in motion at the last tick. Time only passes for
     /// motion that was already under way: an animation begun by a key after
@@ -1012,6 +1015,7 @@ impl Shell {
             island_words: String::new(),
             message: None,
             message_leads: None,
+            message_urgent: None,
             dirty: true,
             moving: false,
             background: Vec::new(),
@@ -1197,6 +1201,7 @@ impl Shell {
             return;
         }
         self.message_leads = leads.then(|| (said.clone(), id));
+        self.message_urgent = urgent.then(|| said.clone());
         self.message = Some((said, MESSAGE_SECONDS));
         if self.standby.state() == State::Off {
             self.lights.notice();
@@ -2849,6 +2854,11 @@ impl Shell {
         let unread = if icon || activity.is_some() { 0 } else { self.notes.unread() };
         let count = (unread > 0).then(|| if unread > 99 { "99+".to_owned() } else { unread.to_string() });
         let count_w = count.as_ref().map_or(0.0, |c| g.measure(c, caption) + 8.0);
+        // An urgent notification being said (a team's call, queue time):
+        // a disc of the signal at the island's end, concentric with it, its
+        // symbol on it rather than any words, and the island's rim lit.
+        let urgent = icon && talk.is_none() && self.message.as_ref().zip(self.message_urgent.as_ref()).is_some_and(|((m, _), u)| m == u);
+        let urgent_room = if urgent { island_h + 4.0 - 22.0 } else { 0.0 };
         // Compact, the island does not reach the time and the battery: it is
         // as wide as leaves them clear, its words what matters most of them
         // (it opens to its card for the rest). The bubble beside it counts,
@@ -2860,7 +2870,7 @@ impl Shell {
             Some(_) if self.activities.open.target() > 0.5 && opened.is_some() => W - 2.0 * PAD,
             Some(a) if a.urgent => crate::liveactivity::compact_w(g, a),
             Some(a) => crate::liveactivity::compact_w(g, a).min(compact_most),
-            None => g.measure(&label, caption) + 34.0 + count_w,
+            None => g.measure(&label, caption) + 34.0 + count_w + urgent_room,
         };
         let want = want + talk.as_ref().map_or(0.0, |_| crate::voice::METER_ROOM);
         if !icon && activity.is_none() {
@@ -2985,6 +2995,16 @@ impl Shell {
                 // second for the bars.
                 bars_seen = a.kind == crate::liveactivity::Kind::Music && words * compact * shown > 0.0 && !self.faces.showing() && !self.settings.battery.saver;
             }
+        } else if urgent {
+            // An exclamation mark drawn, not set: whole at this size, where
+            // a symbol from the font would be a blot.
+            let r = island_h * 0.5 - 2.5;
+            let (cx, cy) = (island.x + island_h * 0.5, island.cy());
+            g.canvas.circle(cx, cy, r, t.signal, shown);
+            let w = (r * 0.3).max(1.6);
+            g.canvas.rrect(Rect::new(cx - w * 0.5, cy - r * 0.58, w, r * 0.78), w * 0.5, t.on_signal, shown);
+            g.canvas.circle(cx, cy + r * 0.48, w * 0.55, t.on_signal, shown);
+            g.text_alpha(island.x + island_h + 4.0, island.cy(), &label, caption, t.ink, words * shown);
         } else {
             let dot = if icon || unread > 0 { t.signal } else if linked { t.ice } else { t.faint };
             g.canvas.circle(island.x + 12.0, island.cy(), 3.0, dot, shown);
@@ -2995,6 +3015,9 @@ impl Shell {
             }
         }
         g.canvas.clear_clip();
+        if urgent && activity.is_none() {
+            g.canvas.stroke_rrect(island, island_radius, 1.0, t.signal, words * shown);
+        }
         self.activities.bars_seen |= bars_seen;
         if let (Some(b), true) = (&second, open < 0.5) {
             crate::liveactivity::draw_bubble(g, bubble_rect, b, shown * (1.0 - open * 2.0));

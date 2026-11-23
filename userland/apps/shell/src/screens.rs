@@ -74,7 +74,7 @@ struct App {
     open: fn(&Robot) -> Box<dyn Screen>,
 }
 
-const APPS: [App; 44] = [
+const APPS: [App; 45] = [
     App { icon: "smart_toy", name: "Robot", open: |_| Box::new(RobotScreen::default()) },
     App { icon: "monitor_heart", name: "Health", open: |_| Box::new(Health::default()) },
     App { icon: "description", name: "Logs", open: |_| Box::new(LogsScreen::default()) },
@@ -103,6 +103,8 @@ const APPS: [App; 44] = [
     App { icon: "fact_check", name: "Scout", open: |_| Box::new(crate::scout::Scout::new()) },
     // The match's plan on the field, for the drive team (strategy/).
     App { icon: "strategy", name: "Strategy", open: |robot| Box::new(crate::strategy::Strategy::new(robot)) },
+    // Messages between the team's handhelds at the event, sealed (team/).
+    App { icon: "groups", name: "Team", open: |_| Box::new(crate::team::TeamScreen::new()) },
     App { icon: "settings_remote", name: "Remote", open: |_| Box::new(crate::irremote::Remotes::new()) },
     App { icon: "straighten", name: "Level", open: |_| Box::new(crate::level::Level::new()) },
     App { icon: "explore", name: "Compass", open: |_| Box::new(crate::level::Compass::new()) },
@@ -569,6 +571,7 @@ impl Home {
             "Pit" => crate::pit::tile(robot),
             "Batteries" => crate::batteries::tile(),
             "Scout" => ("matches · picks".into(), None),
+            "Team" => crate::team::tile(),
             "Console" => ("robot log".into(), None),
             "Terminal" => ("shell".into(), None),
             "Files" => ("storage".into(), None),
@@ -4480,7 +4483,7 @@ mod tests {
         pretend(Some(Found::Nothing));
         let shown = builtin(&Home::new());
         assert!(!shown.iter().any(|n| n == "Level" || n == "Compass"), "{shown:?}");
-        assert_eq!(shown.len(), 42, "the forty-two the emulator's run counts on (all but Level and Compass are on every unit)");
+        assert_eq!(shown.len(), 43, "the forty-three the emulator's run counts on (all but Level and Compass are on every unit)");
         assert_eq!(shown.last().map(String::as_str), Some("Settings"), "Settings stays last");
         assert_eq!(builtin_apps().position(|(_, _, n)| n == "Terminal"), Some(8), "Terminal where it was");
         assert!(!builtin_apps().any(|(_, _, n)| n == "Level"), "nor in search");
