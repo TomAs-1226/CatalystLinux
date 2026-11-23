@@ -10,6 +10,46 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.9.4
+
+### Camera
+- Photos are quick again. "Hold still" could last ten seconds and more: a failed attempt waited six seconds before the next. Now a failed attempt gives up at once and every wait is bounded.
+- "Hold still" shows only while the sensor is exposing a long shot, a detail burst or a bracketing set, with the seconds left. Detail mode's auto burst only in real low light (under 25 lux); it no longer fires in every evening room.
+- Every photo's timing is in the log; in pro mode t shows "last shot: 0.42 s capture · 0.7 s save".
+- Self-timer 2 or 10 s (c), grids in thirds or squares (g), a horizon level from the motion sensor (h), and 3:2, 16:9 and 1:1 framing with the photo cropped to match (o).
+- Pro mode: bracketing of 3 or 5 frames at ±1 or ±2 EV (b); shutter priority, ISO priority and manual (m); long exposures up to 11.7 s; grey-card white balance (y); an RGB histogram (u); false colour (x); presets C1–C3 (1–3, Shift to save); an intervalometer that dims the screen and keeps the handheld awake (v).
+
+### Smart camera
+- Settings › Camera › Smart camera: live status in plain words (power, bytes, speed, what the camera said), and c for a report in /data/logs/smartcam-report.txt.
+- Installing on the camera ends by giving the Grove port to it, so it powers up; a microSD card's main.py is handled.
+- The camera's program can no longer stop before it listens, and its light says how it stands: amber powered, green listening, blue linked, violet updating, red sensor failed.
+- 12 s to answer at first; the speed climbs one confirmed step at a time; a quiet link is found again.
+- The camera's program and face model update over the Grove port from each new Catalyst (resumed if cut off, rolled back if the new one never starts). MaixPy itself still over USB-A, and only when needed.
+- Ctrl-Enter opens the island's notice ("install on the camera") while it shows.
+- The Grove 5 V is rated 0.5 A, the UnitV's own figure: if the camera restarts by itself, give it power on its USB-C (a power bank) as well.
+
+### Scout
+- Scout: match scouting for the stands. Each scout is given a place on the field (s changes it) and Scout opens on the next match and the robot there.
+- The 2026 REBUILT form, kept as a file so a new season needs no update: a key adds (q fuel, w missed, e passed, r and t the tower, y and u fouls), Shift or the key under it takes one away, del undoes. It follows the match clock from AUTO to TELEOP to END GAME, then ratings and notes.
+- Share with no internet: a match or the whole event as QR codes, read in with the Camera's scan; nothing comes in twice, and the newer edit wins. And a CSV file for Catalyst Companion.
+- Teams sorted by any metric with a line over their matches, a picklist with notes and do-not-pick, and a practice cycle timer with each driver's average and best.
+
+### Strategy
+- Strategy: a board for each match on the field map, filled from the schedule with all six robots. Draw with the keys: robots, paths with arrowheads in each robot's colour, drop zones and notes; auto, teleop and endgame on layers of their own (a, t, e); Space plays the paths.
+- Keep a board as a template and use it on any match, on either alliance. Share it as QR codes, or as a picture for Catalyst Companion. When it is nearly time to queue, the island offers the match's board.
+
+### Batteries
+- Batteries: each robot battery's state, health and trend, and which to put in next. When the next match's queue time nears, the island asks which battery goes in.
+- After each match its log tells the battery's volts, sag, brownouts and, where the robot logs its current, its resistance; a battery wearing out is flagged to retire soon. On the charger and off it, with a reminder and rest before it counts as charged. QR labels to print; the Camera's scan opens a battery from its label.
+
+### Pit tools
+- Mech: work out a gear train, drivetrain, arm, elevator or flywheel from its motor, with a graph, from ReCalc's vendor data for the Kraken, NEO, Vortex, Falcon, Minion, Pulsar and the rest.
+- Gamepad: plug a driver's controller into USB-A to see its sticks, triggers and buttons live and rumble it; its check measures drift, shake, full throw and report rate, suggests a deadzone, and keeps each controller's result, best first.
+
+### Rulebook
+- Rulebook: FIRST's 2026 game manual on the handheld, downloaded from FIRST the first time, for events where the Wi-Fi is bad. Read it at any text size, jump to a rule by its ID, bookmark, and search it offline.
+- Ask in plain words: Claude online, or the on-device model offline, answers from the rules the search finds, naming them, with those rules listed under the answer. When online it checks for a revised manual and lists what changed.
+
 ## 0.9.3
 
 ### Fixed
