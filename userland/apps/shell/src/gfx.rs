@@ -1047,9 +1047,12 @@ mod tests {
         g.look_for_gpu();
         assert!(g.gpu_opening.is_none() && g.gpu_retry_at.is_some());
         // Held for ten minutes since it last came up: the waits start over.
-        g.gpu_since = Some(Instant::now() - Duration::from_secs(601));
-        g.gpu_failed("gl error 0x505 drawing glass".into());
-        assert_eq!(g.gpu_wait, Duration::from_secs(30));
+        // (Ten minutes back exists only once the machine has been up that long.)
+        if let Some(long_ago) = Instant::now().checked_sub(Duration::from_secs(601)) {
+            g.gpu_since = Some(long_ago);
+            g.gpu_failed("gl error 0x505 drawing glass".into());
+            assert_eq!(g.gpu_wait, Duration::from_secs(30));
+        }
         // Switched off in Settings: no more tries.
         g.want_gpu(false);
         assert!(g.gpu_retry_at.is_none());
