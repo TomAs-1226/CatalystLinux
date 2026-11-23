@@ -624,7 +624,7 @@ impl Setup {
 
 /// The internal hub answers: a hub on the bus other than the controller's
 /// own (`usb1`), as the GL852G is when the switch is on its side.
-fn hub_present() -> bool {
+pub(crate) fn hub_present() -> bool {
     std::fs::read_dir("/sys/bus/usb/devices").into_iter().flatten().flatten().any(|e| {
         let name = e.file_name().to_string_lossy().into_owned();
         !name.starts_with("usb") && !name.contains(':') && std::fs::read_to_string(e.path().join("bDeviceClass")).is_ok_and(|c| c.trim() == "09")

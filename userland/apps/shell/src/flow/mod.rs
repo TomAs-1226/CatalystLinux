@@ -710,6 +710,8 @@ pub fn about(name: &str) -> Option<&'static str> {
         "Reminders" => "reminders that come when due",
         "Vault" => "passwords and 2FA codes, sealed",
         "Units" => "torque, length and weight converted",
+        "Mech" => "ratios, arms and drivetrains worked out",
+        "Gamepad" => "a driver's controller checked",
         "HTTP" => "requests sent, replies read",
         "Share" => "anything as a QR code",
         "Assistant" => "ask; it uses the robot's tools",

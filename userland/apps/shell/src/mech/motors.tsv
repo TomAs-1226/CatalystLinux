@@ -1,0 +1,30 @@
+# FRC motors at 12 V: free speed, stall torque, stall current, free current.
+#
+# Every figure is ReCalc's (https://www.reca.lc/motors), copied from its
+# motor table, app/lib/models/Motor.ts in github.com/tervay/recalc at commit
+# a1cde22d57591c2ff51fee8c45bdcaf24bae8d32 (2026-10-03). ReCalc names the
+# vendor whose dyno data or spec sheet each line comes from (its
+# `dataSource`); that is the source column here:
+#   CTRE     CTR Electronics' published dyno data (ReCalc takes the NEO and
+#            NEO Vortex lines from CTRE's dyno runs too)
+#   VEX      VEX Robotics' motor dyno data (motors.vex.com)
+#   REV      REV Robotics' spec sheet
+#   Thrifty  The Thrifty Bot's spec sheet
+#
+# name	free rpm	stall N·m	stall A	free A	source
+Kraken X60	6065	7.157	374.383	2.83	CTRE
+Kraken X60 FOC	5784	9.362	476.098	3.496	CTRE
+Kraken X44	7757	4.113	279.099	3.156	CTRE
+Kraken X44 FOC	7367	5.011	329.188	3.231	CTRE
+NEO Vortex	6825	5.957	391.091	5.434	CTRE
+NEO	5906	4.201	216.269	1.782	CTRE
+NEO 2.0	5906	4.201	216.269	1.782	CTRE
+NEO 550	11710	1.08	111	1.1	REV
+Falcon 500	6380	4.69	257	1.5	CTRE
+Falcon 500 FOC	6080	5.84	304	1.5	VEX
+Minion	7703	3.173	211.607	2.206	CTRE
+Thrifty Pulsar	7500	3.1	189	2.7	Thrifty
+CIM	5330	2.41	131	2.7	VEX
+mini-CIM	5840	1.41	89	3	VEX
+BAG	13180	0.43	53	1.8	VEX
+775pro	18730	0.71	134	0.7	VEX
