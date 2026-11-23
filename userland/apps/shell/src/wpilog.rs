@@ -182,14 +182,19 @@ enum Want {
     Current(String),
 }
 
+/// An entry's key as Catalyst names it: DataLogManager records NetworkTables
+/// as "NT:/Catalyst/…"; Catalyst's own sink records the same keys without
+/// the prefix ("Systemcore/BatteryVolts" either way).
+pub fn catalyst_key(name: &str) -> &str {
+    let key = name.strip_prefix("NT:").unwrap_or(name);
+    key.strip_prefix("/Catalyst/").or_else(|| key.strip_prefix("Catalyst/")).unwrap_or(key).trim_start_matches('/')
+}
+
 fn want(name: &str, kind: &str) -> Option<Want> {
-    // DataLogManager records NetworkTables as "NT:/Catalyst/…"; Catalyst's own
-    // sink records the same keys without the prefix.
     if name == "DS:enabled" && kind == "boolean" {
         return Some(Want::Enabled);
     }
-    let key = name.strip_prefix("NT:").unwrap_or(name);
-    let key = key.strip_prefix("/Catalyst/").or_else(|| key.strip_prefix("Catalyst/")).unwrap_or(key).trim_start_matches('/');
+    let key = catalyst_key(name);
     match (key, kind) {
         ("Systemcore/BatteryVolts", "double") => Some(Want::Battery),
         ("Systemcore/BrownedOut", "boolean") => Some(Want::Brownout),

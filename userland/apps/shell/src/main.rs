@@ -53,6 +53,7 @@ mod bluetooth;
 mod browse;
 mod apps;
 mod apriltags;
+mod batteries;
 mod brand;
 mod burst;
 mod camera;
@@ -715,6 +716,18 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--catalogue-shots") {
         return catalogue::shots(std::path::Path::new(&dir));
+    }
+    // The Batteries app's pages from a made-up fleet, in both looks at each
+    // text size, the island asking, and the labels (1.0). Its fleet is kept
+    // in a folder of its own.
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--battery-shots") {
+        let own = std::env::temp_dir().join(format!("catalyst-battery-shots-{}", std::process::id()));
+        std::fs::create_dir_all(&own).ok();
+        std::env::set_var("CATALYST_CONF", own.join("robot"));
+        batteries::shots::run(std::path::Path::new(&dir));
+        std::fs::remove_dir_all(&own).ok();
+        return;
     }
     // The voice screens alone (push-to-talk, dictation, spoken answers),
     // as the end of the full tour (`--shots`) shows them.

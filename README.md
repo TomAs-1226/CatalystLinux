@@ -15,7 +15,7 @@ windows that grow out of tiles whenever it is there.
 | `userland/crates/bezel` | Bezel on the CPU: tonal surfaces, the two type voices, Material Symbols, and the full glass pass (refraction, frost, edge light, groups, shadow). |
 | `userland/crates/nt4` | A NetworkTables 4.1 client: one thread, read-only, reconnects on its own. |
 | `userland/crates/apriltag` | AprilTag detection: AprilRobotics' C library (3.4.5, BSD 2-Clause, vendored with the 36h11 family FRC uses) behind a small flat shim, with each tag's pose. |
-| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, Camera, Photos, AprilTag, Graphs, Pit, Remote, Level, Compass, Weather, Calculator, Clock, Notes, Units, HTTP, Share, Browse, Assistant, Web, Music, Settings) and the launcher for external ones. |
+| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, Camera, Photos, AprilTag, Graphs, Pit, Batteries, Remote, Level, Compass, Weather, Calculator, Clock, Notes, Units, HTTP, Share, Browse, Assistant, Web, Music, Settings) and the launcher for external ones. |
 | `userland/apps/update` | `catalyst-update`: system updates on the handheld (A/B, tried once, rolled back if it does not come up), and the release tool that makes and signs them. |
 | `userland/apps/flasher` | Catalyst Flasher: the newest release onto an SD card in one go. |
 | `userland/assets/app-icon` | Catalyst's icon (the FrcCatalyst bolt) at each size Windows uses, built into the simulator; `assets/` holds it for Raspberry Pi Imager's listing. |
@@ -2064,6 +2064,40 @@ The Pit app opens on two cards, the checklist and the match timer.
   2.0 fills from the FMS), that is shown instead, its period told from what
   it counted before (the clock alone cannot tell AUTO's 0:15 from END
   GAME's).
+
+## Batteries
+
+The Batteries app keeps the team's robot batteries (6 to 12 at an event) in
+`/data/batteries/fleet.json`: each by its name or number, and its year.
+
+- **The fleet.** A card for each: its state's icon and words (full in 28m,
+  resting 6m, charged, used · q22), its health and a trend of it over its
+  matches, and the next one to put in marked. `s` sorts by health, ready
+  first or by name; `c` puts the one in focus on the charger or takes it
+  off; `p` picks the battery for the next match; `n` adds one; `l` makes a
+  sheet of QR labels (`labels.png`, US Letter at 300 dpi on Avery 5160
+  labels), which Catalyst Companion downloads from its Batteries place. A
+  label read in the Camera's scan mode opens its battery.
+- **Per match.** When the next match's queue time is ten minutes off (or
+  the match twenty, with no queue time) and no battery is picked, the
+  island asks, and the app opens on the pick with the suggested battery
+  first: the charged, rested one in the best health.
+- **Health from the logs.** Once a match's log is on the handheld, the
+  battery that was in is read from it: the volts it started at, its low
+  point, its sag under load, its brownouts, and where the log has the
+  robot's total current (a PDH's `TotalCurrent`, AdvantageKit's
+  `SystemStats/BatteryCurrent`), its resistance as ΔV/ΔI, fitted with time
+  beside it so the charge falling over a match is not taken for resistance.
+  Without current, the sag stands in. A battery whose resistance rises a
+  quarter above its first matches (or past 30 mOhm), whose sag grows by
+  0.6 V (or past 3.2 V), or that browned out in its last three matches is
+  flagged to retire soon.
+- **Charging and rest.** On the charger, a reminder comes after an hour
+  (Reminders) to take it off; off, it rests a quarter of an hour before it
+  counts as charged.
+
+`catalyst-shell --battery-shots <dir>` draws its pages in both tones at each
+text size.
 
 ## Event schedule
 

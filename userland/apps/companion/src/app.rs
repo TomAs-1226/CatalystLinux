@@ -33,7 +33,7 @@ pub enum Page {
 const PAGES: [(Page, &str, &str); 5] = [(Page::SignIns, "Sign-ins", "key"), (Page::Music, "Music", "library_music"), (Page::Files, "Files", "folder"), (Page::Settings, "Settings", "tune"), (Page::System, "System", "sync")];
 
 /// The places Files shows, and what the handheld calls them.
-pub const AREAS: [(&str, &str, &str); 4] = [("logs", "Match logs", "insights"), ("photos", "Photos", "photo"), ("screenshots", "Screenshots", "photo_library"), ("notes", "Notes", "description")];
+pub const AREAS: [(&str, &str, &str); 5] = [("logs", "Match logs", "insights"), ("photos", "Photos", "photo"), ("screenshots", "Screenshots", "photo_library"), ("notes", "Notes", "description"), ("batteries", "Batteries", "battery_full")];
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Phase {
@@ -1157,7 +1157,7 @@ impl App {
     // -------------------------------------------------------------- files ---
 
     fn page_files(&mut self, ui: &mut Ui) {
-        self.header(ui, "Files", "Match logs, photos, screenshots and notes from the handheld, to this computer.");
+        self.header(ui, "Files", "Match logs, photos, screenshots, notes and battery labels from the handheld, to this computer.");
         let names: Vec<&str> = AREAS.iter().map(|a| a.1).collect();
         if let Some(i) = ui.segmented(Rect::new(X0, 106.0, 460.0, 36.0), &names, self.area) {
             self.area = i;
@@ -1554,6 +1554,7 @@ fn browse(ui: &mut Ui, b: &mut Browser, area: Rect, root: &str, target: Option<&
                 "music" => "music_note",
                 "photos" | "screenshots" => "photo",
                 "logs" => "insights",
+                "batteries" => "qr_code_2",
                 _ => "description",
             }
         };

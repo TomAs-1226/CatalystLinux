@@ -852,6 +852,8 @@ pub struct Shell {
     /// Notifications kept (notify.rs), and the robot's own as it tells them.
     pub notes: crate::notify::Store,
     robot_watch: crate::notify::RobotWatch,
+    /// The batteries' watch: the queue nearing, match logs arriving.
+    batteries: crate::batteries::Watch,
     /// Tab held towards a lock: the cue round the island, 0 to 1, and
     /// whether the screen was lit at the last tick (a wake brings the lock
     /// screen's parts in again).
@@ -1064,6 +1066,7 @@ impl Shell {
             activities: crate::liveactivity::Activities::new(),
             notes: crate::notify::Store::kept(),
             robot_watch: crate::notify::RobotWatch::default(),
+            batteries: crate::batteries::Watch::new(),
             hold_cue: Animated::new(0.0, role::smooth()).with_rest(0.004),
             lit_was: true,
             sheets: clip::Sheets::new(),
@@ -2284,6 +2287,11 @@ impl Shell {
             if let Some(n) = self.robot_watch.look(&self.robot) {
                 self.notify(n);
             }
+        }
+        // Batteries: the island asks which goes in as the queue nears, and
+        // match logs are read for the battery that was in (batteries/).
+        if let Some(n) = self.batteries.tick(&self.robot) {
+            self.notify(n);
         }
         // Music standby, half a minute into the screen being dark with
         // music playing; deep standby, once the screen has been off long

@@ -1682,7 +1682,8 @@ impl Camera {
                 let command = format!("lynx -accept_all_cookies -nopause {}", quote(&url));
                 Nav::Push(Box::new(crate::terminal::Terminal::running("Web", &command, crate::connect::session_dir())))
             }
-            Code::Text(text) => Nav::Push(Box::new(TextPage::new(text))),
+            // A battery's QR label (Batteries): its page.
+            Code::Text(text) => crate::batteries::scanned(&text).map_or_else(|| Nav::Push(Box::new(TextPage::new(text))), Nav::Push),
         }
     }
 
