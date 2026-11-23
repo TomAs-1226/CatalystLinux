@@ -1,0 +1,40 @@
+{
+  "id": "rebuilt-2026",
+  "game": "REBUILT",
+  "season": 2026,
+  "about": "FRC 2026 REBUILT. Points from the game manual's cheat sheet: FUEL in an active HUB 1; TOWER level 1 in AUTO 15; in TELEOP level 1 10, level 2 20, level 3 30; MINOR FOUL 5 and MAJOR FOUL 15 to the other alliance. A key adds one, the same key with Shift (or the key under it) takes one away.",
+  "sections": [
+    { "id": "auto", "name": "auto", "seconds": 20 },
+    { "id": "teleop", "name": "teleop", "seconds": 110 },
+    { "id": "endgame", "name": "end game", "seconds": 30, "inherits": "teleop" },
+    { "id": "match", "name": "whole match", "always": true },
+    { "id": "after", "name": "after" }
+  ],
+  "fields": [
+    { "section": "auto", "id": "fuel", "label": "fuel in", "kind": "count", "key": "q", "minus": "a", "points": 1 },
+    { "section": "auto", "id": "missed", "label": "missed", "kind": "count", "key": "w", "minus": "s" },
+    { "section": "auto", "id": "tower", "label": "tower L1", "kind": "toggle", "key": "r", "points": 15 },
+
+    { "section": "teleop", "id": "fuel", "label": "fuel in", "kind": "count", "key": "q", "minus": "a", "points": 1 },
+    { "section": "teleop", "id": "missed", "label": "missed", "kind": "count", "key": "w", "minus": "s" },
+    { "section": "teleop", "id": "passed", "label": "passed", "kind": "count", "key": "e", "minus": "d" },
+
+    { "section": "endgame", "id": "tower", "label": "tower", "kind": "choice", "key": "t", "minus": "g",
+      "options": [["none", 0], ["L1", 10], ["L2", 20], ["L3", 30], ["fell", 0]] },
+
+    { "section": "match", "id": "minor", "label": "minor foul", "kind": "count", "key": "y", "minus": "h", "points": 5, "better": "lower" },
+    { "section": "match", "id": "major", "label": "major foul", "kind": "count", "key": "u", "minus": "j", "points": 15, "better": "lower" },
+    { "section": "match", "id": "stopped", "label": "stopped", "kind": "toggle", "key": "o", "better": "lower" },
+
+    { "section": "after", "id": "driving", "label": "driving", "kind": "rating", "max": 5 },
+    { "section": "after", "id": "defense", "label": "defense played", "kind": "rating", "max": 5 },
+    { "section": "after", "id": "notes", "label": "notes", "kind": "text", "max": 160 }
+  ],
+  "totals": [
+    { "id": "points", "label": "points", "of": ["auto", "teleop", "endgame"] },
+    { "id": "auto_points", "label": "auto points", "of": ["auto"] },
+    { "id": "teleop_points", "label": "teleop points", "of": ["teleop"] },
+    { "id": "endgame_points", "label": "end game points", "of": ["endgame"] },
+    { "id": "foul_points", "label": "foul points given", "of": ["match"], "better": "lower" }
+  ]
+}

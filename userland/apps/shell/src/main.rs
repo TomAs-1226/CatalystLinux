@@ -137,6 +137,7 @@ mod robot3d;
 mod schedule;
 mod sched;
 mod schedbench;
+mod scout;
 mod screens;
 mod screenshot;
 mod setup;
@@ -536,6 +537,11 @@ fn main() {
     if let Some(path) = value("--offline-eval") {
         offline::eval::main(std::path::Path::new(&path));
         return;
+    }
+    // Scout's pages from a demo event, dark and light at each text size (1.0).
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--scout-shots") {
+        return scout::shots::gallery(std::path::Path::new(&dir));
     }
     // The assistant's tasks, briefings and memory, in both looks at each size.
     #[cfg(not(target_arch = "aarch64"))]

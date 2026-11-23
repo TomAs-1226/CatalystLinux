@@ -15,7 +15,7 @@ windows that grow out of tiles whenever it is there.
 | `userland/crates/bezel` | Bezel on the CPU: tonal surfaces, the two type voices, Material Symbols, and the full glass pass (refraction, frost, edge light, groups, shadow). |
 | `userland/crates/nt4` | A NetworkTables 4.1 client: one thread, read-only, reconnects on its own. |
 | `userland/crates/apriltag` | AprilTag detection: AprilRobotics' C library (3.4.5, BSD 2-Clause, vendored with the 36h11 family FRC uses) behind a small flat shim, with each tag's pose. |
-| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, Camera, Photos, AprilTag, Graphs, Pit, Remote, Level, Compass, Weather, Calculator, Clock, Notes, Units, HTTP, Share, Browse, Assistant, Web, Music, Settings) and the launcher for external ones. |
+| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, Camera, Photos, AprilTag, Graphs, Pit, Scout, Remote, Level, Compass, Weather, Calculator, Clock, Notes, Units, HTTP, Share, Browse, Assistant, Web, Music, Settings) and the launcher for external ones. |
 | `userland/apps/update` | `catalyst-update`: system updates on the handheld (A/B, tried once, rolled back if it does not come up), and the release tool that makes and signs them. |
 | `userland/apps/flasher` | Catalyst Flasher: the newest release onto an SD card in one go. |
 | `userland/assets/app-icon` | Catalyst's icon (the FrcCatalyst bolt) at each size Windows uses, built into the simulator; `assets/` holds it for Raspberry Pi Imager's listing. |
@@ -2064,6 +2064,43 @@ The Pit app opens on two cards, the checklist and the match timer.
   2.0 fills from the FMS), that is shown instead, its period told from what
   it counted before (the clock alone cannot tell AUTO's 0:15 from END
   GAME's).
+
+## Scout: match scouting
+
+Scout is match scouting made for the keyboard, for a scout in the stands.
+Each scout is given a place on the field (red 1 to blue 3, `s` changes it)
+and Scout opens on the next match and the team at that place there. The
+event's matches, every team's, come from The Blue Alliance with the
+Schedule app's key and are kept for the stands; until they come, the
+team's own matches stand in, and a match can be typed in by hand.
+
+- **The form** is the season's game as data: `rebuilt-2026.json` ships for
+  2026 (REBUILT), and a form put at `/data/scout/form.json` replaces it for
+  a new season with no new shell. Its sections are AUTO, TELEOP and END GAME
+  on the match clock, the whole match (fouls), and after the match (ratings,
+  notes); its fields are counts, toggles, choices, ratings and text, each
+  with its points. A key adds one (`q` fuel in, `w` missed, `e` passed, `r`
+  and `t` the tower, `y` and `u` fouls, `o` stopped); Shift with it, or the
+  key under it, takes one away; `del` undoes the last change. Space starts
+  the clock as the match starts (or the first count in AUTO does), and the
+  form turns with it; Left and Right turn it by hand.
+- **Records** are kept one a team a match in `/data/scout/records/`, with
+  who changed what and when.
+- **Share**, with no internet: a match's or the whole event's records as QR
+  codes (several, shown one after another, each a few whole records as
+  plain CSV text a phone can read), read in with the Camera's scan mode,
+  where they import as they are read; a code read twice adds nothing, and
+  of two versions the one edited last wins. And a CSV file in
+  `/data/scout/export/` for Catalyst Companion to download through Files.
+- **Teams and the picklist.** Every team's averages with a line over its
+  matches, sorted by any metric (Left and Right); a page per team with each
+  metric's trend and the scouts' notes; a picklist put in order with `u`,
+  `d` and `t`, with notes (`n`) and teams not to pick (`x`) kept below.
+- **Practice.** A cycle timer for drive practice: Space splits, Left and
+  Right choose the driver, Enter ends the session, which is kept with each
+  driver's average and best.
+
+`catalyst-shell --scout-shots <dir>` renders its pages from a demo event.
 
 ## Event schedule
 

@@ -135,7 +135,11 @@ impl Code {
         match self {
             Code::Wifi { ssid, password, .. } => ("wifi", format!("Wi-Fi · {ssid}"), if password.is_some() { "enter: join" } else { "enter: join · open network" }),
             Code::Url(url) => ("language", url.trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/').to_owned(), "enter: open in Web"),
-            Code::Text(text) => ("notes", text.lines().next().unwrap_or("").to_owned(), "enter: read it all"),
+            Code::Text(text) => match crate::scout::scan_words(text) {
+                // Scout's codes import as they are read.
+                Some((title, action)) => ("download", title, action),
+                None => ("notes", text.lines().next().unwrap_or("").to_owned(), "enter: read it all"),
+            },
         }
     }
 }
@@ -1295,6 +1299,13 @@ impl Camera {
         self.prefs().save();
     }
 
+    /// Straight into scan mode: for reading Scout's codes.
+    pub fn scanning() -> Self {
+        let mut camera = Camera::new();
+        camera.set_mode(Mode::Scan);
+        camera
+    }
+
     /// For quick capture: the camera for one photo. Enter (or Ctrl-P, the
     /// key that opened it) takes it into Photos, and the camera gives way
     /// at once; Esc goes back with none.
@@ -1682,6 +1693,10 @@ impl Camera {
                 let command = format!("lynx -accept_all_cookies -nopause {}", quote(&url));
                 Nav::Push(Box::new(crate::terminal::Terminal::running("Web", &command, crate::connect::session_dir())))
             }
+            Code::Text(text) if crate::scout::share::is_code(&text) => {
+                self.say("read in already · esc: back");
+                Nav::Stay
+            }
             Code::Text(text) => Nav::Push(Box::new(TextPage::new(text))),
         }
     }
@@ -1973,6 +1988,10 @@ impl Screen for Camera {
                 self.found_seen = l.found_count;
                 self.found_at = l.found_at;
                 let code = l.found.as_ref().map(|f| &f.code);
+                // A Scout code: its records merge in as it is read.
+                if let Some(Code::Text(text)) = code {
+                    crate::scout::scanned(text);
+                }
                 // A code put away and still in sight is not offered again.
                 if code.is_none() || code != self.dismissed.as_ref() {
                     let fresh = self.found_rise.target() < 0.5 || self.found.as_ref().map(|f| &f.code) != code;
