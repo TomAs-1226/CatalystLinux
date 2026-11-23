@@ -4,8 +4,9 @@
 # (the LED-class control grove_5v_out).
 #
 #   catalyst-grove mode            console | camera
-#   catalyst-grove console         the serial console and login, as shipped
-#   catalyst-grove camera          the smart camera's: no login, no console
+#   catalyst-grove console         the serial console and login, at once
+#   catalyst-grove camera          the smart camera's, at once: no login, the
+#                                  kernel's console quiet; prints ready|busy
 #   catalyst-grove boot            at start (catalyst-early): the choice kept
 #   catalyst-grove login           exit 0 if a login may listen on the port
 #   catalyst-grove ready           exit 0 if the camera may be powered and
@@ -16,24 +17,36 @@
 # Console (the default): the kernel's console and a login (root, no password)
 # on the port at 115200, for a USB serial adapter.
 #
-# Smart camera: the port is the camera's link, and nothing else ever uses it:
-#  - The kernel's console is not on it from the kernel's first line: this
-#    system's command line (its slot's cmdline.txt on the boot partition)
-#    says console=null (the kernel's ttynull, which keeps nothing) where it
-#    said console=ttyAMA0. Written when the choice is made, checked at every
-#    start, and carried by the updater into each system it installs (the
-#    boot pack's own cmdline.txt says ttyAMA0). config.txt is left alone:
-#    an update never rewrites it, and nothing in it needs to change.
-#  - No login listens: catalyst-serial starts its getty only in console mode.
+# Smart camera, taken at once (no restart):
+#  - No login listens: catalyst-serial's getty is stopped (it starts one only
+#    in console mode), and whatever still has the port open (a login on it,
+#    a program run from one) is hung up, then ended.
+#  - The kernel's console is quieted on the port now: taken off it where the
+#    kernel lets it go at run time (the serial core's console attribute, N),
+#    its level down to emergencies only (dmesg -n 1), and the magic SysRq
+#    keys off (a serial console reads a break and a letter as one; a camera
+#    powering up can look like a break).
+#  - From the next start on, the console is not on the port from the
+#    kernel's first line: this system's command line (its slot's cmdline.txt
+#    on the boot partition) says console=null (the kernel's ttynull, which
+#    keeps nothing) where it said console=ttyAMA0. Written when the choice is
+#    made, checked at every start, and carried by the updater into each
+#    system it installs (the boot pack's own cmdline.txt says ttyAMA0).
+#    config.txt is left alone. A kernel without ttynull (CONFIG_NULL_TTY,
+#    built in since 0.9) keeps its console on the port at start, and each
+#    start quiets it as above before the camera can be powered.
 #  - The 5 V is off from early in every start, and on only while the shell
 #    uses the camera (and its short warm time after).
-#  - Until a start has run with console=null, the camera is never powered
-#    ("ready" says no): moving the port from the console takes one restart.
-#    In the meantime the kernel's messages are held back (dmesg -n 1).
-#  - A kernel without ttynull (CONFIG_NULL_TTY) refuses camera mode, since
-#    console=null would leave the system's first program without a console.
-# So the camera's bytes never reach a shell, and the boot log never reaches
-# the camera.
+#  - "ready" says yes only with all of that true: camera mode, no getty, the
+#    console quiet, nobody else holding the port.
+# The camera's link is framed with a CRC and resyncs on junk, and its program
+# never sends a byte until spoken to: a kernel emergency line that still
+# reaches it is junk it drops, and nothing it sends can reach a login, as
+# none listens.
+#
+# Back to the console, also at once: the shell lets go of the port first,
+# then its 5 V goes off, the kernel's level and SysRq come back and the getty
+# starts. The kernel's own messages return to the port from the next start.
 
 BOOT_DEV=/dev/mmcblk0p1
 MNT=/run/catalyst-grove-boot
@@ -43,6 +56,10 @@ TTY_DRIVERS=/proc/tty/drivers
 LED=/sys/class/leds/grove_5v_out/brightness
 PROC=/proc
 SERIAL_PID=/run/catalyst-serial.pid
+CONSOLE_ATTR=/sys/class/tty/ttyAMA0/console
+PRINTK=/proc/sys/kernel/printk
+SYSRQ=/proc/sys/kernel/sysrq
+SAVED_SYSRQ=/run/catalyst-grove.sysrq
 PORT=ttyAMA0
 # The console the shipped command line gives the port, and its loglevel.
 CONSOLE="console=ttyAMA0,115200"
@@ -55,6 +72,10 @@ mode() {
 # Whether this start's kernel has its console on the port.
 console_on_port() {
 	tr ' ' '\n' <"$CMDLINE" | grep -Eq '^console=(ttyAMA0|serial0)'
+}
+
+has_console_null() {
+	tr ' ' '\n' <"$CMDLINE" | grep -qx 'console=null'
 }
 
 has_ttynull() {
@@ -100,9 +121,9 @@ power() {
 	echo "$1" >"$LED"
 }
 
-# Every process with the port open, but the caller and its parent: its
-# login and whatever runs from it, hung up and then ended.
-free_port() {
+# Every live process with the port open, but the caller and its parent (the
+# shell asking, which holds it for the camera).
+holders() {
 	for fd in "$PROC"/[0-9]*/fd/*; do
 		target=$(readlink "$fd" 2>/dev/null) || continue
 		case "$target" in
@@ -112,35 +133,80 @@ free_port() {
 		pid=${fd#"$PROC"/}
 		pid=${pid%%/*}
 		[ "$pid" = $$ ] || [ "$pid" = "$PPID" ] && continue
-		kill -HUP "$pid" 2>/dev/null
-		sleep 1
-		kill -KILL "$pid" 2>/dev/null
-	done
+		kill -0 "$pid" 2>/dev/null && echo "$pid"
+	done | sort -u
+}
+
+# Whoever has the port: hung up (a login session ends with it), then, a
+# second later, whatever is left ended.
+free_port() {
+	pids=$(holders)
+	[ -n "$pids" ] || return 0
+	# shellcheck disable=SC2086
+	kill -HUP $pids 2>/dev/null
+	sleep 1
+	pids=$(holders)
+	# shellcheck disable=SC2086
+	[ -z "$pids" ] || kill -KILL $pids 2>/dev/null
+	return 0
 }
 
 serial_running() {
 	[ -s "$SERIAL_PID" ] && kill -0 "$(cat "$SERIAL_PID")" 2>/dev/null
 }
 
+# The kernel's console quiet on the port, at run time: off it where the
+# kernel lets it go, emergencies only, SysRq off (its old setting kept).
+quiet() {
+	[ -w "$CONSOLE_ATTR" ] && echo N >"$CONSOLE_ATTR" 2>/dev/null
+	dmesg -n 1
+	if [ -w "$SYSRQ" ]; then
+		[ -s "$SAVED_SYSRQ" ] || cat "$SYSRQ" >"$SAVED_SYSRQ" 2>/dev/null
+		echo 0 >"$SYSRQ"
+	fi
+	return 0
+}
+
+# As it was, but for the console itself, which comes back to the port at
+# the next start.
+unquiet() {
+	dmesg -n "$LOGLEVEL"
+	if [ -s "$SAVED_SYSRQ" ] && [ -w "$SYSRQ" ]; then
+		cat "$SAVED_SYSRQ" >"$SYSRQ"
+	fi
+	rm -f "$SAVED_SYSRQ"
+	return 0
+}
+
+# Nothing of the kernel's on the port: its console not there this start,
+# or quieted (off it or at emergencies only, and SysRq off).
+is_quiet() {
+	console_on_port || return 0
+	level=$(cut -f1 "$PRINTK" 2>/dev/null)
+	{ [ "$(cat "$CONSOLE_ATTR" 2>/dev/null)" = N ] || [ "${level:-7}" -le 1 ]; } || return 1
+	[ ! -e "$SYSRQ" ] || [ "$(cat "$SYSRQ" 2>/dev/null)" = 0 ]
+}
+
 ready() {
-	[ "$(mode)" = camera ] && ! console_on_port && ! serial_running
+	[ "$(mode)" = camera ] && ! serial_running && is_quiet && [ -z "$(holders)" ]
 }
 
 to_camera() {
-	if ! has_ttynull; then
-		echo "this system's kernel cannot take its console off the Grove port" >&2
-		return 1
-	fi
-	mkdir -p "$(dirname "$SETTING")"
-	echo camera >"$SETTING.new" && mv "$SETTING.new" "$SETTING" || return 1
-	# Nobody listens from now: the login stopped, anything on the port ended,
-	# the kernel's messages held back until the restart moves its console.
+	# Nobody listens from now: the login stopped, anything on the port hung
+	# up and ended, the kernel's console quiet on it, the camera unpowered.
 	rc-service catalyst-serial stop >/dev/null 2>&1
 	free_port
-	console_on_port && dmesg -n 1
+	console_on_port && quiet
 	power 0
-	with_boot write_cmdline camera || echo "the boot partition could not be written" >&2
-	console_on_port && echo restart
+	# Only now the choice, which the shell reads to start using the port.
+	mkdir -p "$(dirname "$SETTING")"
+	echo camera >"$SETTING.new" && mv "$SETTING.new" "$SETTING" || return 1
+	# The next start's console off the port from its first line, where the
+	# kernel has somewhere else to put it.
+	if has_ttynull; then
+		with_boot write_cmdline camera || echo "the boot partition could not be written" >&2
+	fi
+	if ready; then echo ready; else echo busy; fi
 	return 0
 }
 
@@ -148,7 +214,7 @@ to_console() {
 	power 0
 	rm -f "$SETTING"
 	with_boot write_cmdline console || echo "the boot partition could not be written" >&2
-	dmesg -n "$LOGLEVEL"
+	unquiet
 	rc-service catalyst-serial start >/dev/null 2>&1
 	return 0
 }
@@ -158,20 +224,16 @@ boot() {
 		# The camera unpowered until the shell asks for it.
 		power 0
 		if console_on_port; then
-			# This start's kernel still has its console here (an update put
-			# it back, or the boot partition was not written): quiet now,
-			# right for the next start. The camera stays off until then.
-			dmesg -n 1
-			with_boot write_cmdline camera
+			# This start's kernel has its console here (an update put it
+			# back, the boot partition was not written, or no ttynull):
+			# quiet now, and right for the next start where it can be.
+			quiet
+			if has_ttynull; then with_boot write_cmdline camera; fi
 		fi
 	elif ! console_on_port && has_console_null; then
 		with_boot write_cmdline console
 	fi
 	return 0
-}
-
-has_console_null() {
-	tr ' ' '\n' <"$CMDLINE" | grep -qx 'console=null'
 }
 
 case "$1" in
@@ -190,9 +252,10 @@ power)
 	;;
 status)
 	echo "mode=$(mode)"
-	ready && echo ready=yes || echo ready=no
-	if [ "$(mode)" = camera ] && console_on_port; then echo restart=yes; else echo restart=no; fi
-	has_ttynull && echo ttynull=yes || echo ttynull=no
+	if ready; then echo ready=yes; else echo ready=no; fi
+	if console_on_port; then echo console=port; else echo console=elsewhere; fi
+	if is_quiet; then echo quiet=yes; else echo quiet=no; fi
+	if has_ttynull; then echo ttynull=yes; else echo ttynull=no; fi
 	echo "power=$(cat "$LED" 2>/dev/null || echo -)"
 	;;
 *)

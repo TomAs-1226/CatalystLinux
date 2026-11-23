@@ -4018,6 +4018,10 @@ impl Shell {
                 self.say(said);
             }
         }
+        // The Grove port changed hands; the smart camera's install over USB.
+        for said in crate::smartcam::take_said().into_iter().chain(crate::unitv::take_said()) {
+            self.say(said);
+        }
     }
 
     /// What the battery's care asks for.

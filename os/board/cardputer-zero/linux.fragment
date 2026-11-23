@@ -88,6 +88,11 @@ CONFIG_BCM7XXX_PHY=m
 CONFIG_MICREL_PHY=m
 CONFIG_BLK_DEV_LOOP=m
 CONFIG_RC_CORE=m
+# USB serial ports that speak CDC-ACM (WCH's CH9102 and CH343, many boards'
+# own USB): bcm2711_defconfig has the USB serial adapters (FTDI, CH340,
+# CP210x...) but not this one. For the smart camera's install over USB-A,
+# whatever bridge a UnitV carries.
+CONFIG_USB_ACM=m
 
 # --- the Pi's video-processor services: nothing here uses them (the panel is
 # SPI, the camera goes through unicam). Modules, and kept from loading by

@@ -380,6 +380,8 @@ pub fn open(action: &str, cx: &mut Cx) -> Result<Box<dyn Screen>, String> {
             let id = what.parse().map_err(|_| "that reminder is gone")?;
             Ok(crate::reminders::open(id))
         }
+        // The smart camera on USB-A: its install page.
+        "unitv" => Ok(Box::new(crate::unitv::InstallScreen::new())),
         "note" => Ok(Box::new(crate::files::Editor::open(&crate::notes::dir().join(what)).map_err(|_| "that note is gone")?)),
         "log" => {
             let row = cx.robot.logs.list().into_iter().find(|r| r.name == what).ok_or("that log is gone")?;

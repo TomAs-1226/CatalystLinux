@@ -1,11 +1,14 @@
 # Catalyst Linux's smart camera: an M5Stack UnitV (K210, M12 lens, U078-V-M12)
 # on the CardputerZero's Grove port, seeing for the handheld.
 #
-# Install: copy this file to the root of a FAT32 microSD card as main.py
-# (and face.kmodel beside it for faces), put the card in the UnitV, and plug
-# the UnitV into the handheld's Grove port. Settings > Camera > Grove port >
-# Smart camera on the handheld, and restart it once. The README's "The smart
-# camera on the Grove port" has the rest (firmware, the face model, USB).
+# Install: plug the UnitV's USB-C into the handheld's USB-A port; it offers
+# "Install on the camera" (also in Settings > Camera > UnitV) and
+# puts MaixPy (if it needs it), the face model and this file on the camera
+# by itself. Or copy this file to the root of a FAT32 microSD card as main.py
+# (and face.kmodel beside it for faces) and put the card in the UnitV. Then
+# Settings > Camera > Grove port > Smart camera on the handheld (at once) and
+# plug the UnitV into the Grove port. The README's "The smart camera on the
+# Grove port" has the rest.
 #
 # What it does: nothing until the handheld speaks to it (it never sends a
 # byte unasked, and never drives a pin before it knows which is its own).
@@ -158,13 +161,21 @@ except Exception:
 # ------------------------------------------------------------------ link ---
 # The Grove port's two pins are G34 and G35. Which is which depends on the
 # cable, so both only listen (UART1 on 35, UART2 on 34) until the handheld's
-# hello arrives on one; that one is this end's RX, the other its TX.
+# hello arrives on one; that one is this end's RX, the other its TX. The USB
+# serial line (MaixPy's REPL) listens too, so the handheld can check this
+# answers right after installing it over USB-A; a Ctrl-C there still stops it.
 fm.register(35, fm.fpioa.UART1_RX, force=True)
 fm.register(34, fm.fpioa.UART2_RX, force=True)
 listen = [(UART(UART.UART1, START_BAUD, 8, None, 1, timeout=0, read_buf_len=8192), 35, 34), (UART(UART.UART2, START_BAUD, 8, None, 1, timeout=0, read_buf_len=8192), 34, 35)]
+try:
+    usb = UART.repl_uart()
+except Exception:
+    usb = None
 uart = None
+via_usb = False
 decoder = Decoder()
 heard = [Decoder(), Decoder()]
+usb_heard = Decoder()
 while uart is None:
     for i, (port, rx, tx) in enumerate(listen):
         if port.any():
@@ -172,12 +183,28 @@ while uart is None:
             if data and any(f[0] == HELLO for f in heard[i].push(data)):
                 uart, rx_pin, tx_pin = port, rx, tx
                 break
+    if uart is None and usb is not None:
+        try:
+            data = usb.read() if usb.any() else None
+        except Exception:
+            data = None
+        if data and any(f[0] == HELLO for f in usb_heard.push(data)):
+            uart, via_usb = usb, True
     time.sleep_ms(5)
 for port, rx, tx in listen:
     if port is not uart:
         port.deinit()
-fm.unregister(tx_pin)
-fm.register(tx_pin, fm.fpioa.UART1_TX if rx_pin == 35 else fm.fpioa.UART2_TX, force=True)
+if not via_usb:
+    fm.unregister(tx_pin)
+    fm.register(tx_pin, fm.fpioa.UART1_TX if rx_pin == 35 else fm.fpioa.UART2_TX, force=True)
+
+# What the handheld installed (its version stamp), for its hello: Settings
+# says when a newer Catalyst has a newer program for the camera.
+try:
+    with open("/flash/catalyst.json") as f:
+        stamp = ujson.loads(f.read())
+except Exception:
+    stamp = None
 
 seq = 0
 
@@ -189,7 +216,7 @@ def send(kind, payload):
 
 
 def hello():
-    send(HELLO_BACK, ujson.dumps({"v": VERSION, "fw": "catalyst-unitv %d" % VERSION, "kpu": kpu_name, "crc": crc_kind, "fov": 80, "w": 320, "h": 240, "up_ms": time.ticks_diff(time.ticks_ms(), booted)}).encode())
+    send(HELLO_BACK, ujson.dumps({"v": VERSION, "fw": "catalyst-unitv %d" % VERSION, "kpu": kpu_name, "crc": crc_kind, "fov": 80, "w": 320, "h": 240, "up_ms": time.ticks_diff(time.ticks_ms(), booted), "usb": via_usb, "stamp": stamp}).encode())
 
 
 hello()  # the hello that found the pins is answered at once
@@ -211,7 +238,7 @@ def handle(kind, payload):
     global moved_at, want
     if kind == HELLO:
         hello()
-    elif kind == BAUD and len(payload) >= 4:
+    elif kind == BAUD and len(payload) >= 4 and not via_usb:
         rate = payload[0] | (payload[1] << 8) | (payload[2] << 16) | (payload[3] << 24)
         send(BAUD_BACK, payload)
         # The answer out at the old rate before the change (about 15 bytes).

@@ -662,11 +662,11 @@ pub struct Camera {
 pub fn smart_words() -> String {
     use crate::smartcam::Status;
     match crate::smartcam::status() {
+        _ if crate::smartcam::switching() => "the port is changing over…".into(),
         _ if !crate::smartcam::chosen() => "off · the port is the console".into(),
-        _ if crate::smartcam::restart_owed() => "after a restart".into(),
         Status::PortIsConsole => "off · the port is the console".into(),
-        Status::NeedsRestart => "after a restart".into(),
-        Status::Asleep => "asleep · wakes with the Camera".into(),
+        Status::PortBusy => "waiting for the port".into(),
+        Status::Asleep => "asleep".into(),
         Status::Waking { .. } => "waking…".into(),
         Status::Ready { baud, .. } => format!("ready · {}", baud_words(baud)),
         Status::Absent(_) => "not answering".into(),
@@ -1471,8 +1471,8 @@ impl Camera {
         g.canvas.fill_rect(vf.offset(g.ox, 0.0), Color(6, 6, 8), alpha);
         let (icon, line, more) = match &self.smart_status {
             Status::PortIsConsole => ("cable", "the Grove port is the console".to_owned(), "Settings › Camera › Grove port".to_owned()),
-            Status::NeedsRestart => ("restart_alt", "restart once to free the Grove port".to_owned(), "its console leaves at the next start".to_owned()),
-            Status::Absent(_) => ("developer_board", "no smart camera answers".to_owned(), "is main.py on its card? tools/unitv".to_owned()),
+            Status::PortBusy => ("cable", "the Grove port is not free yet".to_owned(), "a login or the console still on it".to_owned()),
+            Status::Absent(_) => ("developer_board", "no smart camera answers".to_owned(), "its program: plug it into USB-A once".to_owned()),
             Status::Waking { since } => ("developer_board", "waking the smart camera…".to_owned(), format!("{} s", since.elapsed().as_secs())),
             Status::Ready { .. } => ("developer_board", "waiting for its picture".to_owned(), String::new()),
             Status::Asleep => ("developer_board", "waking the smart camera…".to_owned(), String::new()),
