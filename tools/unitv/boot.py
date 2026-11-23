@@ -105,3 +105,19 @@ def catalyst_boot(root):
 
 catalyst_boot(ROOT)
 del catalyst_boot
+
+# MaixPy as M5Stack ships it for the UnitV runs boot.py and not main.py: the
+# camera sat at its prompt and never answered the Grove port (found on a
+# UnitV M12, 23 November 2026). So boot.py starts main.py. main.py runs for
+# ever, so a MaixPy that would have started it after boot.py never does it
+# twice; Ctrl-C (the installer's raw REPL) still stops it.
+try:
+    import sensor  # only on the camera, not on a computer running the tests
+except ImportError:
+    sensor = None
+if sensor is not None:
+    del sensor
+    try:
+        exec(open(ROOT + "/main.py").read(), {"__name__": "__main__"})
+    except Exception as e:
+        print("catalyst boot.py: main.py stopped:", e)

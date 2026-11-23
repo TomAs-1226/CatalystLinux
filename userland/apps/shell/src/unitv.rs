@@ -171,7 +171,11 @@ impl Payload {
     }
 
     pub fn stamp(&self, firmware: &str) -> Stamp {
-        Stamp { catalyst: crate::sysupdate::version(), main: short_sum(&self.main), model: short_sum(&self.model), firmware: firmware.to_owned() }
+        // The program is main.py with the boot.py that starts it: a new
+        // boot.py alone (1.0's, which starts main.py on MaixPy builds that
+        // do not) is an update the camera is offered too.
+        let program = [self.main.as_slice(), self.boot.as_slice()].concat();
+        Stamp { catalyst: crate::sysupdate::version(), main: short_sum(&program), model: short_sum(&self.model), firmware: firmware.to_owned() }
     }
 }
 
