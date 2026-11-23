@@ -2,25 +2,68 @@
 //! (Photos), and QR codes read.
 //!
 //! The viewfinder takes the panel's height at the photo's own shape (4:3),
-//! with the controls in a rail beside it: the mode (photo or scan), the
-//! shutter, and the last photo taken (↓ opens the album on it). Enter takes a
-//! photo; `t` sets a timer (3 or 10 s), `g` lays a rule-of-thirds grid over
-//! the picture, `n` lets the exposure run longer in low light.
+//! with the controls in a rail beside it: the modes (scan, photo, pro: a
+//! carousel, as a phone's camera has them), the shutter, and the last photo
+//! taken (↓ opens the album on it). Enter takes a photo; `t` sets a timer
+//! (3 or 10 s), `g` lays a rule-of-thirds grid over the picture, `n` lets
+//! the exposure run longer in low light, `f` opens the looks, `z` the 1:1
+//! focus check.
 //!
 //! On the handheld the picture comes from `catalyst-camera --colour` (the
 //! image's own libcamera program): a 320 × 240 YUV 4:2:0 preview at up to 30
-//! frames a second, turned the right way up for the CardputerZero. A photo is
-//! asked of it by name ("still /data/photos/IMG_….jpg"): it stops the
-//! preview, takes the sensor's full 3280 × 2464, copies the frame out and
+//! frames a second, turned the right way up for the CardputerZero, each with
+//! what the camera said of it (exposure, gains, white balance, light; read
+//! by pro.rs). A photo is asked of it by name, with what to take it with
+//! ("still /data/photos/IMG_….jpg", then the exposure the preview settled
+//! on, its white balance gains, the look's table): it stops the preview,
+//! takes the sensor's full 3280 × 2464 with all of that fixed, so the first
+//! frame is the photo and nothing settles again, copies the frame out and
 //! starts the preview again ("captured"), then writes the JPEG (quality 95,
-//! with Exif) through libjpeg-turbo behind it. The preview is held only for
-//! the capture itself, under the shutter's flash.
+//! with Exif) on three cores behind it.
+//!
+//! The shutter answers at once: the frame in the viewfinder as the key went
+//! down, with the look over it, is the photo's thumbnail straight away (it
+//! flies into the corner) while the full-size photo is taken and saved, and
+//! the next can be taken as soon as the camera has the last one's picture,
+//! before it is written.
+//!
+//! Pro mode (pro.rs): shutter (`s`), ISO (`i`), exposure compensation (`e`)
+//! and white balance (`w`), dials in a bar along the bottom (← → turn the
+//! one chosen, ↑ ↓ go to the next, `a` gives it back to auto). The aperture
+//! is the lens's own f/2.0, said in the rail and never a dial. With them a
+//! live histogram, zebras on highlights at 98% (`x`), RAW (`r`: a DNG of the
+//! sensor's own frame beside the JPEG, dng.rs), and the shutter time always
+//! in sight, a hand beside it when it is slower than 1/30 s (photo mode
+//! shows that too, when its own exposure gets that long).
+//!
+//! Looks (filters.rs, `f`): a strip of live thumbnails along the bottom, ←
+//! → to choose, the viewfinder showing the look as it will be saved, and
+//! Tint's colour on ↑ ↓. The camera program lays it over the photo in its
+//! background save and writes it into the Exif; the photo as taken is kept
+//! beside it (Photos shows it with `o`).
+//!
+//! The focus check (`z`): the sensor's own pixels one to one on the panel
+//! (the preview changes to the full sensor and is cropped), arrows to look
+//! around, focus peaking marking what is sharp. The lens is fixed-focus:
+//! 3.04 mm at f/2.0, set at its hyperfocal distance (about 2 m, for a
+//! circle of confusion of two pixels, 2.2 µm), is sharp from about a metre
+//! to the far distance. Many IMX219 modules have their lens in a thread,
+//! held by a dot of glue, and the tool sold with them (or fine tweezers)
+//! turns it to focus nearer; whether this one's does is down to the module.
+//!
+//! Crisp photos: in auto, the exposure is split for a hand (no slower than
+//! 1/60 s while there is gain to raise, then 1/40, then 1/30); at little
+//! gain the sensor's noise filter is off and its sharpening firmer; the
+//! photo is the sensor's own 3280 × 2464, never scaled. Its colour is the
+//! ISP's 4:2:0 at quality 95, all the ISP gives (4:4:4 would need a 24 MB
+//! frame the camera's memory cannot hold beside the raw one).
 //!
 //! Detail mode (`d`: auto, on, off; Settings › Camera › Detail mode) takes a
 //! burst of full-size frames instead, saves the first as the photo at once,
 //! and merges the rest into it in the background (burst.rs): the thumbnail
 //! wears a "refining" badge with the seconds left until the merged photo
-//! takes its place.
+//! takes its place. Its "auto" is for real low light only (pro.rs's
+//! `low_light`: under 25 lux, or most of the gain at a slow shutter).
 //!
 //! Scan mode reads QR codes from the preview's brightness, a few times a
 //! second on a thread of its own: a Wi-Fi code offers to join the network, a
@@ -37,13 +80,14 @@
 //! photographing one.
 //!
 //! On a computer, a simulated camera shows a scene of its own (and, in scan
-//! mode, a Wi-Fi code on a card), and its photos are written by a JPEG
-//! encoder in the shell, so everything works the same; the smart camera is
-//! smartcam.rs's stand-in.
+//! mode, a Wi-Fi code on a card), meters it and obeys the pro dials, and
+//! its photos (and DNGs) are written by the shell, so everything works the
+//! same; the smart camera is smartcam.rs's stand-in.
 //!
-//! Frames are drawn as they arrive (the camera's thread wakes the main
-//! loop), and nothing here keeps the frame beat but motion: a camera at rest
-//! is drawn at its own frame rate, not the panel's.
+//! Frames are developed on the camera's thread (colour conversion, look,
+//! zebras and histogram in one pass, filters.rs), drawn as they arrive (the
+//! thread wakes the main loop), and nothing here keeps the frame beat but
+//! motion: a camera at rest is drawn at its own frame rate, not the panel's.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -56,8 +100,10 @@ use std::time::{Duration, Instant};
 use bezel::{Align, Color, Rect};
 use detent::{role, Animated};
 
+use crate::filters::{Compiled, Look, LOOKS};
 use crate::gfx::{Gfx, H, PAD, W};
 use crate::photos::{self, draw_picture, whole, Photo, Picture};
+use crate::pro::{self, Metered, Pro};
 use crate::platform::Key;
 use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
@@ -158,8 +204,9 @@ enum Event {
     /// The photo's picture is in: the preview runs again while it is written.
     Captured,
     /// Saved: its size, and whether a detail merge now refines it (what it
-    /// took, "shot 812 write 640", goes to the shell's log).
-    Saved { path: PathBuf, size: (u32, u32), detail: bool },
+    /// took, "shot 812 write 640", goes to the shell's log), and whether a
+    /// RAW asked for found no room in the camera's memory.
+    Saved { path: PathBuf, size: (u32, u32), detail: bool, raw_skipped: bool },
     Failed(String),
 }
 
@@ -181,6 +228,109 @@ struct Live {
     found_count: u64,
     /// When a code was last read (any code).
     found_at: Option<Instant>,
+    /// What the camera said of the newest frame, its histogram, and the
+    /// frame itself as it came (for the shutter's instant thumbnail).
+    meta: Option<Metered>,
+    histogram: pro::Histogram,
+    yuv: Vec<u8>,
+    yuv_size: (usize, usize),
+    /// The looks' live thumbnails (while the strip is open), in its order.
+    thumbs: Vec<Picture>,
+    thumbs_made: u64,
+}
+
+/// How the camera's thread develops each frame, as the screen last asked.
+#[derive(Clone)]
+struct Develop {
+    look: Arc<Compiled>,
+    zebras: bool,
+    /// Focus peaking, in this colour.
+    peaking: Option<[u8; 3]>,
+    /// The strip's looks, for their thumbnails.
+    strip: Option<Arc<Vec<Compiled>>>,
+}
+
+impl Default for Develop {
+    fn default() -> Self {
+        Develop { look: Arc::new(Look::Original.compiled(0.0)), zebras: false, peaking: None, strip: None }
+    }
+}
+
+/// The strip's thumbnails: 4:3, small.
+const THUMB: (usize, usize) = (40, 30);
+
+/// A frame developed as asked, with its histogram, into the shared state;
+/// the strip's thumbnails every third frame while it is open.
+fn develop_frame(live: &Mutex<Live>, develop: &Mutex<Develop>, yuv: &[u8], w: usize, h: usize, pic: &mut Picture, meta: Option<Metered>) {
+    let opts = develop.lock().map(|d| d.clone()).unwrap_or_default();
+    let frames = live.lock().map(|l| l.frames).unwrap_or(0);
+    let clipped = opts.look.develop(yuv, w, h, pic, opts.zebras.then_some(frames as usize % 8));
+    let mut histogram = pro::Histogram::of_luma(&yuv[..w * h], w, h, 2);
+    histogram.clipped = if opts.zebras { clipped as f32 / (w * h) as f32 } else { histogram.clipped };
+    if let Some(colour) = opts.peaking {
+        let marks = pro::peaks(&yuv[..w * h], w, h);
+        for (px, on) in pic.rgb.chunks_exact_mut(3).zip(marks) {
+            if on {
+                px.copy_from_slice(&colour);
+            }
+        }
+    }
+    let thumbs = opts.strip.filter(|_| frames % 3 == 0).map(|looks| {
+        let small = shrink_yuv420(yuv, w, h, THUMB.0, THUMB.1);
+        looks
+            .iter()
+            .map(|look| {
+                let mut t = Picture::default();
+                look.develop(&small, THUMB.0, THUMB.1, &mut t, None);
+                t
+            })
+            .collect::<Vec<_>>()
+    });
+    if let Ok(mut l) = live.lock() {
+        l.preview = Some(pic.clone());
+        l.frames += 1;
+        l.trouble = None;
+        l.histogram = histogram;
+        l.yuv.clear();
+        l.yuv.extend_from_slice(yuv);
+        l.yuv_size = (w, h);
+        if meta.is_some() {
+            l.meta = meta;
+        }
+        if let Some(t) = thumbs {
+            l.thumbs = t;
+            l.thumbs_made += 1;
+        }
+    }
+}
+
+/// A YUV 4:2:0 frame shrunk to `tw` × `th` (each pixel the mean of its
+/// part, cropped to the new shape from the middle), for thumbnails.
+fn shrink_yuv420(yuv: &[u8], w: usize, h: usize, tw: usize, th: usize) -> Vec<u8> {
+    let (cw, ch) = (w / 2, h / 2);
+    let mut out = vec![0u8; tw * th * 3 / 2];
+    let plane = |src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize, dst: &mut [u8]| {
+        for oy in 0..dh {
+            let (y0, y1) = (oy * sh / dh, ((oy + 1) * sh / dh).max(oy * sh / dh + 1));
+            for ox in 0..dw {
+                let (x0, x1) = (ox * sw / dw, ((ox + 1) * sw / dw).max(ox * sw / dw + 1));
+                let (mut sum, mut n) = (0u32, 0u32);
+                for y in y0..y1.min(sh) {
+                    for x in x0..x1.min(sw) {
+                        sum += u32::from(src[y * sw + x]);
+                        n += 1;
+                    }
+                }
+                dst[oy * dw + ox] = (sum / n.max(1)) as u8;
+            }
+        }
+    };
+    let (oy, ouv) = out.split_at_mut(tw * th);
+    let (ou, ov) = ouv.split_at_mut(tw * th / 4);
+    plane(&yuv[..w * h], w, h, tw, th, oy);
+    plane(&yuv[w * h..w * h + cw * ch], cw, ch, tw / 2, th / 2, ou);
+    plane(&yuv[w * h + cw * ch..w * h + 2 * cw * ch], cw, ch, tw / 2, th / 2, ov);
+    out
 }
 
 /// The newest picture's brightness, for the QR reader.
@@ -193,12 +343,35 @@ struct Luma {
 
 /// What the screen asks of the camera.
 enum Order {
-    Still(PathBuf),
+    /// A photo, with what to take it with (`exp=…`, `look=…`: see
+    /// catalyst-camera's notes).
+    Still(PathBuf, Vec<String>),
     /// Detail mode: a burst merged in the background (`true`: only in dim light).
-    Detail(PathBuf, bool),
+    Detail(PathBuf, bool, Vec<String>),
     Night(bool),
     /// Where a face is in the picture (0 to 1), for the exposure; or none.
     Face(Option<[f32; 4]>),
+    /// The preview's exposure and white balance (pro mode's dials).
+    Pro(pro::PreviewControls),
+    /// The focus check's crop, centred here (0 to 1 of the picture), or none.
+    Focus(Option<(f32, f32)>),
+}
+
+impl Order {
+    /// The line the camera program reads.
+    fn line(&self) -> String {
+        let with = |words: &[String]| words.iter().map(|w| format!("\t{w}")).collect::<String>();
+        match self {
+            Order::Still(path, words) => format!("still {}{}\n", path.display(), with(words)),
+            Order::Detail(path, auto, words) => format!("detail {} {}{}\n", if *auto { "auto" } else { "on" }, path.display(), with(words)),
+            Order::Night(on) => format!("night {}\n", if *on { "on" } else { "off" }),
+            Order::Face(Some(b)) => format!("face {:.3} {:.3} {:.3} {:.3}\n", b[0], b[1], b[2], b[3]),
+            Order::Face(None) => "face none\n".to_owned(),
+            Order::Pro(c) => format!("{}\n", c.order()),
+            Order::Focus(Some((x, y))) => format!("focus on {x:.4} {y:.4}\n"),
+            Order::Focus(None) => "focus off\n".to_owned(),
+        }
+    }
 }
 
 /// Where orders go: the camera program's input, or the simulated camera.
@@ -211,13 +384,7 @@ impl Control {
     fn send(&self, order: Order) -> bool {
         match self {
             Control::Program(stdin) => {
-                let line = match order {
-                    Order::Still(path) => format!("still {}\n", path.display()),
-                    Order::Detail(path, auto) => format!("detail {} {}\n", if auto { "auto" } else { "on" }, path.display()),
-                    Order::Night(on) => format!("night {}\n", if on { "on" } else { "off" }),
-                    Order::Face(Some(b)) => format!("face {:.3} {:.3} {:.3} {:.3}\n", b[0], b[1], b[2], b[3]),
-                    Order::Face(None) => "face none\n".to_owned(),
-                };
+                let line = order.line();
                 stdin.lock().ok().and_then(|mut s| s.as_mut().map(|s| s.write_all(line.as_bytes()).and_then(|()| s.flush()).is_ok())).unwrap_or(false)
             }
             Control::Simulated(tx) => tx.send(order).is_ok(),
@@ -250,7 +417,7 @@ pub fn yuv420_to_rgb(data: &[u8], w: usize, h: usize, out: &mut Picture) {
 static CAMERA: Mutex<()> = Mutex::new(());
 
 /// The camera program, read: frames and what it says, until it stops.
-fn run_program(live: &Mutex<Live>, stop: &AtomicBool, slot: &Mutex<Option<ChildStdin>>, luma: &(Mutex<Luma>, Condvar)) {
+fn run_program(live: &Mutex<Live>, stop: &AtomicBool, slot: &Mutex<Option<ChildStdin>>, luma: &(Mutex<Luma>, Condvar), develop: &Mutex<Develop>) {
     let waited = Instant::now();
     let _held = loop {
         match CAMERA.try_lock() {
@@ -304,6 +471,8 @@ fn run_program(live: &Mutex<Live>, stop: &AtomicBool, slot: &Mutex<Option<ChildS
     let mut frame = Vec::new();
     let mut pic = Picture::default();
     let mut head = [0u8; 16];
+    // What the camera said of the frame that follows.
+    let mut said_of = None;
     let trouble = loop {
         if stop.load(Ordering::Relaxed) {
             break None;
@@ -327,21 +496,18 @@ fn run_program(live: &Mutex<Live>, stop: &AtomicBool, slot: &Mutex<Option<ChildS
         let (w, h) = ((number >> 16) as usize, (number & 0xffff) as usize);
         match kind {
             1 if w * h * 3 / 2 == length && w > 0 => {
-                yuv420_to_rgb(&frame, w, h, &mut pic);
+                develop_frame(live, develop, &frame, w, h, &mut pic, said_of.take());
                 give_luma(luma, &frame[..w * h]);
-                if let Ok(mut l) = live.lock() {
-                    l.preview = Some(pic.clone());
-                    l.frames += 1;
-                    l.trouble = None;
-                }
             }
             2 => {
                 let (path, took, detail) = saved_line(&String::from_utf8_lossy(&frame));
                 if !took.is_empty() {
                     eprintln!("camera: {} × {} {took}", number >> 16, number & 0xffff);
                 }
-                live.lock().map(|mut l| l.events.push(Event::Saved { path, size: (number >> 16, number & 0xffff), detail })).ok();
+                let raw_skipped = took.contains("raw-skipped");
+                live.lock().map(|mut l| l.events.push(Event::Saved { path, size: (number >> 16, number & 0xffff), detail, raw_skipped })).ok();
             }
+            5 => said_of = Metered::parse(&String::from_utf8_lossy(&frame)),
             3 => {
                 let why = String::from_utf8_lossy(&frame).trim().to_owned();
                 live.lock().map(|mut l| l.events.push(Event::Failed(why))).ok();
@@ -351,8 +517,11 @@ fn run_program(live: &Mutex<Live>, stop: &AtomicBool, slot: &Mutex<Option<ChildS
             }
             _ => {}
         }
-        // Drawn as it arrives, not on the frame beat.
-        crate::platform::wake();
+        // Drawn as it arrives, not on the frame beat (what the camera says of
+        // a frame comes just before it).
+        if kind != 5 {
+            crate::platform::wake();
+        }
     };
     // Its input closed, it stops the camera and ends: given a moment for
     // that (and to finish writing a photo whose picture it has) before it
@@ -380,29 +549,102 @@ fn run_program(live: &Mutex<Live>, stop: &AtomicBool, slot: &Mutex<Option<ChildS
     finish_luma(luma);
 }
 
-/// The simulated camera: its scene at the camera's pace, photos written by
-/// the shell's own JPEG encoder.
-fn run_simulated(live: &Mutex<Live>, stop: &AtomicBool, orders: &Receiver<Order>, scanning: &AtomicBool, luma: &(Mutex<Luma>, Condvar)) {
+/// The simulated room's light: a lit room in the evening.
+const SIM_LUX: f32 = 320.0;
+/// The simulated scene's light, as a white balance would find it.
+const SIM_CT: u32 = 5200;
+
+/// The whole exposure (µs at a gain of 1) the simulated scene needs, by the
+/// IMX219 tuning's own reference (27.7 ms at gain 1 for 998 lux), with
+/// compensation in stops.
+fn sim_needs(ev: f32) -> f32 {
+    27_685.0 * 998.0 / SIM_LUX * 2f32.powf(ev)
+}
+
+/// What the simulated camera does with the preview's controls: its own
+/// exposure where they leave it free, and how much brighter than right the
+/// result is (1 is the scene as drawn).
+fn sim_meter(c: &pro::PreviewControls, focus: bool) -> (Metered, f32) {
+    let needs = sim_needs(c.ev);
+    let (exposure_us, gain) = match (c.exposure_us, c.gain) {
+        (Some(e), Some(g)) => (e, g),
+        (Some(e), None) => (e, (needs / e as f32).clamp(1.0, pro::MAX_GAIN)),
+        (None, Some(g)) => (((needs / g).round() as u32).clamp(100, c.frame_max_us), g),
+        // The camera's own exposure, as the tuning's normal profile has it.
+        (None, None) => {
+            let e = (needs / 4.0).clamp(100.0, 30_000.0f32.min(c.frame_max_us as f32));
+            (e as u32, (needs / e).clamp(1.0, pro::MAX_GAIN))
+        }
+    };
+    let ct = c.ct.unwrap_or(SIM_CT);
+    let (r, b) = crate::dng::Tuning::stock().white(f64::from(ct));
+    let m = Metered { exposure_us, analogue: gain, digital: 1.0, gains: [(1.0 / r) as f32, (1.0 / b) as f32], ct, lux: SIM_LUX, settled: true, fom: 0, zoom: if focus { 1.0 } else { 0.0 } };
+    (m, exposure_us as f32 * gain / sim_needs(0.0))
+}
+
+/// The scene exposed `bright` times over and white-balanced for `ct` (the
+/// light being [`SIM_CT`]), in place: in linear light, then back.
+fn sim_expose(pic: &mut Picture, bright: f32, ct: u32) {
+    let tuning = crate::dng::Tuning::stock();
+    let (r0, b0) = tuning.white(f64::from(SIM_CT));
+    let (r1, b1) = tuning.white(f64::from(ct));
+    let k = [bright * (r1 / r0) as f32, bright, bright * (b1 / b0) as f32];
+    if k.iter().all(|k| (k - 1.0).abs() < 1e-3) {
+        return;
+    }
+    let mut table = [[0u8; 256]; 3];
+    for (c, t) in table.iter_mut().enumerate() {
+        for (v, o) in t.iter_mut().enumerate() {
+            let lin = (v as f32 / 255.0).powf(2.2) * k[c];
+            *o = (lin.min(1.0).powf(1.0 / 2.2) * 255.0).round() as u8;
+        }
+    }
+    for p in pic.rgb.chunks_exact_mut(3) {
+        for (c, v) in p.iter_mut().enumerate() {
+            *v = table[c][usize::from(*v)];
+        }
+    }
+}
+
+/// The focus check's part of the picture (0 to 1 each way): one photo
+/// pixel to a preview pixel, centred at (`x`, `y`) as far as the edges allow.
+pub fn focus_view(x: f32, y: f32) -> [f32; 4] {
+    let (hw, hh) = (PREVIEW_W as f32 / FULL.0 as f32 * 0.5, PREVIEW_H as f32 / FULL.1 as f32 * 0.5);
+    let (x, y) = (x.clamp(hw, 1.0 - hw), y.clamp(hh, 1.0 - hh));
+    [x - hw, y - hh, x + hw, y + hh]
+}
+
+/// The simulated camera: its scene at the camera's pace, metered and
+/// exposed as the dials say and developed as the screen asks; photos
+/// written by the shell's own JPEG encoder behind the preview.
+fn run_simulated(live: &Arc<Mutex<Live>>, stop: &AtomicBool, orders: &Receiver<Order>, scanning: &AtomicBool, luma: &(Mutex<Luma>, Condvar), develop: &Mutex<Develop>) {
     let started = Instant::now();
     let (mut night, mut face) = (false, None);
+    let mut controls = pro::preview(None, false);
+    let mut focus: Option<(f32, f32)> = None;
+    let mut out = Picture::default();
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(33));
         let t = started.elapsed().as_secs_f32();
         let scan = scanning.load(Ordering::Relaxed);
-        let pic = scene(PREVIEW_W, PREVIEW_H, t, scan);
-        give_luma(luma, &brightness(&pic));
-        if let Ok(mut l) = live.lock() {
-            l.preview = Some(pic);
-            l.frames += 1;
-        }
+        let view = focus.map_or([0.0, 0.0, 1.0, 1.0], |(x, y)| focus_view(x, y));
+        let mut pic = scene_part(PREVIEW_W, PREVIEW_H, t, scan && focus.is_none(), view);
+        let (mut meta, bright) = sim_meter(&controls, focus.is_some());
+        sim_expose(&mut pic, bright, meta.ct);
+        let yuv = rgb_to_yuv420(&pic);
+        meta.fom = yuv[..PREVIEW_W * PREVIEW_H].windows(2).map(|p| u32::from(p[0].abs_diff(p[1]))).sum::<u32>() / 64;
+        develop_frame(live, develop, &yuv, PREVIEW_W, PREVIEW_H, &mut out, Some(meta));
+        give_luma(luma, &yuv[..PREVIEW_W * PREVIEW_H]);
         crate::platform::wake();
         while let Ok(order) = orders.try_recv() {
             match order {
-                Order::Still(path) => sim_photo(live, path, t, scan, 0, None),
+                Order::Still(path, words) => sim_photo(live, path, t, scan, 0, None, &words),
                 // "Dim light" in the simulator: night on.
-                Order::Detail(path, auto) => sim_photo(live, path, t, scan, if auto && !night { 0 } else { SIM_BURST }, face),
+                Order::Detail(path, auto, words) => sim_photo(live, path, t, scan, if auto && !night { 0 } else { SIM_BURST }, face, &words),
                 Order::Night(on) => night = on,
                 Order::Face(f) => face = f,
+                Order::Pro(c) => controls = c,
+                Order::Focus(f) => focus = f,
             }
         }
     }
@@ -414,52 +656,146 @@ pub const SIM_BURST: usize = 6;
 /// The sensor's full size, as every photo is taken.
 pub const FULL: (usize, usize) = (3280, 2464);
 
+/// A still order's word for `key` (each is `key=value`).
+fn still_word<'a>(words: &'a [String], key: &str) -> Option<&'a str> {
+    words.iter().find_map(|w| w.strip_prefix(key).and_then(|r| r.strip_prefix('=')))
+}
+
 /// The simulator's photo, as catalyst-camera takes one: the picture in
-/// ("captured"), the JPEG written behind it; for detail mode a burst of a
-/// dim, noisy scene (the robot still driving) merged on a thread of its own.
-fn sim_photo(live: &Mutex<Live>, path: PathBuf, t: f32, scan: bool, burst: usize, face: Option<[f32; 4]>) {
+/// ("captured") with the exposure and white balance it was given, then
+/// written behind the preview with the look's table over it, the photo as
+/// taken kept beside it and a DNG if asked; for detail mode a burst of a
+/// dim, noisy scene (the robot still driving), merged on a thread of its own.
+fn sim_photo(live: &Arc<Mutex<Live>>, path: PathBuf, t: f32, scan: bool, burst: usize, face: Option<[f32; 4]>, words: &[String]) {
     let asked = Instant::now();
     let (w, h) = FULL;
+    let exposure = still_word(words, "exp").and_then(|v| v.parse::<f32>().ok());
+    let gain = still_word(words, "gain").and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0);
+    let bright = exposure.map_or(1.0, |e| e * gain / sim_needs(0.0));
+    let ct = still_word(words, "ct").and_then(|v| v.parse().ok()).unwrap_or(SIM_CT);
     let mut noise = 0x2545_F491_4F6C_DD1Du64 ^ (t.to_bits() as u64);
     let mut frames = Vec::new();
+    let mut raw_rgb = None;
     for i in 0..burst.max(1) {
         // About 8 frames a second at full size, a hand's drift between them.
-        let mut yuv = rgb_to_yuv420(&scene(w, h, t + i as f32 * 0.12, scan));
+        let mut pic = scene(w, h, t + i as f32 * 0.12, scan);
+        sim_expose(&mut pic, bright, ct);
+        let mut yuv = rgb_to_yuv420(&pic);
         if burst > 0 {
             dim_and_noisy(&mut yuv, w * h, &mut noise);
+        }
+        if i == 0 && still_word(words, "raw").is_some() {
+            raw_rgb = Some(pic);
         }
         frames.push(yuv);
     }
     live.lock().map(|mut l| l.events.push(Event::Captured)).ok();
     crate::platform::wake();
     let shot = asked.elapsed().as_millis();
+    let (live, words) = (live.clone(), words.to_vec());
+    std::thread::Builder::new()
+        .name("photo-write".into())
+        .spawn(move || {
+            let event = sim_write(&path, frames, burst, face, &words, raw_rgb, shot);
+            live.lock().map(|mut l| l.events.push(event)).ok();
+            crate::platform::wake();
+        })
+        .ok();
+}
+
+/// The simulator's photo written: the look over it, the photo as taken
+/// kept beside it, the DNG, and a detail merge started.
+fn sim_write(path: &std::path::Path, mut frames: Vec<Vec<u8>>, burst: usize, face: Option<[f32; 4]>, words: &[String], raw_rgb: Option<Picture>, shot: u128) -> Event {
+    let (w, h) = FULL;
     let began = Instant::now();
-    let event = match crate::burst::write_jpeg(&path, &frames[0], w, h, None) {
-        Ok(()) => {
-            let detail = burst > 0;
-            if detail {
-                std::fs::write(crate::burst::marker(&path), format!("began={}\nexpect={}\nprogress=0\n", crate::burst::now_ms(), crate::burst::expect_ms(burst, w, h))).ok();
-                let (p, faces) = (path.clone(), face.into_iter().collect::<Vec<_>>());
-                std::thread::Builder::new()
-                    .name("merge".into())
-                    .spawn(move || {
-                        crate::sched::enter(crate::sched::Class::Idle);
-                        let refs: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
-                        if let Err(why) = crate::burst::refine(&p, &refs, w, h, &faces, 3) {
-                            eprintln!("camera: detail merge: {why}");
-                        }
-                        crate::platform::wake();
-                    })
-                    .ok();
-            }
-            let took = format!("shot {shot} write {}{}", began.elapsed().as_millis(), if detail { format!(" detail {burst}") } else { String::new() });
-            eprintln!("camera: {w} × {h} {took} (simulated)");
-            Event::Saved { path, size: (w as u32, h as u32), detail }
+    let table = still_word(words, "look").and_then(|f| std::fs::read(f).ok()).and_then(|b| crate::filters::read_lut_file(&b));
+    let name = still_word(words, "lookname").map(str::to_owned);
+    let exif = name.as_deref().map(crate::filters::exif_with_look);
+    let original = still_word(words, "orig").map(PathBuf::from);
+    let mut photo = frames[0].clone();
+    if let Some(table) = &table {
+        crate::filters::apply_yuv420(table, &mut photo, w, h);
+    }
+    if let Err(why) = crate::burst::write_jpeg(path, &photo, w, h, exif.clone()) {
+        return Event::Failed(why);
+    }
+    if let (Some(original), true) = (&original, table.is_some()) {
+        if let Some(dir) = original.parent() {
+            std::fs::create_dir_all(dir).ok();
         }
-        Err(why) => Event::Failed(why),
+        crate::burst::write_jpeg(original, &frames[0], w, h, None).ok();
+    }
+    let mut raw_note = String::new();
+    if let (Some(dng), Some(rgb)) = (still_word(words, "raw"), raw_rgb) {
+        raw_note = match sim_dng(std::path::Path::new(dng), &rgb, words, name.clone()) {
+            Ok(()) => " raw".into(),
+            Err(why) => {
+                eprintln!("camera: raw: {why}");
+                " raw-skipped".into()
+            }
+        };
+    }
+    let detail = burst > 0;
+    if detail {
+        std::fs::write(crate::burst::marker(path), format!("began={}\nexpect={}\nprogress=0\n", crate::burst::now_ms(), crate::burst::expect_ms(burst, w, h))).ok();
+        let (p, faces) = (path.to_path_buf(), face.into_iter().collect::<Vec<_>>());
+        let original = original.filter(|_| table.is_some());
+        frames.shrink_to_fit();
+        std::thread::Builder::new()
+            .name("merge".into())
+            .spawn(move || {
+                crate::sched::enter(crate::sched::Class::Idle);
+                let refs: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
+                if let Err(why) = crate::burst::refine_with(&p, &refs, w, h, &faces, 3, table.as_deref(), original.as_deref()) {
+                    eprintln!("camera: detail merge: {why}");
+                }
+                crate::platform::wake();
+            })
+            .ok();
+    }
+    let took = format!("shot {shot} write {}{}{raw_note}", began.elapsed().as_millis(), if detail { format!(" detail {burst}") } else { String::new() });
+    eprintln!("camera: {w} × {h} {took} (simulated)");
+    Event::Saved { path: path.to_path_buf(), size: (w as u32, h as u32), detail, raw_skipped: raw_note.contains("skipped") }
+}
+
+/// The simulator's RAW: the picture back to the sensor's own light (its
+/// gamma undone, its white balance gains taken off) as a BGGR mosaic of
+/// 10-bit values, written by the same DNG writer as the handheld's.
+fn sim_dng(path: &std::path::Path, rgb: &Picture, words: &[String], look: Option<String>) -> Result<(), String> {
+    let gains = still_word(words, "gains").map(|g| g.split(',').filter_map(|v| v.parse::<f32>().ok()).collect::<Vec<_>>()).filter(|g| g.len() == 2).map_or([1.9, 1.5], |g| [g[0], g[1]]);
+    let info = crate::dng::RawInfo {
+        w: rgb.w,
+        h: rgb.h,
+        stride: rgb.w * 2,
+        format: "SBGGR10".into(),
+        black16: 4096,
+        gains,
+        exposure_us: still_word(words, "exp").and_then(|v| v.parse().ok()).unwrap_or(10_000),
+        gain: still_word(words, "gain").and_then(|v| v.parse().ok()).unwrap_or(1.0),
+        time: chrono::Local::now().timestamp(),
+        turned: false,
+        look,
     };
-    live.lock().map(|mut l| l.events.push(event)).ok();
-    crate::platform::wake();
+    let mut lin = [[0u16; 256]; 3];
+    for (c, t) in lin.iter_mut().enumerate() {
+        let g = [gains[0], 1.0, gains[1]][c];
+        for (v, o) in t.iter_mut().enumerate() {
+            *o = (64.0 + 959.0 * ((v as f32 / 255.0).powf(2.2) / g)).round() as u16;
+        }
+    }
+    let mut px = vec![0u16; rgb.w * rgb.h];
+    for y in 0..rgb.h {
+        for x in 0..rgb.w {
+            // BGGR: blue at the top left, red at the bottom right.
+            let c = match (y % 2, x % 2) {
+                (0, 0) => 2,
+                (1, 1) => 0,
+                _ => 1,
+            };
+            px[y * rgb.w + x] = lin[c][usize::from(rgb.rgb[(y * rgb.w + x) * 3 + c])];
+        }
+    }
+    crate::dng::write(path, &info, &px, &crate::dng::Tuning::load())
 }
 
 /// A picture as YUV 4:2:0 (full-range BT.601, as the camera's), packed planes.
@@ -524,6 +860,7 @@ fn finish_luma(luma: &(Mutex<Luma>, Condvar)) {
 }
 
 /// A picture's brightness (BT.601), as the camera's Y plane would be.
+#[cfg(test)]
 fn brightness(pic: &Picture) -> Vec<u8> {
     pic.rgb.chunks_exact(3).map(|p| ((77 * u32::from(p[0]) + 150 * u32::from(p[1]) + 29 * u32::from(p[2])) >> 8) as u8).collect()
 }
@@ -579,14 +916,97 @@ fn read_qr(y: &[u8], w: usize, h: usize) -> Option<Found> {
 
 // ----------------------------------------------------------------- screen ---
 
+/// The modes, in the carousel's order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
-    Photo,
     Scan,
+    Photo,
+    Pro,
+}
+
+const MODES: [(Mode, &str); 3] = [(Mode::Scan, "scan"), (Mode::Photo, "photo"), (Mode::Pro, "pro")];
+
+impl Mode {
+    fn index(self) -> usize {
+        MODES.iter().position(|(m, _)| *m == self).unwrap_or(1)
+    }
+
+    /// A photo is taken in it.
+    fn shoots(self) -> bool {
+        self != Mode::Scan
+    }
+}
+
+/// Pro mode's dials, in the bar's order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Dial {
+    Shutter,
+    Iso,
+    Ev,
+    Wb,
+}
+
+const DIALS: [Dial; 4] = [Dial::Shutter, Dial::Iso, Dial::Ev, Dial::Wb];
+
+impl Dial {
+    fn index(self) -> usize {
+        DIALS.iter().position(|d| *d == self).unwrap_or(0)
+    }
 }
 
 /// The timer's choices, in turn.
 const TIMERS: [u32; 3] = [0, 3, 10];
+
+/// What the Camera keeps between visits (its own file beside the settings):
+/// the dials, the look, RAW and the zebras. It always opens in photo mode.
+#[derive(Clone, Debug, PartialEq)]
+struct Prefs {
+    pro: Pro,
+    look: Look,
+    hue: f32,
+    raw: bool,
+    zebras: bool,
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Prefs { pro: Pro::default(), look: Look::Original, hue: 32.0, raw: false, zebras: true }
+    }
+}
+
+impl Prefs {
+    fn file() -> PathBuf {
+        crate::config_dir().join("camera")
+    }
+
+    fn load() -> Prefs {
+        let mut p = Prefs::default();
+        for line in std::fs::read_to_string(Self::file()).unwrap_or_default().lines() {
+            let Some((k, v)) = line.split_once('=') else { continue };
+            match k {
+                "pro" => p.pro = Pro::from_line(&v.replace(',', " ")),
+                "look" => p.look = Look::from_id(v).unwrap_or_default(),
+                "hue" => p.hue = v.parse().unwrap_or(p.hue),
+                "raw" => p.raw = v == "1",
+                "zebras" => p.zebras = v != "0",
+                _ => {}
+            }
+        }
+        p
+    }
+
+    fn save(&self) {
+        let text = format!(
+            "pro={}\nlook={}\nhue={:.0}\nraw={}\nzebras={}\n",
+            self.pro.to_line().replace(' ', ","),
+            self.look.id(),
+            self.hue,
+            u8::from(self.raw),
+            u8::from(self.zebras)
+        );
+        crate::sys::write_atomic(&Self::file(), text.as_bytes()).ok();
+    }
+}
 
 pub struct Camera {
     live: Arc<Mutex<Live>>,
@@ -594,8 +1014,46 @@ pub struct Camera {
     control: Control,
     scanning: Arc<AtomicBool>,
     mode: Mode,
-    /// Where the mode's mark is: 0 under photo, 1 under scan.
+    /// Where the modes' carousel is: 0 at scan, 1 at photo, 2 at pro.
     mode_at: Animated,
+    /// Pro mode's dials, the one being turned (its mark sliding between).
+    pro: Pro,
+    dial: Option<Dial>,
+    dial_at: Animated,
+    dial_fade: Animated,
+    /// The look, Tint's colour, the looks' strip (open, where it has slid
+    /// to, how far in), and the thumbnails it shows.
+    look: Look,
+    hue: f32,
+    strip: bool,
+    strip_at: Animated,
+    strip_fade: Animated,
+    thumbs: Vec<Picture>,
+    thumbs_seen: u64,
+    raw: bool,
+    zebras: bool,
+    /// The focus check: where its crop is centred (0 to 1), and its fade.
+    focus: Option<(f32, f32)>,
+    focus_fade: Animated,
+    /// What the camera said of the newest frame, and its histogram.
+    metered: Option<Metered>,
+    histogram: pro::Histogram,
+    /// How the camera's thread develops frames, and the preview's controls
+    /// as last told.
+    develop: Arc<Mutex<Develop>>,
+    told: Option<pro::PreviewControls>,
+    /// Photos asked for and not yet saved, and their names.
+    pending: usize,
+    pending_paths: Vec<PathBuf>,
+    /// The photo whose thumbnail is the shutter's instant one.
+    instant: Option<PathBuf>,
+    /// The shot, the moment it was taken, flying into the thumbnail.
+    flying: Option<Picture>,
+    fly: Animated,
+    /// When the slow shutter was last said, so it is said once.
+    shaky_said: bool,
+    /// Focus peaking's colour: the signal colour, as last drawn.
+    peak: [u8; 3],
     preview: Option<Picture>,
     seen: u64,
     trouble: Option<String>,
@@ -700,16 +1158,18 @@ impl Camera {
         let stop = Arc::new(AtomicBool::new(false));
         let scanning = Arc::new(AtomicBool::new(false));
         let luma: Arc<(Mutex<Luma>, Condvar)> = Arc::default();
+        let prefs = Prefs::load();
+        let develop = Arc::new(Mutex::new(Develop { look: Arc::new(prefs.look.compiled(prefs.hue)), ..Develop::default() }));
         let simulated = !cfg!(target_arch = "aarch64");
         let control = if simulated {
             let (tx, rx) = mpsc::channel();
-            let (l, s, sc, lu) = (live.clone(), stop.clone(), scanning.clone(), luma.clone());
-            std::thread::Builder::new().name("camera".into()).spawn(move || run_simulated(&l, &s, &rx, &sc, &lu)).ok();
+            let (l, s, sc, lu, d) = (live.clone(), stop.clone(), scanning.clone(), luma.clone(), develop.clone());
+            std::thread::Builder::new().name("camera".into()).spawn(move || run_simulated(&l, &s, &rx, &sc, &lu, &d)).ok();
             Control::Simulated(tx)
         } else {
             let slot: Arc<Mutex<Option<ChildStdin>>> = Arc::default();
-            let (l, s, sl, lu) = (live.clone(), stop.clone(), slot.clone(), luma.clone());
-            std::thread::Builder::new().name("camera".into()).spawn(move || run_program(&l, &s, &sl, &lu)).ok();
+            let (l, s, sl, lu, d) = (live.clone(), stop.clone(), slot.clone(), luma.clone(), develop.clone());
+            std::thread::Builder::new().name("camera".into()).spawn(move || run_program(&l, &s, &sl, &lu, &d)).ok();
             Control::Program(slot)
         };
         {
@@ -722,7 +1182,36 @@ impl Camera {
             control,
             scanning,
             mode: Mode::Photo,
-            mode_at: Animated::new(0.0, role::detent()).with_rest(0.002),
+            mode_at: Animated::new(1.0, role::detent()).with_rest(0.002),
+            pro: prefs.pro,
+            dial: None,
+            // The dial's mark on Bezel's mode buttons' spring, its fade on
+            // the effects spring (as the lens switch).
+            dial_at: Animated::new(0.0, role::release()).with_rest(0.002),
+            dial_fade: Animated::new(0.0, role::effect()).with_rest(0.002),
+            look: prefs.look,
+            hue: prefs.hue,
+            strip: false,
+            strip_at: Animated::new(LOOKS.iter().position(|l| *l == prefs.look).unwrap_or(0) as f32, role::release()).with_rest(0.002),
+            strip_fade: Animated::new(0.0, role::effect()).with_rest(0.002),
+            thumbs: Vec::new(),
+            thumbs_seen: 0,
+            raw: prefs.raw,
+            zebras: prefs.zebras,
+            focus: None,
+            focus_fade: Animated::new(0.0, role::effect()).with_rest(0.002),
+            metered: None,
+            histogram: pro::Histogram::default(),
+            develop,
+            told: None,
+            pending: 0,
+            pending_paths: Vec::new(),
+            instant: None,
+            flying: None,
+            // The shot into the corner on a smooth, unbouncing spring.
+            fly: Animated::new(1.0, role::smooth()).with_rest(0.002),
+            shaky_said: false,
+            peak: [255, 140, 40],
             preview: None,
             seen: 0,
             trouble: None,
@@ -768,11 +1257,42 @@ impl Camera {
             frozen: false,
         };
         camera.hold_smart();
+        camera.tell_develop();
+        camera.tell_pro();
         // The simulator's album has a few photos to begin with.
         #[cfg(not(target_arch = "aarch64"))]
         photos::seed_demo();
         camera.load_last(None);
         camera
+    }
+
+    fn prefs(&self) -> Prefs {
+        Prefs { pro: self.pro, look: self.look, hue: self.hue, raw: self.raw, zebras: self.zebras }
+    }
+
+    /// How the camera's thread is to develop frames now: the look, the
+    /// zebras (pro mode), peaking (the focus check), the strip's thumbnails.
+    fn tell_develop(&mut self) {
+        let strip = self.strip.then(|| Arc::new(LOOKS.iter().map(|l| l.compiled(self.hue)).collect::<Vec<_>>()));
+        let look = Arc::new(self.look.compiled(self.hue));
+        let zebras = self.mode == Mode::Pro && self.zebras;
+        let peaking = self.focus.map(|_| self.peak);
+        if let Ok(mut d) = self.develop.lock() {
+            *d = Develop { look, zebras, peaking, strip };
+        }
+    }
+
+    /// The preview's exposure and white balance for the mode and dials,
+    /// told to the camera when they change.
+    fn tell_pro(&mut self) {
+        let controls = pro::preview((self.mode == Mode::Pro).then_some(&self.pro), self.night);
+        if self.told != Some(controls) && self.control.send(Order::Pro(controls)) {
+            self.told = Some(controls);
+        }
+    }
+
+    fn keep_prefs(&self) {
+        self.prefs().save();
     }
 
     /// For quick capture: the camera for one photo. Enter (or Ctrl-P, the
@@ -807,10 +1327,23 @@ impl Camera {
     }
 
     fn set_mode(&mut self, mode: Mode) {
+        let was = self.mode;
         self.mode = mode;
-        self.mode_at.set(if mode == Mode::Scan { 1.0 } else { 0.0 });
+        self.mode_at.set(mode.index() as f32);
         self.scanning.store(mode == Mode::Scan, Ordering::Relaxed);
         self.countdown = None;
+        self.set_dial(None);
+        if mode == Mode::Scan {
+            self.set_strip(false);
+            self.set_focus(None);
+        }
+        if (was == Mode::Pro) != (mode == Mode::Pro) {
+            self.tell_develop();
+            self.tell_pro();
+        }
+        if mode == Mode::Pro {
+            self.say("keys s i e w: the dials");
+        }
         // Whatever was read before is forgotten: scanning starts afresh.
         self.found = None;
         self.found_at = None;
@@ -884,34 +1417,256 @@ impl Camera {
         self.found.as_ref().filter(|_| self.mode == Mode::Scan && self.found_rise.target() > 0.5)
     }
 
+    /// What a photo taken now is asked for with: the exposure the preview
+    /// settled on (or the dials), split for a steady hand, its white
+    /// balance, the look's table and where the photo as taken goes, the RAW;
+    /// and whether detail mode merges a burst for it.
+    fn still_words(&self, path: &std::path::Path, detail: crate::burst::DetailMode) -> (Vec<String>, Option<bool>) {
+        use crate::burst::DetailMode;
+        let pro = (self.mode == Mode::Pro).then_some(&self.pro);
+        let mut words = Vec::new();
+        // Some(auto) for a burst: decided here from the metering when there
+        // is any, else left to the camera program ("auto").
+        let mut burst = match detail {
+            DetailMode::Off => None,
+            DetailMode::On => Some(false),
+            DetailMode::Auto => Some(true),
+        };
+        if let Some(m) = &self.metered {
+            let s = pro::still(pro, m, self.night);
+            words = s.words();
+            if detail == DetailMode::Auto {
+                burst = pro::low_light(m, &s).then_some(false);
+            }
+        }
+        if self.look != Look::Original {
+            if let Some(table) = crate::filters::ensure_lut(self.look, self.hue) {
+                words.push(format!("look={}", table.display()));
+                let name = if self.look == Look::Tint { format!("Tint (hue {:.0})", self.hue.rem_euclid(360.0)) } else { self.look.name().to_owned() };
+                words.push(format!("lookname={name}"));
+                words.push(format!("orig={}", crate::filters::original_of(path).display()));
+            }
+        }
+        if self.mode == Mode::Pro && self.raw {
+            words.push(format!("raw={}", path.with_extension("dng").display()));
+            // A RAW needs the camera's memory a burst would.
+            burst = None;
+        }
+        (words, burst)
+    }
+
+    /// A name for the next photo, never one already taken and not yet written.
+    fn fresh_path(&self) -> PathBuf {
+        let mut path = photos::new_path(chrono::Local::now().naive_local());
+        let mut n = 2;
+        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        while self.pending_paths.contains(&path) {
+            path = path.with_file_name(format!("{stem}_{n}.jpg"));
+            n += 1;
+        }
+        path
+    }
+
     fn shoot(&mut self, calm: bool, detail: crate::burst::DetailMode) {
-        if self.saving.is_some() {
+        // One photo's picture at a time: the next as soon as the camera has
+        // the last one's, while that is still being written.
+        if self.saving.is_some() && !self.captured {
             return;
         }
         if self.preview.is_none() {
             self.say("the camera is not ready yet");
             return;
         }
-        let path = photos::new_path(chrono::Local::now().naive_local());
+        let path = self.fresh_path();
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).ok();
         }
-        let order = match detail {
-            crate::burst::DetailMode::Off => Order::Still(path),
-            crate::burst::DetailMode::On => Order::Detail(path, false),
-            crate::burst::DetailMode::Auto => Order::Detail(path, true),
+        let (words, burst) = self.still_words(&path, detail);
+        let order = match burst {
+            None => Order::Still(path.clone(), words),
+            Some(auto) => Order::Detail(path.clone(), auto, words),
         };
         if !self.control.send(order) {
             self.say("the camera is not ready yet");
             return;
         }
+        self.instant_shot(&path, calm);
         self.saving = Some(Instant::now());
         self.captured = false;
+        self.pending += 1;
+        self.pending_paths.push(path);
         self.press.jump(1.0);
         self.press.set(0.0);
         if !calm {
             self.flash.jump(1.0);
             self.flash.set(0.0);
+        }
+    }
+
+    /// The shutter's answer, at once: the frame in sight as it was taken,
+    /// with the look over it (and nothing else: no zebras, no peaking), as
+    /// the photo's thumbnail, flying into the corner, while the full-size
+    /// photo is taken and saved. The focus check's frame is a crop, not the
+    /// photo: there the thumbnail waits for the photo.
+    fn instant_shot(&mut self, path: &std::path::Path, calm: bool) {
+        if self.focus.is_some() {
+            return;
+        }
+        let (yuv, (w, h)) = match self.live.lock() {
+            Ok(l) => (l.yuv.clone(), l.yuv_size),
+            Err(_) => return,
+        };
+        if w == 0 || yuv.len() < w * h * 3 / 2 {
+            return;
+        }
+        let mut pic = Picture::default();
+        self.look.compiled(self.hue).develop(&yuv, w, h, &mut pic, None);
+        let thumb = pic.cover(photos::THUMB_W, photos::THUMB_H);
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.last = Some((Photo { path: path.to_path_buf(), name, taken: chrono::Local::now().naive_local(), bytes: 0 }, thumb));
+        self.instant = Some(path.to_path_buf());
+        if calm {
+            self.flying = None;
+            self.fly.jump(1.0);
+        } else {
+            self.flying = Some(pic);
+            self.fly.jump(0.0);
+            self.fly.set(1.0);
+        }
+    }
+
+    /// A dial chosen to turn (its mark slides to it), or none.
+    fn set_dial(&mut self, dial: Option<Dial>) {
+        if let Some(d) = dial {
+            // From none, the mark appears where it is, not sliding in.
+            if self.dial.is_none() {
+                self.dial_at.jump(d.index() as f32);
+            }
+            self.dial_at.set(d.index() as f32);
+        }
+        self.dial_fade.set(if dial.is_some() { 1.0 } else { 0.0 });
+        self.dial = dial;
+    }
+
+    /// A dial's key: it is chosen; pressed again, it goes back to auto (the
+    /// white balance's steps through its presets instead).
+    fn dial_key(&mut self, dial: Dial) {
+        if dial == Dial::Ev && self.pro.manual() {
+            self.say("ev shows the meter here");
+            return;
+        }
+        if self.dial != Some(dial) {
+            self.set_dial(Some(dial));
+            return;
+        }
+        match dial {
+            Dial::Wb => {
+                self.pro.wb = self.pro.wb.next_preset();
+                let words = self.pro.wb.preset().map_or_else(|| "wb: auto".to_owned(), |p| format!("wb: {p} · {}", self.pro.wb.words()));
+                self.say(words);
+            }
+            _ => self.dial_auto(),
+        }
+        self.pro_changed();
+    }
+
+    /// The dial chosen back to auto.
+    fn dial_auto(&mut self) {
+        match self.dial {
+            Some(Dial::Shutter) => self.pro.shutter = None,
+            Some(Dial::Iso) => self.pro.iso = None,
+            Some(Dial::Ev) => self.pro.ev = 0,
+            Some(Dial::Wb) => self.pro.wb = pro::Wb::Auto,
+            None => return,
+        }
+        self.pro_changed();
+    }
+
+    /// The chosen dial turned a step: → for more light (a longer shutter, a
+    /// higher ISO, more compensation) or a warmer white balance. From auto,
+    /// it starts at what the camera had chosen.
+    fn turn_dial(&mut self, by: i32) {
+        let m = self.metered.unwrap_or_default();
+        let step = |at: usize, len: usize| (at as i32 + by).clamp(0, len as i32 - 1) as usize;
+        match self.dial {
+            Some(Dial::Shutter) => self.pro.shutter = Some(step(self.pro.shutter.unwrap_or_else(|| pro::nearest_shutter(m.exposure_us)), pro::SHUTTERS.len())),
+            Some(Dial::Iso) => self.pro.iso = Some(step(self.pro.iso.unwrap_or_else(|| pro::nearest_iso(m.analogue * m.digital)), pro::ISOS.len())),
+            Some(Dial::Ev) => self.pro.ev = (i32::from(self.pro.ev) + by).clamp(-i32::from(pro::EV_THIRDS), i32::from(pro::EV_THIRDS)) as i8,
+            Some(Dial::Wb) => {
+                let from = match self.pro.wb {
+                    pro::Wb::Kelvin(k) => k,
+                    pro::Wb::Auto => (m.ct + pro::KELVIN_STEP / 2) / pro::KELVIN_STEP * pro::KELVIN_STEP,
+                };
+                let k = (from as i32 + by * pro::KELVIN_STEP as i32).clamp(pro::KELVIN_MIN as i32, pro::KELVIN_MAX as i32) as u32;
+                self.pro.wb = pro::Wb::Kelvin(k);
+            }
+            None => return,
+        }
+        self.pro_changed();
+    }
+
+    fn pro_changed(&mut self) {
+        self.tell_pro();
+        self.keep_prefs();
+    }
+
+    /// The looks' strip shown or put away.
+    fn set_strip(&mut self, open: bool) {
+        if self.strip == open {
+            return;
+        }
+        self.strip = open;
+        self.strip_fade.set(if open { 1.0 } else { 0.0 });
+        if open {
+            self.set_dial(None);
+            self.say(if self.look == Look::Tint { "← →: looks · ↑ ↓: colour" } else { "← → looks · f: done" });
+        }
+        self.tell_develop();
+    }
+
+    /// The look `by` along the strip.
+    fn choose_look(&mut self, by: i32) {
+        let at = LOOKS.iter().position(|l| *l == self.look).unwrap_or(0) as i32;
+        let to = (at + by).clamp(0, LOOKS.len() as i32 - 1) as usize;
+        if to as i32 != at + by {
+            // At an end: the strip leans a little and comes back.
+            self.strip_at.nudge(by as f32 * 3.0);
+        }
+        self.look = LOOKS[to];
+        self.strip_at.set(to as f32);
+        self.tell_develop();
+        self.keep_prefs();
+    }
+
+    /// Tint's colour turned by `by` degrees.
+    fn turn_hue(&mut self, by: f32) {
+        self.hue = (self.hue + by).rem_euclid(360.0);
+        self.tell_develop();
+        self.keep_prefs();
+    }
+
+    /// The focus check on (its crop centred here) or off.
+    fn set_focus(&mut self, at: Option<(f32, f32)>) {
+        let was = self.focus.is_some();
+        self.focus = at;
+        self.focus_fade.set(if at.is_some() { 1.0 } else { 0.0 });
+        self.control.send(Order::Focus(at));
+        if at.is_some() != was {
+            self.tell_develop();
+            if at.is_some() {
+                self.set_strip(false);
+                self.say("arrows: look around");
+            }
+        }
+    }
+
+    /// The focus check's crop moved a step (half of what is in sight).
+    fn pan_focus(&mut self, dx: f32, dy: f32) {
+        if let Some((x, y)) = self.focus {
+            let v = focus_view(x, y);
+            let (hw, hh) = ((v[2] - v[0]) * 0.5, (v[3] - v[1]) * 0.5);
+            let to = ((x + dx * hw).clamp(hw, 1.0 - hw), (y + dy * hh).clamp(hh, 1.0 - hh));
+            self.set_focus(Some(to));
         }
     }
 
@@ -1004,11 +1759,16 @@ impl Screen for Camera {
             }
             return Nav::Stay;
         }
+        let main = self.lens == Lens::Main && self.mode.shoots();
         match key {
             Key::Back | Key::Leave if self.countdown.is_some() => {
                 self.countdown = None;
                 self.say("timer stopped");
             }
+            // Esc puts away what is out first: a dial, the looks, the focus check.
+            Key::Back if self.dial.is_some() => self.set_dial(None),
+            Key::Back if self.strip => self.set_strip(false),
+            Key::Back if self.focus.is_some() => self.set_focus(None),
             // The card put away; the code not offered again while it stays
             // in sight.
             Key::Back if self.offered().is_some() => {
@@ -1016,13 +1776,52 @@ impl Screen for Camera {
                 self.found_rise.set(0.0);
             }
             Key::Back | Key::Leave => return Nav::Pop,
-            Key::Left | Key::Right | Key::Tab => self.set_mode(if self.mode == Mode::Photo { Mode::Scan } else { Mode::Photo }),
+            // The focus check: the arrows look around.
+            Key::Left if self.focus.is_some() => self.pan_focus(-1.0, 0.0),
+            Key::Right if self.focus.is_some() => self.pan_focus(1.0, 0.0),
+            Key::Up if self.focus.is_some() => self.pan_focus(0.0, -1.0),
+            Key::Down if self.focus.is_some() => self.pan_focus(0.0, 1.0),
+            // The looks: ← → along the strip, ↑ ↓ Tint's colour.
+            Key::Left if self.strip => self.choose_look(-1),
+            Key::Right if self.strip => self.choose_look(1),
+            Key::Up if self.strip && self.look == Look::Tint => self.turn_hue(15.0),
+            Key::Down if self.strip && self.look == Look::Tint => self.turn_hue(-15.0),
+            Key::Up | Key::Down if self.strip => {}
+            // A dial: ← → turn it, ↑ ↓ to the next.
+            Key::Left if self.dial.is_some() => self.turn_dial(-1),
+            Key::Right if self.dial.is_some() => self.turn_dial(1),
+            Key::Up | Key::Down if self.dial.is_some() => {
+                let at = self.dial.map_or(0, Dial::index) as i32 + if key == Key::Down { 1 } else { -1 };
+                self.set_dial(Some(DIALS[at.rem_euclid(DIALS.len() as i32) as usize]));
+            }
+            Key::Char('a') if self.dial.is_some() => self.dial_auto(),
+            Key::Left => self.set_mode(MODES[self.mode.index().saturating_sub(1)].0),
+            Key::Right => self.set_mode(MODES[(self.mode.index() + 1).min(MODES.len() - 1)].0),
+            Key::Tab => self.set_mode(MODES[(self.mode.index() + 1) % MODES.len()].0),
             Key::Enter | Key::Char(' ') | Key::Ctrl('p' | 'P') if self.quick || matches!(key, Key::Enter | Key::Char(' ')) => match self.mode {
                 Mode::Scan => return self.act(),
-                Mode::Photo if self.countdown.is_some() => {}
-                Mode::Photo if self.timer > 0 => self.countdown = Some(Instant::now() + Duration::from_secs(self.timer.into())),
-                Mode::Photo => self.shoot(cx.settings.calm, cx.settings.detail),
+                _ if self.countdown.is_some() => {}
+                _ if self.timer > 0 => self.countdown = Some(Instant::now() + Duration::from_secs(self.timer.into())),
+                _ => self.shoot(cx.settings.calm, cx.settings.detail),
             },
+            // Pro mode's dials, each on its key.
+            Key::Char('s') if self.mode == Mode::Pro => self.dial_key(Dial::Shutter),
+            Key::Char('i') if self.mode == Mode::Pro => self.dial_key(Dial::Iso),
+            Key::Char('e') if self.mode == Mode::Pro => self.dial_key(Dial::Ev),
+            Key::Char('w') if self.mode == Mode::Pro => self.dial_key(Dial::Wb),
+            Key::Char('r') if self.mode == Mode::Pro => {
+                self.raw = !self.raw;
+                self.keep_prefs();
+                self.say(if self.raw { "raw on: a .dng too" } else { "RAW off" });
+            }
+            Key::Char('x') if self.mode == Mode::Pro => {
+                self.zebras = !self.zebras;
+                self.tell_develop();
+                self.keep_prefs();
+                self.say(if self.zebras { "zebras: highlights at 98%" } else { "zebras off" });
+            }
+            Key::Char('f') if main && !self.quick => self.set_strip(!self.strip),
+            Key::Char('z') if main && !self.quick => self.set_focus(if self.focus.is_some() { None } else { Some((0.5, 0.5)) }),
             // The lens switch (↑, or l): this camera, or the smart camera's AI view.
             Key::Up | Key::Char('l') if !self.quick => self.set_lens(if self.lens == Lens::Main { Lens::Ai } else { Lens::Main }),
             Key::Char('d') => {
@@ -1060,6 +1859,7 @@ impl Screen for Camera {
             Key::Char('n') => {
                 self.night = !self.night;
                 self.control.send(Order::Night(self.night));
+                self.tell_pro();
                 self.say(if self.night { "night: longer exposures in low light" } else { "night off" });
             }
             _ => {}
@@ -1082,6 +1882,8 @@ impl Screen for Camera {
         // than saving for ever.
         if self.saving.is_some_and(|at| at.elapsed() > Duration::from_secs(20)) {
             self.saving = None;
+            self.pending = 0;
+            self.pending_paths.clear();
             self.say("the camera did not answer: no photo");
         }
         Nav::Stay
@@ -1093,6 +1895,16 @@ impl Screen for Camera {
         }
         self.clock += dt;
         let mut changed = self.mode_at.tick(dt) | self.flash.tick(dt) | self.press.tick(dt) | self.last_pop.tick(dt) | self.found_rise.tick(dt) | self.lens_at.tick(dt) | self.lens_fade.tick(dt);
+        changed |= self.dial_at.tick(dt) | self.dial_fade.tick(dt) | self.strip_at.tick(dt) | self.strip_fade.tick(dt) | self.focus_fade.tick(dt);
+        // The shot lands in the corner, and the thumbnail pops as it does.
+        let flying = self.flying.is_some();
+        changed |= self.fly.tick(dt);
+        if flying && self.fly.value() > 0.97 {
+            self.flying = None;
+            self.last_pop.jump(0.7);
+            self.last_pop.set(1.0);
+            changed = true;
+        }
         // The countdown pulses on the frame beat; the saving dots and the
         // seconds left are drawn only when they change.
         changed |= self.countdown.is_some();
@@ -1116,13 +1928,19 @@ impl Screen for Camera {
         if let Some(rx) = &self.last_rx {
             if let Ok(last) = rx.try_recv() {
                 self.last_rx = None;
-                let arrived = last.as_ref().map(|(p, _)| p.path.clone()) != self.last.as_ref().map(|(p, _)| p.path.clone());
-                self.last = last;
-                if arrived && self.last.is_some() {
-                    self.last_pop.jump(0.6);
-                    self.last_pop.set(1.0);
+                let path = last.as_ref().map(|(p, _)| p.path.clone());
+                // A photo still being written keeps its instant thumbnail:
+                // an older one from the album does not take its place.
+                let waiting = self.instant.as_ref().is_some_and(|i| self.pending_paths.contains(i) && path.as_ref() != Some(i));
+                if !waiting {
+                    let arrived = path != self.last.as_ref().map(|(p, _)| p.path.clone());
+                    self.last = last;
+                    if arrived && self.last.is_some() {
+                        self.last_pop.jump(0.6);
+                        self.last_pop.set(1.0);
+                    }
+                    changed = true;
                 }
-                changed = true;
             }
         }
         let events = {
@@ -1131,6 +1949,14 @@ impl Screen for Camera {
                 self.seen = l.frames;
                 if let Some(p) = l.preview.take() {
                     self.preview = Some(p);
+                }
+                if l.meta.is_some() {
+                    self.metered = l.meta;
+                }
+                self.histogram.clone_from(&l.histogram);
+                if l.thumbs_made != self.thumbs_seen {
+                    self.thumbs_seen = l.thumbs_made;
+                    self.thumbs = std::mem::take(&mut l.thumbs);
                 }
                 changed = true;
             }
@@ -1174,11 +2000,29 @@ impl Screen for Camera {
             self.found = None;
             changed = true;
         }
+        // The camera program was not yet listening when the dials were first
+        // told: told again once its frames come.
+        if self.told.is_none() && self.preview.is_some() {
+            self.tell_pro();
+        }
+        // A photo's exposure slower than a hand holds, said once as it gets so.
+        let shaky = self.mode.shoots() && self.shutter_now().is_some_and(pro::shaky);
+        if shaky && !self.shaky_said {
+            self.say("slow shutter: hold steady");
+        }
+        self.shaky_said = shaky;
         for event in events {
             match event {
                 Event::Captured => self.captured = true,
-                Event::Saved { path, size, detail } => {
-                    self.saving = None;
+                Event::Saved { path, size, detail, raw_skipped } => {
+                    self.pending = self.pending.saturating_sub(1);
+                    self.pending_paths.retain(|p| *p != path);
+                    if self.pending == 0 {
+                        self.saving = None;
+                    }
+                    if raw_skipped {
+                        self.say("raw skipped: no room");
+                    }
                     photos::changed();
                     // Quick capture's photo: said in the island, and the camera gives way.
                     if self.quick {
@@ -1192,13 +2036,22 @@ impl Screen for Camera {
                         self.say(format!("saved · refining, about {} s", marking.left_s(crate::burst::now_ms())));
                         self.refining = Some((path.clone(), marking));
                         self.refine_look = Instant::now();
-                    } else {
-                        self.say(if size.0 >= 3000 { "saved to photos".to_owned() } else { format!("saved · {} × {} (memory was short)", size.0, size.1) });
+                    } else if size.0 < 3000 {
+                        self.say(format!("saved · {} × {} (memory was short)", size.0, size.1));
                     }
                     self.load_last(Some(path));
                 }
                 Event::Failed(why) => {
-                    self.saving = None;
+                    self.pending = self.pending.saturating_sub(1);
+                    if self.pending == 0 {
+                        self.saving = None;
+                        self.pending_paths.clear();
+                    }
+                    // The instant thumbnail was of a photo that never came.
+                    if self.instant.take().is_some() {
+                        self.load_last(None);
+                    }
+                    self.captured = true;
                     self.say(why);
                 }
             }
@@ -1211,10 +2064,19 @@ impl Screen for Camera {
         let t = g.tokens;
         let ty = g.ty;
         if g.calm {
-            for a in [&mut self.mode_at, &mut self.press, &mut self.last_pop, &mut self.found_rise] {
+            for a in [&mut self.mode_at, &mut self.press, &mut self.last_pop, &mut self.found_rise, &mut self.dial_at, &mut self.dial_fade, &mut self.strip_at, &mut self.strip_fade, &mut self.focus_fade, &mut self.fly] {
                 a.jump(a.target());
             }
             self.flash.jump(0.0);
+            self.flying = None;
+        }
+        // Focus peaking in the signal colour.
+        let signal = [t.signal.0, t.signal.1, t.signal.2];
+        if self.peak != signal {
+            self.peak = signal;
+            if self.focus.is_some() {
+                self.tell_develop();
+            }
         }
         let vf = Self::viewfinder();
         let rail = Rect::new(vf.right(), 0.0, W - vf.right(), H);
@@ -1233,6 +2095,11 @@ impl Screen for Camera {
         let ka = self.lens_fade.value().clamp(0.0, 1.0);
         if ka < 0.999 || self.aligning {
             match &self.preview {
+                // The focus check's crop: its middle, one pixel to one.
+                Some(pic) if self.cropped() => {
+                    let view = [((pic.w as f32 - vf.w) * 0.5).max(0.0), ((pic.h as f32 - vf.h) * 0.5).max(0.0), vf.w.min(pic.w as f32), vf.h.min(pic.h as f32)];
+                    draw_picture(g, vf, pic, view, 0.0, 1.0 - ka);
+                }
                 Some(pic) => {
                     let s = 1.0 - (1.0 - 1.0 / self.align.sx.max(1.0)) * k;
                     let dest = Rect::new(vf.cx() - vf.w * s * 0.5, vf.cy() - vf.h * s * 0.5, vf.w * s, vf.h * s);
@@ -1253,11 +2120,12 @@ impl Screen for Camera {
         }
         let white = Color(255, 255, 255);
         // The face the exposure leans toward, in this camera's picture.
-        if let (Some(face), true) = (self.face, ka < 0.5 && self.mode == Mode::Photo) {
+        let whole_view = !self.cropped();
+        if let (Some(face), true) = (self.face, ka < 0.5 && self.mode.shoots() && whole_view) {
             let r = Self::on_viewfinder(vf, face);
             brackets(g, r, t.signal, 0.85 * (1.0 - 2.0 * ka));
         }
-        if self.grid && self.mode == Mode::Photo {
+        if self.grid && self.mode.shoots() && whole_view {
             for i in 1..3 {
                 let x = vf.x + vf.w * i as f32 / 3.0;
                 let y = vf.y + vf.h * i as f32 / 3.0;
@@ -1266,7 +2134,7 @@ impl Screen for Camera {
             }
         }
         // Scan mode: a square to aim with, the code outlined once read.
-        let scan = self.mode_at.value().clamp(0.0, 1.0);
+        let scan = (1.0 - self.mode_at.value()).clamp(0.0, 1.0);
         if scan > 0.01 {
             let side = (vf.h * 0.62).round();
             let sq = Rect::new(vf.cx() - side * 0.5, vf.cy() - side * 0.5, side, side);
@@ -1300,6 +2168,15 @@ impl Screen for Camera {
             let half = g.measure(&words, big) * 0.5;
             g.text_alpha(vf.cx() - half, vf.cy(), &words, big, white, 1.0 - 0.25 * pulse);
         }
+        // Pro mode's histogram and dials, the looks' strip, the focus
+        // check's chrome, and what the photo will wear (all on the main lens).
+        let main = 1.0 - ka;
+        let mut bottom = 0.0;
+        if main > 0.01 && self.mode.shoots() {
+            // The top row gives way to a note while it shows.
+            let note = self.note.as_ref().map_or(0.0, |(_, age)| ((NOTE_FOR + 0.4 - age) / 0.4).clamp(0.0, 1.0) * (age / 0.15).clamp(0.0, 1.0));
+            bottom = self.draw_overlays(g, vf, main, main * (1.0 - note));
+        }
         // The shutter's flash.
         let flash = self.flash.value();
         if flash > 0.01 {
@@ -1330,15 +2207,17 @@ impl Screen for Camera {
         }
         // Taking it (the picture held), then writing it (a detail photo's
         // merge after that is the thumbnail's badge).
+        // (Above the dials or the strip, when they are out.)
         let h = ty.caption.size + 8.0;
+        let base = vf.bottom() - 7.0 - bottom;
         let pill = |g: &mut Gfx, icon: Option<&str>, words: &str, widest: &str| {
             let lead = if icon.is_some() { h - 2.0 } else { 0.0 };
             let w = g.measure(widest, ty.caption) + 16.0 + lead;
-            g.canvas.rrect(Rect::new(vf.x + 7.0 + g.ox, vf.bottom() - 7.0 - h, w, h), h * 0.5, Color(0, 0, 0), 0.55);
+            g.canvas.rrect(Rect::new(vf.x + 7.0 + g.ox, base - h, w, h), h * 0.5, Color(0, 0, 0), 0.55);
             if let Some(icon) = icon {
-                g.icon(icon, true, vf.x + 7.0 + h * 0.5 + 1.0, vf.bottom() - 7.0 - h * 0.5, h * 0.55, t.signal);
+                g.icon(icon, true, vf.x + 7.0 + h * 0.5 + 1.0, base - h * 0.5, h * 0.55, t.signal);
             }
-            g.text_at(vf.x + 15.0 + lead, vf.bottom() - 7.0 - h * 0.5, Align::Left, words, ty.caption, white);
+            g.text_at(vf.x + 15.0 + lead, base - h * 0.5, Align::Left, words, ty.caption, white);
         };
         if self.saving.is_some() {
             let dots = ".".repeat(self.dots_drawn.max(1));
@@ -1347,17 +2226,264 @@ impl Screen for Camera {
             } else {
                 pill(g, None, &format!("hold still{dots}"), "hold still...");
             }
+        } else if let (Some(us), true) = (self.shutter_now(), self.mode == Mode::Photo && main > 0.5 && !self.strip) {
+            // Photo mode's own exposure, when it gets too slow to hold.
+            if pro::shaky(us) {
+                let words = pro::shutter_words(us);
+                pill(g, Some("back_hand"), &words, &words);
+            }
         }
         // The lens switch, when there is a smart camera to switch to.
         if self.smart.is_some() && !self.quick {
-            self.draw_lens_switch(g, vf);
+            // Above the dials or the strip: glass apart from glass.
+            self.draw_lens_switch(g, Rect::new(vf.x, vf.y, vf.w, vf.h - bottom));
         }
 
         self.draw_rail(g, rail);
+        self.draw_fly(g, vf, rail);
     }
 }
 
 impl Camera {
+    /// The focus check's frames are in (a crop, not the whole picture).
+    fn cropped(&self) -> bool {
+        self.focus.is_some() && self.metered.is_some_and(|m| m.zoom > 0.0)
+    }
+
+    /// What a photo taken now would be taken with.
+    fn still_now(&self) -> Option<pro::StillControls> {
+        self.metered.map(|m| pro::still((self.mode == Mode::Pro).then_some(&self.pro), &m, self.night))
+    }
+
+    fn shutter_now(&self) -> Option<u32> {
+        self.still_now().map(|s| s.exposure_us)
+    }
+
+    /// The newest photo's place in the rail.
+    fn thumb_rect(rail: Rect) -> Rect {
+        let (tw, th) = (36.0, 27.0);
+        Rect::new(rail.x + 10.0, H - PAD - th - 2.0, tw, th)
+    }
+
+    /// A word on a dark chip over the picture, at (x, y); its width.
+    fn chip(g: &mut Gfx, x: f32, y: f32, icon: Option<&str>, words: &str, color: Color, alpha: f32) -> f32 {
+        let cap = g.ty.caption;
+        let h = cap.size + 8.0;
+        let lead = if icon.is_some() { cap.size + 2.0 } else { 0.0 };
+        let w = (g.measure(words, cap) + 14.0 + lead).round();
+        g.canvas.rrect(Rect::new(x + g.ox, y, w, h), h * 0.5, Color(0, 0, 0), 0.55 * alpha);
+        if let Some(icon) = icon {
+            g.icon_alpha(icon, true, x + 7.0 + cap.size * 0.5, y + h * 0.5, cap.size, color, alpha);
+        }
+        g.text_alpha(x + 7.0 + lead, y + h * 0.5, words, cap, Color(255, 255, 255), alpha);
+        w
+    }
+
+    /// The overlays on this camera's picture: what the photo will wear (its
+    /// look, RAW), pro mode's histogram and dials, the looks' strip, the
+    /// focus check's scale and where it is (the top row at `top`, which
+    /// gives way to a note). Gives how much of the viewfinder's foot they take.
+    fn draw_overlays(&mut self, g: &mut Gfx, vf: Rect, alpha: f32, top: f32) -> f32 {
+        let t = g.tokens;
+        let m = 6.0;
+        let mut x = vf.x + m;
+        if top > 0.01 {
+            if self.focus.is_some() {
+                let words = match self.metered.map(|m| m.zoom) {
+                    Some(z) if z > 0.0 && z < 0.99 => "1:2",
+                    _ => "1:1",
+                };
+                x += Self::chip(g, x, vf.y + m, Some("center_focus_strong"), words, t.signal, top) + 4.0;
+            }
+            if self.look != Look::Original && !self.strip {
+                let name = self.look.name().to_lowercase();
+                x += Self::chip(g, x, vf.y + m, Some("photo_filter"), &name, t.ice, top) + 4.0;
+            }
+            if self.mode == Mode::Pro && self.raw {
+                Self::chip(g, x, vf.y + m, None, "raw", t.ink, top);
+            }
+            if self.mode == Mode::Pro {
+                self.draw_histogram(g, vf, top);
+            }
+        }
+        let strip = self.strip_fade.value().clamp(0.0, 1.0);
+        let mut foot = 0.0f32;
+        if self.mode == Mode::Pro && strip < 0.99 {
+            foot = foot.max(self.draw_dials(g, vf, alpha * (1.0 - strip)));
+        }
+        if strip > 0.01 {
+            foot = foot.max(self.draw_strip(g, vf, alpha * strip));
+        }
+        if let Some((fx, fy)) = self.focus {
+            // Where the crop is in the whole picture.
+            let fade = self.focus_fade.value().clamp(0.0, 1.0) * alpha;
+            let (bw, bh) = (40.0, 30.0);
+            let b = Rect::new(vf.right() - m - bw, vf.bottom() - m - foot - bh, bw, bh);
+            g.canvas.rrect(b.inset(-3.0).offset(g.ox, 0.0), 6.0, Color(0, 0, 0), 0.55 * fade);
+            outline(g, b, 1.0, Color(255, 255, 255), 0.5 * fade);
+            let (vw, vh) = ((vf.w / FULL.0 as f32 * bw).max(3.0), (vf.h / FULL.1 as f32 * bh).max(2.0));
+            let at = Rect::new(b.x + fx * bw - vw * 0.5, b.y + fy * bh - vh * 0.5, vw, vh);
+            g.canvas.fill_rect(at.offset(g.ox, 0.0), t.signal, fade);
+            foot = foot.max(foot + bh + 6.0);
+        }
+        foot
+    }
+
+    /// The live histogram, top right: the camera's own brightness before any
+    /// look, the clipping mark at its right in the signal colour.
+    fn draw_histogram(&self, g: &mut Gfx, vf: Rect, alpha: f32) {
+        let t = g.tokens;
+        let (hw, hh) = (pro::BINS as f32, 24.0);
+        let pad = 4.0;
+        let b = Rect::new(vf.right() - 6.0 - hw - 2.0 * pad, vf.y + 6.0, hw + 2.0 * pad, hh + 2.0 * pad);
+        g.canvas.rrect(b.offset(g.ox, 0.0), 8.0, Color(0, 0, 0), 0.55 * alpha);
+        let base = b.bottom() - pad;
+        for (i, k) in self.histogram.heights().iter().enumerate() {
+            let height = (k * hh).max(if *k > 0.0 { 1.0 } else { 0.0 });
+            if height > 0.0 {
+                g.canvas.fill_rect(Rect::new(b.x + pad + i as f32 + g.ox, base - height, 1.0, height), Color(236, 238, 242), 0.85 * alpha);
+            }
+        }
+        if self.histogram.clipped > 0.002 {
+            g.canvas.fill_rect(Rect::new(b.right() - pad - 2.0 + g.ox, b.y + pad, 2.0, hh), t.signal, alpha);
+        }
+    }
+
+    /// Pro mode's dials: shutter, ISO, compensation and white balance in a
+    /// bar of glass along the foot, the one being turned an ice capsule that
+    /// slides between them (Bezel's mode buttons). Values set by hand in
+    /// ink, the camera's own choice dimmer; a hand beside a shutter too slow
+    /// to hold. Gives its height with its margin.
+    fn draw_dials(&mut self, g: &mut Gfx, vf: Rect, alpha: f32) -> f32 {
+        if alpha <= 0.01 {
+            return 0.0;
+        }
+        let t = g.tokens;
+        let cap = g.ty.caption;
+        let m = 6.0;
+        let bh = (cap.size + 12.0).round();
+        let pad = 3.0;
+        let r = Rect::new(vf.x + m, vf.bottom() - m - bh, vf.w - 2.0 * m, bh);
+        g.glass(&[bezel::GlassShape::new(r.offset(g.ox, 0.0), bh * 0.5, 12)]);
+        let cell = (r.w - 2.0 * pad) / DIALS.len() as f32;
+        let metered = self.metered.unwrap_or_default();
+        let still = self.still_now();
+        let shutter_us = self.pro.shutter.map_or_else(|| still.map_or(metered.exposure_us, |s| s.exposure_us), |i| pro::SHUTTERS[i].us);
+        let iso = self.pro.iso.map_or_else(|| still.map_or(metered.iso(), |s| (s.gain * 100.0).round() as u32), |i| pro::ISOS[i]);
+        let iso_word = |long: bool| {
+            let n = pro::iso_words(iso).trim_start_matches("ISO ").to_owned();
+            if long { format!("iso {n}") } else { n }
+        };
+        let iso_text = if g.measure(&iso_word(true), cap) <= cell - 6.0 { iso_word(true) } else { iso_word(false) };
+        let wb = match self.pro.wb {
+            pro::Wb::Auto => "awb".to_owned(),
+            k => k.words(),
+        };
+        // Fully manual, the compensation's place shows the meter instead.
+        let ev = if self.pro.manual() {
+            let stops = pro::meter(&metered, shutter_us, iso as f32 / 100.0);
+            pro::ev_words((stops * 3.0).round().clamp(-9.0, 9.0) as i8)
+        } else {
+            self.pro.ev_words()
+        };
+        let cells = [
+            (pro::shutter_words(shutter_us), self.pro.shutter.is_some()),
+            (iso_text, self.pro.iso.is_some()),
+            (ev, self.pro.ev != 0 && !self.pro.manual()),
+            (wb, self.pro.wb != pro::Wb::Auto),
+        ];
+        // The capsule behind the dial being turned.
+        let fade = self.dial_fade.value().clamp(0.0, 1.0);
+        if fade > 0.01 {
+            let x = r.x + pad + cell * self.dial_at.value();
+            g.canvas.rrect(Rect::new(x + g.ox, r.y + pad, cell, bh - 2.0 * pad), bh * 0.5 - pad, t.ice, fade * alpha);
+        }
+        let shaky = pro::shaky(shutter_us);
+        for (i, (words, set)) in cells.iter().enumerate() {
+            let on = if self.dial.map(Dial::index) == Some(i) { fade } else { 0.0 };
+            let rest = if *set { t.ink } else { t.dim };
+            let ink = mix(rest, t.on_ice, on);
+            let cx = r.x + pad + cell * (i as f32 + 0.5);
+            let words = g.text.fit(words, &cap, cell - 4.0);
+            let tw = g.measure(&words, cap);
+            let icon = if i == 0 && shaky { cap.size + 2.0 } else { 0.0 };
+            let left = cx - (tw + icon) * 0.5;
+            if icon > 0.0 {
+                g.icon_alpha("back_hand", true, left + cap.size * 0.5, r.cy(), cap.size, mix(t.signal, t.on_ice, on), alpha);
+            }
+            g.text_alpha(left + icon, r.cy(), &words, cap, ink, alpha);
+        }
+        bh + m
+    }
+
+    /// The looks' strip along the foot: each look's live thumbnail, the one
+    /// chosen ringed in ice and named above, sliding to keep it in the
+    /// middle. Gives its height with the name and margins.
+    fn draw_strip(&mut self, g: &mut Gfx, vf: Rect, alpha: f32) -> f32 {
+        let t = g.tokens;
+        let cap = g.ty.caption;
+        let m = 6.0;
+        let (tw, th) = (THUMB.0 as f32, THUMB.1 as f32);
+        let gap = 6.0;
+        let rise = (1.0 - alpha) * 12.0;
+        let y = vf.bottom() - m - th + rise;
+        let at = self.strip_at.value();
+        g.canvas.set_clip(vf.offset(g.ox, 0.0));
+        let chosen = LOOKS.iter().position(|l| *l == self.look).unwrap_or(0);
+        for (i, _) in LOOKS.iter().enumerate() {
+            let cx = vf.cx() + (i as f32 - at) * (tw + gap);
+            if cx + tw < vf.x || cx - tw > vf.right() {
+                continue;
+            }
+            let r = Rect::new((cx - tw * 0.5).round(), y, tw, th);
+            if i == chosen {
+                // Concentric: the ring's corners are the thumbnail's and its gap.
+                g.canvas.rrect(r.inset(-3.0).offset(g.ox, 0.0), 9.0, t.ice, alpha);
+                g.canvas.rrect(r.inset(-1.5).offset(g.ox, 0.0), 7.5, Color(6, 6, 8), alpha);
+            }
+            // Pictures are drawn past any clip: cut to the viewfinder here.
+            let (x0, x1) = (r.x.max(vf.x), r.right().min(vf.right()));
+            if x1 - x0 < 1.0 {
+                continue;
+            }
+            let part = Rect::new(x0, r.y, x1 - x0, r.h);
+            let whole_one = x0 <= r.x && x1 >= r.right();
+            match self.thumbs.get(i) {
+                Some(p) => {
+                    let k = p.w as f32 / r.w;
+                    draw_picture(g, part, p, [(x0 - r.x) * k, 0.0, (x1 - x0) * k, p.h as f32], if whole_one { 6.0 } else { 0.0 }, alpha);
+                }
+                None => g.canvas.rrect(part.offset(g.ox, 0.0), 6.0, t.surface1, alpha),
+            }
+        }
+        g.canvas.clear_clip();
+        // The chosen look's name (and Tint's colour), above the strip.
+        let name = self.look.name().to_lowercase();
+        let h = cap.size + 8.0;
+        let dot = if self.look == Look::Tint { cap.size } else { 0.0 };
+        let w = g.measure(&name, cap) + 16.0 + if dot > 0.0 { dot + 4.0 } else { 0.0 };
+        let ly = y - 7.0 - h;
+        g.canvas.rrect(Rect::new(vf.cx() - w * 0.5 + g.ox, ly, w, h), h * 0.5, Color(0, 0, 0), 0.55 * alpha);
+        let mut tx = vf.cx() - w * 0.5 + 8.0;
+        if dot > 0.0 {
+            let c = crate::filters::tint_colour(self.hue).map(|v| (v * 255.0).round() as u8);
+            g.canvas.rrect(Rect::new(tx + g.ox, ly + (h - dot) * 0.5, dot, dot), dot * 0.5, Color(c[0], c[1], c[2]), alpha);
+            tx += dot + 4.0;
+        }
+        g.text_alpha(tx, ly + h * 0.5, &name, cap, Color(255, 255, 255), alpha);
+        th + m + 7.0 + h - rise
+    }
+
+    /// The shot flying from the viewfinder into the rail's corner.
+    fn draw_fly(&self, g: &mut Gfx, vf: Rect, rail: Rect) {
+        let Some(pic) = &self.flying else { return };
+        let k = self.fly.value().clamp(0.0, 1.0);
+        let to = Self::thumb_rect(rail);
+        let lerp = |a: f32, b: f32| a + (b - a) * k;
+        let r = Rect::new(lerp(vf.x, to.x), lerp(vf.y, to.y), lerp(vf.w, to.w), lerp(vf.h, to.h));
+        draw_picture(g, r, pic, whole(pic), lerp(0.0, 5.0), 1.0);
+    }
+
     /// The smart camera's news: its status, its picture, what it found;
     /// the face handed to the exposure; its codes to scan mode. True if any
     /// of it shows.
@@ -1583,17 +2709,37 @@ impl Camera {
     fn draw_rail(&mut self, g: &mut Gfx, rail: Rect) {
         let t = g.tokens;
         let ty = g.ty;
-        // The modes, a mark sliding under the one in use.
+        // The modes: the one in use named, sliding aside and fading as the
+        // next comes in (← →), over a pager's dots, the one in use in ink.
         let cap = ty.caption;
-        let (photo_w, scan_w) = (g.measure("photo", cap), g.measure("scan", cap));
-        let gap = 10.0;
-        let x0 = rail.cx() - (photo_w + gap + scan_w) * 0.5;
+        let at = self.mode_at.value().clamp(0.0, (MODES.len() - 1) as f32);
         let cy = PAD + cap.size * 0.5 + 2.0;
-        let at = self.mode_at.value();
-        g.text_at(x0, cy, Align::Left, "photo", cap, if self.mode == Mode::Photo { t.ink } else { t.dim });
-        g.text_at(x0 + photo_w + gap, cy, Align::Left, "scan", cap, if self.mode == Mode::Scan { t.ink } else { t.dim });
-        let (mx, mw) = (x0 + (photo_w + gap) * at, photo_w + (scan_w - photo_w) * at);
-        g.surface(Rect::new(mx, cy + cap.size * 0.5 + 3.0, mw, 2.0), 1.0, t.signal);
+        for (i, (_, name)) in MODES.iter().enumerate() {
+            let d = i as f32 - at;
+            let a = (1.0 - d.abs() * 1.4).clamp(0.0, 1.0);
+            if a > 0.01 {
+                let half = g.measure(name, cap) * 0.5;
+                g.text_alpha(rail.cx() + d * 22.0 - half, cy, name, cap, t.ink, a);
+            }
+        }
+        let (dot, gap) = (4.0, 5.0);
+        let row = MODES.len() as f32 * dot + (MODES.len() - 1) as f32 * gap;
+        let dy = cy + cap.size * 0.5 + 6.0;
+        for i in 0..MODES.len() {
+            let x = rail.cx() - row * 0.5 + i as f32 * (dot + gap);
+            g.canvas.rrect(Rect::new(x + g.ox, dy, dot, dot), dot * 0.5, t.faint, 1.0);
+        }
+        // The one in use: a capsule that stretches as it slides.
+        let stretch = (1.0 - (at - at.round()).abs() * 2.0).clamp(0.0, 1.0);
+        let w = dot + (dot + gap) * (1.0 - stretch);
+        let x = rail.cx() - row * 0.5 + at * (dot + gap) - (w - dot) * 0.5;
+        g.canvas.rrect(Rect::new(x + g.ox, dy, w, dot), dot * 0.5, t.ink, 1.0);
+        // The lens's aperture: fixed, so said, never a dial.
+        let pro_k = (at - 1.0).clamp(0.0, 1.0);
+        if pro_k > 0.01 && self.lens == Lens::Main {
+            let half = g.measure(pro::APERTURE, cap) * 0.5;
+            g.text_alpha(rail.cx() - half, dy + dot + 4.0 + cap.size * 0.5, pro::APERTURE, cap, t.dim, pro_k);
+        }
 
         // The shutter: a ring, and in it a disc that presses in.
         let (sx, sy) = (rail.cx(), (H * 0.5).round());
@@ -1602,8 +2748,8 @@ impl Camera {
         g.canvas.rrect(Rect::new(sx - ring + 2.5 + g.ox, sy - ring + 2.5, ring * 2.0 - 5.0, ring * 2.0 - 5.0), ring - 2.5, t.ground, 1.0);
         let inner = (ring - 5.5) * (1.0 - 0.12 * self.press.value().clamp(0.0, 1.0));
         match self.mode {
-            Mode::Photo => {
-                let a = if self.saving.is_some() { 0.45 } else { 1.0 };
+            Mode::Photo | Mode::Pro => {
+                let a = if self.saving.is_some() && !self.captured { 0.45 } else { 1.0 };
                 g.canvas.rrect(Rect::new(sx - inner + g.ox, sy - inner, inner * 2.0, inner * 2.0), inner, t.ink, a);
                 if self.timer > 0 && self.countdown.is_none() {
                     g.text_at(sx, sy, Align::Center, &format!("{}s", self.timer), ty.caption, t.ground);
@@ -1612,13 +2758,15 @@ impl Camera {
             Mode::Scan => g.icon("qr_code_scanner", false, sx, sy, 18.0, t.ink),
         }
 
-        // The last photo, opening the album (↓).
-        let (tw, th) = (36.0, 27.0);
-        let thumb = Rect::new(rail.x + 10.0, H - PAD - th - 2.0, tw, th);
+        // The last photo, opening the album (↓); while a shot flies into
+        // it, its place waits.
+        let thumb = Self::thumb_rect(rail);
+        let (tw, th) = (thumb.w, thumb.h);
         let pop = self.last_pop.value();
         let grown = Rect::new(thumb.cx() - tw * pop * 0.5, thumb.cy() - th * pop * 0.5, tw * pop, th * pop);
         match &self.last {
-            Some((_, pic)) => draw_picture(g, grown, pic, whole(pic), 5.0, 1.0),
+            Some((_, pic)) if self.flying.is_none() => draw_picture(g, grown, pic, whole(pic), 5.0, 1.0),
+            Some(_) => g.surface(thumb, 5.0, t.surface1),
             None => {
                 g.surface(thumb, 5.0, t.surface1);
                 g.icon("photo_library", false, thumb.cx(), thumb.cy(), 13.0, t.faint);
@@ -1781,17 +2929,26 @@ impl Screen for TextPage {
 /// bumper), drifting a little as a hand would; in scan mode a card with a
 /// Wi-Fi QR code held up in front.
 pub fn scene(w: usize, h: usize, t: f32, with_code: bool) -> Picture {
+    scene_part(w, h, t, with_code, [0.0, 0.0, 1.0, 1.0])
+}
+
+/// Part of the scene (`view`: x0, y0, x1, y1, 0 to 1 of the whole) drawn
+/// at `w` × `h`: the focus check's crop at the photo's own scale.
+pub fn scene_part(w: usize, h: usize, t: f32, with_code: bool, view: [f32; 4]) -> Picture {
     let mut pic = Picture::new(w, h);
     let (fw, fh) = (w as f32, h as f32);
+    let (sx, sy) = ((view[2] - view[0]) / fw, (view[3] - view[1]) / fh);
+    // The whole picture's shape (the sun is round in it).
+    let aspect = 4.0 / 3.0;
     // A hand's drift, and the light changing with the time.
     let (jx, jy) = ((t * 0.7).sin() * 0.012, (t * 0.53).cos() * 0.01);
     let warm = 0.5 + 0.5 * (t * 0.11).sin();
     let horizon = 0.58 + jy;
     let sun = (0.72 + jx + 0.05 * (t * 0.05).sin(), 0.3 + jy);
     for y in 0..h {
-        let v = y as f32 / fh;
+        let v = view[1] + y as f32 * sy;
         for x in 0..w {
-            let u = x as f32 / fw;
+            let u = view[0] + x as f32 * sx;
             let (mut r, mut g, mut b);
             let hill1 = horizon - 0.07 - 0.05 * ((u + jx) * 7.0).sin() - 0.03 * ((u + jx) * 17.0 + 1.0).sin();
             let hill2 = horizon - 0.02 - 0.03 * ((u + jx) * 11.0 + 2.0).sin();
@@ -1802,7 +2959,7 @@ pub fn scene(w: usize, h: usize, t: f32, with_code: bool) -> Picture {
                 g = 90.0 + 110.0 * k * (0.7 + 0.2 * warm);
                 b = 190.0 - 60.0 * k;
                 // The sun and its glow.
-                let d = (((u - sun.0) * fw / fh).powi(2) + (v - sun.1).powi(2)).sqrt();
+                let d = (((u - sun.0) * aspect).powi(2) + (v - sun.1).powi(2)).sqrt();
                 let glow = (1.0 - d / 0.35).max(0.0).powi(2);
                 r += 120.0 * glow;
                 g += 90.0 * glow;
@@ -1817,7 +2974,13 @@ pub fn scene(w: usize, h: usize, t: f32, with_code: bool) -> Picture {
             } else {
                 // The carpet, with white lines meeting at the far end.
                 let k = (v - horizon) / (1.0 - horizon);
-                (r, g, b) = (70.0 + 20.0 * k, 78.0 + 18.0 * k, 86.0 + 14.0 * k);
+                // Its weave, fine enough to show only near the photo's own scale.
+                let (px, py) = ((u * 3280.0) as u32, (v * 2464.0) as u32);
+                let weave = (px.wrapping_mul(2_654_435_761) ^ py.wrapping_mul(40_503)).wrapping_mul(2_246_822_519) >> 28;
+                // (Averaged away as a smaller picture would: each of its
+                // pixels stands for many.)
+                let fibre = (weave as f32 - 7.5) / (sx * 3280.0).max(1.0);
+                (r, g, b) = (70.0 + 20.0 * k + fibre, 78.0 + 18.0 * k + fibre, 86.0 + 14.0 * k + fibre);
                 let lane = ((u - 0.5 - jx) / (0.08 + 0.9 * k)).abs();
                 if (lane - 0.5).abs() < 0.03 + 0.01 * k || (k * 9.0).fract() < 0.035 {
                     (r, g, b) = (226.0, 228.0, 232.0);
@@ -2086,6 +3249,237 @@ pub fn shots(dir: &std::path::Path) {
     );
 }
 
+/// The Camera's 0.9.2 pictures (`catalyst-shell --camera-pro-shots DIR`):
+/// pro mode's viewfinder (a dial being turned, a slow shutter, the zebras
+/// and histogram; and all in auto), the looks' strip, the focus check with
+/// peaking, photo mode's slow-shutter warning and the shutter's instant
+/// thumbnail flying in, in dark and light at each text size; each look on
+/// the sample scene in one sheet; and a sheet of each screen's six.
+#[cfg(not(target_arch = "aarch64"))]
+pub fn pro_shots(dir: &std::path::Path) {
+    use crate::gfx::TextSize;
+    use crate::shell::Shell;
+    std::fs::create_dir_all(dir).ok();
+    crate::smartcam::sim::choose(false);
+    let t = 3.1;
+    // The sample scene: the pit at the end of the afternoon, the robot on the carpet.
+    let sample = scene(PREVIEW_W, PREVIEW_H, t, false);
+    let yuv_of = |pic: &Picture| rgb_to_yuv420(pic);
+    let developed = |yuv: &[u8], look: Look, hue: f32, zebras: bool| {
+        let mut out = Picture::default();
+        look.compiled(hue).develop(yuv, PREVIEW_W, PREVIEW_H, &mut out, zebras.then_some(0));
+        out
+    };
+    let metered = |exposure_us: u32, gain: f32, zoom: f32| Metered { exposure_us, analogue: gain, digital: 1.0, gains: [1.82, 1.46], ct: 5200, lux: 320.0, settled: true, fom: 900, zoom };
+    let thumbs = |yuv: &[u8], hue: f32| {
+        let small = shrink_yuv420(yuv, PREVIEW_W, PREVIEW_H, THUMB.0, THUMB.1);
+        LOOKS
+            .iter()
+            .map(|l| {
+                let mut p = Picture::default();
+                l.compiled(hue).develop(&small, THUMB.0, THUMB.1, &mut p, None);
+                p
+            })
+            .collect::<Vec<_>>()
+    };
+    let base_yuv = yuv_of(&sample);
+    // Overexposed half a stop and more for the zebras (the sun, its glow and the lines clip).
+    let mut bright = sample.clone();
+    sim_expose(&mut bright, 1.6, SIM_CT);
+    let bright_yuv = yuv_of(&bright);
+    // The focus check's crop: the robot's bumper and the carpet's lines, 1:1.
+    let crop = focus_view(0.47, 0.72);
+    let mut crop_pic = scene_part(PREVIEW_W, PREVIEW_H, t, false, crop);
+    sim_expose(&mut crop_pic, 1.0, SIM_CT);
+    let crop_yuv = yuv_of(&crop_pic);
+
+    type Setup = Box<dyn Fn(&mut Camera)>;
+    let snap = |c: &mut Camera| {
+        for a in [&mut c.mode_at, &mut c.dial_at, &mut c.dial_fade, &mut c.strip_at, &mut c.strip_fade, &mut c.focus_fade] {
+            a.jump(a.target());
+        }
+    };
+    let screens: Vec<(&str, Setup)> = vec![
+        ("1-pro-dial", {
+            let (pic, hist) = (developed(&bright_yuv, Look::Original, 0.0, true), pro::Histogram::of_luma(&bright_yuv[..PREVIEW_W * PREVIEW_H], PREVIEW_W, PREVIEW_H, 2));
+            Box::new(move |c: &mut Camera| {
+                c.set_mode(Mode::Pro);
+                c.pro = Pro { shutter: Some(pro::nearest_shutter(66_667)), iso: Some(0), ev: 0, wb: pro::Wb::Kelvin(5500) };
+                c.set_dial(Some(Dial::Shutter));
+                c.raw = true;
+                c.preview = Some(pic.clone());
+                c.histogram = hist.clone();
+                c.histogram.clipped = 0.08;
+                c.metered = Some(metered(66_667, 1.0, 0.0));
+                c.note = None;
+                snap(c);
+            })
+        }),
+        ("2-pro-auto", {
+            let (pic, hist) = (developed(&base_yuv, Look::Contemporary, 0.0, true), pro::Histogram::of_luma(&base_yuv[..PREVIEW_W * PREVIEW_H], PREVIEW_W, PREVIEW_H, 2));
+            Box::new(move |c: &mut Camera| {
+                c.set_mode(Mode::Pro);
+                c.pro = Pro { ev: -1, ..Pro::default() };
+                c.look = Look::Contemporary;
+                c.set_dial(Some(Dial::Ev));
+                c.preview = Some(pic.clone());
+                c.histogram = hist.clone();
+                c.metered = Some(metered(16_667, 3.2, 0.0));
+                c.note = None;
+                snap(c);
+            })
+        }),
+        ("3-looks-strip", {
+            let (pic, th) = (developed(&base_yuv, Look::VividWarm, 0.0, false), thumbs(&base_yuv, 32.0));
+            Box::new(move |c: &mut Camera| {
+                c.look = Look::VividWarm;
+                c.strip = true;
+                c.strip_fade.set(1.0);
+                c.strip_at.set(2.0);
+                c.thumbs = th.clone();
+                c.preview = Some(pic.clone());
+                c.metered = Some(metered(16_667, 2.0, 0.0));
+                c.note = None;
+                snap(c);
+            })
+        }),
+        ("4-looks-tint", {
+            let (pic, th) = (developed(&base_yuv, Look::Tint, 205.0, false), thumbs(&base_yuv, 205.0));
+            Box::new(move |c: &mut Camera| {
+                c.look = Look::Tint;
+                c.hue = 205.0;
+                c.strip = true;
+                c.strip_fade.set(1.0);
+                c.strip_at.set(14.0);
+                c.thumbs = th.clone();
+                c.preview = Some(pic.clone());
+                c.metered = Some(metered(16_667, 2.0, 0.0));
+                c.note = Some(("← →: looks · ↑ ↓: colour".into(), 1.0));
+                snap(c);
+            })
+        }),
+        ("5-focus-check", {
+            let pic = developed(&crop_yuv, Look::Original, 0.0, false);
+            Box::new(move |c: &mut Camera| {
+                c.focus = Some((0.47, 0.72));
+                c.focus_fade.set(1.0);
+                let colour = [c.peak[0], c.peak[1], c.peak[2]];
+                let mut pic = pic.clone();
+                for (px, on) in pic.rgb.chunks_exact_mut(3).zip(pro::peaks(&crop_yuv[..PREVIEW_W * PREVIEW_H], PREVIEW_W, PREVIEW_H)) {
+                    if on {
+                        px.copy_from_slice(&colour);
+                    }
+                }
+                c.preview = Some(pic.clone());
+                c.metered = Some(metered(16_667, 2.0, 1.0));
+                c.note = None;
+                snap(c);
+            })
+        }),
+        ("6-photo-slow-shutter", {
+            let mut dim = sample.clone();
+            sim_expose(&mut dim, 0.55, SIM_CT);
+            let pic = developed(&yuv_of(&dim), Look::Classic, 0.0, false);
+            Box::new(move |c: &mut Camera| {
+                c.look = Look::Classic;
+                c.preview = Some(pic.clone());
+                // Dim enough that photo mode's own exposure gets to 1/15.
+                c.metered = Some(metered(66_667, 10.0, 0.0));
+                c.night = true;
+                c.note = None;
+                snap(c);
+            })
+        }),
+        ("7-instant-shot", {
+            let pic = developed(&base_yuv, Look::Vivid, 0.0, false);
+            Box::new(move |c: &mut Camera| {
+                c.look = Look::Vivid;
+                c.preview = Some(pic.clone());
+                c.metered = Some(metered(8_000, 1.0, 0.0));
+                c.flying = Some(pic.clone());
+                c.fly.jump(0.42);
+                c.saving = Some(Instant::now());
+                c.captured = true;
+                c.dots_drawn = 2;
+                c.last = Some((Photo { path: PathBuf::from("IMG_new.jpg"), name: "IMG_new.jpg".into(), taken: chrono::Local::now().naive_local(), bytes: 0 }, pic.cover(photos::THUMB_W, photos::THUMB_H)));
+                c.note = None;
+                snap(c);
+            })
+        }),
+    ];
+    let mut sheets: Vec<Vec<bezel::Canvas>> = (0..screens.len()).map(|_| Vec::new()).collect();
+    for light in [false, true] {
+        for (size, tag) in [(TextSize::Compact, "compact"), (TextSize::Standard, "standard"), (TextSize::Large, "large")] {
+            let tone = if light { "light" } else { "dark" };
+            for (n, (name, setup)) in screens.iter().enumerate() {
+                let mut camera = Camera::new();
+                camera.frozen = true;
+                camera.flash.jump(0.0);
+                // As set here, whatever this computer's Camera kept.
+                (camera.look, camera.hue, camera.raw, camera.zebras, camera.pro) = (Look::Original, 32.0, false, true, Pro::default());
+                camera.last = None;
+                camera.last_rx = None;
+                let mut shell = Shell::new(crate::robot::Robot::demo());
+                (shell.settings.text, shell.settings.light) = (size, light);
+                shell.apply_settings();
+                // The peaking colour is the theme's signal.
+                let s = shell.gfx.tokens.signal;
+                camera.peak = [s.0, s.1, s.2];
+                setup(&mut camera);
+                shell.show(Box::new(camera));
+                for _ in 0..90 {
+                    if shell.tick(1.0 / 60.0) {
+                        shell.draw();
+                    }
+                }
+                shell.draw();
+                crate::platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}-{tone}-{tag}.png")), 3);
+                sheets[n].push(shell.gfx.canvas.clone());
+            }
+        }
+    }
+    // Each screen's six (dark above light; compact, standard, large).
+    for ((name, _), shots) in screens.iter().zip(&sheets) {
+        let (w, h) = (W as i32, H as i32);
+        let gap = 6;
+        let mut sheet = bezel::Canvas::new(3 * w + 2 * gap, 2 * h + gap);
+        sheet.px.fill(0x0080_8080);
+        for (i, shot) in shots.iter().enumerate() {
+            let (ox, oy) = ((i % 3) as i32 * (w + gap), (i / 3) as i32 * (h + gap));
+            for y in 0..h {
+                let from = (y * shot.w) as usize;
+                let to = ((oy + y) * sheet.w + ox) as usize;
+                sheet.px[to..to + w as usize].copy_from_slice(&shot.px[from..from + w as usize]);
+            }
+        }
+        crate::platform::sim::save_png(&sheet, &dir.join(format!("sheet-{name}.png")), 2);
+    }
+    // Every look on the sample scene, named, five across.
+    let (cw, ch) = (PREVIEW_W as i32, PREVIEW_H as i32);
+    let label = 22;
+    let mut sheet = bezel::Canvas::new(5 * cw, 3 * (ch + label));
+    sheet.px.fill(0x0010_1214);
+    let mut shell = Shell::new(crate::robot::Robot::demo());
+    shell.apply_settings();
+    for (i, look) in LOOKS.iter().enumerate() {
+        let pic = developed(&base_yuv, *look, 32.0, false);
+        let (ox, oy) = ((i % 5) as i32 * cw, (i / 5) as i32 * (ch + label));
+        for y in 0..ch {
+            for x in 0..cw {
+                let p = &pic.rgb[((y * cw + x) * 3) as usize..];
+                sheet.px[((oy + y) * sheet.w + ox + x) as usize] = (u32::from(p[0]) << 16) | (u32::from(p[1]) << 8) | u32::from(p[2]);
+            }
+        }
+        let g = &mut shell.gfx;
+        std::mem::swap(&mut g.canvas, &mut sheet);
+        let ty = g.ty;
+        g.text_at(ox as f32 + 8.0, (oy + ch) as f32 + label as f32 * 0.5, Align::Left, &look.name().to_lowercase(), ty.caption, Color(236, 238, 242));
+        std::mem::swap(&mut g.canvas, &mut sheet);
+    }
+    crate::platform::sim::save_png(&sheet, &dir.join("looks-on-the-sample-scene.png"), 2);
+    println!("camera 0.9.2 shots in {}", dir.display());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2170,7 +3564,7 @@ mod tests {
         let _port = crate::smartcam::sim::exclusive(false);
         let mut camera = Camera::new();
         run(&mut camera, 300);
-        assert!(matches!(press(&mut camera, Key::Right), Nav::Stay));
+        assert!(matches!(press(&mut camera, Key::Left), Nav::Stay));
         assert_eq!(camera.mode, Mode::Scan);
         // The reader runs a few times a second on the simulated Wi-Fi card.
         let started = Instant::now();
@@ -2186,8 +3580,8 @@ mod tests {
         assert!(camera.offered().is_none() && camera.found.is_none(), "put away");
         // Back to photos and to scanning again: it is offered afresh, and
         // Enter takes it to the Wi-Fi page.
-        press(&mut camera, Key::Left);
         press(&mut camera, Key::Right);
+        press(&mut camera, Key::Left);
         let started = Instant::now();
         while camera.offered().is_none() && started.elapsed() < Duration::from_secs(8) {
             run(&mut camera, 50);
@@ -2195,7 +3589,7 @@ mod tests {
         assert!(camera.offered().is_some(), "offered again after scanning anew");
         assert!(matches!(press(&mut camera, Key::Enter), Nav::Push(_)));
         // With nothing to put away, Esc leaves.
-        press(&mut camera, Key::Left);
+        press(&mut camera, Key::Right);
         assert!(matches!(press(&mut camera, Key::Back), Nav::Pop));
     }
 
@@ -2211,7 +3605,7 @@ mod tests {
         }
         let path = photos::new_path(chrono::Local::now().naive_local());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        assert!(camera.control.send(Order::Still(path.clone())));
+        assert!(camera.control.send(Order::Still(path.clone(), Vec::new())));
         let mut saved = None;
         let mut captured = false;
         while saved.is_none() && started.elapsed() < Duration::from_secs(30) {
@@ -2221,7 +3615,7 @@ mod tests {
                     captured = true;
                     None
                 }
-                Event::Saved { path, size, detail } => Some((path, size, detail)),
+                Event::Saved { path, size, detail, .. } => Some((path, size, detail)),
                 Event::Failed(why) => panic!("{why}"),
             });
         }
@@ -2266,7 +3660,7 @@ mod tests {
         // Scan mode from there still shows the AI view; back with ↑ (or l).
         assert!(matches!(press(&mut camera, Key::Char('l')), Nav::Stay));
         assert_eq!(camera.lens, Lens::Main);
-        press(&mut camera, Key::Right);
+        press(&mut camera, Key::Left);
         assert_eq!(camera.smart.as_ref().map(|(u, _)| *u), Some(crate::smartcam::Use::Codes), "codes in scan mode");
     }
 
@@ -2287,5 +3681,147 @@ mod tests {
         press(&mut camera, Key::Up);
         run(&mut camera, 300);
         assert!(camera.face.is_some(), "the face for the exposure");
+    }
+
+    /// A camera with its first metered frames in.
+    fn ready() -> Camera {
+        let mut camera = Camera::new();
+        let started = Instant::now();
+        while (camera.metered.is_none() || camera.preview.is_none()) && started.elapsed() < Duration::from_secs(5) {
+            run(&mut camera, 40);
+        }
+        assert!(camera.metered.is_some(), "metered frames");
+        camera
+    }
+
+    #[test]
+    fn the_shutter_answers_with_the_preview_at_once_then_the_full_photo_is_saved() {
+        crate::shell::tests::sandbox();
+        let _port = crate::smartcam::sim::exclusive(false);
+        let mut camera = ready();
+        let before = camera.last.as_ref().map(|(p, _)| p.path.clone());
+        assert!(matches!(press(&mut camera, Key::Enter), Nav::Stay));
+        // At once, before the camera has even taken it: the thumbnail is the
+        // new photo's, made from the preview, and flying into the corner.
+        let path = camera.last.as_ref().map(|(p, _)| p.path.clone()).expect("an instant thumbnail");
+        assert_ne!(Some(&path), before.as_ref());
+        assert_eq!(camera.instant.as_ref(), Some(&path));
+        assert!(camera.flying.is_some(), "the shot flies into the corner");
+        assert!(!path.exists() && !camera.captured && camera.pending == 1, "nothing written yet");
+        // Then the camera has its picture (the next could be taken), then
+        // the full-size photo is saved: in that order.
+        let started = Instant::now();
+        let (mut captured_at, mut saved_at) = (None, None);
+        while saved_at.is_none() && started.elapsed() < Duration::from_secs(30) {
+            run(&mut camera, 20);
+            if camera.captured && captured_at.is_none() {
+                captured_at = Some(started.elapsed());
+            }
+            if camera.pending == 0 {
+                saved_at = Some(started.elapsed());
+            }
+        }
+        let (captured_at, saved_at) = (captured_at.expect("captured"), saved_at.expect("saved"));
+        assert!(captured_at <= saved_at, "{captured_at:?} then {saved_at:?}");
+        assert_eq!(photos::dimensions(&path), Some(FULL));
+        // Its thumbnail is still the same photo's, now from the file.
+        assert_eq!(camera.last.as_ref().map(|(p, _)| p.path.clone()), Some(path.clone()));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_pro_photo_takes_the_dials_and_keeps_its_look_its_original_and_its_raw() {
+        crate::shell::tests::sandbox();
+        let _port = crate::smartcam::sim::exclusive(false);
+        let mut camera = ready();
+        // Pro mode, to the right of photo: 1/250 s by hand, RAW on, Vivid.
+        press(&mut camera, Key::Right);
+        assert_eq!(camera.mode, Mode::Pro);
+        press(&mut camera, Key::Char('s'));
+        assert_eq!(camera.dial, Some(Dial::Shutter));
+        camera.pro.shutter = Some(pro::nearest_shutter(4_000));
+        camera.pro_changed();
+        press(&mut camera, Key::Char('r'));
+        assert!(camera.raw);
+        press(&mut camera, Key::Back);
+        assert_eq!(camera.dial, None, "esc puts the dial away first");
+        press(&mut camera, Key::Char('f'));
+        assert!(camera.strip);
+        press(&mut camera, Key::Right);
+        assert_eq!(camera.look, Look::Vivid);
+        press(&mut camera, Key::Back);
+        assert!(!camera.strip && camera.mode == Mode::Pro, "esc closes the strip, not the camera");
+        // The preview runs at the dial's time (the simulated camera says so).
+        let started = Instant::now();
+        while camera.metered.map(|m| m.exposure_us) != Some(4_000) && started.elapsed() < Duration::from_secs(3) {
+            run(&mut camera, 40);
+        }
+        assert_eq!(camera.metered.map(|m| m.exposure_us), Some(4_000));
+        let (words, burst) = camera.still_words(std::path::Path::new("/x/IMG_1.jpg"), crate::burst::DetailMode::Auto);
+        assert!(words.iter().any(|w| w == "exp=4000") && words.iter().any(|w| w.starts_with("look=")) && words.iter().any(|w| w == "raw=/x/IMG_1.dng"), "{words:?}");
+        assert_eq!(burst, None, "a RAW photo takes no burst");
+        press(&mut camera, Key::Enter);
+        let path = camera.pending_paths.first().cloned().expect("taken");
+        let started = Instant::now();
+        while camera.pending > 0 && started.elapsed() < Duration::from_secs(40) {
+            run(&mut camera, 30);
+        }
+        // The photo wears its look (said in its Exif), the original is kept,
+        // and the DNG beside it is the sensor's size.
+        assert_eq!(crate::filters::look_of(&path).as_deref(), Some("Vivid"));
+        let original = crate::filters::original_of(&path);
+        assert_eq!(photos::dimensions(&original), Some(FULL));
+        let dng = std::fs::read(path.with_extension("dng")).expect("a DNG");
+        assert_eq!(&dng[..4], b"II*\0");
+        assert!(dng.len() > FULL.0 * FULL.1 * 2);
+        // Deleting the photo takes what was kept beside it too.
+        let photo = photos::list().into_iter().find(|p| p.path == path).expect("in the album");
+        photos::delete(&photo).unwrap();
+        assert!(!original.exists() && !path.with_extension("dng").exists());
+        // The dials are kept for the next visit.
+        assert_eq!(Prefs::load().pro.shutter, Some(pro::nearest_shutter(4_000)));
+        assert!(Prefs::load().raw);
+    }
+
+    #[test]
+    fn the_focus_check_shows_the_photos_own_pixels_and_moves_with_the_arrows() {
+        crate::shell::tests::sandbox();
+        let _port = crate::smartcam::sim::exclusive(false);
+        let mut camera = ready();
+        press(&mut camera, Key::Char('z'));
+        assert_eq!(camera.focus, Some((0.5, 0.5)));
+        let started = Instant::now();
+        while !camera.cropped() && started.elapsed() < Duration::from_secs(3) {
+            run(&mut camera, 40);
+        }
+        assert!(camera.cropped(), "the crop's frames arrive");
+        press(&mut camera, Key::Right);
+        let (x, _) = camera.focus.unwrap();
+        assert!(x > 0.5 && x < 0.6, "{x}");
+        assert_eq!(camera.mode, Mode::Photo, "the arrows look around, not change mode");
+        press(&mut camera, Key::Back);
+        assert_eq!(camera.focus, None);
+        // Its crop never reaches past the picture's edge.
+        let v = focus_view(0.0, 1.0);
+        assert!(v[0] >= 0.0 && v[3] <= 1.0 + 1e-6 && ((v[2] - v[0]) * FULL.0 as f32 - PREVIEW_W as f32).abs() < 0.5);
+    }
+
+    #[test]
+    fn developing_a_frame_lays_the_look_and_zebras_over_it_and_counts_the_histogram() {
+        let live = Mutex::new(Live::default());
+        let mut pic = scene(PREVIEW_W, PREVIEW_H, 2.0, false);
+        // Overexposed four times: the sky clips.
+        sim_expose(&mut pic, 4.0, SIM_CT);
+        let yuv = rgb_to_yuv420(&pic);
+        let develop = Mutex::new(Develop { look: Arc::new(Look::Mono.compiled(0.0)), zebras: true, ..Develop::default() });
+        let mut out = Picture::default();
+        develop_frame(&live, &develop, &yuv, PREVIEW_W, PREVIEW_H, &mut out, None);
+        let l = live.lock().unwrap();
+        let shown = l.preview.as_ref().unwrap();
+        assert!(shown.rgb.chunks_exact(3).all(|p| p[0] == p[1] && p[1] == p[2]), "mono");
+        assert!(l.histogram.clipped > 0.05, "{}", l.histogram.clipped);
+        assert!(shown.rgb.chunks_exact(3).any(|p| p == [36, 36, 36]), "zebra stripes");
+        assert_eq!(l.histogram.bins.iter().sum::<u32>() as usize, PREVIEW_W * PREVIEW_H / 4);
+        assert_eq!(l.yuv.len(), yuv.len(), "the frame kept for the shutter");
     }
 }

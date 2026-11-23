@@ -325,6 +325,9 @@ pub fn thumbnail(photo: &Photo) -> Option<Picture> {
 pub fn delete(photo: &Photo) -> std::io::Result<()> {
     std::fs::remove_file(&photo.path)?;
     std::fs::remove_file(thumb_file(photo)).ok();
+    // And what was kept beside it: the photo as taken (under a look), its RAW.
+    std::fs::remove_file(crate::filters::original_of(&photo.path)).ok();
+    std::fs::remove_file(photo.path.with_extension("dng")).ok();
     TILE_COUNT.store(u64::MAX, Ordering::Relaxed);
     Ok(())
 }
@@ -656,6 +659,12 @@ pub struct Viewer {
     chrome: f32,
     details: bool,
     deleting: bool,
+    /// The photo's look (from its Exif), whether the photo as taken is kept
+    /// beside it and shown now (`o`), and whether it has a RAW.
+    look: Option<String>,
+    has_original: bool,
+    original: bool,
+    has_raw: bool,
 }
 
 const ZOOMS: [f32; 3] = [1.0, 2.0, 4.0];
@@ -677,9 +686,22 @@ impl Viewer {
             chrome: 2.5,
             details: false,
             deleting: false,
+            look: None,
+            has_original: false,
+            original: false,
+            has_raw: false,
         };
         v.arrive();
         v
+    }
+
+    /// The file in sight: the photo, or the photo as taken.
+    fn shown_path(&self, photo: &Photo) -> PathBuf {
+        if self.original {
+            crate::filters::original_of(&photo.path)
+        } else {
+            photo.path.clone()
+        }
     }
 
     /// A single photo (opened from Files).
@@ -700,6 +722,10 @@ impl Viewer {
         self.placeholder = read_thumb(&thumb_file(photo), photo.bytes).map(|t| (self.at, t));
         self.chrome = 2.5;
         self.deleting = false;
+        self.look = crate::filters::look_of(&photo.path);
+        self.has_original = crate::filters::original_of(&photo.path).is_file();
+        self.has_raw = photo.path.with_extension("dng").is_file();
+        self.original = false;
     }
 
     /// How large a decode the zoom asks for: the panel's size at that zoom.
@@ -776,6 +802,15 @@ impl Screen for Viewer {
                 self.details = !self.details;
                 self.chrome = 2.5;
             }
+            // The photo as the camera took it, before its look, and back.
+            Key::Char('o') if self.has_original => {
+                self.original = !self.original;
+                self.shown = None;
+                self.decoding = None;
+                self.trouble = None;
+                self.chrome = 2.5;
+            }
+            Key::Char('o') => *cx.say = Some("no look: this is the original".into()),
             Key::Char('d') => {
                 if deleting {
                     let photo = self.photos[self.at].clone();
@@ -832,7 +867,7 @@ impl Screen for Viewer {
         if !enough && self.decoding.is_none() && self.trouble.is_none() {
             if let Some(photo) = self.photos.get(self.at) {
                 let (tx, rx) = mpsc::channel();
-                let path = photo.path.clone();
+                let path = self.shown_path(photo);
                 std::thread::Builder::new()
                     .name("photo".into())
                     .stack_size(512 * 1024)
@@ -895,12 +930,30 @@ impl Screen for Viewer {
                 let h = g.ty.caption.size + 8.0;
                 chip(g, right, frame.bottom() - inset - h, &format!("{:.0}×", self.zoom.target()), Align::Right, shade);
             }
+            if !self.details {
+                let h = g.ty.caption.size + 8.0;
+                let words = match (&self.look, self.original) {
+                    (_, true) => Some("original".to_owned()),
+                    (Some(look), false) if self.has_original => Some(format!("{} · o: original", look.to_lowercase())),
+                    (Some(look), false) => Some(look.to_lowercase()),
+                    _ => None,
+                };
+                if let Some(words) = words {
+                    chip(g, left, frame.bottom() - inset - h, &words, Align::Left, shade);
+                }
+            }
         }
         if self.details {
             let dims = self.dims.map_or("–".into(), |(w, h)| format!("{w} × {h}"));
             let mp = self.dims.map_or(String::new(), |(w, h)| format!(" · {:.1} mp", (w * h) as f32 / 1e6));
-            let lines = [photo.name.clone(), format!("{dims}{mp}"), size_words(photo.bytes), photo.taken.format("%A %-d %B %Y, %H:%M:%S").to_string()];
-            let card = Rect::new(PAD, H - PAD - 4.0 * (ty.caption.size + 5.0) - 14.0, W - 2.0 * PAD, 4.0 * (ty.caption.size + 5.0) + 14.0);
+            let mut lines = vec![photo.name.clone(), format!("{dims}{mp}"), size_words(photo.bytes), photo.taken.format("%A %-d %B %Y, %H:%M:%S").to_string()];
+            // What it wears and what is kept beside it.
+            let kept: Vec<String> = [self.look.as_ref().map(|l| format!("look: {}", l.to_lowercase())), self.has_original.then(|| "o: the original".to_owned()), self.has_raw.then(|| "raw kept (.dng)".to_owned())].into_iter().flatten().collect();
+            if !kept.is_empty() {
+                lines.push(kept.join(" · "));
+            }
+            let n = lines.len() as f32;
+            let card = Rect::new(PAD, H - PAD - n * (ty.caption.size + 5.0) - 14.0, W - 2.0 * PAD, n * (ty.caption.size + 5.0) + 14.0);
             g.canvas.rrect(card.offset(g.ox, 0.0), g.radius(10.0), t.surface1, 1.0);
             for (i, line) in lines.iter().enumerate() {
                 let fitted = g.text.fit(line, &ty.caption, card.w - 20.0);
