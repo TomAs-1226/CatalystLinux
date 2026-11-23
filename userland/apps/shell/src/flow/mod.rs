@@ -645,7 +645,7 @@ pub fn hue_of(name: &str, icon: &str) -> u8 {
         "Graphs" => 280,
         "Pit" => 30,
         "Batteries" => 110,
-        "Scout" => 110,
+        "Scout" => 160,
         "Strategy" => 115,
         "Remote" => 355,
         "Level" => 100,

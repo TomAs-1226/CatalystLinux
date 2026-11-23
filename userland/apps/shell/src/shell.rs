@@ -6980,7 +6980,9 @@ pub(crate) mod tests {
         // Its first frame: the new page has not moved yet, so nothing else has either.
         frames(&mut shell, 1, 0.0);
         let same = picture_before.iter().zip(&shell.gfx.canvas.px).filter(|(a, b)| a == b).count();
-        assert!(same as f32 > 0.97 * picture_before.len() as f32, "no jump: {same} of {} pixels the same", picture_before.len());
+        // (A jump moves most of the panel; Home's busier tiles since 1.0 change
+        // a few hundred pixels more on their own.)
+        assert!(same as f32 > 0.95 * picture_before.len() as f32, "no jump: {same} of {} pixels the same", picture_before.len());
         let mut n = 0;
         while shell.transition.is_some() {
             frames(&mut shell, 1, 0.025);
