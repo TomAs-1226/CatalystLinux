@@ -34,27 +34,44 @@ pub struct Summary {
     pub records: u64,
     /// The log ended mid-record.
     pub truncated: bool,
+    /// When things happened, in seconds into the match (from its first
+    /// enable, as the offline analysis counts): the first brownout, the
+    /// battery's low point, the worst loop, the busiest CAN moment.
+    pub brownout_at: Option<f64>,
+    pub battery_low_at: Option<f64>,
+    pub worst_loop_at: Option<f64>,
+    pub can_peak_at: Option<f64>,
 }
 
 impl Summary {
     /// The findings worth reading first, worst first, in plain words.
     pub fn highlights(&self) -> Vec<(Level, String)> {
+        self.findings().into_iter().map(|(level, text, _)| (level, text)).collect()
+    }
+
+    /// Each highlight that happened at a moment, and when (seconds into the
+    /// match): where its replay opens.
+    pub fn moments(&self) -> Vec<(String, f64)> {
+        self.findings().into_iter().filter_map(|(_, text, at)| Some((text, at?))).collect()
+    }
+
+    fn findings(&self) -> Vec<(Level, String, Option<f64>)> {
         let mut out = Vec::new();
         if self.brownouts > 0 {
-            out.push((Level::Fault, format!("{} brownout{}", self.brownouts, plural(self.brownouts))));
+            out.push((Level::Fault, format!("{} brownout{}", self.brownouts, plural(self.brownouts)), self.brownout_at));
         }
         if let Some(v) = self.battery_low {
             let level = if v < 9.0 { Level::Fault } else if v < 11.0 { Level::Warn } else { Level::Fine };
-            out.push((level, format!("battery low point {v:.1} v")));
+            out.push((level, format!("battery low point {v:.1} v"), self.battery_low_at));
         }
         for (name, times) in &self.fired {
-            out.push((Level::Warn, format!("{name} fired {times}×")));
+            out.push((Level::Warn, format!("{name} fired {times}×"), None));
         }
         if self.loop_overruns > 0 {
             let worst = self.worst_loop_ms.unwrap_or(0.0);
-            out.push((Level::Warn, format!("{} loop{} over 20 ms, worst {worst:.0} ms", self.loop_overruns, plural(self.loop_overruns))));
+            out.push((Level::Warn, format!("{} loop{} over 20 ms, worst {worst:.0} ms", self.loop_overruns, plural(self.loop_overruns)), self.worst_loop_at));
         } else if let Some(ms) = self.worst_loop_ms {
-            out.push((Level::Fine, format!("worst loop {ms:.1} ms")));
+            out.push((Level::Fine, format!("worst loop {ms:.1} ms"), self.worst_loop_at));
         }
         for (name, temp, amps) in &self.mechanisms {
             let level = if temp.is_some_and(|c| c >= 80.0) { Level::Fault } else if temp.is_some_and(|c| c >= 70.0) { Level::Warn } else { Level::Fine };
@@ -65,17 +82,78 @@ impl Summary {
             if let Some(a) = amps {
                 parts.push(format!("{a:.0} a"));
             }
-            out.push((level, format!("{name} peak {}", parts.join(" · "))));
+            out.push((level, format!("{name} peak {}", parts.join(" · ")), None));
         }
         if let Some(can) = self.can_peak {
             let level = if can >= 0.9 { Level::Warn } else { Level::Fine };
-            out.push((level, format!("CAN peak {:.0}%", can * 100.0)));
+            out.push((level, format!("CAN peak {:.0}%", can * 100.0), self.can_peak_at));
         }
         if self.truncated {
-            out.push((Level::Fine, "log ends mid-record".into()));
+            out.push((Level::Fine, "log ends mid-record".into(), None));
         }
-        out.sort_by_key(|(level, _)| *level);
+        out.sort_by_key(|(level, ..)| *level);
         out
+    }
+}
+
+/// Read a log one record at a time, as [`summarize`] does: `start` decides
+/// from each entry's name and type whether its values are wanted, and what
+/// for; `value` is handed each wanted record's time (µs) and payload. The
+/// rest is skipped unread, and so is a record too large to be one worth
+/// reading (a damaged file). Returns whether the log ends mid-record.
+pub fn read_entries<W>(mut r: impl Read, mut start: impl FnMut(&str, &str) -> Option<W>, mut value: impl FnMut(&W, u64, &[u8])) -> io::Result<bool> {
+    let mut magic = [0u8; 6];
+    r.read_exact(&mut magic)?;
+    if &magic != b"WPILOG" {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "not a wpilog file"));
+    }
+    read_uint(&mut r, 2)?;
+    let extra = read_uint(&mut r, 4)?;
+    io::copy(&mut r.by_ref().take(extra), &mut io::sink())?;
+    let mut wants: HashMap<u32, W> = HashMap::new();
+    let mut payload = Vec::with_capacity(256);
+    loop {
+        let mut head = [0u8; 1];
+        match r.read(&mut head) {
+            Ok(0) => return Ok(false),
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+        let widths = ((head[0] & 3) as usize + 1, ((head[0] >> 2) & 3) as usize + 1, ((head[0] >> 4) & 7) as usize + 1);
+        let Ok((entry, size, time)) = (|| -> io::Result<(u32, u64, u64)> { Ok((read_uint(&mut r, widths.0)? as u32, read_uint(&mut r, widths.1)?, read_uint(&mut r, widths.2)?)) })() else {
+            return Ok(true);
+        };
+        if (entry != 0 && !wants.contains_key(&entry)) || size > MAX_RECORD {
+            if io::copy(&mut r.by_ref().take(size), &mut io::sink())? < size {
+                return Ok(true);
+            }
+            continue;
+        }
+        payload.resize(size as usize, 0);
+        if r.read_exact(&mut payload).is_err() {
+            return Ok(true);
+        }
+        if entry != 0 {
+            value(&wants[&entry], time, &payload);
+            continue;
+        }
+        // Start: type 0, entry id, then name, type and metadata as length-prefixed strings.
+        if payload.first() == Some(&0) && payload.len() >= 9 {
+            let id = u32::from_le_bytes(payload[1..5].try_into().unwrap());
+            let mut at = 5;
+            let mut text = || -> Option<&str> {
+                let len = u32::from_le_bytes(payload.get(at..at + 4)?.try_into().ok()?) as usize;
+                let out = std::str::from_utf8(payload.get(at + 4..at + 4 + len)?).ok()?;
+                at += 4 + len;
+                Some(out)
+            };
+            if let (Some(name), Some(kind)) = (text(), text()) {
+                if let Some(w) = start(name, kind) {
+                    wants.insert(id, w);
+                }
+            }
+        }
     }
 }
 
@@ -165,6 +243,10 @@ pub fn summarize(mut r: impl Read) -> io::Result<Summary> {
     let mut enabled_since: Option<u64> = None;
     let mut enabled_us = 0u64;
     let mut saw_enabled = false;
+    // When the match started (its first enable), and when each moment was,
+    // as log times.
+    let mut match_start: Option<u64> = None;
+    let (mut brownout_at, mut battery_at, mut loop_at, mut can_at) = (None::<u64>, None::<u64>, None::<u64>, None::<u64>);
     let mut payload = Vec::with_capacity(256);
 
     loop {
@@ -232,17 +314,24 @@ pub fn summarize(mut r: impl Read) -> io::Result<Summary> {
         match wanted {
             Some(Want::Battery) => {
                 if let Some(v) = number().filter(|v| *v > 0.5) {
+                    if s.battery_low.is_none_or(|low| v < low) {
+                        battery_at = Some(time);
+                    }
                     s.battery_low = Some(s.battery_low.map_or(v, |low: f64| low.min(v)));
                 }
             }
             Some(Want::Brownout) => {
                 if flag == Some(true) && !browned {
                     s.brownouts += 1;
+                    brownout_at.get_or_insert(time);
                 }
                 browned = flag == Some(true);
             }
             Some(Want::LoopMs) => {
                 if let Some(ms) = number() {
+                    if s.worst_loop_ms.is_none_or(|w| ms > w) {
+                        loop_at = Some(time);
+                    }
                     s.worst_loop_ms = Some(s.worst_loop_ms.map_or(ms, |w: f64| w.max(ms)));
                     if ms > 20.0 {
                         s.loop_overruns += 1;
@@ -252,7 +341,10 @@ pub fn summarize(mut r: impl Read) -> io::Result<Summary> {
             Some(Want::Enabled) => {
                 saw_enabled = true;
                 match (flag, enabled_since) {
-                    (Some(true), None) => enabled_since = Some(time),
+                    (Some(true), None) => {
+                        enabled_since = Some(time);
+                        match_start.get_or_insert(time);
+                    }
                     (Some(false), Some(since)) => {
                         enabled_us += time.saturating_sub(since);
                         enabled_since = None;
@@ -264,6 +356,9 @@ pub fn summarize(mut r: impl Read) -> io::Result<Summary> {
                 // The busiest bus, whether one number or one per bus.
                 let busiest = payload.chunks_exact(8).map(|b| f64::from_le_bytes(b.try_into().unwrap())).filter(|v| v.is_finite()).fold(None, |m: Option<f64>, v| Some(m.map_or(v, |m| m.max(v))));
                 if let Some(v) = busiest {
+                    if s.can_peak.is_none_or(|p| v > p) {
+                        can_at = Some(time);
+                    }
                     s.can_peak = Some(s.can_peak.map_or(v, |p: f64| p.max(v)));
                 }
             }
@@ -295,6 +390,9 @@ pub fn summarize(mut r: impl Read) -> io::Result<Summary> {
     }
     s.seconds = last.saturating_sub(first.unwrap_or(last)) as f64 / 1e6;
     s.enabled_seconds = saw_enabled.then_some(enabled_us as f64 / 1e6);
+    let zero = match_start.or(first).unwrap_or(0);
+    let into_match = |at: Option<u64>| at.map(|t| (t as f64 - zero as f64) / 1e6);
+    (s.brownout_at, s.battery_low_at, s.worst_loop_at, s.can_peak_at) = (into_match(brownout_at), into_match(battery_at), into_match(loop_at), into_match(can_at));
     s.fired = fired.into_iter().filter(|(_, (_, n))| *n > 0).map(|(name, (_, n))| (name, n)).collect();
     s.fired.sort_by(|a, b| b.1.cmp(&a.1));
     // The hottest few; a robot has dozens of motors and the screen has five lines.
@@ -393,6 +491,14 @@ mod tests {
         // The first thing read is the worst thing.
         let highlights = s.highlights();
         assert_eq!(highlights[0], (Level::Fault, "1 brownout".to_owned()));
+        // When: enabled at 10 s, the dip at 88 s, so 1:18 into the match,
+        // as the offline analysis says it (where the replay opens).
+        let moments = s.moments();
+        let at = |text: &str| moments.iter().find(|(t, _)| t.starts_with(text)).map(|(_, at)| *at);
+        assert_eq!(at("1 brownout").map(f64::round), Some(78.0));
+        assert_eq!(at("battery low point").map(f64::round), Some(78.0));
+        assert!(at("CAN peak").is_some_and(|t| (76.0..82.0).contains(&t)));
+        assert_eq!(at("Elevator peak"), None, "a peak over the match has no one moment");
     }
 
     #[test]

@@ -48,6 +48,7 @@ pub fn stops() -> Vec<Stop> {
     let licences = crate::about::row_of("Licences").unwrap_or(6);
     all.extend([
         stop("logs-match", Open::App("Logs"), &[Enter]),
+        stop("robot-field", Open::App("Robot"), &[Right]),
         stop("logs-trends", Open::App("Logs"), &[Up, Enter]),
         stop("tables-elevator", Open::App("Tables"), &[Down, Down, Enter]),
         stop("files-editor", Open::App("Files"), &[Down, Down, Enter]),

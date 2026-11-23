@@ -34,9 +34,10 @@ fn keep_free(partition: u64) -> u64 {
 }
 
 /// The digest's layout: 2 added what trends across matches read (brownouts,
-/// loop overruns, the hottest motor, CAN). A digest of an older layout is
-/// made again when its log is next looked at.
-const DIGEST_LAYOUT: u64 = 2;
+/// loop overruns, the hottest motor, CAN); 3, when each finding happened
+/// (for the replay to open there). A digest of an older layout is made
+/// again when its log is next looked at.
+const DIGEST_LAYOUT: u64 = 3;
 
 /// What the screens show for one log.
 #[derive(Clone, Debug, PartialEq)]
@@ -53,9 +54,17 @@ pub struct Digest {
     pub hottest: Option<(String, f64)>,
     /// The busiest CAN bus at its busiest, 0 to 1.
     pub can_peak: Option<f64>,
+    /// Highlights that happened at a moment, by their text, and when
+    /// (seconds into the match): where the replay opens for them.
+    pub moments: Vec<(String, f64)>,
 }
 
 impl Digest {
+    /// When a highlight happened, if it happened at a moment.
+    pub fn moment(&self, highlight: &str) -> Option<f64> {
+        self.moments.iter().find(|(text, _)| text == highlight).map(|(_, at)| *at)
+    }
+
     pub fn of(summary: &Summary) -> Self {
         Digest {
             seconds: summary.seconds,
@@ -67,6 +76,7 @@ impl Digest {
             loop_overruns: Some(summary.loop_overruns),
             hottest: summary.mechanisms.iter().find_map(|(name, temp, _)| temp.map(|t| (name.clone(), t))),
             can_peak: summary.can_peak,
+            moments: summary.moments(),
         }
     }
 
@@ -89,6 +99,7 @@ impl Digest {
             "brownouts": self.brownouts, "loopOverruns": self.loop_overruns,
             "hottest": self.hottest.as_ref().map(|(name, temp)| json!([name, temp])),
             "canPeak": self.can_peak,
+            "moments": self.moments.iter().map(|(text, at)| json!([text, at])).collect::<Vec<_>>(),
         })
     }
 
@@ -124,6 +135,7 @@ impl Digest {
             loop_overruns: v["loopOverruns"].as_u64().map(|n| n as u32),
             hottest: v["hottest"].as_array().and_then(|pair| Some((pair.first()?.as_str()?.to_owned(), pair.get(1)?.as_f64()?))),
             can_peak: v["canPeak"].as_f64(),
+            moments: v["moments"].as_array().map(|all| all.iter().filter_map(|pair| Some((pair[0].as_str()?.to_owned(), pair[1].as_f64()?))).collect()).unwrap_or_default(),
         })
     }
 }

@@ -120,6 +120,10 @@ struct Shared {
     status: Mutex<String>,
     /// Round trip to the server, microseconds; 0 until measured.
     rtt_us: AtomicU64,
+    /// Topics asked for by their whole name at the rate they change (a
+    /// robot's pose), and what moves when one of them does.
+    fast: Vec<String>,
+    fast_generation: AtomicU64,
 }
 
 /// A handle to the client thread. Dropping it stops the thread.
@@ -135,7 +139,16 @@ impl Client {
     /// every topic under each prefix. Returns at once; the thread keeps
     /// retrying until dropped.
     pub fn connect(address: &str, client_name: &str, prefixes: &[&str]) -> Client {
-        let shared = Arc::new(Shared::default());
+        Self::connect_with(address, client_name, prefixes, &[])
+    }
+
+    /// As [`Client::connect`], and `fast` topics besides, each by its whole
+    /// name, sent as often as they change up to 50 times a second rather
+    /// than ten (a robot's pose, for a live field). A change to one moves
+    /// [`Client::fast_generation`], not [`Client::generation`], so nothing
+    /// that does not show them is drawn again for them.
+    pub fn connect_with(address: &str, client_name: &str, prefixes: &[&str], fast: &[&str]) -> Client {
+        let shared = Arc::new(Shared { fast: fast.iter().map(|s| s.to_string()).collect(), ..Shared::default() });
         let address = if address.contains(':') { address.to_owned() } else { format!("{address}:{PORT}") };
         *shared.status.lock().unwrap() = "connecting".into();
         let thread_shared = shared.clone();
@@ -166,6 +179,11 @@ impl Client {
     /// with the last value seen to know whether to redraw.
     pub fn generation(&self) -> u64 {
         self.shared.generation.load(Ordering::Relaxed)
+    }
+
+    /// Changes whenever a fast topic's value does.
+    pub fn fast_generation(&self) -> u64 {
+        self.shared.fast_generation.load(Ordering::Relaxed)
     }
 
     pub fn rtt_ms(&self) -> Option<f32> {
@@ -289,6 +307,14 @@ fn session(shared: &Shared, address: &str, name: &str, prefixes: &[String], epoc
         "params": { "topics": prefixes, "subuid": 1, "options": { "prefix": true, "periodic": 0.1 } }
     }]);
     ws.send(Message::text(subscribe.to_string())).map_err(|e| e.to_string())?;
+    if !shared.fast.is_empty() {
+        // By whole name, at the robot's loop rate: 20 ms.
+        let fast = serde_json::json!([{
+            "method": "subscribe",
+            "params": { "topics": shared.fast, "subuid": 2, "options": { "periodic": 0.02 } }
+        }]);
+        ws.send(Message::text(fast.to_string())).map_err(|e| e.to_string())?;
+    }
 
     shared.connected.store(true, Ordering::Relaxed);
     set_status(shared, "connected");
@@ -314,8 +340,12 @@ fn session(shared: &Shared, address: &str, name: &str, prefixes: &[String], epoc
             }
             Ok(Message::Binary(bytes)) => {
                 last_heard = Instant::now();
-                if handle_binary(shared, &names, &bytes, epoch) {
+                let (changed, fast) = handle_binary(shared, &names, &bytes, epoch);
+                if changed {
                     shared.generation.fetch_add(1, Ordering::Relaxed);
+                }
+                if fast {
+                    shared.fast_generation.fetch_add(1, Ordering::Relaxed);
                 }
             }
             Ok(Message::Close(_)) => return Err("closed by robot".into()),
@@ -373,10 +403,13 @@ fn handle_text(shared: &Shared, names: &mut BTreeMap<i64, String>, text: &str) -
     changed
 }
 
-/// Value frames; several may share one WebSocket message.
-fn handle_binary(shared: &Shared, names: &BTreeMap<i64, String>, bytes: &[u8], epoch: Instant) -> bool {
+/// Value frames; several may share one WebSocket message. Returns whether
+/// the table changed, and whether a fast topic did (which does not count as
+/// the table changing).
+fn handle_binary(shared: &Shared, names: &BTreeMap<i64, String>, bytes: &[u8], epoch: Instant) -> (bool, bool) {
     let mut cursor = bytes;
     let mut changed = false;
+    let mut fast = false;
     let mut table = None;
     while !cursor.is_empty() {
         let Ok(rmpv::Value::Array(frame)) = rmpv::decode::read_value(&mut cursor) else { break };
@@ -399,13 +432,17 @@ fn handle_binary(shared: &Shared, names: &BTreeMap<i64, String>, bytes: &[u8], e
         let table = table.get_or_insert_with(|| shared.table.lock().unwrap());
         if let Some(entry) = table.get_mut(name) {
             if entry.value.as_ref() != Some(&value) {
-                changed = true;
+                if shared.fast.iter().any(|f| f == name) {
+                    fast = true;
+                } else {
+                    changed = true;
+                }
             }
             entry.value = Some(value);
             entry.timestamp = timestamp;
         }
     }
-    changed
+    (changed, fast)
 }
 
 fn decode(type_id: u64, v: &rmpv::Value) -> Option<Value> {

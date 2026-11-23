@@ -17,9 +17,16 @@ const FMS: &str = "/FMSInfo/";
 
 enum Source {
     Live(Client),
-    /// A scripted robot, for developing and demonstrating the UI with no robot.
-    Demo { elapsed: f64, table: BTreeMap<String, Value>, tick: u64, overrides: BTreeMap<String, Value> },
+    /// A scripted robot, for developing and demonstrating the UI with no
+    /// robot. It drives about the field (`field::demo_live`) unless told
+    /// it publishes no pose.
+    Demo { elapsed: f64, table: BTreeMap<String, Value>, tick: u64, overrides: BTreeMap<String, Value>, pose: bool },
     None,
+}
+
+/// The link, with the pose topics asked for at the rate they change.
+fn link(address: &str) -> Client {
+    Client::connect_with(address, "catalyst-linux", &[ROOT, FMS], &crate::field::POSE_TOPICS)
 }
 
 pub struct Robot {
@@ -65,7 +72,7 @@ impl Robot {
     /// Awake again: the link made again, to the same robot.
     pub fn resume(&mut self) {
         if std::mem::take(&mut self.paused) {
-            self.source = Source::Live(Client::connect(&self.address, "catalyst-linux", &[ROOT, FMS]));
+            self.source = Source::Live(link(&self.address));
         }
     }
 
@@ -76,14 +83,14 @@ impl Robot {
     }
 
     pub fn connect(address: &str) -> Self {
-        let client = Client::connect(address, "catalyst-linux", &[ROOT, FMS]);
+        let client = link(address);
         let host = address.split(':').next().unwrap_or_default();
         Robot { source: Source::Live(client), address: address.to_owned(), logs: Logs::for_robot(host), schedule: crate::schedule::Schedule::for_robot(host), ..Self::none() }
     }
 
     pub fn demo() -> Self {
         let mut robot = Robot {
-            source: Source::Demo { elapsed: 0.0, table: BTreeMap::new(), tick: 0, overrides: BTreeMap::new() },
+            source: Source::Demo { elapsed: 0.0, table: BTreeMap::new(), tick: 0, overrides: BTreeMap::new(), pose: true },
             address: "demo".into(),
             logs: Logs::demo(),
             schedule: crate::schedule::Schedule::demo(),
@@ -142,7 +149,7 @@ impl Robot {
     pub fn refresh(&mut self, dt: f32) -> bool {
         let generation = match &mut self.source {
             Source::Live(c) => c.generation(),
-            Source::Demo { elapsed, table, tick, overrides } => {
+            Source::Demo { elapsed, table, tick, overrides, .. } => {
                 *elapsed += dt as f64;
                 self.logs.advance(dt);
                 let now = (*elapsed * 4.0) as u64; // 4 Hz
@@ -196,6 +203,24 @@ impl Robot {
         if let Source::Demo { overrides, table, .. } = &mut self.source {
             overrides.insert(key.to_owned(), value.clone());
             table.insert(key.to_owned(), value);
+        }
+    }
+
+    /// The demo robot publishing no pose (for the field's "no pose" page).
+    #[cfg(any(test, not(target_arch = "aarch64")))]
+    pub fn demo_without_pose(&mut self) {
+        if let Source::Demo { pose, .. } = &mut self.source {
+            *pose = false;
+        }
+    }
+
+    /// Where the robot says it is on the field: AdvantageKit's odometry
+    /// pose if it publishes one, else WPILib's Field2d (`field::POSE_TOPICS`).
+    pub fn pose(&self) -> Option<crate::field::Pose> {
+        match &self.source {
+            Source::Live(c) => crate::field::POSE_TOPICS.iter().find_map(|topic| c.get(topic).and_then(|v| crate::field::pose_from(topic, &v))),
+            Source::Demo { elapsed, pose: true, .. } => Some(crate::field::demo_live(*elapsed as f32)),
+            _ => None,
         }
     }
 
