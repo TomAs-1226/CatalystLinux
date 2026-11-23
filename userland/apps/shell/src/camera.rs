@@ -11,18 +11,39 @@
 //! image's own libcamera program): a 320 × 240 YUV 4:2:0 preview at up to 30
 //! frames a second, turned the right way up for the CardputerZero. A photo is
 //! asked of it by name ("still /data/photos/IMG_….jpg"): it stops the
-//! preview, takes the sensor's full 3280 × 2464 (or its binned 1640 × 1232
-//! where the camera's memory will not stretch to the full one), writes the
-//! JPEG through libjpeg-turbo straight from the camera's buffer, and carries
-//! on. The preview is held meanwhile, under the shutter's flash.
+//! preview, takes the sensor's full 3280 × 2464, copies the frame out and
+//! starts the preview again ("captured"), then writes the JPEG (quality 95,
+//! with Exif) through libjpeg-turbo behind it. The preview is held only for
+//! the capture itself, under the shutter's flash.
+//!
+//! Detail mode (`d`: auto, on, off; Settings › Camera › Detail mode) takes a
+//! burst of full-size frames instead, saves the first as the photo at once,
+//! and merges the rest into it in the background (burst.rs): the thumbnail
+//! wears a "refining" badge with the seconds left until the merged photo
+//! takes its place.
 //!
 //! Scan mode reads QR codes from the preview's brightness, a few times a
 //! second on a thread of its own: a Wi-Fi code offers to join the network, a
-//! web address to open it in the Web app, anything else shows as text.
+//! web address to open it in the Web app, anything else shows as text. With
+//! the smart camera on the Grove port (smartcam.rs) its codes are taken too,
+//! read on its own processor.
+//!
+//! The smart camera: with the Grove port set to it, the Camera holds it
+//! while open. Its faces lean the exposure toward the people in the picture
+//! (mapped into this camera's picture, `a` in the AI view to align the two),
+//! and the lens switch (↑, the way a phone switches 1× and 0.5×) shows its
+//! AI view: what it sees, at its own small size, with what it finds drawn
+//! on it. It takes no photos: at 0.3 MP it is a seeing camera, not a
+//! photographing one.
 //!
 //! On a computer, a simulated camera shows a scene of its own (and, in scan
 //! mode, a Wi-Fi code on a card), and its photos are written by a JPEG
-//! encoder in the shell, so everything works the same.
+//! encoder in the shell, so everything works the same; the smart camera is
+//! smartcam.rs's stand-in.
+//!
+//! Frames are drawn as they arrive (the camera's thread wakes the main
+//! loop), and nothing here keeps the frame beat but motion: a camera at rest
+//! is drawn at its own frame rate, not the panel's.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -134,8 +155,19 @@ struct Found {
 /// What happened that the screen is told of.
 #[derive(Debug)]
 enum Event {
-    Saved { path: PathBuf, size: (u32, u32) },
+    /// The photo's picture is in: the preview runs again while it is written.
+    Captured,
+    /// Saved: its size, and whether a detail merge now refines it (what it
+    /// took, "shot 812 write 640", goes to the shell's log).
+    Saved { path: PathBuf, size: (u32, u32), detail: bool },
     Failed(String),
+}
+
+/// A saved photo's line from the camera program: its path, then after a tab
+/// what it took and "detail N" when it is being refined.
+fn saved_line(text: &str) -> (PathBuf, String, bool) {
+    let (path, took) = text.split_once('\t').unwrap_or((text, ""));
+    (PathBuf::from(path), took.to_owned(), took.contains("detail "))
 }
 
 /// What the camera's thread hands the screen.
@@ -162,7 +194,11 @@ struct Luma {
 /// What the screen asks of the camera.
 enum Order {
     Still(PathBuf),
+    /// Detail mode: a burst merged in the background (`true`: only in dim light).
+    Detail(PathBuf, bool),
     Night(bool),
+    /// Where a face is in the picture (0 to 1), for the exposure; or none.
+    Face(Option<[f32; 4]>),
 }
 
 /// Where orders go: the camera program's input, or the simulated camera.
@@ -177,7 +213,10 @@ impl Control {
             Control::Program(stdin) => {
                 let line = match order {
                     Order::Still(path) => format!("still {}\n", path.display()),
+                    Order::Detail(path, auto) => format!("detail {} {}\n", if auto { "auto" } else { "on" }, path.display()),
                     Order::Night(on) => format!("night {}\n", if on { "on" } else { "off" }),
+                    Order::Face(Some(b)) => format!("face {:.3} {:.3} {:.3} {:.3}\n", b[0], b[1], b[2], b[3]),
+                    Order::Face(None) => "face none\n".to_owned(),
                 };
                 stdin.lock().ok().and_then(|mut s| s.as_mut().map(|s| s.write_all(line.as_bytes()).and_then(|()| s.flush()).is_ok())).unwrap_or(false)
             }
@@ -217,7 +256,7 @@ fn run_program(live: &Mutex<Live>, stop: &AtomicBool, slot: &Mutex<Option<ChildS
         match CAMERA.try_lock() {
             Ok(held) => break Some(held),
             Err(std::sync::TryLockError::Poisoned(held)) => break Some(held.into_inner()),
-            Err(_) if waited.elapsed() < Duration::from_secs(4) && !stop.load(Ordering::Relaxed) => std::thread::sleep(Duration::from_millis(40)),
+            Err(_) if waited.elapsed() < Duration::from_secs(10) && !stop.load(Ordering::Relaxed) => std::thread::sleep(Duration::from_millis(40)),
             Err(_) => break None,
         }
     };
@@ -297,20 +336,29 @@ fn run_program(live: &Mutex<Live>, stop: &AtomicBool, slot: &Mutex<Option<ChildS
                 }
             }
             2 => {
-                let path = PathBuf::from(String::from_utf8_lossy(&frame).into_owned());
-                live.lock().map(|mut l| l.events.push(Event::Saved { path, size: (number >> 16, number & 0xffff) })).ok();
+                let (path, took, detail) = saved_line(&String::from_utf8_lossy(&frame));
+                if !took.is_empty() {
+                    eprintln!("camera: {} × {} {took}", number >> 16, number & 0xffff);
+                }
+                live.lock().map(|mut l| l.events.push(Event::Saved { path, size: (number >> 16, number & 0xffff), detail })).ok();
             }
             3 => {
                 let why = String::from_utf8_lossy(&frame).trim().to_owned();
                 live.lock().map(|mut l| l.events.push(Event::Failed(why))).ok();
             }
+            4 => {
+                live.lock().map(|mut l| l.events.push(Event::Captured)).ok();
+            }
             _ => {}
         }
+        // Drawn as it arrives, not on the frame beat.
+        crate::platform::wake();
     };
     // Its input closed, it stops the camera and ends: given a moment for
-    // that before it is made to.
+    // that (and to finish writing a photo whose picture it has) before it
+    // is made to.
     slot.lock().map(|mut s| s.take()).ok();
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(8);
     while matches!(child.try_wait(), Ok(None)) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -336,6 +384,7 @@ fn run_program(live: &Mutex<Live>, stop: &AtomicBool, slot: &Mutex<Option<ChildS
 /// the shell's own JPEG encoder.
 fn run_simulated(live: &Mutex<Live>, stop: &AtomicBool, orders: &Receiver<Order>, scanning: &AtomicBool, luma: &(Mutex<Luma>, Condvar)) {
     let started = Instant::now();
+    let (mut night, mut face) = (false, None);
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(33));
         let t = started.elapsed().as_secs_f32();
@@ -346,20 +395,117 @@ fn run_simulated(live: &Mutex<Live>, stop: &AtomicBool, orders: &Receiver<Order>
             l.preview = Some(pic);
             l.frames += 1;
         }
+        crate::platform::wake();
         while let Ok(order) = orders.try_recv() {
-            if let Order::Still(path) = order {
-                // The photo at half the sensor's size, as a camera short of
-                // memory would take it.
-                let photo = scene(1640, 1232, t, scan);
-                let event = match save_jpeg(&path, &photo) {
-                    Ok(()) => Event::Saved { path, size: (1640, 1232) },
-                    Err(why) => Event::Failed(why),
-                };
-                live.lock().map(|mut l| l.events.push(event)).ok();
+            match order {
+                Order::Still(path) => sim_photo(live, path, t, scan, 0, None),
+                // "Dim light" in the simulator: night on.
+                Order::Detail(path, auto) => sim_photo(live, path, t, scan, if auto && !night { 0 } else { SIM_BURST }, face),
+                Order::Night(on) => night = on,
+                Order::Face(f) => face = f,
             }
         }
     }
     finish_luma(luma);
+}
+
+/// The simulator's burst: as many frames as the handheld takes with room to spare.
+pub const SIM_BURST: usize = 6;
+/// The sensor's full size, as every photo is taken.
+pub const FULL: (usize, usize) = (3280, 2464);
+
+/// The simulator's photo, as catalyst-camera takes one: the picture in
+/// ("captured"), the JPEG written behind it; for detail mode a burst of a
+/// dim, noisy scene (the robot still driving) merged on a thread of its own.
+fn sim_photo(live: &Mutex<Live>, path: PathBuf, t: f32, scan: bool, burst: usize, face: Option<[f32; 4]>) {
+    let asked = Instant::now();
+    let (w, h) = FULL;
+    let mut noise = 0x2545_F491_4F6C_DD1Du64 ^ (t.to_bits() as u64);
+    let mut frames = Vec::new();
+    for i in 0..burst.max(1) {
+        // About 8 frames a second at full size, a hand's drift between them.
+        let mut yuv = rgb_to_yuv420(&scene(w, h, t + i as f32 * 0.12, scan));
+        if burst > 0 {
+            dim_and_noisy(&mut yuv, w * h, &mut noise);
+        }
+        frames.push(yuv);
+    }
+    live.lock().map(|mut l| l.events.push(Event::Captured)).ok();
+    crate::platform::wake();
+    let shot = asked.elapsed().as_millis();
+    let began = Instant::now();
+    let event = match crate::burst::write_jpeg(&path, &frames[0], w, h, None) {
+        Ok(()) => {
+            let detail = burst > 0;
+            if detail {
+                std::fs::write(crate::burst::marker(&path), format!("began={}\nexpect={}\nprogress=0\n", crate::burst::now_ms(), crate::burst::expect_ms(burst, w, h))).ok();
+                let (p, faces) = (path.clone(), face.into_iter().collect::<Vec<_>>());
+                std::thread::Builder::new()
+                    .name("merge".into())
+                    .spawn(move || {
+                        crate::sched::enter(crate::sched::Class::Idle);
+                        let refs: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
+                        if let Err(why) = crate::burst::refine(&p, &refs, w, h, &faces, 3) {
+                            eprintln!("camera: detail merge: {why}");
+                        }
+                        crate::platform::wake();
+                    })
+                    .ok();
+            }
+            let took = format!("shot {shot} write {}{}", began.elapsed().as_millis(), if detail { format!(" detail {burst}") } else { String::new() });
+            eprintln!("camera: {w} × {h} {took} (simulated)");
+            Event::Saved { path, size: (w as u32, h as u32), detail }
+        }
+        Err(why) => Event::Failed(why),
+    };
+    live.lock().map(|mut l| l.events.push(event)).ok();
+    crate::platform::wake();
+}
+
+/// A picture as YUV 4:2:0 (full-range BT.601, as the camera's), packed planes.
+pub fn rgb_to_yuv420(pic: &Picture) -> Vec<u8> {
+    let (w, h) = (pic.w, pic.h);
+    let (cw, ch) = (w / 2, h / 2);
+    let mut out = vec![0u8; w * h + 2 * cw * ch];
+    let (y, uv) = out.split_at_mut(w * h);
+    let (u, v) = uv.split_at_mut(cw * ch);
+    for (i, p) in pic.rgb.chunks_exact(3).enumerate() {
+        let (r, g, b) = (i32::from(p[0]), i32::from(p[1]), i32::from(p[2]));
+        y[i] = ((77 * r + 150 * g + 29 * b + 128) >> 8).clamp(0, 255) as u8;
+    }
+    for cy in 0..ch {
+        for cx in 0..cw {
+            let (mut r, mut g, mut b) = (0i32, 0i32, 0i32);
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let at = ((2 * cy + dy) * w + 2 * cx + dx) * 3;
+                r += i32::from(pic.rgb[at]);
+                g += i32::from(pic.rgb[at + 1]);
+                b += i32::from(pic.rgb[at + 2]);
+            }
+            let (r, g, b) = (r / 4, g / 4, b / 4);
+            u[cy * cw + cx] = (128 + ((-43 * r - 85 * g + 128 * b + 128) >> 8)).clamp(0, 255) as u8;
+            v[cy * cw + cx] = (128 + ((128 * r - 107 * g - 21 * b + 128) >> 8)).clamp(0, 255) as u8;
+        }
+    }
+    out
+}
+
+/// The simulator's dim light: the picture darker, with a small sensor's
+/// noise in it at high gain (brightness and, less, colour).
+fn dim_and_noisy(yuv: &mut [u8], ysize: usize, seed: &mut u64) {
+    let mut next = || {
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 7;
+        *seed ^= *seed << 17;
+        // Roughly normal: four uniforms.
+        let u = |s: u64, k: u32| ((s >> k) & 0xFFFF) as f32 / 65535.0;
+        (u(*seed, 0) + u(*seed, 16) + u(*seed, 32) + u(*seed, 48) - 2.0) * 1.732
+    };
+    for (i, p) in yuv.iter_mut().enumerate() {
+        let (sigma, gain) = if i < ysize { (7.0, 0.62) } else { (4.0, 1.0) };
+        let v = if i < ysize { f32::from(*p) * gain } else { 128.0 + (f32::from(*p) - 128.0) * 0.8 };
+        *p = (v + next() * sigma).round().clamp(0.0, 255.0) as u8;
+    }
 }
 
 fn give_luma(luma: &(Mutex<Luma>, Condvar), y: &[u8]) {
@@ -479,6 +625,68 @@ pub struct Camera {
     /// Opened by quick capture (`capture.rs`): one photo, and it gives way.
     quick: bool,
     done: bool,
+    /// The photo's picture is in (the preview runs again); still writing.
+    captured: bool,
+    /// The newest photo while detail mode refines it, and when it was last
+    /// looked at (its marker, twice a second).
+    refining: Option<(PathBuf, crate::burst::Refining)>,
+    refine_look: Instant,
+    /// The dots of "saving…" as last drawn (only a change is a new frame).
+    dots_drawn: usize,
+    /// The lens in use, and the switch's spring between them (0 main, 1 AI).
+    lens: Lens,
+    lens_at: Animated,
+    lens_fade: Animated,
+    /// The smart camera, held while this is open and the port is its.
+    smart: Option<(crate::smartcam::Use, crate::smartcam::Lease)>,
+    smart_status: crate::smartcam::Status,
+    /// Its picture (the AI view) and what it found, as last taken in.
+    ai_seen: u64,
+    ai_preview: Option<Picture>,
+    ai_results: Option<crate::smartcam::Results>,
+    /// Where its picture sits in this one's, and the alignment step.
+    align: crate::smartcam::Align,
+    aligning: bool,
+    /// The face the exposure leans toward (in this camera's picture), and
+    /// when it was last told to the camera program.
+    face: Option<[f32; 4]>,
+    face_told: (Instant, Option<[f32; 4]>),
+    /// The seconds of "waking the smart camera" as last drawn.
+    waking_drawn: u64,
+    /// Held as set (the shots): nothing taken in, nothing moving.
+    frozen: bool,
+}
+
+/// Settings › Camera › Smart camera: how it stands, and how fast its link
+/// runs and it started, once it has.
+pub fn smart_words() -> String {
+    use crate::smartcam::Status;
+    match crate::smartcam::status() {
+        _ if !crate::smartcam::chosen() => "off · the port is the console".into(),
+        _ if crate::smartcam::restart_owed() => "after a restart".into(),
+        Status::PortIsConsole => "off · the port is the console".into(),
+        Status::NeedsRestart => "after a restart".into(),
+        Status::Asleep => "asleep · wakes with the Camera".into(),
+        Status::Waking { .. } => "waking…".into(),
+        Status::Ready { baud, .. } => format!("ready · {}", baud_words(baud)),
+        Status::Absent(_) => "not answering".into(),
+    }
+}
+
+/// A baud rate as the Camera says it.
+fn baud_words(baud: u32) -> String {
+    if baud >= 1_000_000 {
+        format!("{:.1} Mbaud", baud as f32 / 1e6)
+    } else {
+        format!("{} kbaud", baud / 1000)
+    }
+}
+
+/// The lens switch: this camera, or the smart camera's AI view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lens {
+    Main,
+    Ai,
 }
 
 /// A code's card stays this long after the code was last seen; its outline
@@ -537,7 +745,29 @@ impl Camera {
             clock: 0.0,
             quick: false,
             done: false,
+            captured: false,
+            refining: None,
+            refine_look: Instant::now(),
+            dots_drawn: 0,
+            lens: Lens::Main,
+            // Bezel's mode buttons: the shape on SwiftUI's snappy (Detent's
+            // release, 0.5 s, bounce 0.15), the colour and fade on Material
+            // 3's default effects spring (stiffness 1600, no bounce).
+            lens_at: Animated::new(0.0, role::release()).with_rest(0.002),
+            lens_fade: Animated::new(0.0, role::effect()).with_rest(0.002),
+            smart: None,
+            smart_status: crate::smartcam::Status::Asleep,
+            ai_seen: 0,
+            ai_preview: None,
+            ai_results: None,
+            align: crate::smartcam::Align::load(),
+            aligning: false,
+            face: None,
+            face_told: (Instant::now(), None),
+            waking_drawn: 0,
+            frozen: false,
         };
+        camera.hold_smart();
         // The simulator's album has a few photos to begin with.
         #[cfg(not(target_arch = "aarch64"))]
         photos::seed_demo();
@@ -594,6 +824,59 @@ impl Camera {
         if mode == Mode::Scan {
             self.say("point it at a QR code");
         }
+        self.hold_smart();
+    }
+
+    /// The smart camera held for what this shows now (its codes in scan
+    /// mode, everything in the AI view, faces otherwise), when the port is
+    /// its. The new lease is taken before the old goes: no gap in its power.
+    fn hold_smart(&mut self) {
+        use crate::smartcam::Use;
+        if !crate::smartcam::chosen() {
+            self.smart = None;
+            return;
+        }
+        let want = match (self.lens, self.mode) {
+            (Lens::Ai, _) => Use::View,
+            (_, Mode::Scan) => Use::Codes,
+            _ => Use::Faces,
+        };
+        if self.smart.as_ref().map(|(u, _)| *u) != Some(want) {
+            let lease = crate::smartcam::lease(want);
+            self.smart = Some((want, lease));
+        }
+    }
+
+    /// The lens switch, as a phone switches 1× and 0.5×: a spring between
+    /// this camera's picture and the smart camera's.
+    pub fn set_lens(&mut self, lens: Lens) {
+        if self.lens == lens {
+            return;
+        }
+        self.lens = lens;
+        self.lens_at.set(if lens == Lens::Ai { 1.0 } else { 0.0 });
+        self.lens_fade.set(if lens == Lens::Ai { 1.0 } else { 0.0 });
+        self.aligning = false;
+        self.hold_smart();
+        if lens == Lens::Ai {
+            self.say(match self.smart_status {
+                crate::smartcam::Status::Ready { .. } => "AI view · a: align with the main camera",
+                _ => "AI view: what the smart camera sees",
+            });
+        }
+    }
+
+    /// The face boxes, codes, tags and blobs the smart camera found, in
+    /// its own picture's terms (0 to 1).
+    fn smart_found(&self) -> Option<&crate::smartcam::Results> {
+        self.ai_results.as_ref()
+    }
+
+    /// A box in the picture (0 to 1) on the viewfinder.
+    fn on_viewfinder(vf: Rect, b: [f32; 4]) -> Rect {
+        let (x0, y0) = (vf.x + b[0].min(b[2]) * vf.w, vf.y + b[1].min(b[3]) * vf.h);
+        let (x1, y1) = (vf.x + b[0].max(b[2]) * vf.w, vf.y + b[1].max(b[3]) * vf.h);
+        Rect::new(x0, y0, (x1 - x0).max(2.0), (y1 - y0).max(2.0))
     }
 
     /// The code being offered: read, and not put away.
@@ -601,7 +884,7 @@ impl Camera {
         self.found.as_ref().filter(|_| self.mode == Mode::Scan && self.found_rise.target() > 0.5)
     }
 
-    fn shoot(&mut self, calm: bool) {
+    fn shoot(&mut self, calm: bool, detail: crate::burst::DetailMode) {
         if self.saving.is_some() {
             return;
         }
@@ -613,11 +896,17 @@ impl Camera {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).ok();
         }
-        if !self.control.send(Order::Still(path)) {
+        let order = match detail {
+            crate::burst::DetailMode::Off => Order::Still(path),
+            crate::burst::DetailMode::On => Order::Detail(path, false),
+            crate::burst::DetailMode::Auto => Order::Detail(path, true),
+        };
+        if !self.control.send(order) {
             self.say("the camera is not ready yet");
             return;
         }
         self.saving = Some(Instant::now());
+        self.captured = false;
         self.press.jump(1.0);
         self.press.set(0.0);
         if !calm {
@@ -682,11 +971,39 @@ impl Screen for Camera {
         true
     }
 
+    /// Only the countdown's pulse keeps the frame beat: frames are drawn as
+    /// they arrive (the camera wakes the loop), springs as they move.
     fn busy(&self) -> bool {
-        true
+        self.countdown.is_some()
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
+        // The alignment step: the smart camera's picture over this one's,
+        // moved and sized by eye until they agree.
+        if self.aligning {
+            let step = 0.004;
+            match key {
+                Key::Left => self.align.ox -= step,
+                Key::Right => self.align.ox += step,
+                Key::Up => self.align.oy -= step,
+                Key::Down => self.align.oy += step,
+                Key::Char('+' | '=') => (self.align.sx, self.align.sy) = (self.align.sx * 1.01, self.align.sy * 1.01),
+                Key::Char('-' | '_') => (self.align.sx, self.align.sy) = (self.align.sx / 1.01, self.align.sy / 1.01),
+                Key::Char('r') => self.align = crate::smartcam::Align::default(),
+                Key::Enter => {
+                    self.aligning = false;
+                    let kept = self.align.save().is_ok();
+                    self.say(if kept { "aligned: faces now map onto this camera" } else { "could not keep the alignment" });
+                }
+                Key::Back | Key::Leave => {
+                    self.aligning = false;
+                    self.align = crate::smartcam::Align::load();
+                    self.say("alignment left as it was");
+                }
+                _ => {}
+            }
+            return Nav::Stay;
+        }
         match key {
             Key::Back | Key::Leave if self.countdown.is_some() => {
                 self.countdown = None;
@@ -704,8 +1021,27 @@ impl Screen for Camera {
                 Mode::Scan => return self.act(),
                 Mode::Photo if self.countdown.is_some() => {}
                 Mode::Photo if self.timer > 0 => self.countdown = Some(Instant::now() + Duration::from_secs(self.timer.into())),
-                Mode::Photo => self.shoot(cx.settings.calm),
+                Mode::Photo => self.shoot(cx.settings.calm, cx.settings.detail),
             },
+            // The lens switch (↑, or l): this camera, or the smart camera's AI view.
+            Key::Up | Key::Char('l') if !self.quick => self.set_lens(if self.lens == Lens::Main { Lens::Ai } else { Lens::Main }),
+            Key::Char('d') => {
+                cx.settings.detail = cx.settings.detail.step(1);
+                crate::save_settings(cx.settings);
+                self.say(match cx.settings.detail {
+                    crate::burst::DetailMode::Auto => "detail: auto · merged from a burst in dim light",
+                    crate::burst::DetailMode::On => "detail: on · every photo merged from a burst",
+                    crate::burst::DetailMode::Off => "detail: off · one frame a photo",
+                });
+            }
+            Key::Char('a') if self.lens == Lens::Ai => {
+                if matches!(self.smart_status, crate::smartcam::Status::Ready { .. }) && self.preview.is_some() {
+                    self.aligning = true;
+                    self.say("arrows · +/− · enter: keep");
+                } else {
+                    self.say("align once both cameras show a picture");
+                }
+            }
             Key::Down => {
                 return Nav::Push(Box::new(match &self.last {
                     Some((photo, _)) => photos::Album::at(&photo.path),
@@ -740,7 +1076,7 @@ impl Screen for Camera {
         // The timer ran out: the photo now.
         if self.countdown.is_some_and(|at| Instant::now() >= at) {
             self.countdown = None;
-            self.shoot(cx.settings.calm);
+            self.shoot(cx.settings.calm, cx.settings.detail);
         }
         // The camera never answered (its program gone quiet): say so rather
         // than saving for ever.
@@ -752,18 +1088,31 @@ impl Screen for Camera {
     }
 
     fn tick(&mut self, dt: f32) -> bool {
+        if self.frozen {
+            return false;
+        }
         self.clock += dt;
-        let mut changed = self.mode_at.tick(dt) | self.flash.tick(dt) | self.press.tick(dt) | self.last_pop.tick(dt) | self.found_rise.tick(dt);
-        // Counting down and saving are drawn moving (the number's pulse, the
-        // dots), and keep the frames coming while they last.
-        changed |= self.countdown.is_some() || self.saving.is_some();
+        let mut changed = self.mode_at.tick(dt) | self.flash.tick(dt) | self.press.tick(dt) | self.last_pop.tick(dt) | self.found_rise.tick(dt) | self.lens_at.tick(dt) | self.lens_fade.tick(dt);
+        // The countdown pulses on the frame beat; the saving dots and the
+        // seconds left are drawn only when they change.
+        changed |= self.countdown.is_some();
+        if self.saving.is_some() {
+            let dots = (self.clock * 3.0) as usize % 3 + 1;
+            changed |= dots != self.dots_drawn;
+            self.dots_drawn = dots;
+        }
         if let Some((_, age)) = &mut self.note {
             *age += dt;
-            changed = true;
+            // Drawn while it fades in and out; held still between.
+            let fading = *age < 0.2 || *age > NOTE_FOR;
+            changed |= fading;
             if *age > NOTE_FOR + 0.4 {
                 self.note = None;
+                changed = true;
             }
         }
+        changed |= self.tick_smart();
+        changed |= self.tick_refining();
         if let Some(rx) = &self.last_rx {
             if let Ok(last) = rx.try_recv() {
                 self.last_rx = None;
@@ -826,19 +1175,32 @@ impl Screen for Camera {
             changed = true;
         }
         for event in events {
-            self.saving = None;
             match event {
-                Event::Saved { path, size } => {
+                Event::Captured => self.captured = true,
+                Event::Saved { path, size, detail } => {
+                    self.saving = None;
                     photos::changed();
                     // Quick capture's photo: said in the island, and the camera gives way.
                     if self.quick {
                         crate::capture::photo_taken(path.clone());
                         self.done = true;
                     }
-                    self.say(if size.0 >= 3000 { "saved to photos".to_owned() } else { format!("saved · {} × {}", size.0, size.1) });
+                    if detail {
+                        // Refined in the background: its badge until the merged photo is in.
+                        let expect = crate::burst::expect_ms(SIM_BURST, size.0 as usize, size.1 as usize);
+                        let marking = crate::burst::read_marker(&path).unwrap_or(crate::burst::Refining { began_ms: crate::burst::now_ms(), expect_ms: expect, progress: 0.0 });
+                        self.say(format!("saved · refining, about {} s", marking.left_s(crate::burst::now_ms())));
+                        self.refining = Some((path.clone(), marking));
+                        self.refine_look = Instant::now();
+                    } else {
+                        self.say(if size.0 >= 3000 { "saved to photos".to_owned() } else { format!("saved · {} × {} (memory was short)", size.0, size.1) });
+                    }
                     self.load_last(Some(path));
                 }
-                Event::Failed(why) => self.say(why),
+                Event::Failed(why) => {
+                    self.saving = None;
+                    self.say(why);
+                }
             }
             changed = true;
         }
@@ -859,17 +1221,42 @@ impl Screen for Camera {
         g.canvas.fill_rect(Rect::new(g.ox, 0.0, W, H), t.ground, 1.0);
         g.canvas.fill_rect(vf.offset(g.ox, 0.0), Color(6, 6, 8), 1.0);
 
-        // The picture.
-        match &self.preview {
-            Some(pic) => draw_picture(g, vf, pic, whole(pic), 0.0, 1.0),
-            None => {
-                let words = self.trouble.clone().unwrap_or_else(|| "starting the camera".into());
-                let words = g.text.fit(&words, &ty.caption, vf.w - 20.0);
-                g.icon("photo_camera", false, vf.cx(), vf.cy() - 12.0, 20.0, Color(120, 120, 128));
-                g.text_at(vf.cx(), vf.cy() + 12.0, Align::Center, &words, ty.caption, Color(170, 170, 178));
+        // The pictures: this camera's, and the smart camera's AI view, the
+        // lens switch a spring between them. Going to the wider lens, this
+        // picture draws back into the middle as it fades and the AI view
+        // settles from the size this one shows of it, as a phone's 0.5×.
+        if g.calm {
+            self.lens_at.jump(self.lens_at.target());
+            self.lens_fade.jump(self.lens_fade.target());
+        }
+        let k = self.lens_at.value();
+        let ka = self.lens_fade.value().clamp(0.0, 1.0);
+        if ka < 0.999 || self.aligning {
+            match &self.preview {
+                Some(pic) => {
+                    let s = 1.0 - (1.0 - 1.0 / self.align.sx.max(1.0)) * k;
+                    let dest = Rect::new(vf.cx() - vf.w * s * 0.5, vf.cy() - vf.h * s * 0.5, vf.w * s, vf.h * s);
+                    draw_picture(g, dest, pic, whole(pic), 0.0, if self.aligning { 1.0 } else { 1.0 - ka });
+                }
+                None => {
+                    let words = self.trouble.clone().unwrap_or_else(|| "starting the camera".into());
+                    let words = g.text.fit(&words, &ty.caption, vf.w - 20.0);
+                    let a = 1.0 - ka;
+                    g.icon_alpha("photo_camera", false, vf.cx(), vf.cy() - 12.0, 20.0, Color(120, 120, 128), a);
+                    let half = g.measure(&words, ty.caption) * 0.5;
+                    g.text_alpha(vf.cx() - half, vf.cy() + 12.0, &words, ty.caption, Color(170, 170, 178), a);
+                }
             }
         }
+        if ka > 0.001 || self.aligning {
+            self.draw_ai(g, vf, k, ka);
+        }
         let white = Color(255, 255, 255);
+        // The face the exposure leans toward, in this camera's picture.
+        if let (Some(face), true) = (self.face, ka < 0.5 && self.mode == Mode::Photo) {
+            let r = Self::on_viewfinder(vf, face);
+            brackets(g, r, t.signal, 0.85 * (1.0 - 2.0 * ka));
+        }
         if self.grid && self.mode == Mode::Photo {
             for i in 1..3 {
                 let x = vf.x + vf.w * i as f32 / 3.0;
@@ -941,13 +1328,29 @@ impl Screen for Camera {
             g.canvas.rrect(Rect::new(vf.cx() - w * 0.5 + g.ox, 7.0, w, h), h * 0.5, Color(0, 0, 0), 0.55 * a);
             g.text_alpha(vf.cx() - w * 0.5 + 8.0, 7.0 + h * 0.5, &words, ty.caption, white, a);
         }
-        if self.saving.is_some() {
-            let dots = ".".repeat((self.clock * 3.0) as usize % 3 + 1);
-            let words = format!("saving{dots}");
-            let w = g.measure("saving...", ty.caption) + 16.0;
-            let h = ty.caption.size + 8.0;
+        // Taking it (the picture held), then writing it (a detail photo's
+        // merge after that is the thumbnail's badge).
+        let h = ty.caption.size + 8.0;
+        let pill = |g: &mut Gfx, icon: Option<&str>, words: &str, widest: &str| {
+            let lead = if icon.is_some() { h - 2.0 } else { 0.0 };
+            let w = g.measure(widest, ty.caption) + 16.0 + lead;
             g.canvas.rrect(Rect::new(vf.x + 7.0 + g.ox, vf.bottom() - 7.0 - h, w, h), h * 0.5, Color(0, 0, 0), 0.55);
-            g.text_at(vf.x + 15.0, vf.bottom() - 7.0 - h * 0.5, Align::Left, &words, ty.caption, white);
+            if let Some(icon) = icon {
+                g.icon(icon, true, vf.x + 7.0 + h * 0.5 + 1.0, vf.bottom() - 7.0 - h * 0.5, h * 0.55, t.signal);
+            }
+            g.text_at(vf.x + 15.0 + lead, vf.bottom() - 7.0 - h * 0.5, Align::Left, words, ty.caption, white);
+        };
+        if self.saving.is_some() {
+            let dots = ".".repeat(self.dots_drawn.max(1));
+            if self.captured {
+                pill(g, None, &format!("saving{dots}"), "saving...");
+            } else {
+                pill(g, None, &format!("hold still{dots}"), "hold still...");
+            }
+        }
+        // The lens switch, when there is a smart camera to switch to.
+        if self.smart.is_some() && !self.quick {
+            self.draw_lens_switch(g, vf);
         }
 
         self.draw_rail(g, rail);
@@ -955,6 +1358,226 @@ impl Screen for Camera {
 }
 
 impl Camera {
+    /// The smart camera's news: its status, its picture, what it found;
+    /// the face handed to the exposure; its codes to scan mode. True if any
+    /// of it shows.
+    fn tick_smart(&mut self) -> bool {
+        use crate::smartcam::Status;
+        let mut changed = false;
+        if self.smart.is_none() {
+            return false;
+        }
+        let status = crate::smartcam::status();
+        if status != self.smart_status {
+            // It answered: how long it took to start, and how fast the link runs.
+            if let (Status::Waking { .. } | Status::Asleep, Status::Ready { baud, woke_ms }) = (&self.smart_status, &status) {
+                if self.lens == Lens::Ai {
+                    self.say(format!("woke in {:.1} s · {}", *woke_ms as f32 / 1000.0, baud_words(*baud)));
+                }
+            }
+            self.smart_status = status;
+            changed = true;
+        }
+        // The seconds of waking, counted once a second.
+        if let Status::Waking { since } = &self.smart_status {
+            let s = since.elapsed().as_secs();
+            if s != self.waking_drawn && self.lens == Lens::Ai {
+                self.waking_drawn = s;
+                changed = true;
+            }
+        }
+        let showing_ai = self.lens == Lens::Ai || self.lens_at.value() > 0.01;
+        let (n, pic) = crate::smartcam::preview();
+        if n != self.ai_seen {
+            self.ai_seen = n;
+            self.ai_preview = pic;
+            changed |= showing_ai;
+        }
+        let results = crate::smartcam::results(Duration::from_millis(700));
+        if results != self.ai_results {
+            self.ai_results = results;
+            changed |= showing_ai;
+        }
+        // The face the exposure leans toward, told to the camera program
+        // at most five times a second (and at once when it goes).
+        let face = if self.lens == Lens::Main && self.mode == Mode::Photo { self.ai_results.as_ref().and_then(|r| crate::smartcam::main_face(r, &self.align)) } else { None };
+        if face != self.face {
+            self.face = face;
+            changed = true;
+        }
+        let told = self.face_told.1;
+        if (face.is_some() && face != told && self.face_told.0.elapsed() >= Duration::from_millis(200)) || (face.is_none() && told.is_some()) {
+            self.control.send(Order::Face(face));
+            self.face_told = (Instant::now(), face);
+        }
+        // Scan mode: its codes, read on its own processor; the handheld's
+        // own reader rests while it answers.
+        if self.mode == Mode::Scan {
+            let ready = matches!(self.smart_status, Status::Ready { .. });
+            self.scanning.store(!ready, Ordering::Relaxed);
+            if let Some(code) = self.ai_results.as_ref().and_then(|r| r.codes.first()).cloned() {
+                let read = read_code(&code.text);
+                if self.dismissed.as_ref() != Some(&read) {
+                    let fresh = self.found_rise.target() < 0.5 || self.found.as_ref().map(|f| &f.code) != Some(&read);
+                    let b = self.align.map(code.at);
+                    let (w, h) = (PREVIEW_W as f32, PREVIEW_H as f32);
+                    let corners = [(b[0] * w, b[1] * h), (b[2] * w, b[1] * h), (b[2] * w, b[3] * h), (b[0] * w, b[3] * h)];
+                    self.found = Some(Found { code: read, corners });
+                    self.found_at = Some(Instant::now());
+                    if fresh {
+                        self.found_rise.jump(0.0);
+                        self.found_rise.set(1.0);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        changed
+    }
+
+    /// The AI view: the smart camera's picture (settling from the part of it
+    /// this camera shows to the whole, `k`), at `alpha`, with what it found;
+    /// or, before it has a picture, how it stands, calmly. In the alignment
+    /// step, its picture at half strength over this camera's, where the
+    /// alignment puts it.
+    fn draw_ai(&mut self, g: &mut Gfx, vf: Rect, k: f32, alpha: f32) {
+        use crate::smartcam::Status;
+        let ty = g.ty;
+        if self.aligning {
+            if let Some(pic) = &self.ai_preview {
+                let a = self.align;
+                // The part of its picture that falls inside this one's.
+                let (u0, u1) = (0.5 + (-0.5 - a.ox) / a.sx, 0.5 + (0.5 - a.ox) / a.sx);
+                let (v0, v1) = (0.5 + (-0.5 - a.oy) / a.sy, 0.5 + (0.5 - a.oy) / a.sy);
+                let (pw, ph) = (pic.w as f32, pic.h as f32);
+                draw_picture(g, vf, pic, [u0 * pw, v0 * ph, (u1 - u0) * pw, (v1 - v0) * ph], 0.0, 0.5);
+            }
+            return;
+        }
+        let ready = matches!(self.smart_status, Status::Ready { .. });
+        if let (true, Some(pic)) = (ready, &self.ai_preview) {
+            let s = 1.0 + (self.align.sx - 1.0).max(0.0) * (1.0 - k);
+            let (vw, vh) = (pic.w as f32 / s, pic.h as f32 / s);
+            draw_picture(g, vf, pic, [(pic.w as f32 - vw) * 0.5, (pic.h as f32 - vh) * 0.5, vw, vh], 0.0, alpha);
+            let shown = ((alpha - 0.6) / 0.4).clamp(0.0, 1.0);
+            if shown > 0.0 {
+                if let Some(found) = self.smart_found().cloned() {
+                    self.draw_found(g, vf, &found, shown);
+                }
+            }
+            return;
+        }
+        // How it stands, over the dark viewfinder.
+        g.canvas.fill_rect(vf.offset(g.ox, 0.0), Color(6, 6, 8), alpha);
+        let (icon, line, more) = match &self.smart_status {
+            Status::PortIsConsole => ("cable", "the Grove port is the console".to_owned(), "Settings › Camera › Grove port".to_owned()),
+            Status::NeedsRestart => ("restart_alt", "restart once to free the Grove port".to_owned(), "its console leaves at the next start".to_owned()),
+            Status::Absent(_) => ("developer_board", "no smart camera answers".to_owned(), "is main.py on its card? tools/unitv".to_owned()),
+            Status::Waking { since } => ("developer_board", "waking the smart camera…".to_owned(), format!("{} s", since.elapsed().as_secs())),
+            Status::Ready { .. } => ("developer_board", "waiting for its picture".to_owned(), String::new()),
+            Status::Asleep => ("developer_board", "waking the smart camera…".to_owned(), String::new()),
+        };
+        g.icon_alpha(icon, false, vf.cx(), vf.cy() - 18.0, 22.0, Color(150, 150, 160), alpha);
+        let line = g.text.fit(&line, &ty.caption, vf.w - 20.0);
+        let half = g.measure(&line, ty.caption) * 0.5;
+        g.text_alpha(vf.cx() - half, vf.cy() + 6.0, &line, ty.caption, Color(214, 214, 220), alpha);
+        if !more.is_empty() {
+            let more = g.text.fit(&more, &ty.caption, vf.w - 20.0);
+            let half = g.measure(&more, ty.caption) * 0.5;
+            g.text_alpha(vf.cx() - half, vf.cy() + 10.0 + ty.caption.size, &more, ty.caption, Color(140, 140, 150), alpha);
+        }
+    }
+
+    /// What the smart camera found, on its picture: faces in brackets, codes
+    /// and colour blobs outlined, tags marked with their id and distance.
+    fn draw_found(&self, g: &mut Gfx, vf: Rect, found: &crate::smartcam::Results, alpha: f32) {
+        let t = g.tokens;
+        let ty = g.ty;
+        let white = Color(255, 255, 255);
+        // A label at (x, y), or ending at x when left.
+        let label = |g: &mut Gfx, x: f32, y: f32, words: &str, left: bool| {
+            let words = g.text.fit(words, &ty.caption, vf.w * 0.55);
+            let w = g.measure(&words, ty.caption) + 10.0;
+            let h = ty.caption.size + 6.0;
+            let x = if left { x - w } else { x }.clamp(vf.x + 2.0, vf.right() - w - 2.0);
+            let y = y.clamp(vf.y + 2.0, vf.bottom() - h - 2.0);
+            g.canvas.rrect(Rect::new(x + g.ox, y, w, h), h * 0.5, Color(0, 0, 0), 0.6 * alpha);
+            g.text_alpha(x + 5.0, y + h * 0.5, &words, ty.caption, white, alpha);
+        };
+        for face in &found.faces {
+            brackets(g, Self::on_viewfinder(vf, face.at), t.signal, 0.9 * alpha);
+        }
+        for code in &found.codes {
+            let r = Self::on_viewfinder(vf, code.at);
+            outline(g, r, 1.5, white, 0.9 * alpha);
+            // Beside it, on the side with more room, level with its middle.
+            let left = r.cx() > vf.cx();
+            label(g, if left { r.x - 4.0 } else { r.right() + 4.0 }, r.cy() - (ty.caption.size + 6.0) * 0.5, &code.text, left);
+        }
+        for tag in &found.tags {
+            let (cx, cy) = (vf.x + tag.centre[0] * vf.w, vf.y + tag.centre[1] * vf.h);
+            let r = Rect::new(cx - 12.0, cy - 12.0, 24.0, 24.0);
+            outline(g, r, 2.0, t.ice, alpha);
+            let metres = (tag.pose_mm[0].powi(2) + tag.pose_mm[1].powi(2) + tag.pose_mm[2].powi(2)).sqrt() / 1000.0;
+            label(g, r.right() + 4.0, cy - (ty.caption.size + 6.0) * 0.5, &format!("tag {} · {metres:.1} m", tag.id), false);
+        }
+        for blob in &found.blobs {
+            let colour = [Color(255, 149, 0), Color(255, 214, 10), Color(255, 69, 58), Color(10, 132, 255)][usize::from(blob.colour.min(3))];
+            outline(g, Self::on_viewfinder(vf, blob.at), 1.5, colour, 0.9 * alpha);
+        }
+    }
+
+    /// The lens switch: Bezel's mode buttons in small, on clear glass over
+    /// the picture (it floats over media), the one in use an ice capsule
+    /// that slides between them.
+    fn draw_lens_switch(&mut self, g: &mut Gfx, vf: Rect) {
+        let t = g.tokens;
+        let cap = g.ty.caption;
+        let d = (cap.size + 10.0).round();
+        let pad = 3.0;
+        let (w, h) = (2.0 * d + 3.0 * pad, d + 2.0 * pad);
+        let r = Rect::new((vf.right() - 8.0 - w).round(), (vf.bottom() - 8.0 - h).round(), w, h);
+        g.glass(&[bezel::GlassShape { clear: true, ..bezel::GlassShape::new(r.offset(g.ox, 0.0), h * 0.5, 11) }]);
+        // Concentric: the capsule's radius is the track's less its padding.
+        let k = self.lens_at.value();
+        let x = r.x + pad + (d + pad) * k;
+        g.canvas.rrect(Rect::new(x + g.ox, r.y + pad, d, d), h * 0.5 - pad, t.ice, 1.0);
+        let fade = self.lens_fade.value().clamp(0.0, 1.0);
+        for (i, words) in ["1×", "AI"].iter().enumerate() {
+            let on = if i == 0 { 1.0 - fade } else { fade };
+            let ink = mix(t.ink, t.on_ice, on);
+            let cx = r.x + pad + d * 0.5 + i as f32 * (d + pad);
+            g.text_at(cx, r.cy(), Align::Center, words, cap, ink);
+        }
+    }
+
+    /// The newest photo being refined: its marker looked at twice a second;
+    /// gone, the merged photo is in and its thumbnail is taken again.
+    fn tick_refining(&mut self) -> bool {
+        let Some((path, was)) = self.refining.clone() else { return false };
+        if self.refine_look.elapsed() < Duration::from_millis(500) {
+            return false;
+        }
+        self.refine_look = Instant::now();
+        let now = crate::burst::now_ms();
+        match crate::burst::read_marker(&path) {
+            Some(r) => {
+                let moved = r.left_s(now) != was.left_s(now) || (r.progress - was.progress).abs() > 0.05;
+                self.refining = Some((path, r));
+                moved || was.left_s(now) != was.left_s(now.saturating_sub(500))
+            }
+            // Not written yet (the merge just starting): given a moment.
+            None if now.saturating_sub(was.began_ms) < 3000 => false,
+            None => {
+                self.refining = None;
+                photos::changed();
+                self.load_last(Some(path));
+                self.say("detail merged into the photo");
+                true
+            }
+        }
+    }
+
     /// The rail beside the picture: the modes, the shutter, the last photo
     /// and the choices.
     fn draw_rail(&mut self, g: &mut Gfx, rail: Rect) {
@@ -1001,7 +1624,28 @@ impl Camera {
                 g.icon("photo_library", false, thumb.cx(), thumb.cy(), 13.0, t.faint);
             }
         }
-        g.text_at(thumb.cx(), thumb.y - 2.0 - cap.size * 0.5, Align::Center, "↓", cap, t.faint);
+        // Being refined: a badge with the seconds left where the ↓ is.
+        match &self.refining {
+            Some((_, r)) => {
+                let s = format!("{}s", r.left_s(crate::burst::now_ms()));
+                let bh = cap.size + 4.0;
+                let bw = g.measure(&s, cap) + bh + 2.0;
+                let b = Rect::new((thumb.cx() - bw * 0.5).round(), thumb.y - 2.0 - bh, bw, bh);
+                g.canvas.rrect(b.offset(g.ox, 0.0), bh * 0.5, t.surface2, 1.0);
+                g.icon("auto_awesome", true, b.x + bh * 0.5, b.cy(), bh * 0.6, t.signal);
+                g.text_at(b.x + bh - 1.0, b.cy(), Align::Left, &s, cap, t.ink);
+            }
+            None => {
+                g.text_at(thumb.cx(), thumb.y - 2.0 - cap.size * 0.5, Align::Center, "↓", cap, t.faint);
+            }
+        }
+        // In the AI view: the smart camera's pace and the link's rate.
+        if let (Lens::Ai, crate::smartcam::Status::Ready { baud, .. }) = (self.lens, &self.smart_status) {
+            let fps = self.ai_results.as_ref().map_or(0.0, |r| r.fps);
+            let full = format!("{fps:.0} fps · {}M", (*baud as f32 / 1e6 * 10.0).round() / 10.0);
+            let words = if g.measure(&full, cap) <= rail.w - 8.0 { full } else { format!("{fps:.0} fps") };
+            g.text_at(rail.cx(), PAD + cap.size * 2.0 + 10.0, Align::Center, &words, cap, t.faint);
+        }
         // The choices, each with its key: on in ink, off faint.
         let right = rail.right() - 9.0;
         let row = |i: usize| thumb.y + 3.0 + i as f32 * (th / 2.0 - 1.0);
@@ -1017,7 +1661,45 @@ impl Camera {
         let y = thumb.y - 2.0 - cap.size * 0.5;
         g.icon(icon, on, right - 18.0, y, 11.0, color);
         g.text_at(right - 6.0, y, Align::Center, key, cap, color);
+        // Detail mode: on in ink, auto dimmer, off faint.
+        let color = match g.detail {
+            crate::burst::DetailMode::On => t.ink,
+            crate::burst::DetailMode::Auto => t.dim,
+            crate::burst::DetailMode::Off => t.faint,
+        };
+        let y = y - cap.size - 3.0;
+        g.icon("auto_awesome", g.detail == crate::burst::DetailMode::On, right - 18.0, y, 11.0, color);
+        g.text_at(right - 6.0, y, Align::Center, "d", cap, color);
     }
+}
+
+/// A face's corners, as a camera marks one: four short brackets.
+fn brackets(g: &mut Gfx, r: Rect, color: Color, alpha: f32) {
+    if alpha <= 0.0 {
+        return;
+    }
+    let arm = (r.w.min(r.h) * 0.28).clamp(4.0, 14.0);
+    let th = 2.0;
+    for (cx, cy, sx, sy) in [(r.x, r.y, 1.0, 1.0), (r.right(), r.y, -1.0, 1.0), (r.right(), r.bottom(), -1.0, -1.0), (r.x, r.bottom(), 1.0, -1.0)] {
+        let h = Rect::new(if sx > 0.0 { cx } else { cx - arm }, if sy > 0.0 { cy } else { cy - th }, arm, th);
+        let v = Rect::new(if sx > 0.0 { cx } else { cx - th }, if sy > 0.0 { cy } else { cy - arm }, th, arm);
+        g.canvas.rrect(h.offset(g.ox, 0.0), 1.0, color, alpha);
+        g.canvas.rrect(v.offset(g.ox, 0.0), 1.0, color, alpha);
+    }
+}
+
+/// A box's outline, `width` thick.
+fn outline(g: &mut Gfx, r: Rect, width: f32, color: Color, alpha: f32) {
+    for side in [Rect::new(r.x, r.y, r.w, width), Rect::new(r.x, r.bottom() - width, r.w, width), Rect::new(r.x, r.y, width, r.h), Rect::new(r.right() - width, r.y, width, r.h)] {
+        g.canvas.fill_rect(side.offset(g.ox, 0.0), color, alpha);
+    }
+}
+
+/// `a` toward `b` by `k`.
+fn mix(a: Color, b: Color, k: f32) -> Color {
+    let k = k.clamp(0.0, 1.0);
+    let m = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * k).round() as u8;
+    Color(m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
 }
 
 /// A straight line `width` pixels wide.
@@ -1226,6 +1908,184 @@ pub fn save_jpeg(path: &std::path::Path, pic: &Picture) -> Result<(), String> {
     }
 }
 
+/// The Camera's 0.9 pictures (`catalyst-shell --camera-shots DIR`): the
+/// lens switch at rest and on its way, the smart camera waking and its AI
+/// view, taking, saving and refining a photo, the alignment step, and
+/// Settings › Camera, at each text size; and a detail merge's before and
+/// after (a 1:1 crop, twice up), timed.
+#[cfg(not(target_arch = "aarch64"))]
+pub fn shots(dir: &std::path::Path) {
+    use crate::gfx::TextSize;
+    use crate::shell::Shell;
+    use crate::smartcam::{sim, Blob, Code, Face, Results, Status, Tag};
+    std::fs::create_dir_all(dir).ok();
+    sim::choose(true);
+    let t = 3.1;
+    let face = [0.42, 0.28];
+    let ai_pic = sim::view(t, face);
+    // The same person in this camera's narrower picture, where the
+    // alignment puts them.
+    let mut main_pic = scene(PREVIEW_W, PREVIEW_H, t, false);
+    {
+        let a = crate::smartcam::Align::default();
+        let (cx, cy) = ((face[0] * 320.0 + 29.0) / 320.0, (face[1] * 240.0 + 35.0) / 240.0);
+        let m = a.map([cx, cy, cx, cy]);
+        sim::person(&mut main_pic, m[0] * PREVIEW_W as f32, m[1] * PREVIEW_H as f32, a.sx);
+    }
+    let found = Results {
+        frame: 1,
+        fps: 14.6,
+        faces: vec![Face { at: [face[0], face[1], face[0] + 58.0 / 320.0, face[1] + 70.0 / 240.0], score: 0.87 }],
+        codes: vec![Code { at: [212.0 / 320.0, 128.0 / 240.0, 264.0 / 320.0, 180.0 / 240.0], text: "SCOUT 5805 Q12 auto=3 tele=11".into() }],
+        tags: vec![Tag { id: 7, centre: [70.0 / 320.0, 62.0 / 240.0], turn: 0.1, pose_mm: [-412.0, -88.0, 2640.0] }],
+        blobs: vec![Blob { colour: 0, at: [40.0 / 320.0, 176.0 / 240.0, 74.0 / 320.0, 204.0 / 240.0], pixels: 640 }],
+    };
+    let ready = Status::Ready { baud: 3_000_000, woke_ms: 1420 };
+    type Setup = Box<dyn Fn(&mut Camera)>;
+    let (m, a, f, r) = (main_pic.clone(), ai_pic.clone(), found.clone(), ready.clone());
+    let base = move |c: &mut Camera| {
+        c.frozen = true;
+        c.preview = Some(m.clone());
+        c.ai_preview = Some(a.clone());
+        c.ai_results = Some(f.clone());
+        c.smart_status = r.clone();
+        c.note = None;
+        c.align = crate::smartcam::Align::default();
+    };
+    let base = std::rc::Rc::new(base);
+    let with = |base: &std::rc::Rc<dyn Fn(&mut Camera)>, more: Box<dyn Fn(&mut Camera)>| -> Setup {
+        let base = base.clone();
+        Box::new(move |c: &mut Camera| {
+            base(c);
+            more(c);
+        })
+    };
+    let base: std::rc::Rc<dyn Fn(&mut Camera)> = base;
+    let lens = |c: &mut Camera, k: f32, fade: f32| {
+        c.lens_at.jump(k);
+        c.lens_fade.jump(fade);
+    };
+    let note = |c: &mut Camera, words: &str| c.note = Some((words.to_owned(), 1.0));
+    let shots: Vec<(&str, crate::burst::DetailMode, Setup)> = vec![
+        ("1-main-face", crate::burst::DetailMode::Auto, with(&base, Box::new(move |c| {
+            let aligned = crate::smartcam::main_face(c.ai_results.as_ref().unwrap(), &c.align);
+            c.face = aligned;
+        }))),
+        ("2-switching", crate::burst::DetailMode::Auto, with(&base, Box::new(move |c| {
+            c.lens = Lens::Ai;
+            lens(c, 0.55, 0.5);
+        }))),
+        ("3-waking", crate::burst::DetailMode::Auto, with(&base, Box::new(move |c| {
+            c.lens = Lens::Ai;
+            lens(c, 1.0, 1.0);
+            c.ai_preview = None;
+            c.smart_status = Status::Waking { since: Instant::now() - Duration::from_millis(1100) };
+        }))),
+        ("4-ai-view", crate::burst::DetailMode::Auto, with(&base, Box::new(move |c| {
+            c.lens = Lens::Ai;
+            lens(c, 1.0, 1.0);
+            note(c, "woke in 1.4 s · 3.0 Mbaud");
+        }))),
+        ("5-hold-still", crate::burst::DetailMode::On, with(&base, Box::new(move |c| {
+            c.saving = Some(Instant::now());
+            c.dots_drawn = 3;
+            c.flash.jump(0.0);
+        }))),
+        ("6-saving", crate::burst::DetailMode::On, with(&base, Box::new(move |c| {
+            c.saving = Some(Instant::now());
+            c.captured = true;
+            c.dots_drawn = 2;
+        }))),
+        ("7-refining", crate::burst::DetailMode::On, with(&base, Box::new(move |c| {
+            let began = crate::burst::now_ms() - 1500;
+            let r = crate::burst::Refining { began_ms: began, expect_ms: 7500, progress: 0.2 };
+            c.note = Some((format!("saved · refining, about {} s", r.left_s(crate::burst::now_ms())), 1.0));
+            c.refining = Some((PathBuf::from("IMG_refining.jpg"), r));
+            c.last = Some((Photo { path: PathBuf::from("IMG_refining.jpg"), name: "IMG_refining.jpg".into(), taken: chrono::Local::now().naive_local(), bytes: 0 }, scene(72, 54, t, false)));
+        }))),
+        ("8-aligning", crate::burst::DetailMode::Off, with(&base, Box::new(move |c| {
+            c.lens = Lens::Ai;
+            lens(c, 1.0, 1.0);
+            c.aligning = true;
+            c.align.ox = 0.03;
+            note(c, "arrows · +/− · enter: keep");
+        }))),
+    ];
+    for (size, tag) in [(TextSize::Compact, "compact"), (TextSize::Standard, "standard"), (TextSize::Large, "large")] {
+        for (name, detail, setup) in &shots {
+            let mut camera = Camera::new();
+            setup(&mut camera);
+            let mut shell = Shell::new(crate::robot::Robot::demo());
+            (shell.settings.text, shell.settings.detail) = (size, *detail);
+            shell.apply_settings();
+            shell.show(Box::new(camera));
+            for _ in 0..90 {
+                if shell.tick(1.0 / 60.0) {
+                    shell.draw();
+                }
+            }
+            shell.draw();
+            crate::platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}-{tag}.png")), 3);
+        }
+        let mut shell = Shell::new(crate::robot::Robot::demo());
+        shell.settings.text = size;
+        shell.apply_settings();
+        shell.show(Box::new(crate::screens::SettingsApp::camera_page()));
+        for _ in 0..90 {
+            if shell.tick(1.0 / 60.0) {
+                shell.draw();
+            }
+        }
+        shell.draw();
+        crate::platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("9-settings-camera-{tag}.png")), 3);
+    }
+    // Detail mode's before and after: six full-size frames of the dim pit,
+    // the robot driving through them, merged as the handheld merges them.
+    let (w, h) = FULL;
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    let frames: Vec<Vec<u8>> = (0..SIM_BURST)
+        .map(|i| {
+            let mut yuv = rgb_to_yuv420(&scene(w, h, t + i as f32 * 0.12, false));
+            dim_and_noisy(&mut yuv, w * h, &mut seed);
+            yuv
+        })
+        .collect();
+    let refs: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
+    let began = Instant::now();
+    let (merged, report) = crate::burst::merge(&refs, w, h, &[], 3, &mut |_| {});
+    let took = began.elapsed();
+    let crop = |yuv: &[u8]| {
+        let mut rgb = Picture::default();
+        yuv420_to_rgb(yuv, w, h, &mut rgb);
+        // The robot's bumper and the carpet's lines, 1:1.
+        let (cw, ch, x0, y0) = (480, 320, 1300, 1720);
+        let mut out = Picture::new(cw, ch);
+        for y in 0..ch {
+            let from = ((y0 + y) * w + x0) * 3;
+            out.rgb[y * cw * 3..(y + 1) * cw * 3].copy_from_slice(&rgb.rgb[from..from + cw * 3]);
+        }
+        out
+    };
+    for (name, pic) in [("detail-before", crop(&frames[0])), ("detail-after", crop(&merged))] {
+        let mut canvas = bezel::Canvas::new(pic.w as i32, pic.h as i32);
+        for (i, p) in pic.rgb.chunks_exact(3).enumerate() {
+            canvas.px[i] = (u32::from(p[0]) << 16) | (u32::from(p[1]) << 8) | u32::from(p[2]);
+        }
+        crate::platform::sim::save_png(&canvas, &dir.join(format!("{name}.png")), 2);
+    }
+    println!(
+        "camera shots in {} · detail merge of {} frames at {w} × {h}: {} ms here on 3 threads (align {} + merge {} + finish {}), {:.0}% of the other frames kept, noise {:.1}",
+        dir.display(),
+        report.frames,
+        took.as_millis(),
+        report.align_ms,
+        report.merge_ms,
+        report.finish_ms,
+        report.kept * 100.0,
+        report.noise
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1306,6 +2166,8 @@ mod tests {
     #[test]
     fn a_code_read_is_offered_put_away_and_not_offered_again_while_in_sight() {
         crate::shell::tests::sandbox();
+        // The handheld's own reader: no smart camera on the port.
+        let _port = crate::smartcam::sim::exclusive(false);
         let mut camera = Camera::new();
         run(&mut camera, 300);
         assert!(matches!(press(&mut camera, Key::Right), Nav::Stay));
@@ -1340,6 +2202,7 @@ mod tests {
     #[test]
     fn a_photo_taken_lands_in_the_album() {
         crate::shell::tests::sandbox();
+        let _port = crate::smartcam::sim::exclusive(false);
         let camera = Camera::new();
         // The simulated camera's first pictures.
         let started = Instant::now();
@@ -1350,18 +2213,79 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         assert!(camera.control.send(Order::Still(path.clone())));
         let mut saved = None;
-        while saved.is_none() && started.elapsed() < Duration::from_secs(15) {
+        let mut captured = false;
+        while saved.is_none() && started.elapsed() < Duration::from_secs(30) {
             std::thread::sleep(Duration::from_millis(30));
             saved = camera.live.lock().unwrap().events.drain(..).find_map(|e| match e {
-                Event::Saved { path, size } => Some((path, size)),
+                Event::Captured => {
+                    captured = true;
+                    None
+                }
+                Event::Saved { path, size, detail } => Some((path, size, detail)),
                 Event::Failed(why) => panic!("{why}"),
             });
         }
-        let (got, size) = saved.expect("the photo is taken");
+        let (got, size, detail) = saved.expect("the photo is taken");
+        assert!(captured, "its picture was in before it was written");
         assert_eq!(got, path);
-        assert_eq!(size, (1640, 1232));
-        assert_eq!(photos::dimensions(&path), Some((1640, 1232)));
+        // Every photo at the sensor's full size.
+        assert_eq!(size, (3280, 2464));
+        assert_eq!(photos::dimensions(&path), Some((3280, 2464)));
+        assert!(!detail, "a plain photo is not refined");
         drop(camera);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn the_camera_programs_saved_line_is_read_with_its_timing() {
+        let (path, took, detail) = saved_line("/data/photos/IMG_1.jpg\tshot 812 write 640 detail 6");
+        assert_eq!(path, PathBuf::from("/data/photos/IMG_1.jpg"));
+        assert_eq!(took, "shot 812 write 640 detail 6");
+        assert!(detail);
+        // An older program's line: the path alone.
+        assert_eq!(saved_line("/data/photos/IMG_2.jpg"), (PathBuf::from("/data/photos/IMG_2.jpg"), String::new(), false));
+    }
+
+    #[test]
+    fn the_lens_switch_springs_to_the_ai_view_and_back_and_holds_what_it_shows() {
+        crate::shell::tests::sandbox();
+        let _port = crate::smartcam::sim::exclusive(true);
+        let mut camera = Camera::new();
+        run(&mut camera, 100);
+        assert_eq!(camera.lens, Lens::Main);
+        assert_eq!(camera.smart.as_ref().map(|(u, _)| *u), Some(crate::smartcam::Use::Faces), "faces for the exposure");
+        // ↑: to the AI view, on a spring (part way after a frame, there after a while).
+        assert!(matches!(press(&mut camera, Key::Up), Nav::Stay));
+        assert_eq!(camera.lens, Lens::Ai);
+        camera.tick(1.0 / 60.0);
+        let early = camera.lens_at.value();
+        assert!(early > 0.0 && early < 0.9, "moving: {early}");
+        assert_eq!(camera.smart.as_ref().map(|(u, _)| *u), Some(crate::smartcam::Use::View), "everything, with its picture");
+        run(&mut camera, 900);
+        assert!((camera.lens_at.value() - 1.0).abs() < 0.01);
+        // Scan mode from there still shows the AI view; back with ↑ (or l).
+        assert!(matches!(press(&mut camera, Key::Char('l')), Nav::Stay));
+        assert_eq!(camera.lens, Lens::Main);
+        press(&mut camera, Key::Right);
+        assert_eq!(camera.smart.as_ref().map(|(u, _)| *u), Some(crate::smartcam::Use::Codes), "codes in scan mode");
+    }
+
+    #[test]
+    fn the_ai_view_wakes_the_smart_camera_and_shows_what_it_finds() {
+        crate::shell::tests::sandbox();
+        let _port = crate::smartcam::sim::exclusive(true);
+        let mut camera = Camera::new();
+        press(&mut camera, Key::Up);
+        let started = Instant::now();
+        while (camera.ai_preview.is_none() || camera.ai_results.is_none()) && started.elapsed() < Duration::from_secs(15) {
+            run(&mut camera, 50);
+        }
+        assert!(matches!(camera.smart_status, crate::smartcam::Status::Ready { .. }), "{:?}", camera.smart_status);
+        let found = camera.ai_results.clone().expect("results");
+        assert!(!found.faces.is_empty() && !found.tags.is_empty());
+        // Back on the main lens, the face reaches this camera's picture.
+        press(&mut camera, Key::Up);
+        run(&mut camera, 300);
+        assert!(camera.face.is_some(), "the face for the exposure");
     }
 }

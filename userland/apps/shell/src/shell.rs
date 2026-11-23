@@ -25,6 +25,8 @@ pub struct Settings {
     pub home: HomeStyle,
     /// Open the Robot app when a robot links while Home is showing.
     pub open_robot: bool,
+    /// Settings › Camera › Detail mode: photos merged from a burst (burst.rs).
+    pub detail: crate::burst::DetailMode,
     /// Show a match's summary once its log is pulled after the robot links.
     pub match_report: bool,
     /// The widgets on the glance page and among Home's apps (widgets.rs).
@@ -173,6 +175,7 @@ impl Default for Settings {
             accent,
             home: HomeStyle::Grid,
             open_robot: true,
+            detail: crate::burst::DetailMode::Auto,
             match_report: true,
             widgets: crate::widgets::Layout::starting(),
             edit_widgets: None,
@@ -1613,6 +1616,7 @@ impl Shell {
         self.gfx.calm = self.settings.calm;
         self.gfx.home = self.settings.home;
         self.gfx.open_robot = self.settings.open_robot;
+        self.gfx.detail = self.settings.detail;
         self.gfx.match_report = self.settings.match_report;
         if self.gfx.widgets != self.settings.widgets {
             self.gfx.widgets.clone_from(&self.settings.widgets);

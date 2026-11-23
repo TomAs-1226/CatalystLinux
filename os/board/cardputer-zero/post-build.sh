@@ -63,7 +63,7 @@ for f in etc/init.d/catalyst-early etc/init.d/catalyst-shell etc/init.d/catalyst
 	usr/sbin/catalyst-usb usr/sbin/catalyst-power usr/sbin/catalyst-time usr/share/udhcpc/default.script.d/50-catalyst-time \
 	usr/libexec/catalyst/git-credential etc/init.d/catalyst-tailscale usr/sbin/catalyst-tailscale \
 	etc/init.d/catalyst-zram etc/init.d/catalyst-audio usr/sbin/catalyst-audio etc/init.d/catalyst-bluetooth usr/sbin/catalyst-bluetooth \
-	etc/init.d/catalyst-companion; do
+	etc/init.d/catalyst-companion etc/init.d/catalyst-serial usr/sbin/catalyst-grove; do
 	chmod 0755 "$TARGET_DIR/$f"
 done
 mkdir -p "$TARGET_DIR/data"
@@ -144,7 +144,9 @@ link default catalyst-tailscale
 link default catalyst-zram
 link default catalyst-bluetooth
 link default catalyst-companion
-link default agetty.ttyAMA0
+# The Grove port's login, only while the port is the console (not the smart
+# camera's): catalyst-serial, in place of the plain agetty.ttyAMA0.
+link default catalyst-serial
 link shutdown killprocs
 link shutdown mount-ro
 

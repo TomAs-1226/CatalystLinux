@@ -18,6 +18,40 @@ use crate::widgets::{Act, Board, Cell, Grid, Kind, Layout, Packed, Placed, Slot}
 use crate::wifi::Wifi;
 use crate::wpilog::Level;
 
+/// Settings › Camera › Grove port, as it stands.
+fn grove_words() -> String {
+    match (crate::smartcam::chosen(), crate::smartcam::restart_owed()) {
+        (false, _) => "Console".into(),
+        (true, true) => "Smart camera · restart".into(),
+        (true, false) => "Smart camera".into(),
+    }
+}
+
+/// The Grove port given to the smart camera (or back to the console):
+/// catalyst-grove takes the login and the kernel's console off it, or puts
+/// them back. What to say of it.
+fn switch_grove(camera: bool) -> String {
+    if !cfg!(target_arch = "aarch64") {
+        crate::smartcam::sim::choose(camera);
+        return if camera { "Grove port: smart camera".into() } else { "Grove port: console".into() };
+    }
+    match std::process::Command::new("catalyst-grove").arg(if camera { "camera" } else { "console" }).output() {
+        Ok(out) if out.status.success() => {
+            let said = String::from_utf8_lossy(&out.stdout);
+            match (camera, said.contains("restart")) {
+                (true, true) => "Grove port: smart camera · restart once to finish".into(),
+                (true, false) => "Grove port: smart camera".into(),
+                (false, _) => "Grove port: console, login on it again".into(),
+            }
+        }
+        Ok(out) => {
+            let why = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+            if why.is_empty() { "the Grove port could not be changed".into() } else { why }
+        }
+        Err(_) => "the Grove port is set on the handheld".into(),
+    }
+}
+
 fn dash(v: Option<String>) -> String {
     v.unwrap_or_else(|| "–".into())
 }
@@ -2942,6 +2976,11 @@ enum Item {
     BluetoothSection,
     /// Settings › Music: what Music keeps on the card (music/settings.rs).
     MusicSection,
+    /// Settings › Camera: detail mode, the Grove port, the smart camera.
+    CameraSection,
+    DetailModeRow,
+    GrovePort,
+    SmartCamera,
     /// Setup's page offered to a computer, outside first start.
     FromComputer,
     /// Settings › Computer companion: a page of its own (companion.rs).
@@ -3098,7 +3137,7 @@ fn nearest_hue(accent: bezel::Accent) -> u8 {
 
 /// Where everything in Settings is, for search: what it is called, the
 /// section it is in, and its place there (none: the section itself).
-const SETTING_PLACES: [(&str, Item, Option<usize>); 87] = [
+const SETTING_PLACES: [(&str, Item, Option<usize>); 91] = [
     ("Robot settings", Item::RobotSection, None),
     ("Open Robot on link", Item::RobotSection, Some(0)),
     ("Match report after a match", Item::RobotSection, Some(1)),
@@ -3161,6 +3200,10 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 87] = [
     ("Clear played songs", Item::MusicSection, Some(2)),
     ("Music downloads", Item::MusicSection, Some(3)),
     ("Lyrics on the island", Item::MusicSection, Some(6)),
+    ("Camera", Item::CameraSection, None),
+    ("Detail mode", Item::CameraSection, Some(0)),
+    ("Grove port", Item::CameraSection, Some(1)),
+    ("Smart camera", Item::CameraSection, Some(2)),
     ("Name & time", Item::NameSection, None),
     ("Handheld name", Item::NameSection, Some(0)),
     ("Time zone", Item::NameSection, Some(1)),
@@ -3274,8 +3317,14 @@ impl SettingsApp {
         use Item::*;
         Self::page(
             "Settings",
-            vec![RobotSection, Appearance, TextSection, HomeSection, Display, LockSection, StandBySection, BatterySection, Network, SoundSection, BluetoothSection, MusicSection, NameSection, UsbSection, CompanionSection, KeysSection, OnDeviceModel, Access, UpdateSection, Help, About, FromComputer],
+            vec![RobotSection, Appearance, TextSection, HomeSection, Display, LockSection, StandBySection, BatterySection, Network, SoundSection, BluetoothSection, MusicSection, CameraSection, NameSection, UsbSection, CompanionSection, KeysSection, OnDeviceModel, Access, UpdateSection, Help, About, FromComputer],
         )
+    }
+
+    /// Settings › Camera on its own (the camera's shots).
+    #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+    pub fn camera_page() -> Self {
+        Self::section(Item::CameraSection).unwrap_or_else(Self::new)
     }
 
     /// Settings › Keys on its own, for the assistant to send someone to.
@@ -3326,6 +3375,7 @@ impl SettingsApp {
             Help => Self::page("Help", vec![TakeTour, KeyboardShortcuts, KeyboardLesson]),
             NameSection => Self::page("Name & time", vec![DeviceName, TimeZone, ClockNote]),
             UsbSection => Self::page("USB", vec![UsbMode, UsbLink]),
+            CameraSection => Self::page("Camera", vec![DetailModeRow, GrovePort, SmartCamera]),
             DeveloperSection => Self::page("Developer", vec![DevMode, MotionScale, ShowKeys, Undervolt, TearFree]),
             _ => return None,
         })
@@ -3439,6 +3489,10 @@ impl SettingsApp {
             SoundSection => section("Sound", crate::sound::summary()),
             BluetoothSection => section("Bluetooth", crate::bluetooth::summary()),
             MusicSection => section("Music", crate::music::summary()),
+            CameraSection => section("Camera", format!("detail {}", g.detail.name())),
+            DetailModeRow => ("Detail mode".into(), g.detail.words().into(), g.detail != crate::burst::DetailMode::Off),
+            GrovePort => ("Grove port".into(), grove_words(), crate::smartcam::chosen()),
+            SmartCamera => ("Smart camera".into(), crate::camera::smart_words(), false),
             CompanionSection => section("Computer companion", crate::companion::summary()),
             Mode => ("Mode".into(), (if g.tokens.tone == bezel::Tone::Light { "light" } else { "dark" }).into(), true),
             AccentColor => ("Accent".into(), g.accent.name().into(), true),
@@ -3619,6 +3673,8 @@ impl SettingsApp {
                 });
             }
             OpenRobot => cx.settings.open_robot = !cx.settings.open_robot,
+            DetailModeRow => cx.settings.detail = cx.settings.detail.step(step),
+            GrovePort => *cx.say = Some(switch_grove(!crate::smartcam::chosen())),
             MatchReport => cx.settings.match_report = !cx.settings.match_report,
             LiftWake => cx.settings.lift_wake = !cx.settings.lift_wake,
             FaceDown => cx.settings.face_down = !cx.settings.face_down,

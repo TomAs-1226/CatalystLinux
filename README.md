@@ -2286,16 +2286,49 @@ an album, and QR codes read. The AprilTag reader is still there beside it.
   10 s, then off), counted down over the picture; Esc stops it. `g` lays a
   rule-of-thirds grid over the picture. `n` is for low light: the exposure may
   run to a fifth of a second, so the preview slows down too.
-- **Photos are full size.** The preview is 320 × 240 YUV 4:2:0 at up to 30
-  frames a second from the sensor's binned full-view mode. A photo stops the
-  preview and asks the sensor for all 3280 × 2464 pixels. `catalyst-camera`
-  waits a few frames so the exposure settles, then writes the JPEG
-  (libjpeg-turbo, quality 92) straight from the camera's buffer, with no RGB
-  copy in between. The preview carries on as soon as the photo is written.
-  The camera's memory (CMA) is 32 MB, so where a full-size frame cannot be had
-  it takes the binned 1640 × 1232 instead, and the note says which size it
-  saved. Photos are written to a temporary file and renamed into place, so a
-  photo is never half there.
+- **Photos are full size, every time.** The preview is 320 × 240 YUV 4:2:0
+  at up to 30 frames a second from the sensor's binned full-view mode. A
+  photo stops the preview and asks the sensor for all 3280 × 2464 pixels,
+  with the ISP's high-quality colour denoise; `catalyst-camera` keeps the
+  first frame whose exposure has settled (libcamera's AE state), copies it
+  out of the camera's memory and starts the preview again ("hold still", then
+  "saving"), and writes the JPEG behind it on a thread of its own at a lower
+  priority: libjpeg-turbo, quality 95, the ISP's own 4:2:0 written as it is
+  (no RGB copy, nothing resampled), with Exif (camera, lens, exposure, ISO,
+  the time and its offset). Photos are written to a temporary file and
+  renamed into place, so a photo is never half there.
+- **Why it used to be 1640 × 1232.** Every camera buffer comes from the
+  kernel's contiguous pool (CMA, 64 MB), which the GPU shares (it keeps 16 MB
+  for its binner while the shell draws with it). libcamera's Raspberry Pi
+  pipeline keeps four raw frames of its own by default: 39 MB at full size,
+  63 MB with the ISP's frame and ours, so the full-size still never fitted
+  and every photo fell back to the binned size. Since 0.9 the pipeline keeps
+  one (`/usr/share/catalyst-camera/vc4.yaml`, through
+  `LIBCAMERA_RPI_CONFIG_FILE`): a full-size photo needs 35 MB. The preview
+  hands the sensor raw frames of its own in each request, so it still never
+  waits for one. The binned size is kept only as a last resort, after a
+  second try, so a photo is never lost; the note says so if it happens.
+- **4:4:4?** Not worth it here: the ISP gives 4:2:0, and 4:4:4 would need it
+  to give 24-bit frames (two of 24 MB), which the pool cannot hold beside the
+  raw frame. Quality 95 on the ISP's own chroma is the best this sensor's
+  pipeline gives.
+- **Detail mode** (`d` in the Camera: auto, on, off; Settings › Camera ›
+  Detail mode) takes a burst instead, the way phones' night and HDR+ modes
+  do: the first frame settled, then up to five more with its exposure and
+  white balance held (as many as memory leaves room for, 12 MB each). The
+  first is saved as the photo at once, and the shutter is free again. The
+  frames go, in memory files, to `catalyst-shell --merge-burst`, which runs
+  by itself at idle priority (SCHED_IDLE, nice 19, idle I/O: the music
+  player at nice −10 never waits on it) on three cores. It aligns each frame
+  to the first on a pyramid (one shift for the picture at an eighth of the
+  size, then tiles, down to 32-pixel tiles at full size), leaves out any
+  tile that moved (no ghosts: the first frame stands alone there), merges
+  the rest with weights that fall as a pixel differs from the first's, and
+  finishes with gentle local tone mapping and sharpening, softer inside the
+  faces the smart camera saw, whose colour it leaves as merged. The
+  thumbnail wears a "refining" badge with the seconds left until the merged
+  photo takes its place (it keeps the first frame's Exif). Auto takes the
+  burst only in dim light (under 60 lux, or a gain of 3 or more).
 - **Where they go:** `/data/photos`, named for when they were taken
   (`IMG_20261121_140312.jpg`, with `_2` added if two land in the same
   second). Files opens a photo in the viewer too.
@@ -2330,10 +2363,96 @@ an album, and QR codes read. The AprilTag reader is still there beside it.
   six of them. The QR reader reads the simulated code at the preview's size
   (tested).
 
-Not yet checked on a CardputerZero: the colours and which way up the colour
-preview is, whether a full-size photo fits in the camera's 32 MB or falls back
-to 1640 × 1232, the preview's frame rate and how long a photo takes to write,
-and how far away a QR code can be read at 320 × 240.
+Not yet checked on a CardputerZero: how long a full-size photo and a detail
+merge take there (estimated: under a second to the picture, about a second
+more to write it; a six-frame merge 5 to 8 s at idle priority), and how far
+away a QR code can be read at 320 × 240.
+
+## The smart camera on the Grove port
+
+An M5Stack UnitV (the K210 with the M12 lens, U078-V-M12) plugged into the
+Grove port sees for the handheld, on its own processor and KPU: faces, QR
+codes, AprilTags with their pose, colour blobs. What it finds comes back as
+small results; it takes no photos (0.3 MP), but the Camera's lens switch (↑)
+shows its AI view: what it sees, with what it found drawn on it.
+
+- **What it is for.** Faces lean the main camera's exposure toward the
+  people in the picture (a face's brightness brought to a face's usual level
+  through the exposure compensation the camera's own AE follows), and soften
+  the detail merge's sharpening there. Scan mode takes its QR codes (a
+  scouting note, a Wi-Fi code) and rests the handheld's own reader. Its
+  AprilTags are there for the field view (`smartcam::tags()`: id, place in
+  its picture, pose in millimetres).
+- **The Grove port.** Settings › Camera › Grove port: Console (the serial
+  console and a root login, as shipped) or Smart camera. As the smart
+  camera's, nothing else ever uses the port (`catalyst-grove`): this
+  system's kernel command line says `console=null` (the kernel's ttynull,
+  built in since 0.9) for `console=ttyAMA0`, so from the kernel's first line
+  the boot log never goes there; no login listens (`catalyst-serial` starts
+  its getty only in console mode); the 5 V is off from early in every start.
+  Moving the port from the console takes one restart, and until then the
+  camera is never powered. The updater carries the choice into each system
+  it installs (the boot pack's command line still says ttyAMA0), and a start
+  that finds the console back on the port puts it right for the next and
+  keeps the camera off meanwhile. config.txt is left alone. The USB serial
+  console (ttyGS0) is untouched either way.
+- **Power only when used.** The Grove 5 V is on while the Camera is open
+  (or something else holds the camera), kept warm 15 s after, then off. The
+  AI view says "waking the smart camera…" with the seconds, then how long it
+  took to start (a K210 answers in about 1.5 s) and the link's rate.
+- **The link.** Frames: a sync word (`C5 7A`), the kind, a sequence number,
+  the length with a check of its own, the payload, a CRC-32; junk between
+  frames is skipped. 115 200 baud to start, then the fastest both ends hold,
+  tried from the top: 3 Mbaud (the PL011's limit at its default clock; the
+  K210's UART runs from a 195 MHz clock with a fractional divider), 2, 1.5,
+  1 Mbaud and down, each confirmed by a ping at the new rate and stepped down
+  when too many frames are refused. At 3 Mbaud a QVGA preview (6–10 kB)
+  takes about 30 ms on the wire, so the AI view runs at the camera's own
+  pace (10–15 frames a second); at 115 200 it would be about one a second.
+- **Alignment.** Side by side in a case, the two cameras look the same way
+  a few centimetres apart: the smart camera's 80° picture maps into the
+  IMX219's 62° by a scale (from the two lenses, about 1.1) and an offset.
+  `a` in the AI view lays its picture over the main one's at half strength:
+  the arrows move it, `+`/`-` size it, `r` resets, Enter keeps it.
+
+**Setting it up, once.** The UnitV runs MaixPy (MicroPython) from its
+microSD card:
+
+1. The firmware: M5Stack's UnitV firmware (`M5StickV_Firmware_v5.1.2.kfpkg`)
+   or a full MaixPy build (not a "minimum" one: it needs `find_qrcodes`,
+   `find_apriltags` and KPU), flashed over its USB-C with kflash_gui (board
+   "M5StickV") or `kflash -p COM5 -b 1500000 <firmware>`. Most UnitVs ship
+   with it.
+2. The easy path: copy `tools/unitv/main.py` to the root of a FAT32 microSD
+   card (MBR, a card that works in SPI mode; M5Stack's page lists some that
+   do not), and for faces Sipeed's face model beside it as `face.kmodel`
+   (from MaixPy_scripts' `face_model_at_0x300000.kfpkg`, a zip: its
+   `.kmodel` inside). MaixPy runs `/sd/main.py` at every start.
+3. Without a card: MaixPy IDE over USB-C (open `main.py`, Tools › Save open
+   script to board), or `mpfshell -o ser:COM5 -c "put main.py"`; the face
+   model flashed with `kflash -p COM5 -b 1500000
+   face_model_at_0x300000.kfpkg` (main.py looks on the card, then at
+   0x300000).
+4. On the handheld: Settings › Camera › Grove port › Smart camera, restart
+   once, plug the UnitV into the Grove port.
+
+main.py never sends a byte until the handheld speaks to it, and listens on
+both Grove pins (G34, G35) until the handheld's hello says which is its RX,
+so a crossed cable works and no pin is driven against the handheld's. Its
+models: Sipeed's YOLOv2 face detector (MaixPy_scripts, MIT; 320 × 240 in,
+about 380 kB); no object model (Sipeed's 20-class VOC model states no
+licence). The rest is MaixPy's own vision (QR, AprilTag 36h11, LAB
+thresholds for blobs). To check on the UnitV: which way up its picture is
+(`FLIP`, `MIRROR`), the tag distance against a tape measure (`TAG_MM`), the
+blob colours in the field's light, and whether it draws its power from the
+Grove port (M5Stack says USB-C; a Grove 5 V output powers it on M5's own
+cores).
+
+In the simulator a stand-in camera answers behind the same bytes (a person
+drifting about, a scouting QR code, tag 7 on the wall, an orange game piece),
+starting 1.4 s after power and running at the baud rates' real pace.
+`tools/unitv/test_protocol.py` checks main.py's link on a computer against
+the same bytes the shell's tests check.
 
 ## Remote: a universal remote
 

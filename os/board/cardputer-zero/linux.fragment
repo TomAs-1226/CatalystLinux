@@ -9,6 +9,12 @@
 # costs next to nothing while no swap is switched on.
 CONFIG_SWAP=y
 
+# A console that keeps nothing (ttynull), for `console=null`: with the Grove
+# port the smart camera's (catalyst-grove), the kernel's console and the
+# first program's /dev/console go there instead of to the port. A few
+# kilobytes, built in (a console must be there before the first program).
+CONFIG_NULL_TTY=y
+
 # --- already off since the first image ---
 # CONFIG_AUDIT is not set
 # CONFIG_FTRACE is not set
