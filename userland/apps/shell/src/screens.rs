@@ -101,6 +101,8 @@ const APPS: [App; 40] = [
     App { icon: "battery_charging_full", name: "Batteries", open: crate::batteries::open },
     // Match scouting at speed on the keyboard, shared by QR with no internet.
     App { icon: "fact_check", name: "Scout", open: |_| Box::new(crate::scout::Scout::new()) },
+    // The match's plan on the field, for the drive team (strategy/).
+    App { icon: "strategy", name: "Strategy", open: |robot| Box::new(crate::strategy::Strategy::new(robot)) },
     App { icon: "settings_remote", name: "Remote", open: |_| Box::new(crate::irremote::Remotes::new()) },
     App { icon: "straighten", name: "Level", open: |_| Box::new(crate::level::Level::new()) },
     App { icon: "explore", name: "Compass", open: |_| Box::new(crate::level::Compass::new()) },

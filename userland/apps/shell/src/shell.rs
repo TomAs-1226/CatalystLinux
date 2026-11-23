@@ -4365,7 +4365,7 @@ impl Shell {
         } else {
             crate::notify::Notification::new("Schedule", "flag", format!("queue for {label} in 5 min"))
         };
-        self.notify(n.tag(format!("queue:{}", m.key)).action("builtin:Schedule"));
+        self.notify(crate::strategy::offer(n.tag(format!("queue:{}", m.key)).action("builtin:Schedule"), &m.key, &label));
     }
 
     /// At start: the start the tear-free panel is tried in asks, over

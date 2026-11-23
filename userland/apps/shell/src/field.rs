@@ -41,7 +41,7 @@ const IN: f32 = 0.0254;
 
 /// Each alliance zone, from its wall (158.6 in); its edge is the robot
 /// starting line.
-const ZONE: f32 = 158.6 * IN;
+pub const ZONE: f32 = 158.6 * IN;
 /// The blue HUB: centred between its AprilTags (18 to 27), 47 in square.
 const HUB_X: f32 = 4.6255;
 const HUB: f32 = 47.0 * IN;

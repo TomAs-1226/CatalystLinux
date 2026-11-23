@@ -151,6 +151,7 @@ impl Code {
         match self {
             Code::Wifi { ssid, password, .. } => ("wifi", format!("Wi-Fi · {ssid}"), if password.is_some() { "enter: join" } else { "enter: join · open network" }),
             Code::Url(url) => ("language", url.trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/').to_owned(), "enter: open in Web"),
+            Code::Text(text) if crate::strategy::is_board_code(text) => crate::strategy::card(text),
             Code::Text(text) => match crate::scout::scan_words(text) {
                 // Scout's codes import as they are read.
                 Some((title, action)) => ("download", title, action),
@@ -1838,6 +1839,13 @@ impl Camera {
                 self.say("read in already · esc: back");
                 Nav::Stay
             }
+            Code::Text(text) if crate::strategy::is_board_code(&text) => match crate::strategy::scanned(&text) {
+                Ok(board) => Nav::Push(board),
+                Err(words) => {
+                    self.say(words);
+                    Nav::Stay
+                }
+            },
             // A battery's QR label (Batteries): its page.
             Code::Text(text) => crate::batteries::scanned(&text).map_or_else(|| Nav::Push(Box::new(TextPage::new(text))), Nav::Push),
         }
