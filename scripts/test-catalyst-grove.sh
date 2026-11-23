@@ -13,7 +13,7 @@ set -eu
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/boot/slot-a" "$T/boot/slot-b" "$T/data" "$T/bin" "$T/proc/tty" "$T/proc/sys/kernel" "$T/sys/leds/grove_5v_out" "$T/sys/tty/ttyAMA0" "$T/run" "$T/procfs"
+mkdir -p "$T/boot/slot-a" "$T/boot/slot-b" "$T/data" "$T/bin" "$T/proc/tty" "$T/proc/sys/kernel" "$T/sys/leds/grove_5v_out" "$T/sys/leds/grove_fun" "$T/sys/tty/ttyAMA0" "$T/run" "$T/procfs"
 
 SHIPPED="root=/dev/mmcblk0p2 rootfstype=ext4 ro rootwait console=ttyAMA0,115200 loglevel=3 vt.global_cursor_default=0 cma=64M panic=10"
 echo "$SHIPPED" >"$T/boot/slot-a/cmdline.txt"
@@ -21,6 +21,8 @@ echo "$SHIPPED" | sed 's|p2|p3|' >"$T/boot/slot-b/cmdline.txt"
 cp "$T/boot/slot-b/cmdline.txt" "$T/slot-b.before"
 echo "$SHIPPED" >"$T/proc/cmdline"
 echo 1 >"$T/sys/leds/grove_5v_out/brightness"
+# The port's lines left on I2C by something else: power on puts them on the UART.
+echo 1 >"$T/sys/leds/grove_fun/brightness"
 printf '/dev/tty             /dev/tty        5       0 system:/dev/tty\nserial               /dev/ttyAMA     204 64-77 serial\n' >"$T/proc/tty/drivers"
 # The kernel as it starts: its console on the port, at loglevel 3, SysRq as
 # the Pi's kernel has it (0x1f6).
@@ -45,6 +47,7 @@ sed -e "s|^MNT=.*|MNT=$T/boot|" \
 	-e "s|^CMDLINE=.*|CMDLINE=$T/proc/cmdline|" \
 	-e "s|^TTY_DRIVERS=.*|TTY_DRIVERS=$T/proc/tty/drivers|" \
 	-e "s|^LED=.*|LED=$T/sys/leds/grove_5v_out/brightness|" \
+	-e "s|^FUN=.*|FUN=$T/sys/leds/grove_fun/brightness|" \
 	-e "s|^PROC=.*|PROC=$T/procfs|" \
 	-e "s|^SERIAL_PID=.*|SERIAL_PID=$T/run/catalyst-serial.pid|" \
 	-e "s|^CONSOLE_ATTR=.*|CONSOLE_ATTR=$T/sys/tty/ttyAMA0/console|" \
@@ -107,6 +110,11 @@ check "its 5 V off" '[ "$(led)" = 0 ]'
 check "no login may listen" '! $G login'
 check "ready at once, no restart" '$G ready && $G status | grep -q ready=yes'
 check "power on and off as the shell asks" '$G power on && [ "$(led)" = 1 ] && $G power off && [ "$(led)" = 0 ]'
+check "powered, the port's lines on the UART" '[ "$(cat $T/sys/leds/grove_fun/brightness)" = 0 ] && $G status | grep -q lines=uart'
+check "status: no getty, nobody holding the port" '$G status | grep -q getty=none && $G status | grep -qx holders='
+mv "$T/sys/leds/grove_5v_out" "$T/sys/leds/gone"
+check "no switch for the 5 V: power on is an error, and says so" '! $G power on 2>$T/err && grep -q grove_5v_out $T/err && $G power off'
+mv "$T/sys/leds/gone" "$T/sys/leds/grove_5v_out"
 check "without ttynull the command line keeps its console" '[ "$(cmd_a)" = "$SHIPPED" ]'
 check "the other system's command line untouched" 'cmp -s "$T/boot/slot-b/cmdline.txt" "$T/slot-b.before"'
 # Its next start, console on the port: quieted early, the camera usable.

@@ -33,7 +33,7 @@ fn camera_hint(item: Option<Item>) -> &'static [&'static str] {
         Some(Item::GrovePort) if crate::smartcam::chosen() => &["enter: console now · kernel messages from the next start", "enter: console now · kernel log next start", "console now · kernel log next start", "enter: console now"],
         Some(Item::GrovePort) => &["enter: smart camera now · login and console off it", "enter: smart camera now"],
         Some(Item::CameraProgram) => &["enter: its program over USB-A, no microSD card", "enter: its program over USB-A", "enter: over USB-A"],
-        Some(Item::SmartCamera) => &["wakes with the Camera, sleeps 15 s after", "wakes with the Camera"],
+        Some(Item::SmartCamera) => &["enter: its status · wakes with the Camera", "enter: its status"],
         _ => &["enter: auto, on or off · a photo of several frames", "enter: auto, on or off"],
     }
 }
@@ -3870,6 +3870,7 @@ impl Screen for SettingsApp {
             Key::Enter | Key::Right if item == Item::StandBySection => return Nav::Push(Box::new(crate::lockpages::StandByPage::new())),
             Key::Enter | Key::Right if item == Item::OnDeviceModel => return Nav::Push(Box::new(crate::local::ModelPage::new())),
             Key::Enter | Key::Right if item == Item::CameraProgram => return Nav::Push(Box::new(crate::unitv::InstallScreen::new())),
+            Key::Enter | Key::Right if item == Item::SmartCamera => return Nav::Push(Box::new(crate::smartcam_status::StatusPage::new())),
             Key::Enter | Key::Right if item == Item::SoundSection => return Nav::Push(Box::new(crate::sound::SoundScreen::new())),
             Key::Enter | Key::Right if item == Item::BluetoothSection => return Nav::Push(Box::new(crate::bluetooth::BluetoothScreen::new())),
             Key::Enter | Key::Right if item == Item::MusicSection => return Nav::Push(Box::new(crate::music::MusicSettings::new())),

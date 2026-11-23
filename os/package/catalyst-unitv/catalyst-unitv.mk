@@ -16,6 +16,8 @@
 #  - isp.bin: the K210's flash-mode loader, the ISP_PROG kflash.py carries
 #    (Kendryte's kflash.py, MIT), loaded into its SRAM to write the flash.
 #  - main.py: the camera's program (tools/unitv), written to /flash.
+#  - boot.py: what runs before it there (tools/unitv): finishes an update
+#    over the Grove port cut off part way, rolls back one that never starts.
 # Each file's source and licence are in SOURCES with them.
 CATALYST_UNITV_VERSION = 0.6.3
 CATALYST_UNITV_MAIXPY = maixpy_v0.6.3_2_gd8901fd22
@@ -30,6 +32,7 @@ CATALYST_UNITV_LICENSE = MIT, Apache-2.0 (MaixPy), MIT (face model, kflash.py IS
 CATALYST_UNITV_LICENSE_FILES = licences/MaixPy-LICENSE.md licences/MaixPy_scripts-LICENSE licences/kflash.py-LICENSE
 CATALYST_UNITV_DEPENDENCIES = host-python3
 CATALYST_UNITV_MAIN = $(BR2_EXTERNAL_CATALYST_PATH)/../tools/unitv/main.py
+CATALYST_UNITV_BOOT = $(BR2_EXTERNAL_CATALYST_PATH)/../tools/unitv/boot.py
 
 define CATALYST_UNITV_EXTRACT_CMDS
 	cp $(CATALYST_UNITV_DL_DIR)/$(CATALYST_UNITV_SOURCE) $(@D)/maixpy.bin
@@ -50,6 +53,7 @@ define CATALYST_UNITV_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0644 $(@D)/face.kmodel $(TARGET_DIR)/usr/share/catalyst/unitv/face.kmodel
 	$(INSTALL) -D -m 0644 $(@D)/isp.bin $(TARGET_DIR)/usr/share/catalyst/unitv/isp.bin
 	$(INSTALL) -D -m 0644 $(CATALYST_UNITV_MAIN) $(TARGET_DIR)/usr/share/catalyst/unitv/main.py
+	$(INSTALL) -D -m 0644 $(CATALYST_UNITV_BOOT) $(TARGET_DIR)/usr/share/catalyst/unitv/boot.py
 	echo "$(CATALYST_UNITV_MAIXPY)_m5stickv" >$(TARGET_DIR)/usr/share/catalyst/unitv/maixpy.version
 	$(INSTALL) -D -m 0644 $(CATALYST_UNITV_PKGDIR)/SOURCES $(TARGET_DIR)/usr/share/catalyst/unitv/SOURCES
 	$(INSTALL) -d $(TARGET_DIR)/usr/share/catalyst/unitv/licences

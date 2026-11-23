@@ -3,6 +3,15 @@
 # Its GPIO14/15 are the PL011, ttyAMA0, and it carries a switched 5 V
 # (the LED-class control grove_5v_out).
 #
+# The board (CardputerZero V0.6.1 schematic): the Grove 5 V comes from the
+# 5.2 V boost (VSYS_5V, an SY7088) through an AW35112FDR load switch, enabled
+# by the I/O expander's G4 (M5Stack's overlay: grove_5v_out, gpio-leds, active
+# high, so brightness 1 is on). The schematic rates it at 0.5 A at most, and
+# says the whole 5 V rail has about 3 W left over the CM0 on battery. The
+# port's two data lines go through an FSW7227 switch: GPIO4 (grove_fun,
+# default off) chooses UART (low) or I2C1 (high), and its enable follows the
+# Grove 5 V, so the UART reaches the connector only while the 5 V is on.
+#
 #   catalyst-grove mode            console | camera
 #   catalyst-grove console         the serial console and login, at once
 #   catalyst-grove camera          the smart camera's, at once: no login, the
@@ -54,6 +63,7 @@ SETTING=/data/catalyst/grove-port
 CMDLINE=/proc/cmdline
 TTY_DRIVERS=/proc/tty/drivers
 LED=/sys/class/leds/grove_5v_out/brightness
+FUN=/sys/class/leds/grove_fun/brightness
 PROC=/proc
 SERIAL_PID=/run/catalyst-serial.pid
 CONSOLE_ATTR=/sys/class/tty/ttyAMA0/console
@@ -116,9 +126,24 @@ write_cmdline() {
 	printf '%s\n' "$new" >"$file.new" && mv "$file.new" "$file"
 }
 
+# The port's 5 V. On: the data lines held on the UART first (GPIO4 low),
+# then the switch, read back; a switch that is missing or will not hold is
+# an error (on is never taken for done when it is not).
 power() {
-	[ -e "$LED" ] || return 0
-	echo "$1" >"$LED"
+	if [ ! -e "$LED" ]; then
+		[ "$1" = 0 ] && return 0
+		echo "no switch for the Grove 5 V (grove_5v_out): the board's driver did not load" >&2
+		return 1
+	fi
+	if [ "$1" != 0 ] && [ -w "$FUN" ] && [ "$(cat "$FUN" 2>/dev/null)" != 0 ]; then
+		echo 0 >"$FUN"
+	fi
+	echo "$1" >"$LED" || return 1
+	if [ "$1" != 0 ] && [ "$(cat "$LED" 2>/dev/null)" = 0 ]; then
+		echo "the Grove 5 V did not stay on" >&2
+		return 1
+	fi
+	return 0
 }
 
 # Every live process with the port open, but the caller and its parent (the
@@ -236,6 +261,30 @@ boot() {
 	return 0
 }
 
+status() {
+	echo "mode=$(mode)"
+	if ready; then echo ready=yes; else echo ready=no; fi
+	if serial_running; then echo getty=running; else echo getty=none; fi
+	echo "holders=$(holders | tr '\n' ',' | sed 's/,$//')"
+	if console_on_port; then echo console=port; else echo console=elsewhere; fi
+	if is_quiet; then echo quiet=yes; else echo quiet=no; fi
+	if has_ttynull; then echo ttynull=yes; else echo ttynull=no; fi
+	echo "power=$(cat "$LED" 2>/dev/null || echo -)"
+	echo "lines=$(lines)"
+}
+
+# Where the port's data lines go (GPIO4, grove_fun): uart, i2c, or -.
+lines() {
+	fun=$(cat "$FUN" 2>/dev/null)
+	if [ -z "$fun" ]; then
+		echo -
+	elif [ "$fun" = 0 ]; then
+		echo uart
+	else
+		echo i2c
+	fi
+}
+
 case "$1" in
 mode) mode ;;
 console) to_console ;;
@@ -245,19 +294,18 @@ login) [ "$(mode)" = console ] ;;
 ready) ready ;;
 power)
 	case "$2" in
-	on) ready && power 1 ;;
+	on)
+		if ! ready; then
+			echo "the port is not the camera's yet: $(status | tr '\n' ' ')" >&2
+			exit 1
+		fi
+		power 1
+		;;
 	off) power 0 ;;
 	*) exit 2 ;;
 	esac
 	;;
-status)
-	echo "mode=$(mode)"
-	if ready; then echo ready=yes; else echo ready=no; fi
-	if console_on_port; then echo console=port; else echo console=elsewhere; fi
-	if is_quiet; then echo quiet=yes; else echo quiet=no; fi
-	if has_ttynull; then echo ttynull=yes; else echo ttynull=no; fi
-	echo "power=$(cat "$LED" 2>/dev/null || echo -)"
-	;;
+status) status ;;
 *)
 	echo "usage: catalyst-grove mode|console|camera|boot|login|ready|power on|off|status" >&2
 	exit 2

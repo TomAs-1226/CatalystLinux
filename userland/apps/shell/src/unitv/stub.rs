@@ -332,6 +332,11 @@ impl Fake {
 
     fn exec(&mut self, code: &str) -> (String, String) {
         let path_in = |code: &str, mode: &str| code.split("open('").nth(1).and_then(|r| r.split_once(&format!("','{mode}')"))).map(|(p, _)| p.to_owned());
+        // The install's tidy: an update's leftovers gone; no card in this one.
+        if code.contains("CARD|") {
+            self.files.retain(|p, _| !p.contains("catalyst.trial") && !p.contains("catalyst.commit") && !p.ends_with(".new") && !p.ends_with(".part"));
+            return ("CARD|none\n".into(), String::new());
+        }
         if code.contains("CATALYST|") {
             let Firmware::MaixPy { full } = self.firmware else { return (String::new(), "ImportError: no module named 'KPU'\n".into()) };
             let stamp = self.files.get("/flash/catalyst.json").map(|s| String::from_utf8_lossy(s).replace('\n', "")).unwrap_or_else(|| "{}".into());

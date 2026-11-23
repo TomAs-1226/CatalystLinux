@@ -382,6 +382,8 @@ pub fn open(action: &str, cx: &mut Cx) -> Result<Box<dyn Screen>, String> {
         }
         // The smart camera on USB-A: its install page.
         "unitv" => Ok(Box::new(crate::unitv::InstallScreen::new())),
+        // The smart camera on the Grove port: its status page.
+        "smartcam" => Ok(Box::new(crate::smartcam_status::StatusPage::new())),
         "note" => Ok(Box::new(crate::files::Editor::open(&crate::notes::dir().join(what)).map_err(|_| "that note is gone")?)),
         "log" => {
             let row = cx.robot.logs.list().into_iter().find(|r| r.name == what).ok_or("that log is gone")?;

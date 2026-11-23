@@ -719,6 +719,9 @@ pub struct Shell {
     island_from: f32,
     island_words: String,
     message: Option<(String, f32)>,
+    /// The notification the island is saying, where it leads somewhere:
+    /// its words and id (Ctrl-Enter opens it while the island says it).
+    message_leads: Option<(String, u64)>,
     dirty: bool,
     /// Whether anything was in motion at the last tick. Time only passes for
     /// motion that was already under way: an animation begun by a key after
@@ -1008,6 +1011,7 @@ impl Shell {
             island_from: 60.0,
             island_words: String::new(),
             message: None,
+            message_leads: None,
             dirty: true,
             moving: false,
             background: Vec::new(),
@@ -1186,12 +1190,13 @@ impl Shell {
         use crate::standby::State;
         let awake = self.standby.state() == State::Awake && !self.lock.covering() && !self.faces.showing();
         let front = awake && !n.urgent && self.stack.last().is_some_and(|(s, _)| s.app() == n.app);
-        let (said, urgent) = (n.said(), n.urgent);
-        self.notes.add(n, front);
+        let (said, urgent, leads) = (n.said(), n.urgent, n.leads_to().is_some());
+        let id = self.notes.add(n, front);
         self.dirty = true;
         if front || (self.notes.quiet() && !urgent) {
             return;
         }
+        self.message_leads = leads.then(|| (said.clone(), id));
         self.message = Some((said, MESSAGE_SECONDS));
         if self.standby.state() == State::Off {
             self.lights.notice();
@@ -1213,6 +1218,12 @@ impl Shell {
         self.control.turn_to(crate::control::Page::Notices, &self.settings, &mut self.notes);
         self.moving = true;
         self.dirty = true;
+    }
+
+    /// The notification the island is saying now, if it leads somewhere.
+    fn island_leads(&self) -> Option<u64> {
+        let (words, _) = self.message.as_ref()?;
+        self.message_leads.as_ref().filter(|(w, _)| w == words).map(|(_, id)| *id)
     }
 
     /// Where a notification leads, opened over the screen in front; it is
@@ -1495,8 +1506,13 @@ impl Shell {
         };
         // Ctrl-Enter brings Spotlight up over any screen, a terminal included
         // (no program can tell it from Enter), and over the control centre,
-        // which gives way to it.
+        // which gives way to it; while the island says a notification that
+        // leads somewhere ("install on the camera"), it opens that instead.
         if key == Key::Ctrl('\n') {
+            if let Some(id) = self.island_leads().filter(|_| !self.locked()) {
+                self.message = None;
+                return self.open_notification(id);
+            }
             return self.summon_spotlight();
         }
         // A key while the control centre is on its way out: it finishes going
@@ -7029,6 +7045,26 @@ pub(crate) mod tests {
         frames(shell, 90, FRAME);
         assert!(!shell.spotlight.visible() && shell.spotlight_under.is_none(), "gone, and its picture let go");
         assert_eq!(titles_of(shell), before);
+    }
+
+    /// While the island says a notice that leads somewhere ("install on the
+    /// camera"), Ctrl-Enter opens where it leads; once said, it is search.
+    #[test]
+    fn ctrl_enter_opens_the_notice_the_island_is_saying() {
+        let mut shell = shell();
+        let notice = || crate::notify::Notification::new("Camera", "developer_board", "smart camera on USB").body("install on the camera").tag("unitv").action("unitv:install");
+        shell.notify(notice());
+        shell.key(Key::Ctrl('\n'));
+        assert!(!shell.spotlight_open());
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(shell.top_title(), "UnitV", "its install page");
+        shell.key(Key::Back);
+        frames(&mut shell, 60, FRAME);
+        // Said and gone from the island: search, as from anywhere.
+        shell.notify(notice());
+        frames(&mut shell, 600, FRAME);
+        shell.key(Key::Ctrl('\n'));
+        assert!(shell.spotlight_open());
     }
 
     #[test]

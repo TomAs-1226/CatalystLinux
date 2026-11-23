@@ -16,18 +16,37 @@
 //! **Power.** The port's 5 V is on only while something holds a [`Lease`]
 //! (the Camera, for its face-aware exposure, the AI view and scan mode; the
 //! field view for tags), then kept warm [`WARM_FOR`] so coming straight back
-//! is instant, then off. A K210 starts in about a second and a half: the
-//! time from power to its first answer is measured and shown ("waking the
-//! smart camera…").
+//! is instant, then off. A K210 with main.py answers two or three seconds
+//! after power (MaixPy, the sensor, the face model): it is given
+//! [`WAKE_TIMEOUT`], then powered off a moment and tried again. The time
+//! from power to its first answer is measured and shown ("waking the smart
+//! camera…"); one far longer than a start takes means it started more than
+//! once (short of power: the Grove 5 V is rated for 0.5 A, the UnitV's own
+//! figure).
 //!
 //! **The link.** Frames (see [`frame`]): a sync word, the kind, a sequence
 //! number, the length with a check of its own, the payload, and a CRC-32
 //! over all of it; junk between frames (a camera starting up, a bit lost) is
-//! skipped to the next sync word. It starts at 115 200 baud and then asks
-//! for the fastest both ends hold (3 Mbaud is the PL011's limit at its
-//! default clock; the K210's UART runs from a 195 MHz clock with a
-//! fractional divider), stepping down whenever a rate fails to answer or
-//! garbles too many frames.
+//! skipped to the next sync word. It starts at 115 200 baud and climbs a
+//! step at a time ([`CLIMB`]), each step confirmed both ways (asked and
+//! answered at the old rate, a ping heard and answered at the new); the
+//! first that fails sends both back to the last that held (3 Mbaud is the
+//! PL011's limit at its default clock; the K210's UART runs from a 195 MHz
+//! clock with a fractional divider). Too many frames garbled at a rate: one
+//! step down. Quiet for [`LOST_AFTER`]: both back to 115 200 and found again
+//! (main.py goes back by itself after five quiet seconds).
+//!
+//! **Its program.** When the camera answers with an older program or model
+//! than this image carries (`/usr/share/catalyst/unitv`), the new ones go
+//! over the link ([`update`]) and the camera starts again with them; boot.py
+//! there rolls back a program that never starts. MaixPy itself cannot go
+//! over the Grove port (it needs the K210's boot pin, which only the USB
+//! bridge reaches): when the camera's lacks what the program needs, it is
+//! said so, and USB-A does it.
+//!
+//! **What it has seen** ([`diag`]): the 5 V, the bytes and frames, the
+//! rates tried, the last error, the camera's hello, for Settings › Camera ›
+//! Smart camera (`smartcam_status`).
 //!
 //! **The field view.** [`tags`] is the AprilTags the camera saw last, with
 //! their id, where in its picture, and their pose (millimetres, from its
@@ -43,16 +62,26 @@ use crate::photos::Picture;
 
 /// Kept powered this long after the last lease goes (a K210 starts fast).
 pub const WARM_FOR: Duration = Duration::from_secs(15);
-/// No answer this long after power on: not there (or not set up).
-pub const WAKE_TIMEOUT: Duration = Duration::from_secs(6);
+/// No answer this long after power on: not there (or not set up). A K210
+/// with main.py answers in two or three seconds; this leaves room for a
+/// slow start (a fresh /flash, a sensor slow to wake) several times over.
+pub const WAKE_TIMEOUT: Duration = Duration::from_secs(12);
 /// After a camera that did not answer, tried again this long after.
 pub const RETRY_AFTER: Duration = Duration::from_secs(10);
-/// The rates tried, fastest first.
+/// The rates stepped down through when one garbles, fastest first.
 pub const BAUDS: [u32; 7] = [3_000_000, 2_000_000, 1_500_000, 1_000_000, 921_600, 460_800, 115_200];
 pub const START_BAUD: u32 = 115_200;
 /// The 5 V stays off at least this long before it comes back (my own
 /// tuning: the UnitV's capacitors drained, the K210 reset).
-pub const OFF_FOR: Duration = Duration::from_millis(500);
+pub const OFF_FOR: Duration = Duration::from_secs(1);
+/// Nothing heard this long from a camera that answered: the link is lost
+/// (pinged meanwhile, so a quiet camera still answers).
+pub const LOST_AFTER: Duration = Duration::from_secs(5);
+/// From power to main.py's first line, a start takes two or three seconds
+/// (MaixPy loading); longer than this, the K210 started more than once.
+pub const RESTARTED_MS: u32 = 7000;
+/// What the handheld's hello says of itself.
+pub const HELLO_PAYLOAD: &[u8] = br#"{"v":2}"#;
 
 // ------------------------------------------------------------------ frames ---
 
@@ -71,6 +100,13 @@ pub mod frame {
     pub const BAUD: u8 = 0x02;
     pub const WANT: u8 = 0x03;
     pub const PING: u8 = 0x04;
+    /// The Grove update: a file begun (name, size, CRC, id), a chunk of it
+    /// (its offset, LE, then bytes), its end (checked whole), and all of
+    /// them moved into place with the stamp (the camera then starts again).
+    pub const PUT: u8 = 0x05;
+    pub const CHUNK: u8 = 0x06;
+    pub const DONE: u8 = 0x07;
+    pub const COMMIT: u8 = 0x08;
     // Its answers, and what it sends by itself once asked.
     pub const HELLO_BACK: u8 = 0x81;
     pub const BAUD_BACK: u8 = 0x82;
@@ -80,6 +116,12 @@ pub mod frame {
     pub const PREVIEW: u8 = 0x86;
     #[allow(dead_code)]
     pub const LOG: u8 = 0x87;
+    /// How much of the file it already holds (to resume from), or why not.
+    pub const PUT_BACK: u8 = 0x88;
+    /// How much of the file it holds now (LE; 0xFFFFFFFF: no file under way).
+    pub const CHUNK_BACK: u8 = 0x89;
+    pub const DONE_BACK: u8 = 0x8A;
+    pub const COMMIT_BACK: u8 = 0x8B;
 
     /// CRC-32 (IEEE 802.3, as zlib and MicroPython's binascii have it).
     pub fn crc32(bytes: &[u8]) -> u32 {
@@ -369,6 +411,117 @@ pub enum Use {
     View,
     /// The field view: AprilTags.
     Tags,
+    /// Settings › Camera › Smart camera: powered and linked, asked for
+    /// nothing (what it says of itself, its program brought up to date).
+    Status,
+}
+
+// --------------------------------------------------------------- diagnosis ---
+
+/// The camera's hello, as main.py says it (0.9.3's, version 1, says less).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Hello {
+    /// main.py's VERSION.
+    pub version: u32,
+    /// It takes its program over the link (version 2 on).
+    pub updates: bool,
+    /// MaixPy's version ("0.6.3").
+    pub maixpy: String,
+    /// Whether its MaixPy has what main.py needs (None: it did not say).
+    pub full: Option<bool>,
+    /// "ok", or why its image sensor did not start.
+    pub sensor: Option<String>,
+    pub kpu: String,
+    /// From main.py's first line to this hello.
+    pub up_ms: u32,
+    /// From main.py's first line to its listening on the link.
+    pub listen_ms: Option<u32>,
+    pub usb: bool,
+    /// Where MaixPy started it from: /flash, or /sd (a card in it).
+    pub cwd: String,
+    /// A new program's starts so far (None: no update on trial).
+    pub trial: Option<u32>,
+    /// The last update never started, and boot.py put the old one back.
+    pub rolled_back: bool,
+    pub stamp: Option<crate::unitv::Stamp>,
+}
+
+impl Hello {
+    pub fn parse(json: &[u8]) -> Option<Hello> {
+        let v: serde_json::Value = serde_json::from_slice(json).ok()?;
+        let text = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_owned);
+        let num = |k: &str| v.get(k).and_then(serde_json::Value::as_u64);
+        let flag = |k: &str| v.get(k).and_then(|x| x.as_bool().or_else(|| x.as_u64().map(|n| n != 0)));
+        Some(Hello {
+            version: num("v").unwrap_or(1) as u32,
+            updates: flag("upd").unwrap_or(false),
+            maixpy: text("mp").unwrap_or_default(),
+            full: flag("full"),
+            sensor: text("sensor"),
+            kpu: text("kpu").unwrap_or_default(),
+            up_ms: num("up_ms").unwrap_or(0) as u32,
+            listen_ms: num("listen_ms").map(|n| n as u32),
+            usb: flag("usb").unwrap_or(false),
+            cwd: text("cwd").unwrap_or_default(),
+            trial: num("trial").map(|n| n as u32),
+            rolled_back: flag("rolled_back").unwrap_or(false),
+            stamp: v.get("stamp").and_then(crate::unitv::Stamp::from_value),
+        })
+    }
+}
+
+/// The camera's program brought up to date over the link, as it stands.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Update {
+    #[default]
+    Idle,
+    /// Older than this image's, and it cannot take one over the link: why
+    /// (USB-A does it, once).
+    UsbOnce(String),
+    /// A file on its way; `done` is of the whole update, 0 to 1.
+    Sending { file: String, done: f32 },
+    /// Committed: the camera starting again with it.
+    Restarting,
+    /// On it now: the release whose program it is.
+    Done(String),
+    Failed(String),
+    /// It never started, and the old program is back.
+    RolledBack,
+}
+
+/// What the link has seen since the shell started, for the status page and
+/// its report.
+#[derive(Clone, Debug, Default)]
+pub struct Diag {
+    /// The Grove 5 V as its switch reads back (None: no switch to read).
+    pub five_volt: Option<bool>,
+    /// Powered since.
+    pub powered_at: Option<Instant>,
+    pub wakes: u32,
+    /// Powered and never answered (each a wake timed out).
+    pub unanswered: u32,
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+    pub frames: u64,
+    /// Frames refused (header or CRC), and bytes between frames.
+    pub refused: u64,
+    pub junk: u64,
+    /// The rate in use, the fastest tried, and the last that did not hold.
+    pub baud: u32,
+    pub baud_tried: u32,
+    pub baud_failed: Option<u32>,
+    pub last_error: Option<(Instant, String)>,
+    pub hello: Option<Hello>,
+    pub hello_at: Option<Instant>,
+    /// Power to main.py's first line, at the last start.
+    pub start_ms: Option<u32>,
+    /// It started again by itself (a long start, or after the link went quiet).
+    pub restarts: u32,
+    /// The link went quiet and was found again.
+    pub lost: u32,
+    /// The port's own trouble: it would not open, catalyst-grove's word.
+    pub port: Option<String>,
+    pub update: Update,
 }
 
 struct Shared {
@@ -379,6 +532,7 @@ struct Shared {
     seen: Seen,
     /// The camera's own description (from its HELLO).
     about: Option<String>,
+    diag: Diag,
 }
 
 struct Hub {
@@ -390,7 +544,7 @@ fn hub() -> &'static Arc<Hub> {
     static HUB: std::sync::OnceLock<Arc<Hub>> = std::sync::OnceLock::new();
     HUB.get_or_init(|| {
         let hub = Arc::new(Hub {
-            shared: Mutex::new(Shared { leases: Vec::new(), next_lease: 1, status: Status::Asleep, rates: Rates::default(), seen: Seen::default(), about: None }),
+            shared: Mutex::new(Shared { leases: Vec::new(), next_lease: 1, status: Status::Asleep, rates: Rates::default(), seen: Seen::default(), about: None, diag: Diag::default() }),
             wake: Condvar::new(),
         });
         let h = hub.clone();
@@ -538,10 +692,29 @@ pub fn rates() -> Rates {
     hub().shared.lock().map(|s| s.rates).unwrap_or_default()
 }
 
-#[allow(dead_code)] // the camera's own description, for diagnostics
+/// The camera's own description (its hello's JSON, as it came).
 pub fn about() -> Option<String> {
     hub().shared.lock().ok().and_then(|s| s.about.clone())
 }
+
+/// What the link has seen (the status page reads it four times a second).
+pub fn diag() -> Diag {
+    hub().shared.lock().map(|s| s.diag.clone()).unwrap_or_default()
+}
+
+/// The update tried once each start of the shell (for one program); asked
+/// again from the status page.
+static TRIED: Mutex<Option<String>> = Mutex::new(None);
+
+/// The camera's program sent again, if it needs it, at its next answer (the
+/// status page's `u`).
+pub fn retry_update() {
+    *TRIED.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    RECHECK.store(true, Ordering::Release);
+    changed();
+}
+
+static RECHECK: AtomicBool = AtomicBool::new(false);
 
 /// The newest results, if they are no older than `fresh`.
 pub fn results(fresh: Duration) -> Option<Results> {
@@ -642,6 +815,350 @@ pub trait Port: Send {
     fn write(&mut self, bytes: &[u8]) -> bool;
     /// What has arrived, waiting up to `wait` for something.
     fn read(&mut self, buf: &mut [u8], wait: Duration) -> usize;
+    /// The 5 V as its switch reads back (None: no switch to read).
+    fn five_volt(&mut self) -> Option<bool> {
+        None
+    }
+    /// What last went wrong with the port itself (it would not open, the 5 V
+    /// was refused, why it is not free), if anything.
+    fn trouble(&mut self) -> Option<String> {
+        None
+    }
+}
+
+/// How long the link waits for things.
+#[derive(Clone, Copy, Debug)]
+pub struct Timing {
+    /// For the camera's first answer after power on (or after it restarts).
+    pub answer: Duration,
+    /// The 5 V kept off before it comes back.
+    pub off_for: Duration,
+    /// For the answer to a request.
+    pub ack: Duration,
+    /// For the camera to go back to the rate before, after a move that did
+    /// not hold (main.py: a second with no frame at the new rate).
+    pub settle: Duration,
+}
+
+pub const TIMING: Timing = Timing { answer: WAKE_TIMEOUT, off_for: OFF_FOR, ack: Duration::from_millis(1500), settle: Duration::from_millis(1200) };
+
+/// The rates climbed through from 115 200, one step at a time.
+pub const CLIMB: [u32; 6] = [460_800, 921_600, 1_000_000, 1_500_000, 2_000_000, 3_000_000];
+
+/// The port with the link's frames on it, what goes each way counted.
+pub struct Link {
+    pub port: Box<dyn Port>,
+    pub decoder: frame::Decoder,
+    pub baud: u32,
+    seq: u8,
+    pub sent: u64,
+    pub got: u64,
+}
+
+impl Link {
+    pub fn new(port: Box<dyn Port>) -> Link {
+        Link { port, decoder: frame::Decoder::default(), baud: START_BAUD, seq: 0, sent: 0, got: 0 }
+    }
+
+    pub fn send(&mut self, kind: u8, payload: &[u8]) -> bool {
+        self.seq = self.seq.wrapping_add(1);
+        let bytes = frame::encode(kind, self.seq, payload);
+        self.sent += bytes.len() as u64;
+        self.port.write(&bytes)
+    }
+
+    pub fn set_baud(&mut self, baud: u32) {
+        self.baud = baud;
+        self.port.set_baud(baud);
+    }
+
+    /// The frames that arrive within `wait`.
+    pub fn read(&mut self, wait: Duration) -> Vec<frame::Frame> {
+        let mut buf = [0u8; 8192];
+        let n = self.port.read(&mut buf, wait);
+        self.got += n as u64;
+        self.decoder.push(&buf[..n])
+    }
+
+    /// The first frame of `kind` within `within` (any other let go).
+    pub fn await_kind(&mut self, kind: u8, within: Duration) -> Option<frame::Frame> {
+        let until = Instant::now() + within;
+        while Instant::now() < until {
+            if let Some(f) = self.read(Duration::from_millis(20)).into_iter().find(|f| f.kind == kind) {
+                return Some(f);
+            }
+        }
+        None
+    }
+
+    /// Sent, and its answer waited for, up to `tries` times.
+    pub fn ask(&mut self, kind: u8, payload: &[u8], back: u8, within: Duration, tries: u32) -> Option<frame::Frame> {
+        (0..tries).find_map(|_| {
+            self.send(kind, payload);
+            self.await_kind(back, within)
+        })
+    }
+
+    /// Hellos four times a second until the camera answers, for up to
+    /// `within`.
+    pub fn hello(&mut self, within: Duration) -> Option<frame::Frame> {
+        let until = Instant::now() + within;
+        while Instant::now() < until {
+            self.send(frame::HELLO, HELLO_PAYLOAD);
+            let left = until.saturating_duration_since(Instant::now());
+            if let Some(f) = self.await_kind(frame::HELLO_BACK, Duration::from_millis(250).min(left)) {
+                return Some(f);
+            }
+        }
+        None
+    }
+}
+
+/// Where a climb ended: the rate in use, the fastest tried, the one that
+/// did not hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Climbed {
+    pub baud: u32,
+    pub tried: u32,
+    pub failed: Option<u32>,
+}
+
+/// Up from the rate in use, a step at a time; the first step that does not
+/// hold sends both back to the last that did.
+pub fn climb(link: &mut Link, t: &Timing) -> Climbed {
+    let (mut tried, from) = (link.baud, link.baud);
+    for &rate in CLIMB.iter().filter(|r| **r > from) {
+        tried = rate;
+        if !step_to(link, rate, t) {
+            return Climbed { baud: link.baud, tried, failed: Some(rate) };
+        }
+    }
+    Climbed { baud: link.baud, tried, failed: None }
+}
+
+/// One move, confirmed both ways: asked and answered at the rate in use,
+/// then a ping heard and answered at `to`. Not held: both back to the rate
+/// before (the camera goes back by itself after a second with no frame).
+/// Whether it held.
+pub fn step_to(link: &mut Link, to: u32, t: &Timing) -> bool {
+    let from = link.baud;
+    if link.ask(frame::BAUD, &to.to_le_bytes(), frame::BAUD_BACK, Duration::from_millis(400), 1).is_none() {
+        // It may have moved with its answer lost: it comes back by itself.
+        std::thread::sleep(t.settle);
+        link.decoder = frame::Decoder::default();
+        return false;
+    }
+    link.set_baud(to);
+    std::thread::sleep(Duration::from_millis(30));
+    if link.ask(frame::PING, b"catalyst", frame::PONG, Duration::from_millis(200), 3).is_some() {
+        return true;
+    }
+    link.set_baud(from);
+    std::thread::sleep(t.settle);
+    link.decoder = frame::Decoder::default();
+    false
+}
+
+/// A baud rate in a few characters ("3 Mbaud", "921.6 kbaud").
+pub fn baud_words(baud: u32) -> String {
+    match baud {
+        b if b >= 1_000_000 && b % 1_000_000 == 0 => format!("{} Mbaud", b / 1_000_000),
+        b if b >= 1_000_000 => format!("{:.1} Mbaud", f64::from(b) / 1e6),
+        b if b % 1000 == 0 => format!("{} kbaud", b / 1000),
+        b => format!("{:.1} kbaud", f64::from(b) / 1e3),
+    }
+}
+
+// ------------------------------------------------------------------ update ---
+
+/// The camera's program (and face model) over the link.
+///
+/// Each file: PUT (name, size, CRC-32, an id of its contents), answered with
+/// how much of it the camera already holds (a transfer cut off before, by a
+/// lost link or the power, resumes there); CHUNKs, each its offset and up to
+/// 4 kB (1 kB below 921.6 kbaud), each answered with how much it holds now
+/// (one out of place is not written, so a resent chunk is harmless); DONE,
+/// answered once the camera has read the file back and checked its CRC (a
+/// file that fails is thrown away and sent again). Then COMMIT with the
+/// stamp: main.py moves them all into place with the old ones kept, begins a
+/// trial for boot.py and starts again; if the new program does not answer,
+/// the camera is powered off and on until boot.py (on its third start) has
+/// the old one back.
+pub mod update {
+    use super::*;
+    use crate::unitv::{Payload, Stamp};
+
+    /// What the camera needs, from its hello and this image's program.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum Plan {
+        Nothing,
+        /// Over USB-A, once: why.
+        UsbOnce(String),
+        /// Over the link: the program (main.py and boot.py), the model.
+        Send { program: bool, model: bool },
+    }
+
+    pub fn plan(hello: &Hello, expected: Option<&Stamp>) -> Plan {
+        if hello.full == Some(false) {
+            return Plan::UsbOnce("its MaixPy lacks what the program needs: a full one over USB-A".into());
+        }
+        let Some(e) = expected else { return Plan::Nothing };
+        let (program, model) = match &hello.stamp {
+            Some(s) => (s.main != e.main, s.model != e.model),
+            None => (true, true),
+        };
+        if !program && !model {
+            return Plan::Nothing;
+        }
+        if !hello.updates {
+            return Plan::UsbOnce("its program is from before updates over the Grove port: once over USB-A".into());
+        }
+        if hello.cwd == "/sd" {
+            return Plan::UsbOnce("it starts from a microSD card: take the card out, then once over USB-A".into());
+        }
+        Plan::Send { program, model }
+    }
+
+    /// How an update went: the camera's hello after, the files that resumed
+    /// part way (and from where), the files sent again.
+    #[derive(Debug)]
+    #[allow(dead_code)] // the tests read how it went
+    pub struct Sent {
+        pub hello: Hello,
+        pub resumed: Vec<(String, usize)>,
+        pub again: u32,
+    }
+
+    /// The files, then the commit, then the camera started again.
+    pub fn run(link: &mut Link, payload: &Payload, stamp: &Stamp, program: bool, model: bool, t: &Timing, progress: &mut dyn FnMut(Update)) -> Result<Sent, String> {
+        let mut files: Vec<(&str, &[u8])> = Vec::new();
+        if program {
+            files.push(("main.py", payload.main.as_slice()));
+            files.push(("boot.py", payload.boot.as_slice()));
+        }
+        if model {
+            files.push(("face.kmodel", payload.model.as_slice()));
+        }
+        let total = files.iter().map(|(_, d)| d.len()).sum::<usize>().max(1);
+        let (mut before, mut resumed, mut again) = (0usize, Vec::new(), 0u32);
+        // Nothing streams while files arrive.
+        link.send(frame::WANT, br#"{"faces":0,"codes":0,"tags":0,"blobs":0,"preview":0}"#);
+        for (name, data) in &files {
+            let id = format!("{:08x}{:x}", frame::crc32(data), data.len());
+            let mut tries = 0;
+            loop {
+                let r = send_file(link, name, data, &id, t, &mut |at| progress(Update::Sending { file: (*name).to_owned(), done: (before + at) as f32 / total as f32 }));
+                match r {
+                    Ok(from) => {
+                        if from > 0 {
+                            resumed.push(((*name).to_owned(), from));
+                        }
+                        break;
+                    }
+                    Err(_) if tries < 3 => {
+                        tries += 1;
+                        again += 1;
+                        relink(link, t)?;
+                    }
+                    Err(why) => return Err(why),
+                }
+            }
+            before += data.len();
+        }
+        let names: Vec<&str> = files.iter().map(|(n, _)| *n).collect();
+        let stamp_value: serde_json::Value = serde_json::from_str(&stamp.json()).unwrap_or_default();
+        let commit = serde_json::json!({ "files": names, "stamp": stamp_value }).to_string();
+        let f = link.ask(frame::COMMIT, commit.as_bytes(), frame::COMMIT_BACK, t.ack * 2, 2).ok_or("no answer to the commit")?;
+        let v: serde_json::Value = serde_json::from_slice(&f.payload).unwrap_or_default();
+        if v["ok"].as_u64() != Some(1) {
+            return Err(format!("the camera would not take it ({})", v["err"].as_str().unwrap_or("?")));
+        }
+        progress(Update::Restarting);
+        // It starts again by itself, at 115 200.
+        link.set_baud(START_BAUD);
+        link.decoder = frame::Decoder::default();
+        let hello = restart(link, t, 4).ok_or("the camera did not start again")?;
+        Ok(Sent { hello, resumed, again })
+    }
+
+    /// One file: from where the camera has got to, chunk by chunk, checked
+    /// whole at the end. Where it began (more than 0: resumed).
+    pub fn send_file(link: &mut Link, name: &str, data: &[u8], id: &str, t: &Timing, progress: &mut dyn FnMut(usize)) -> Result<usize, String> {
+        let begin = serde_json::json!({ "name": name, "size": data.len(), "crc": frame::crc32(data), "id": id }).to_string();
+        let f = link.ask(frame::PUT, begin.as_bytes(), frame::PUT_BACK, t.ack, 3).ok_or_else(|| format!("no answer to {name}'s start"))?;
+        let v: serde_json::Value = serde_json::from_slice(&f.payload).unwrap_or_default();
+        if let Some(err) = v["err"].as_str() {
+            return Err(match err {
+                "room" => "no room for it on the camera's flash".to_owned(),
+                "card" => "it starts from a microSD card".to_owned(),
+                other => format!("the camera refused {name} ({other})"),
+            });
+        }
+        let from = (v["have"].as_u64().unwrap_or(0) as usize).min(data.len());
+        let piece = if link.baud >= 921_600 { 4096 } else { 1024 };
+        let (mut at, mut stalls) = (from, 0);
+        progress(at);
+        while at < data.len() {
+            let end = (at + piece).min(data.len());
+            let mut chunk = (at as u32).to_le_bytes().to_vec();
+            chunk.extend_from_slice(&data[at..end]);
+            let wire = Duration::from_secs_f64((chunk.len() + 11) as f64 * 10.0 / f64::from(link.baud.max(1)));
+            match link.ask(frame::CHUNK, &chunk, frame::CHUNK_BACK, wire + t.ack, 1) {
+                Some(f) if f.payload.len() >= 4 => {
+                    let have = u32::from_le_bytes([f.payload[0], f.payload[1], f.payload[2], f.payload[3]]);
+                    if have == u32::MAX {
+                        return Err(format!("the camera lost {name}"));
+                    }
+                    let have = (have as usize).min(data.len());
+                    stalls = if have > at { 0 } else { stalls + 1 };
+                    at = have;
+                }
+                _ => stalls += 1,
+            }
+            if stalls >= 4 {
+                return Err(format!("{name}: no answer at {at} of {} bytes", data.len()));
+            }
+            progress(at);
+        }
+        // It reads the file back for its CRC: about 20 kB a millisecond's worth, slow.
+        let check = t.ack + Duration::from_millis(data.len() as u64 / 20);
+        let done = serde_json::json!({ "name": name }).to_string();
+        let f = link.ask(frame::DONE, done.as_bytes(), frame::DONE_BACK, check, 2).ok_or_else(|| format!("no answer to {name}'s end"))?;
+        let v: serde_json::Value = serde_json::from_slice(&f.payload).unwrap_or_default();
+        if v["ok"].as_u64() == Some(1) {
+            Ok(from)
+        } else {
+            Err(format!("{name} arrived damaged ({})", v["err"].as_str().unwrap_or("?")))
+        }
+    }
+
+    /// Hellos until it answers; powered off and on between tries (a new
+    /// program that never answers is rolled back by boot.py on its third
+    /// start). Its hello.
+    pub fn restart(link: &mut Link, t: &Timing, tries: u32) -> Option<Hello> {
+        for i in 0..tries {
+            if i > 0 {
+                link.port.power(false);
+                std::thread::sleep(t.off_for);
+                link.port.power(true);
+                link.set_baud(START_BAUD);
+                link.decoder = frame::Decoder::default();
+            }
+            if let Some(f) = link.hello(t.answer) {
+                return Hello::parse(&f.payload);
+            }
+        }
+        None
+    }
+
+    /// Found again at 115 200 (it may have started again), and up to speed.
+    fn relink(link: &mut Link, t: &Timing) -> Result<(), String> {
+        link.set_baud(START_BAUD);
+        link.decoder = frame::Decoder::default();
+        restart(link, t, 2).ok_or("the camera stopped answering")?;
+        climb(link, t);
+        Ok(())
+    }
 }
 
 mod link {
@@ -661,28 +1178,53 @@ mod link {
         )
     }
 
+    fn note(hub: &Hub, change: impl FnOnce(&mut Diag)) {
+        if let Ok(mut s) = hub.shared.lock() {
+            change(&mut s.diag);
+        }
+    }
+
+    fn fault(hub: &Hub, words: impl Into<String>) {
+        let words = words.into();
+        note(hub, |d| d.last_error = Some((Instant::now(), words)));
+    }
+
+    /// Why a camera that never answered did not, in a few words (the AI view
+    /// says it under "no smart camera answers").
+    fn absent_words(d: &Diag) -> String {
+        match (d.five_volt, d.bytes_in, d.frames) {
+            (Some(false), ..) => "the Grove 5 V did not come on".into(),
+            (_, 0, _) => "no bytes from it · its cable, or its own power".into(),
+            (_, _, 0) => "bytes, no frames · its program or the speed".into(),
+            _ => "it stopped answering · Settings › Camera".into(),
+        }
+    }
+
     pub fn run(hub: &Hub) {
-        let mut port: Box<dyn Port> = if cfg!(target_arch = "aarch64") { device::open() } else { Box::new(sim::port()) };
+        let port: Box<dyn Port> = if cfg!(target_arch = "aarch64") { device::open() } else { Box::new(sim::port()) };
+        let mut link = Link::new(port);
+        let t = TIMING;
+        crate::unitv::work_out_expected();
         let mut power = Power::Off;
-        let mut decoder = frame::Decoder::default();
-        let mut seq = 0u8;
-        let mut baud = START_BAUD;
-        // The camera answered since power on; the rate settled; what was last asked of it.
-        let mut answered = false;
-        let mut settled = false;
+        // The camera answered since power on; the rate settled; its program
+        // compared with this image's; what was last asked of it.
+        let (mut answered, mut settled, mut checked) = (false, false, false);
         let mut asked = String::new();
         let mut last_hello = Instant::now() - Duration::from_secs(1);
+        let (mut last_sent, mut last_frame) = (Instant::now(), Instant::now());
+        // Since when the link was quiet, when it was lost (to tell a camera
+        // that started again by itself); and an update just made it start
+        // again (that start is not counted against it).
+        let mut lost_at: Option<Instant> = None;
+        let mut updated = false;
         let mut window = (Instant::now(), 0u64, 0u64, 0u64, 0u64);
-        let mut buf = vec![0u8; 8192];
-        let mut send = |port: &mut Box<dyn Port>, kind: u8, payload: &[u8]| {
-            seq = seq.wrapping_add(1);
-            port.write(&frame::encode(kind, seq, payload))
-        };
+        let mut seen_bad = 0u64;
         // When the 5 V last went off: it stays off a moment before it comes
         // back, so the K210 starts afresh (at 115 200) rather than riding a
         // short gap on its capacitors at the rate it had.
         let mut off_at: Option<Instant> = None;
         loop {
+            let now = Instant::now();
             let (leases, chosen, gen) = {
                 let s = hub.shared.lock().unwrap_or_else(|e| e.into_inner());
                 (s.leases.clone(), super::chosen() && !HOLD_OFF.load(Ordering::Acquire), CHANGED.load(Ordering::Acquire))
@@ -690,40 +1232,63 @@ mod link {
             // Not the camera's (any more, or for now): unpowered and let go
             // of at once, no warm time.
             if !chosen && power.powered() {
-                port.power(false);
-                off_at = Some(Instant::now());
+                link.port.power(false);
+                off_at = Some(now);
                 power = Power::Off;
                 (answered, settled) = (false, false);
+                let five = link.port.five_volt();
+                note(hub, |d| (d.powered_at, d.five_volt) = (None, five));
             }
             let wanted = !leases.is_empty() && chosen;
             // Not to be powered (the port is the console, or not free yet:
             // a login or the console still on it): said so, and nothing more.
-            if wanted && power.would_power(Instant::now()) {
-                if let Err(why) = port.ready() {
+            if wanted && power.would_power(now) {
+                if let Err(why) = link.port.ready() {
+                    let trouble = link.port.trouble();
+                    note(hub, |d| d.port = trouble);
                     set_status(hub, why);
                     wait(hub, Duration::from_secs(2), gen);
                     continue;
                 }
             }
-            match power.step(Instant::now(), wanted, answered && matches!(power, Power::Waking { .. })) {
+            let was_waking = matches!(power, Power::Waking { .. });
+            match power.step(now, wanted, answered && was_waking) {
                 Switch::On => {
-                    if let Some(rest) = off_at.and_then(|at| OFF_FOR.checked_sub(at.elapsed())) {
+                    if let Some(rest) = off_at.and_then(|at| t.off_for.checked_sub(at.elapsed())) {
                         std::thread::sleep(rest);
                     }
-                    port.power(true);
-                    port.set_baud(START_BAUD);
-                    baud = START_BAUD;
-                    (answered, settled) = (false, false);
+                    link.port.power(true);
+                    link.set_baud(START_BAUD);
+                    (answered, settled, checked) = (false, false, false);
                     asked.clear();
-                    decoder = frame::Decoder::default();
+                    link.decoder = frame::Decoder::default();
+                    (seen_bad, lost_at, updated) = (0, None, false);
+                    let (five, trouble) = (link.port.five_volt(), link.port.trouble());
+                    note(hub, |d| {
+                        (d.powered_at, d.five_volt, d.port, d.baud) = (Some(Instant::now()), five, trouble, START_BAUD);
+                        d.wakes += 1;
+                        if five == Some(false) {
+                            d.last_error = Some((Instant::now(), "the Grove 5 V did not come on".into()));
+                        }
+                    });
                 }
                 Switch::Off => {
-                    port.power(false);
-                    off_at = Some(Instant::now());
+                    link.port.power(false);
+                    off_at = Some(now);
                     (answered, settled) = (false, false);
+                    let five = link.port.five_volt();
+                    let failed = matches!(power, Power::Failed { .. });
+                    note(hub, |d| {
+                        (d.powered_at, d.five_volt) = (None, five);
+                        if failed {
+                            d.unanswered += 1;
+                            d.last_error = Some((now, format!("no answer within {} s of power on", t.answer.as_secs())));
+                        }
+                    });
                 }
                 Switch::Keep => {}
             }
+            let absent = hub.shared.lock().map(|s| absent_words(&s.diag)).unwrap_or_default();
             set_status(
                 hub,
                 match &power {
@@ -731,8 +1296,8 @@ mod link {
                     Power::Off if !chosen => Status::PortIsConsole,
                     Power::Off => Status::Asleep,
                     Power::Waking { since } => Status::Waking { since: *since },
-                    Power::On { took } | Power::Warm { took, .. } => Status::Ready { baud, woke_ms: took.as_millis() as u32 },
-                    Power::Failed { .. } => Status::Absent("no answer from the smart camera on the Grove port".into()),
+                    Power::On { took } | Power::Warm { took, .. } => Status::Ready { baud: link.baud, woke_ms: took.as_millis() as u32 },
+                    Power::Failed { .. } => Status::Absent(absent),
                 },
             );
             if !power.powered() {
@@ -741,20 +1306,55 @@ mod link {
             }
             // Hello until it answers.
             if !answered && last_hello.elapsed() >= Duration::from_millis(250) {
-                send(&mut port, frame::HELLO, br#"{"v":1}"#);
-                last_hello = Instant::now();
+                link.send(frame::HELLO, HELLO_PAYLOAD);
+                (last_hello, last_sent) = (Instant::now(), Instant::now());
             }
-            let n = port.read(&mut buf, Duration::from_millis(40));
-            for f in decoder.push(&buf[..n]) {
+            for f in link.read(Duration::from_millis(40)) {
+                last_frame = Instant::now();
                 window.1 += (f.payload.len() + frame::HEAD + frame::TAIL) as u64;
                 match f.kind {
                     frame::HELLO_BACK => {
+                        let first = !answered;
                         answered = true;
+                        let hello = Hello::parse(&f.payload);
                         if let Ok(mut s) = hub.shared.lock() {
                             s.about = Some(String::from_utf8_lossy(&f.payload).into_owned());
+                            let d = &mut s.diag;
+                            if let (true, false, Some(h)) = (first, updated, &hello) {
+                                match lost_at {
+                                    // Found again after it went quiet: it
+                                    // started again by itself if it has been
+                                    // up for less time than it was quiet.
+                                    Some(quiet) if u128::from(h.up_ms) < quiet.elapsed().as_millis() => {
+                                        d.restarts += 1;
+                                        d.last_error = Some((Instant::now(), "the camera started again by itself".into()));
+                                    }
+                                    Some(_) => {}
+                                    None => {
+                                        let start = d.powered_at.map(|p| (p.elapsed().as_millis() as u32).saturating_sub(h.up_ms));
+                                        d.start_ms = start;
+                                        if start.is_some_and(|s| s > RESTARTED_MS) {
+                                            d.restarts += 1;
+                                            d.last_error = Some((Instant::now(), format!("{:.1} s from power to its program: it started more than once", f64::from(start.unwrap_or(0)) / 1000.0)));
+                                        }
+                                    }
+                                }
+                            }
+                            if hello.is_some() {
+                                (d.hello, d.hello_at) = (hello.clone(), Some(Instant::now()));
+                            }
                         }
+                        (lost_at, updated) = (None, false);
                         if !settled {
-                            baud = negotiate(&mut port, &mut decoder, &mut send, baud);
+                            let c = climb(&mut link, &t);
+                            note(hub, |d| {
+                                d.baud = c.baud;
+                                d.baud_tried = d.baud_tried.max(c.tried);
+                                if let Some(fail) = c.failed {
+                                    d.baud_failed = Some(fail);
+                                    d.last_error = Some((Instant::now(), format!("{} did not hold · {} in use", baud_words(fail), baud_words(c.baud))));
+                                }
+                            });
                             settled = true;
                         }
                     }
@@ -780,36 +1380,179 @@ mod link {
                             crate::platform::wake();
                         }
                     }
+                    frame::LOG => fault(hub, format!("the camera said: {}", String::from_utf8_lossy(&f.payload))),
                     _ => {}
+                }
+            }
+            // Its program against this image's, once each time it answers
+            // after power on (or when the status page asks again).
+            if RECHECK.swap(false, Ordering::AcqRel) {
+                checked = false;
+            }
+            if answered && settled && !checked {
+                checked = true;
+                let hello = hub.shared.lock().ok().and_then(|s| s.diag.hello.clone());
+                if let Some(h) = hello {
+                    if bring_up_to_date(hub, &mut link, &h, &t) {
+                        // It started again at 115 200: found again, and its
+                        // rate climbed afresh.
+                        (answered, settled, updated) = (false, false, true);
+                        asked.clear();
+                        last_frame = Instant::now();
+                    }
                 }
             }
             // Ask for what the leases want, once it answers (and again when that changes).
             let want = wants(&leases);
             if answered && settled && (want != asked) && wanted {
-                send(&mut port, frame::WANT, want.as_bytes());
-                asked = want;
+                link.send(frame::WANT, want.as_bytes());
+                (asked, last_sent) = (want, Instant::now());
             }
             if !wanted && answered && !asked.is_empty() {
                 // Warm: it keeps quiet meanwhile.
-                send(&mut port, frame::WANT, br#"{"faces":0,"codes":0,"tags":0,"blobs":0,"preview":0}"#);
+                link.send(frame::WANT, br#"{"faces":0,"codes":0,"tags":0,"blobs":0,"preview":0}"#);
+                (asked, last_sent) = (String::new(), Instant::now());
+            }
+            // Something every two seconds, whatever arrives: main.py goes
+            // back to 115 200 after five without a frame from here, and a
+            // quiet camera answers the ping. One quiet too long is lost: both
+            // back to 115 200, and found again (or powered off and on, if it
+            // does not answer in time).
+            if answered && last_sent.elapsed() > Duration::from_secs(2) {
+                link.send(frame::PING, b"alive");
+                last_sent = Instant::now();
+            }
+            if answered && last_frame.elapsed() > LOST_AFTER {
+                let at = link.baud;
+                (answered, settled, lost_at) = (false, false, Some(last_frame));
                 asked.clear();
+                link.set_baud(START_BAUD);
+                link.decoder = frame::Decoder::default();
+                seen_bad = 0;
+                power = Power::Waking { since: Instant::now() };
+                note(hub, |d| {
+                    d.lost += 1;
+                    d.baud = START_BAUD;
+                    d.last_error = Some((Instant::now(), format!("the link went quiet at {}: finding it again", baud_words(at))));
+                });
             }
             // The figures, every second; too many frames refused at this
             // rate: one step slower.
             if window.0.elapsed() >= Duration::from_secs(1) {
                 let secs = window.0.elapsed().as_secs_f32();
-                let refused = decoder.bad.saturating_sub(window.4);
+                let refused = link.decoder.bad.saturating_sub(window.4);
+                let five = link.port.five_volt();
                 if let Ok(mut s) = hub.shared.lock() {
-                    s.rates = Rates { bytes_per_s: window.1 as f32 / secs, previews_per_s: window.2 as f32 / secs, results_per_s: window.3 as f32 / secs, refused: decoder.bad };
+                    s.rates = Rates { bytes_per_s: window.1 as f32 / secs, previews_per_s: window.2 as f32 / secs, results_per_s: window.3 as f32 / secs, refused: link.decoder.bad };
+                    let d = &mut s.diag;
+                    (d.bytes_in, d.bytes_out, d.frames, d.refused, d.junk, d.five_volt) = (link.got, link.sent, link.decoder.good, link.decoder.bad, link.decoder.junk, five);
+                    if link.decoder.bad > seen_bad {
+                        let n = link.decoder.bad - seen_bad;
+                        d.last_error = Some((Instant::now(), format!("{n} frame{} refused (header or CRC) at {}", if n == 1 { "" } else { "s" }, baud_words(link.baud))));
+                    }
                 }
-                if refused >= 3 && settled && baud > START_BAUD {
-                    let slower = BAUDS.iter().copied().find(|b| *b < baud).unwrap_or(START_BAUD);
-                    baud = switch_to(&mut port, &mut decoder, &mut send, baud, slower).unwrap_or(START_BAUD);
+                seen_bad = link.decoder.bad;
+                if refused >= 3 && settled && link.baud > START_BAUD {
+                    let slower = BAUDS.iter().copied().find(|b| *b < link.baud).unwrap_or(START_BAUD);
+                    let from = link.baud;
+                    if !step_to(&mut link, slower, &t) {
+                        // Not even the step down: found again from the start.
+                        link.set_baud(START_BAUD);
+                        (answered, settled) = (false, false);
+                    }
+                    let now_at = link.baud;
+                    note(hub, |d| {
+                        d.baud = now_at;
+                        d.baud_failed = Some(from);
+                        d.last_error = Some((Instant::now(), format!("too many frames refused at {}: {} now", baud_words(from), baud_words(now_at))));
+                    });
                     asked.clear();
                 }
-                window = (Instant::now(), 0, 0, 0, decoder.bad);
+                window = (Instant::now(), 0, 0, 0, link.decoder.bad);
+            } else if let Ok(mut s) = hub.shared.lock() {
+                // The byte counts live for the status page.
+                (s.diag.bytes_in, s.diag.bytes_out) = (link.got, link.sent);
             }
         }
+    }
+
+    /// The camera's program compared with this image's, and sent over the
+    /// link when older (once each start of the shell for one program).
+    /// Whether the camera was touched (it has started again).
+    fn bring_up_to_date(hub: &Hub, link: &mut Link, hello: &Hello, t: &Timing) -> bool {
+        let expected = crate::unitv::expected();
+        let (program, model) = match update::plan(hello, expected.as_ref()) {
+            update::Plan::Nothing => {
+                note(hub, |d| {
+                    if matches!(d.update, Update::UsbOnce(_)) {
+                        d.update = Update::Idle;
+                    }
+                });
+                return false;
+            }
+            update::Plan::UsbOnce(why) => {
+                let fresh = hub.shared.lock().is_ok_and(|s| s.diag.update != Update::UsbOnce(why.clone()));
+                note(hub, |d| d.update = Update::UsbOnce(why.clone()));
+                if fresh {
+                    crate::notify::post(crate::notify::Notification::new("Camera", "developer_board", "smart camera").body("update on the camera · USB-A, once").tag("unitv").action("unitv:install"));
+                }
+                return false;
+            }
+            update::Plan::Send { program, model } => (program, model),
+        };
+        let Some(expected) = expected else { return false };
+        let target = format!("{}{}", expected.main, expected.model);
+        {
+            let mut tried = TRIED.lock().unwrap_or_else(|e| e.into_inner());
+            if tried.as_deref() == Some(target.as_str()) {
+                return false;
+            }
+            *tried = Some(target);
+        }
+        let payload = match crate::unitv::Payload::program() {
+            Ok(p) => p,
+            Err(why) => {
+                note(hub, |d| d.update = Update::Failed(why));
+                return false;
+            }
+        };
+        let firmware = hello.stamp.as_ref().map(|s| s.firmware.clone()).filter(|f| !f.is_empty()).unwrap_or_else(|| format!("MaixPy {} (as found)", hello.maixpy));
+        let stamp = crate::unitv::Stamp { firmware, ..expected.clone() };
+        let task = crate::liveactivity::task(crate::liveactivity::Kind::Download, "Smart camera", "updating its program");
+        let outcome = update::run(link, &payload, &stamp, program, model, t, &mut |u| {
+            match &u {
+                Update::Sending { file, done } => {
+                    task.progress(*done);
+                    task.detail(format!("sending {file}"));
+                }
+                Update::Restarting => task.detail("starting it again"),
+                _ => {}
+            }
+            note(hub, |d| d.update = u);
+            crate::platform::wake();
+        });
+        let release = expected.catalyst.clone();
+        let (state, said) = match outcome {
+            Ok(sent) if sent.hello.stamp.as_ref().is_some_and(|s| s.same_program(&expected)) => (Update::Done(release.clone()), format!("smart camera updated · Catalyst {release}'s program")),
+            Ok(sent) if sent.hello.rolled_back => (Update::RolledBack, "smart camera update did not start · its old program is back".to_owned()),
+            Ok(_) => (Update::Failed("it answered with another program".into()), "smart camera update did not take".to_owned()),
+            Err(why) => (Update::Failed(why.clone()), format!("smart camera update stopped · {why}")),
+        };
+        if matches!(state, Update::Done(_)) {
+            task.done("updated");
+        } else {
+            drop(task);
+            crate::notify::post(crate::notify::Notification::new("Camera", "developer_board", "smart camera").body(said.clone()).tag("smartcam").action("smartcam:status"));
+        }
+        note(hub, |d| {
+            if !matches!(state, Update::Done(_)) {
+                d.last_error = Some((Instant::now(), said.clone()));
+            }
+            d.update = state;
+        });
+        *SAID.lock().unwrap_or_else(|e| e.into_inner()) = Some(said);
+        crate::platform::wake();
+        true
     }
 
     fn set_status(hub: &Hub, status: Status) {
@@ -827,56 +1570,6 @@ mod link {
         if let Ok(s) = hub.shared.lock() {
             hub.wake.wait_timeout_while(s, d, |_| CHANGED.load(Ordering::Acquire) == gen).ok();
         }
-    }
-
-    type Sender<'a> = dyn FnMut(&mut Box<dyn Port>, u8, &[u8]) -> bool + 'a;
-
-    /// The fastest rate both ends hold: each tried from the top until one
-    /// answers a ping, falling back to where it was.
-    fn negotiate(port: &mut Box<dyn Port>, decoder: &mut frame::Decoder, send: &mut Sender, from: u32) -> u32 {
-        for &rate in BAUDS.iter().filter(|b| **b > from) {
-            if let Some(b) = switch_to(port, decoder, send, from, rate) {
-                if b == rate {
-                    return rate;
-                }
-            }
-        }
-        from
-    }
-
-    /// Ask the camera to move to `to` and follow it; a ping must come back
-    /// at the new rate, or both go back to 115 200 (the camera does so by
-    /// itself when no frame reaches it at the new rate). The rate in use.
-    fn switch_to(port: &mut Box<dyn Port>, decoder: &mut frame::Decoder, send: &mut Sender, from: u32, to: u32) -> Option<u32> {
-        send(port, frame::BAUD, &to.to_le_bytes());
-        if !await_kind(port, decoder, frame::BAUD_BACK, Duration::from_millis(400)) {
-            return None;
-        }
-        port.set_baud(to);
-        std::thread::sleep(Duration::from_millis(30));
-        for _ in 0..3 {
-            send(port, frame::PING, b"catalyst");
-            if await_kind(port, decoder, frame::PONG, Duration::from_millis(200)) {
-                return Some(to);
-            }
-        }
-        // Not held: back to the start rate, where the camera returns too.
-        port.set_baud(START_BAUD);
-        std::thread::sleep(Duration::from_millis(1200));
-        let _ = from;
-        Some(START_BAUD)
-    }
-
-    fn await_kind(port: &mut Box<dyn Port>, decoder: &mut frame::Decoder, kind: u8, within: Duration) -> bool {
-        let until = Instant::now() + within;
-        let mut buf = [0u8; 2048];
-        while Instant::now() < until {
-            let n = port.read(&mut buf, Duration::from_millis(20));
-            if decoder.push(&buf[..n]).iter().any(|f| f.kind == kind) {
-                return true;
-            }
-        }
-        false
     }
 
     fn decode_jpeg(bytes: &[u8]) -> Option<Picture> {
@@ -899,14 +1592,19 @@ mod link {
 mod device {
     use super::*;
 
+    /// The Grove 5 V's switch (gpio-leds on the board's I/O expander, active
+    /// high: 1 is on).
+    const FIVE_VOLT: &str = "/sys/class/leds/grove_5v_out/brightness";
+
     /// ttyAMA0, raw, and the port's power through catalyst-grove (which
     /// refuses it unless the port is safely the camera's).
     pub struct Uart {
         fd: i32,
+        trouble: Option<String>,
     }
 
     pub fn open() -> Box<dyn Port> {
-        Box::new(Uart { fd: -1 })
+        Box::new(Uart { fd: -1, trouble: None })
     }
 
     fn speed(baud: u32) -> libc::speed_t {
@@ -931,18 +1629,29 @@ mod device {
             unsafe {
                 let fd = libc::open(c"/dev/ttyAMA0".as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK | libc::O_CLOEXEC);
                 if fd < 0 {
+                    self.trouble = Some(format!("/dev/ttyAMA0 would not open: {}", std::io::Error::last_os_error()));
                     return false;
                 }
+                // All raw, whatever a getty left set: no flow control either
+                // way (no XON/XOFF in the bytes, no RTS/CTS), no line
+                // editing, no echo, no CR/LF turned, no break read as a
+                // signal; 8 bits, no parity, one stop bit.
                 let mut t: libc::termios = std::mem::zeroed();
-                libc::tcgetattr(fd, &mut t);
+                if libc::tcgetattr(fd, &mut t) != 0 {
+                    self.trouble = Some(format!("ttyAMA0's settings would not read: {}", std::io::Error::last_os_error()));
+                }
                 libc::cfmakeraw(&mut t);
-                t.c_cflag |= libc::CLOCAL | libc::CREAD;
-                t.c_cflag &= !(libc::CRTSCTS | libc::CSTOPB | libc::PARENB);
+                t.c_iflag = 0;
+                t.c_oflag = 0;
+                t.c_lflag = 0;
+                t.c_cflag = libc::CS8 | libc::CREAD | libc::CLOCAL;
                 t.c_cc[libc::VMIN] = 0;
                 t.c_cc[libc::VTIME] = 0;
                 libc::cfsetispeed(&mut t, libc::B115200);
                 libc::cfsetospeed(&mut t, libc::B115200);
-                libc::tcsetattr(fd, libc::TCSANOW, &t);
+                if libc::tcsetattr(fd, libc::TCSANOW, &t) != 0 {
+                    self.trouble = Some(format!("ttyAMA0 would not go raw: {}", std::io::Error::last_os_error()));
+                }
                 libc::tcflush(fd, libc::TCIOFLUSH);
                 self.fd = fd;
                 PORT_OPEN.store(true, Ordering::Release);
@@ -956,6 +1665,11 @@ mod device {
             let ok = std::process::Command::new("catalyst-grove").arg("ready").status().is_ok_and(|s| s.success());
             if ok {
                 return Ok(());
+            }
+            // Why not, for the status page: catalyst-grove's own account.
+            if let Ok(out) = std::process::Command::new("catalyst-grove").arg("status").output() {
+                let said = String::from_utf8_lossy(&out.stdout).split_whitespace().collect::<Vec<_>>().join(" ");
+                self.trouble = Some(format!("catalyst-grove: {said}"));
             }
             if super::chosen() {
                 Err(Status::PortBusy)
@@ -972,7 +1686,15 @@ mod device {
             if on {
                 self.ensure_open();
             }
-            let given = std::process::Command::new("catalyst-grove").args(["power", if on { "on" } else { "off" }]).status().is_ok_and(|s| s.success());
+            let out = std::process::Command::new("catalyst-grove").args(["power", if on { "on" } else { "off" }]).output();
+            let given = out.as_ref().is_ok_and(|o| o.status.success());
+            if on && given {
+                self.trouble = None;
+            }
+            if on && !given {
+                let why = out.map(|o| String::from_utf8_lossy(&o.stderr).trim().to_owned()).unwrap_or_default();
+                self.trouble = Some(if why.is_empty() { "catalyst-grove would not power the port".into() } else { why });
+            }
             if (!on || !given) && self.fd >= 0 {
                 // SAFETY: the descriptor this opened, closed once.
                 unsafe { libc::close(self.fd) };
@@ -1032,6 +1754,20 @@ mod device {
                 n.max(0) as usize
             }
         }
+
+        fn five_volt(&mut self) -> Option<bool> {
+            match std::fs::read_to_string(FIVE_VOLT) {
+                Ok(level) => Some(level.trim() != "0"),
+                Err(_) => {
+                    self.trouble = Some("no switch for the Grove 5 V (grove_5v_out): the board's driver did not load".into());
+                    None
+                }
+            }
+        }
+
+        fn trouble(&mut self) -> Option<String> {
+            self.trouble.clone()
+        }
     }
 }
 
@@ -1045,15 +1781,22 @@ mod device {
 // --------------------------------------------------------------------- sim ---
 
 /// The simulator's smart camera: the UnitV and its program as the handheld
-/// sees them over the wire. It starts about 1.4 s after power on, keeps
+/// sees them over the wire. It starts [`sim::BOOT`] after power on, keeps
 /// quiet until spoken to, answers the same frames, moves to the baud rates
 /// asked (bytes then take as long as they would at that rate, so the
-/// preview's rate is the real link's), and sees a pit: a face drifting
-/// about, a QR code with a scouting note, AprilTag 7 on the field wall, an
-/// orange game piece. Now and then it sends a burst of junk, as a camera
-/// starting up does, which the link skips.
+/// preview's rate is the real link's; a rate it does not hold garbles both
+/// ways), takes a program over the link into a /flash of its own with
+/// main.py's and boot.py's rules (the trial, the rollback), and sees a pit:
+/// a face drifting about, a QR code with a scouting note, AprilTag 7 on the
+/// field wall, an orange game piece. Now and then it sends a burst of junk,
+/// as a camera starting up does, which the link skips. [`sim::Spec`] makes
+/// it awkward for the tests (a slow start, a slow link, a chunk lost, the
+/// power cut part way, a new program that never starts);
+/// `CATALYST_SIM_SMARTCAM` does in the simulator (old, v1, slow, slowlink,
+/// brownout, silent, sensor).
 pub mod sim {
     use super::*;
+    use std::collections::HashMap;
     use std::sync::mpsc;
 
     static CHOSEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -1079,22 +1822,175 @@ pub mod sim {
 
     pub const BOOT: Duration = Duration::from_millis(1400);
 
+    /// How the stand-in behaves.
+    #[derive(Clone, Debug)]
+    pub struct Spec {
+        /// Power to listening.
+        pub boot: Duration,
+        /// The fastest rate it holds; above it, both ways garble.
+        pub max_baud: u32,
+        /// Its program's VERSION (1: 0.9.3's, which takes no update over the link).
+        pub version: u32,
+        /// Its /flash/catalyst.json.
+        pub stamp: Option<String>,
+        pub full: bool,
+        pub sensor_fails: bool,
+        /// No program answers at all.
+        pub silent: bool,
+        /// A program sent over the link never starts.
+        pub breaks_new: bool,
+        /// The nth chunk (from 1) lost on the wire.
+        pub drop_chunk: Option<u32>,
+        /// The nth chunk written wrong (its file fails its CRC).
+        pub bad_write: Option<u32>,
+        /// The power gone once a file has this many bytes, the first time.
+        pub cut_at: Option<usize>,
+        /// It starts again by itself this long after each start (short of power).
+        pub restarts_after: Option<Duration>,
+    }
+
+    impl Spec {
+        /// No program of Catalyst's yet: a stamp of none.
+        pub fn bare() -> Spec {
+            Spec { boot: BOOT, max_baud: 3_000_000, version: 2, stamp: None, full: true, sensor_fails: false, silent: false, breaks_new: false, drop_chunk: None, bad_write: None, cut_at: None, restarts_after: None }
+        }
+
+        /// This image's program on it, up to date (the simulator's).
+        pub fn current() -> Spec {
+            let stamp = crate::unitv::Payload::load().ok().map(|p| p.stamp("MaixPy 0.6.3 (simulated)").json());
+            Spec { stamp, ..Spec::bare() }
+        }
+
+        /// An older release's program on it.
+        pub fn old() -> Spec {
+            Spec { stamp: Some(r#"{"catalyst":"0.9.3","main":"0a1b2c3d4e5f","model":"000000000000","firmware":"MaixPy 0.6.3 (installed by Catalyst)"}"#.into()), ..Spec::bare() }
+        }
+
+        /// As CATALYST_SIM_SMARTCAM says (else up to date).
+        pub fn from_env() -> Spec {
+            match std::env::var("CATALYST_SIM_SMARTCAM").unwrap_or_default().as_str() {
+                "old" => Spec::old(),
+                "v1" => Spec { version: 1, ..Spec::old() },
+                "slow" => Spec { boot: Duration::from_secs(7), ..Spec::current() },
+                "slowlink" => Spec { max_baud: START_BAUD, ..Spec::current() },
+                "brownout" => Spec { restarts_after: Some(Duration::from_secs(6)), ..Spec::current() },
+                "silent" => Spec { silent: true, ..Spec::current() },
+                "sensor" => Spec { sensor_fails: true, ..Spec::current() },
+                _ => Spec::current(),
+            }
+        }
+    }
+
+    /// The stand-in's /flash, as main.py and boot.py keep it.
+    #[derive(Debug, Default)]
+    pub struct Flash {
+        pub files: HashMap<String, Vec<u8>>,
+        pub old: HashMap<String, Vec<u8>>,
+        /// Files on their way: size, CRC, id, what has arrived.
+        pub new: HashMap<String, (usize, u32, String, Vec<u8>)>,
+        /// A new program's starts, and its files (and whether each was there before).
+        pub trial: Option<(u32, Vec<(String, bool)>)>,
+        pub rolled_back: bool,
+        /// The program running came over the link.
+        pub from_link: bool,
+        pub starts: u32,
+        /// Files begun again part way: their name and where.
+        pub resumed: Vec<(String, usize)>,
+        pub chunks: u32,
+        /// Files refused at their end (their CRC).
+        pub damaged: u32,
+        cut: bool,
+    }
+
+    impl Flash {
+        fn with(spec: &Spec) -> Flash {
+            let mut f = Flash::default();
+            f.files.insert("main.py".into(), b"# the program it came with\n".to_vec());
+            f.files.insert("boot.py".into(), b"# its boot.py\n".to_vec());
+            if let Some(s) = &spec.stamp {
+                f.files.insert("catalyst.json".into(), s.as_bytes().to_vec());
+            }
+            f
+        }
+
+        /// A start: boot.py's count, and the old files back on the third
+        /// start of a program never heard. Whether a program answers.
+        fn start(&mut self, spec: &Spec) -> bool {
+            self.starts += 1;
+            if let Some((n, list)) = self.trial.take() {
+                if n >= 2 {
+                    for (name, had) in &list {
+                        match (had, self.old.remove(name)) {
+                            (true, Some(old)) => {
+                                self.files.insert(name.clone(), old);
+                            }
+                            (true, None) => {}
+                            (false, _) => {
+                                self.files.remove(name);
+                            }
+                        }
+                    }
+                    (self.rolled_back, self.from_link) = (true, false);
+                } else {
+                    self.trial = Some((n + 1, list));
+                }
+            }
+            !spec.silent && !(spec.breaks_new && self.from_link)
+        }
+
+        fn commit(&mut self, names: &[String], stamp: &[u8]) -> Result<(), String> {
+            if let Some(missing) = names.iter().find(|n| !self.new.contains_key(*n)) {
+                return Err(format!("missing {missing}"));
+            }
+            let mut list = Vec::new();
+            for name in names {
+                let (.., data) = self.new.remove(name).unwrap_or_default();
+                list.push((name.clone(), self.put(name, data)));
+            }
+            list.push(("catalyst.json".to_owned(), self.put("catalyst.json", stamp.to_vec())));
+            self.trial = Some((0, list));
+            self.rolled_back = false;
+            self.from_link |= names.iter().any(|n| n == "main.py");
+            Ok(())
+        }
+
+        /// In place, what was there kept as .old: whether there was.
+        fn put(&mut self, name: &str, data: Vec<u8>) -> bool {
+            match self.files.insert(name.to_owned(), data) {
+                Some(was) => {
+                    self.old.insert(name.to_owned(), was);
+                    true
+                }
+                None => {
+                    self.old.remove(name);
+                    false
+                }
+            }
+        }
+    }
+
     pub struct SimPort {
-        to_cam: mpsc::Sender<Vec<u8>>,
-        from_cam: mpsc::Receiver<Vec<u8>>,
+        to_cam: mpsc::Sender<(u32, Vec<u8>)>,
+        from_cam: mpsc::Receiver<(u32, Vec<u8>)>,
         held: Vec<u8>,
-        baud: Arc<Mutex<u32>>,
+        baud: u32,
         powered: Arc<Mutex<Option<Instant>>>,
     }
 
+    /// The simulator's stand-in, as CATALYST_SIM_SMARTCAM says.
     pub fn port() -> SimPort {
-        let (to_cam, cam_rx) = mpsc::channel::<Vec<u8>>();
-        let (cam_tx, from_cam) = mpsc::channel::<Vec<u8>>();
-        let baud = Arc::new(Mutex::new(START_BAUD));
+        port_with(Spec::from_env()).0
+    }
+
+    /// A stand-in as `spec` says, and its /flash to look into.
+    pub fn port_with(spec: Spec) -> (SimPort, Arc<Mutex<Flash>>) {
+        let (to_cam, cam_rx) = mpsc::channel::<(u32, Vec<u8>)>();
+        let (cam_tx, from_cam) = mpsc::channel::<(u32, Vec<u8>)>();
         let powered = Arc::new(Mutex::new(None));
-        let (b, p) = (baud.clone(), powered.clone());
-        std::thread::Builder::new().name("smartcam-sim".into()).spawn(move || camera(cam_rx, cam_tx, b, p)).ok();
-        SimPort { to_cam, from_cam, held: Vec::new(), baud, powered }
+        let flash = Arc::new(Mutex::new(Flash::with(&spec)));
+        let (p, f) = (powered.clone(), flash.clone());
+        std::thread::Builder::new().name("smartcam-sim".into()).spawn(move || Cam::new(spec, f, cam_tx).run(cam_rx, p)).ok();
+        (SimPort { to_cam, from_cam, held: Vec::new(), baud: START_BAUD, powered }, flash)
     }
 
     impl Port for SimPort {
@@ -1109,23 +2005,28 @@ pub mod sim {
             *self.powered.lock().unwrap_or_else(|e| e.into_inner()) = on.then(Instant::now);
         }
         fn set_baud(&mut self, baud: u32) -> bool {
-            *self.baud.lock().unwrap_or_else(|e| e.into_inner()) = baud;
+            self.baud = baud;
             true
         }
         fn write(&mut self, bytes: &[u8]) -> bool {
-            // Tagged with the rate it was sent at: the camera hears it only
-            // if it listens at the same.
-            let mut tagged = self.baud.lock().map(|b| b.to_le_bytes().to_vec()).unwrap_or_default();
-            tagged.extend_from_slice(bytes);
-            self.to_cam.send(tagged).is_ok()
+            // Sent at a rate: the camera hears it only at the same.
+            self.to_cam.send((self.baud, bytes.to_vec())).is_ok()
         }
         fn read(&mut self, buf: &mut [u8], wait: Duration) -> usize {
             if self.held.is_empty() {
+                let mut take = |(rate, bytes): (u32, Vec<u8>)| {
+                    if rate == self.baud {
+                        self.held.extend_from_slice(&bytes);
+                    } else {
+                        // Heard at the wrong rate: a few bytes of nothing.
+                        self.held.extend_from_slice(&vec![0xFF; bytes.len().div_ceil(8)]);
+                    }
+                };
                 if let Ok(chunk) = self.from_cam.recv_timeout(wait) {
-                    self.held = chunk;
+                    take(chunk);
                 }
                 while let Ok(more) = self.from_cam.try_recv() {
-                    self.held.extend_from_slice(&more);
+                    take(more);
                 }
             }
             let n = self.held.len().min(buf.len());
@@ -1133,117 +2034,312 @@ pub mod sim {
             self.held.drain(..n);
             n
         }
+        fn five_volt(&mut self) -> Option<bool> {
+            Some(self.powered.lock().map(|p| p.is_some()).unwrap_or(false))
+        }
     }
 
-    /// The stand-in camera's program (as tools/unitv/main.py does it).
-    fn camera(rx: mpsc::Receiver<Vec<u8>>, tx: mpsc::Sender<Vec<u8>>, _baud: Arc<Mutex<u32>>, powered: Arc<Mutex<Option<Instant>>>) {
-        let mut decoder = frame::Decoder::default();
-        let mut my_baud = START_BAUD;
-        let mut want = (false, false, false, false, false);
-        let mut seq = 0u8;
-        let mut n = 0u32;
-        let mut booted_at: Option<Instant> = None;
-        let mut last_frame = Instant::now();
-        let mut since_baud: Option<Instant> = None;
-        let started = Instant::now();
-        // Sent at the camera's rate: as long as the bytes take on the wire.
-        let send = |kind: u8, payload: &[u8], seq: &mut u8, rate: u32| {
-            *seq = seq.wrapping_add(1);
-            let bytes = frame::encode(kind, *seq, payload);
-            std::thread::sleep(Duration::from_secs_f64(bytes.len() as f64 * 10.0 / f64::from(rate)));
-            tx.send(bytes).ok();
-        };
-        loop {
-            let on = *powered.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(since) = on else {
-                (booted_at, my_baud, want) = (None, START_BAUD, (false, false, false, false, false));
-                decoder = frame::Decoder::default();
-                while rx.try_recv().is_ok() {}
-                std::thread::sleep(Duration::from_millis(30));
-                continue;
-            };
-            if since.elapsed() < BOOT {
-                while rx.try_recv().is_ok() {}
-                std::thread::sleep(Duration::from_millis(20));
-                continue;
+    /// The stand-in's program (as tools/unitv/main.py does it).
+    struct Cam {
+        spec: Spec,
+        flash: Arc<Mutex<Flash>>,
+        tx: mpsc::Sender<(u32, Vec<u8>)>,
+        decoder: frame::Decoder,
+        baud: u32,
+        before: u32,
+        since_baud: Option<Instant>,
+        heard_at: Instant,
+        want: (bool, bool, bool, bool, bool),
+        seq: u8,
+        n: u32,
+        /// Powered (or started again by itself) at; listening from.
+        on_since: Option<Instant>,
+        booted_at: Option<Instant>,
+        alive: bool,
+        last_frame: Instant,
+        started: Instant,
+        file: Option<String>,
+    }
+
+    impl Cam {
+        fn new(spec: Spec, flash: Arc<Mutex<Flash>>, tx: mpsc::Sender<(u32, Vec<u8>)>) -> Cam {
+            let now = Instant::now();
+            Cam { spec, flash, tx, decoder: frame::Decoder::default(), baud: START_BAUD, before: START_BAUD, since_baud: None, heard_at: now, want: (false, false, false, false, false), seq: 0, n: 0, on_since: None, booted_at: None, alive: false, last_frame: now, started: now, file: None }
+        }
+
+        /// From its first line again (power, or a reset of its own).
+        fn reset(&mut self, at: Option<Instant>) {
+            (self.on_since, self.booted_at, self.alive) = (at, None, false);
+            (self.baud, self.before, self.since_baud) = (START_BAUD, START_BAUD, None);
+            self.want = (false, false, false, false, false);
+            self.decoder = frame::Decoder::default();
+            self.file = None;
+        }
+
+        /// Sent at its rate: as long as the bytes take on the wire; garbled
+        /// at a rate it does not hold.
+        fn send(&mut self, kind: u8, payload: &[u8]) {
+            self.seq = self.seq.wrapping_add(1);
+            let mut bytes = frame::encode(kind, self.seq, payload);
+            std::thread::sleep(Duration::from_secs_f64(bytes.len() as f64 * 10.0 / f64::from(self.baud)));
+            if self.baud > self.spec.max_baud {
+                bytes.iter_mut().for_each(|b| *b = b.rotate_left(3) ^ 0x5A);
             }
-            if booted_at.is_none() {
-                booted_at = Some(Instant::now());
-                // The K210's boot ROM says something at its own rate: junk to the link.
-                tx.send(b"\x00\xffK210 boot\r\n\xc5".to_vec()).ok();
+            self.tx.send((self.baud, bytes)).ok();
+        }
+
+        fn hello(&mut self) -> String {
+            // main.py's first line comes before it listens (the sensor, the model).
+            let up = self.booted_at.map_or(0, |b| b.elapsed().as_millis() + self.spec.boot.as_millis().min(880));
+            let f = self.flash.lock().unwrap_or_else(|e| e.into_inner());
+            let stamp = f.files.get("catalyst.json").map(|s| String::from_utf8_lossy(s).into_owned()).unwrap_or_else(|| "null".into());
+            let trial = f.trial.as_ref().map_or("null".to_owned(), |(n, _)| n.to_string());
+            let (v, rolled) = (self.spec.version, f.rolled_back);
+            let sensor = if self.spec.sensor_fails { "failed: Reset Failed" } else { "ok" };
+            if v < 2 {
+                return format!(r#"{{"v":1,"fw":"catalyst-unitv 1 (simulated)","kpu":"face yolo2 320x240","crc":"native","fov":80,"w":320,"h":240,"up_ms":{up},"usb":false,"stamp":{stamp}}}"#);
             }
-            // What the handheld sent, heard only at the rate this listens at.
-            while let Ok(chunk) = rx.try_recv() {
-                let (rate, bytes) = (u32::from_le_bytes(chunk[..4].try_into().unwrap_or([0; 4])), &chunk[4..]);
-                if rate != my_baud {
+            format!(
+                r#"{{"v":{v},"fw":"catalyst-unitv {v} (simulated)","upd":1,"mp":"0.6.3","full":{},"sensor":"{sensor}","kpu":"face yolo2 320x240 (flash 0x300000)","crc":"native","fov":80,"w":320,"h":240,"up_ms":{up},"listen_ms":880,"usb":false,"cwd":"/flash","free":2850000,"trial":{trial},"rolled_back":{rolled},"stamp":{stamp}}}"#,
+                u8::from(self.spec.full)
+            )
+        }
+
+        fn run(mut self, rx: mpsc::Receiver<(u32, Vec<u8>)>, powered: Arc<Mutex<Option<Instant>>>) {
+            let mut seen_power: Option<Instant> = None;
+            loop {
+                let power = *powered.lock().unwrap_or_else(|e| e.into_inner());
+                if power != seen_power {
+                    seen_power = power;
+                    self.reset(power);
+                }
+                let Some(since) = self.on_since else {
+                    if !drain(&rx) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(15));
+                    continue;
+                };
+                if since.elapsed() < self.spec.boot {
+                    if !drain(&rx) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
                     continue;
                 }
-                for f in decoder.push(bytes) {
-                    match f.kind {
-                        frame::HELLO => {
-                            let up = booted_at.map_or(0, |b| b.elapsed().as_millis());
-                            let hello = format!(r#"{{"v":1,"fw":"catalyst-unitv 1 (simulated)","kpu":"face yolo2 320x240","crc":"native","fov":80,"w":320,"h":240,"up_ms":{up}}}"#);
-                            send(frame::HELLO_BACK, hello.as_bytes(), &mut seq, my_baud);
+                if self.booted_at.is_none() {
+                    self.booted_at = Some(Instant::now());
+                    self.heard_at = Instant::now();
+                    self.alive = self.flash.lock().map(|mut f| f.start(&self.spec)).unwrap_or(false);
+                    // The K210's boot ROM says something at its own rate: junk to the link.
+                    self.tx.send((0, b"\x00\xffK210 boot\r\n\xc5".to_vec())).ok();
+                }
+                // Short of power: it starts again by itself, now and then.
+                if self.spec.restarts_after.is_some_and(|every| self.booted_at.is_some_and(|b| b.elapsed() >= every)) {
+                    self.reset(Some(Instant::now()));
+                    continue;
+                }
+                // What the handheld sent, heard only at the rate this listens
+                // at, and only at a rate it holds.
+                loop {
+                    match rx.try_recv() {
+                        Ok((rate, bytes)) => {
+                            if !self.alive || rate != self.baud || self.baud > self.spec.max_baud {
+                                continue;
+                            }
+                            for f in self.decoder.push(&bytes) {
+                                self.heard_at = Instant::now();
+                                if !self.hear(f) {
+                                    break;
+                                }
+                            }
                         }
-                        frame::BAUD => {
-                            let to = u32::from_le_bytes(f.payload[..4].try_into().unwrap_or([0; 4]));
-                            send(frame::BAUD_BACK, &f.payload, &mut seq, my_baud);
-                            // The K210 holds every rate the link asks of it here.
-                            my_baud = to;
-                            since_baud = Some(Instant::now());
-                        }
-                        frame::PING => {
-                            since_baud = None;
-                            send(frame::PONG, &f.payload, &mut seq, my_baud);
-                        }
-                        frame::WANT => {
-                            let v: serde_json::Value = serde_json::from_slice(&f.payload).unwrap_or_default();
-                            let on = |k: &str| v[k].as_u64().unwrap_or(0) != 0;
-                            want = (on("faces"), on("codes"), on("tags"), on("blobs"), on("preview"));
-                            send(frame::WANT_BACK, &f.payload, &mut seq, my_baud);
-                        }
-                        _ => {}
+                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Disconnected) => return,
+                    }
+                    if self.booted_at.is_none() {
+                        break;
                     }
                 }
+                if self.booted_at.is_none() {
+                    continue;
+                }
+                // No frame at a new rate for a second: back to the rate
+                // before; nothing for five at a raised rate: to the start.
+                if self.since_baud.is_some_and(|t| t.elapsed() > Duration::from_secs(1)) {
+                    (self.baud, self.since_baud) = (self.before, None);
+                }
+                if self.baud != START_BAUD && self.since_baud.is_none() && self.heard_at.elapsed() > Duration::from_secs(5) {
+                    self.baud = START_BAUD;
+                }
+                self.look();
             }
-            // No frame at a new rate for a second: back to the start rate.
-            if since_baud.is_some_and(|t| t.elapsed() > Duration::from_secs(1)) {
-                (my_baud, since_baud) = (START_BAUD, None);
+        }
+
+        /// One frame from the handheld; false if it started again (the rest
+        /// of what arrived is lost with it).
+        fn hear(&mut self, f: frame::Frame) -> bool {
+            match f.kind {
+                frame::HELLO => {
+                    self.flash.lock().unwrap_or_else(|e| e.into_inner()).trial = None;
+                    let hello = self.hello();
+                    self.send(frame::HELLO_BACK, hello.as_bytes());
+                }
+                frame::BAUD if f.payload.len() >= 4 => {
+                    let to = u32::from_le_bytes([f.payload[0], f.payload[1], f.payload[2], f.payload[3]]);
+                    self.send(frame::BAUD_BACK, &f.payload);
+                    (self.before, self.baud, self.since_baud) = (self.baud, to, Some(Instant::now()));
+                }
+                frame::PING => {
+                    self.since_baud = None;
+                    self.send(frame::PONG, &f.payload);
+                }
+                frame::WANT => {
+                    let v: serde_json::Value = serde_json::from_slice(&f.payload).unwrap_or_default();
+                    let on = |k: &str| v[k].as_u64().unwrap_or(0) != 0;
+                    self.want = (on("faces"), on("codes"), on("tags"), on("blobs"), on("preview"));
+                    self.send(frame::WANT_BACK, &f.payload);
+                }
+                frame::PUT => {
+                    self.want = (false, false, false, false, false);
+                    let v: serde_json::Value = serde_json::from_slice(&f.payload).unwrap_or_default();
+                    let (name, size, crc, id) = (v["name"].as_str().unwrap_or("").to_owned(), v["size"].as_u64().unwrap_or(0) as usize, v["crc"].as_u64().unwrap_or(0) as u32, v["id"].as_str().unwrap_or("").to_owned());
+                    let said = if ["main.py", "boot.py", "face.kmodel"].contains(&name.as_str()) {
+                        let mut fl = self.flash.lock().unwrap_or_else(|e| e.into_inner());
+                        let have = match fl.new.get(&name) {
+                            Some((s, c, i, data)) if *s == size && *c == crc && *i == id && data.len() <= size => data.len(),
+                            _ => {
+                                fl.new.insert(name.clone(), (size, crc, id, Vec::new()));
+                                0
+                            }
+                        };
+                        if have > 0 {
+                            fl.resumed.push((name.clone(), have));
+                        }
+                        self.file = Some(name.clone());
+                        format!(r#"{{"name":"{name}","have":{have}}}"#)
+                    } else {
+                        self.file = None;
+                        format!(r#"{{"name":"{name}","err":"name"}}"#)
+                    };
+                    self.send(frame::PUT_BACK, said.as_bytes());
+                }
+                frame::CHUNK if f.payload.len() >= 4 => {
+                    let at = u32::from_le_bytes([f.payload[0], f.payload[1], f.payload[2], f.payload[3]]) as usize;
+                    let mut fl = self.flash.lock().unwrap_or_else(|e| e.into_inner());
+                    fl.chunks += 1;
+                    let count = fl.chunks;
+                    if self.spec.drop_chunk == Some(count) {
+                        return true;
+                    }
+                    let Some((size, _, _, data)) = self.file.as_ref().and_then(|n| fl.new.get_mut(n)) else {
+                        drop(fl);
+                        self.send(frame::CHUNK_BACK, &u32::MAX.to_le_bytes());
+                        return true;
+                    };
+                    let mut piece = f.payload[4..].to_vec();
+                    if at == data.len() && data.len() + piece.len() <= *size {
+                        if self.spec.bad_write == Some(count) {
+                            piece[0] ^= 0x01;
+                        }
+                        data.extend_from_slice(&piece);
+                    }
+                    let have = data.len();
+                    let cut = self.spec.cut_at.is_some_and(|c| have >= c) && !fl.cut;
+                    if cut {
+                        // The power gone: what arrived is kept, the rest lost.
+                        fl.cut = true;
+                        drop(fl);
+                        self.reset(Some(Instant::now()));
+                        return false;
+                    }
+                    drop(fl);
+                    self.send(frame::CHUNK_BACK, &(have as u32).to_le_bytes());
+                }
+                frame::DONE => {
+                    let v: serde_json::Value = serde_json::from_slice(&f.payload).unwrap_or_default();
+                    let name = v["name"].as_str().unwrap_or("").to_owned();
+                    let mut fl = self.flash.lock().unwrap_or_else(|e| e.into_inner());
+                    let ok = fl.new.get(&name).is_some_and(|(size, crc, _, data)| data.len() == *size && frame::crc32(data) == *crc);
+                    if !ok {
+                        fl.new.remove(&name);
+                        fl.damaged += 1;
+                    }
+                    drop(fl);
+                    self.file = None;
+                    let said = if ok { format!(r#"{{"name":"{name}","ok":1}}"#) } else { format!(r#"{{"name":"{name}","ok":0,"err":"crc"}}"#) };
+                    self.send(frame::DONE_BACK, said.as_bytes());
+                }
+                frame::COMMIT => {
+                    let v: serde_json::Value = serde_json::from_slice(&f.payload).unwrap_or_default();
+                    let names: Vec<String> = v["files"].as_array().into_iter().flatten().filter_map(|n| n.as_str().map(str::to_owned)).collect();
+                    let stamp = v["stamp"].to_string();
+                    let done = self.flash.lock().unwrap_or_else(|e| e.into_inner()).commit(&names, stamp.as_bytes());
+                    let said = match &done {
+                        Ok(()) => r#"{"ok":1}"#.to_owned(),
+                        Err(why) => format!(r#"{{"ok":0,"err":"{why}"}}"#),
+                    };
+                    self.send(frame::COMMIT_BACK, said.as_bytes());
+                    if done.is_ok() {
+                        // The new program from its first line.
+                        self.reset(Some(Instant::now()));
+                        return false;
+                    }
+                }
+                _ => {}
             }
-            // Its looking, at about 15 frames a second while asked to.
-            let any = want.0 || want.1 || want.2 || want.3 || want.4;
-            if !any || last_frame.elapsed() < Duration::from_millis(66) {
+            true
+        }
+
+        /// Its looking, at about 15 frames a second while asked to.
+        fn look(&mut self) {
+            let w = self.want;
+            let any = w.0 || w.1 || w.2 || w.3 || w.4;
+            if !self.alive || self.spec.sensor_fails || !any || self.last_frame.elapsed() < Duration::from_millis(66) {
                 std::thread::sleep(Duration::from_millis(8));
-                continue;
+                return;
             }
-            last_frame = Instant::now();
-            n += 1;
-            let t = started.elapsed().as_secs_f32();
+            self.last_frame = Instant::now();
+            self.n += 1;
+            let n = self.n;
+            let t = self.started.elapsed().as_secs_f32();
             let face = [0.42 + 0.12 * (t * 0.4).sin(), 0.28 + 0.04 * (t * 0.7).cos()];
             let mut json = format!(r#"{{"n":{n},"w":320,"h":240,"fps":15.0"#);
-            if want.0 {
+            if w.0 {
                 json += &format!(r#","f":[[{:.0},{:.0},58,70,87]]"#, face[0] * 320.0, face[1] * 240.0);
             }
-            if want.1 {
+            if w.1 {
                 json += r#","q":[[212,128,52,52,"SCOUT 5805 Q12 auto=3 tele=11 climb=deep"]]"#;
             }
-            if want.2 {
+            if w.2 {
                 json += &format!(r#","a":[[7,{:.0},62,{:.0},-412,-88,2640]]"#, 70.0 + 6.0 * (t * 0.3).sin(), 120.0 * (t * 0.2).sin());
             }
-            if want.3 {
+            if w.3 {
                 json += r#","b":[[0,40,176,34,28,640]]"#;
             }
             json.push('}');
-            send(frame::RESULTS, json.as_bytes(), &mut seq, my_baud);
+            self.send(frame::RESULTS, json.as_bytes());
             // A burst of junk now and then (a hand on the cable).
             if n % 97 == 0 {
-                tx.send(vec![0xC5, 0x7A, 0x85, 0x01, 0xFF, 0xFF, 0x00, 1, 2, 3]).ok();
+                self.tx.send((self.baud, vec![0xC5, 0x7A, 0x85, 0x01, 0xFF, 0xFF, 0x00, 1, 2, 3])).ok();
             }
-            if want.4 {
+            if w.4 {
                 let pic = view(t, face);
                 if let Some(jpeg) = jpeg(&pic) {
-                    send(frame::PREVIEW, &jpeg, &mut seq, my_baud);
+                    self.send(frame::PREVIEW, &jpeg);
                 }
+            }
+        }
+    }
+
+    /// What arrived while it was not listening, dropped; false once the
+    /// handheld's end is gone (the stand-in ends with it).
+    fn drain(rx: &mpsc::Receiver<(u32, Vec<u8>)>) -> bool {
+        loop {
+            match rx.try_recv() {
+                Ok(_) => {}
+                Err(mpsc::TryRecvError::Empty) => return true,
+                Err(mpsc::TryRecvError::Disconnected) => return false,
             }
         }
     }
@@ -1316,188 +2412,4 @@ pub mod sim {
 // ------------------------------------------------------------------- tests ---
 
 #[cfg(test)]
-mod tests {
-    use super::frame::*;
-    use super::*;
-
-    #[test]
-    fn crc32_is_the_standard_one() {
-        // The check value every CRC-32 (IEEE) has for "123456789".
-        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
-        assert_eq!(crc32(b""), 0);
-    }
-
-    #[test]
-    fn the_wire_bytes_are_the_cameras() {
-        // tools/unitv/test_protocol.py checks main.py makes these same bytes.
-        let bytes = encode(RESULTS, 1, br#"{"n":1}"#);
-        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(hex, "c57a85010700e77b226e223a317d5ed2d160");
-    }
-
-    #[test]
-    fn frames_survive_junk_a_split_read_and_a_corrupted_neighbour() {
-        let a = encode(RESULTS, 1, br#"{"n":1}"#);
-        let b = encode(PREVIEW, 2, &[0xC5, 0x7A, 1, 2, 3, 0xC5]);
-        let mut bad = encode(PONG, 3, b"x");
-        let last = bad.len() - 1;
-        bad[last] ^= 0x40;
-        let c = encode(LOG, 4, b"after the bad one");
-        let mut wire = b"boot noise \xc5".to_vec();
-        wire.extend_from_slice(&a);
-        wire.extend_from_slice(&[0x00, 0xC5, 0xC5, 0x7A]);
-        wire.extend_from_slice(&b);
-        wire.extend_from_slice(&bad);
-        wire.extend_from_slice(&c);
-        // Every way of cutting it up gives the same frames.
-        for cut in [1usize, 2, 3, 5, 7, 11, 64, wire.len()] {
-            let mut d = Decoder::default();
-            let mut got = Vec::new();
-            for chunk in wire.chunks(cut) {
-                got.extend(d.push(chunk));
-            }
-            let kinds: Vec<(u8, u8)> = got.iter().map(|f| (f.kind, f.seq)).collect();
-            assert_eq!(kinds, vec![(RESULTS, 1), (PREVIEW, 2), (LOG, 4)], "cut into {cut}s");
-            assert_eq!(got[1].payload, vec![0xC5, 0x7A, 1, 2, 3, 0xC5], "a payload that holds the sync word");
-            assert!(d.bad >= 1, "the corrupted frame was refused");
-            assert!(d.junk > 0);
-        }
-    }
-
-    #[test]
-    fn a_false_sync_with_a_huge_length_is_refused_at_once() {
-        let good = encode(PONG, 9, b"ok");
-        // A sync word in junk, a header claiming 60 kB: refused by the
-        // header's own check, not waited on.
-        let mut wire = vec![0xC5, 0x7A, 0x85, 0x01, 0x60, 0xEA, 0x00];
-        wire.extend_from_slice(&good);
-        let mut d = Decoder::default();
-        let got = d.push(&wire);
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].payload, b"ok");
-    }
-
-    #[test]
-    fn power_is_on_while_wanted_warm_after_and_then_off() {
-        let t0 = Instant::now();
-        let at = |ms: u64| t0 + Duration::from_millis(ms);
-        let mut p = Power::Off;
-        assert_eq!(p.step(at(0), false, false), Switch::Keep, "nobody wants it: off");
-        assert_eq!(p.step(at(10), true, false), Switch::On, "wanted: on at once");
-        assert_eq!(p.step(at(500), true, false), Switch::Keep);
-        assert!(matches!(p, Power::Waking { .. }));
-        // It answers 1.4 s after power: that is its start time.
-        p.step(at(1410), true, true);
-        assert_eq!(p, Power::On { took: Duration::from_millis(1400) });
-        // Let go: warm for WARM_FOR, wanted again meanwhile, no restart.
-        assert_eq!(p.step(at(5000), false, false), Switch::Keep);
-        assert!(matches!(p, Power::Warm { .. }));
-        assert_eq!(p.step(at(9000), true, false), Switch::Keep, "back within the warm time: still on");
-        assert!(matches!(p, Power::On { .. }));
-        p.step(at(10_000), false, false);
-        let off_at = 10_000 + WARM_FOR.as_millis() as u64;
-        assert_eq!(p.step(at(off_at - 1), false, false), Switch::Keep);
-        assert_eq!(p.step(at(off_at), false, false), Switch::Off, "off once the warm time is out");
-        assert_eq!(p, Power::Off);
-    }
-
-    #[test]
-    fn a_camera_that_never_answers_is_powered_off_and_tried_again_later() {
-        let t0 = Instant::now();
-        let at = |ms: u64| t0 + Duration::from_millis(ms);
-        let mut p = Power::Off;
-        p.step(at(0), true, false);
-        let timeout = WAKE_TIMEOUT.as_millis() as u64;
-        assert_eq!(p.step(at(timeout), true, false), Switch::Off);
-        assert!(matches!(p, Power::Failed { .. }));
-        assert_eq!(p.step(at(timeout + 1000), true, false), Switch::Keep, "not hammered");
-        assert_eq!(p.step(at(timeout + RETRY_AFTER.as_millis() as u64), true, false), Switch::On, "tried again");
-        // Nobody wants it any more: off, and stays so.
-        let mut q = Power::Failed { at: at(0) };
-        q.step(at(10), false, false);
-        assert_eq!(q, Power::Off);
-    }
-
-    #[test]
-    fn results_are_read_into_the_cameras_picture() {
-        let r = parse_results(br#"{"n":42,"w":320,"h":240,"fps":14.5,"f":[[160,120,32,24,91]],"q":[[0,0,64,48,"SCOUT 5805"]],"a":[[7,80,60,250,-412,-88,2640]],"b":[[0,40,176,34,28,640]]}"#).unwrap();
-        assert_eq!(r.frame, 42);
-        assert_eq!(r.faces, vec![Face { at: [0.5, 0.5, 0.6, 0.6], score: 0.91 }]);
-        assert_eq!(r.codes[0].text, "SCOUT 5805");
-        assert_eq!(r.tags[0].id, 7);
-        assert!((r.tags[0].turn - 0.25).abs() < 1e-6 && r.tags[0].pose_mm == [-412.0, -88.0, 2640.0]);
-        assert_eq!(r.blobs[0].pixels, 640);
-        assert!(parse_results(b"not json").is_none());
-    }
-
-    #[test]
-    fn a_face_maps_into_the_main_cameras_picture() {
-        let a = Align::default();
-        // The wider lens: its picture's middle is the main one's, its edges
-        // further out.
-        assert!(a.sx > 1.05 && a.sx < 1.2 && a.sy > 1.05 && a.sy < 1.2, "{a:?}");
-        let mid = a.map([0.45, 0.45, 0.55, 0.55]);
-        assert!((mid[0] - (0.5 - 0.05 * a.sx)).abs() < 1e-5);
-        let offset = Align { ox: 0.1, ..a };
-        assert!((offset.map([0.5, 0.5, 0.5, 0.5])[0] - 0.6).abs() < 1e-5);
-        // The largest sure face, if it falls in the main picture.
-        let r = Results { faces: vec![Face { at: [0.4, 0.4, 0.5, 0.5], score: 0.9 }, Face { at: [0.1, 0.1, 0.12, 0.12], score: 0.95 }, Face { at: [0.3, 0.3, 0.7, 0.7], score: 0.3 }], ..Results::default() };
-        let f = main_face(&r, &a).unwrap();
-        assert!(f[0] > 0.35 && f[2] < 0.6);
-        let outside = Results { faces: vec![Face { at: [0.0, 0.0, 0.03, 0.03], score: 0.9 }], ..Results::default() };
-        assert!(main_face(&outside, &a).is_none(), "a face beyond the main picture's edge");
-    }
-
-    /// The whole link against the stand-in: woken, its start time measured,
-    /// the fastest rate taken, results and previews arriving, then warm.
-    #[test]
-    fn the_stand_in_wakes_and_answers_at_the_fastest_rate() {
-        let _port = sim::exclusive(true);
-        let lease = lease(Use::View);
-        let started = Instant::now();
-        while !matches!(status(), Status::Ready { baud: 3_000_000, .. }) && started.elapsed() < Duration::from_secs(10) {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let Status::Ready { baud, woke_ms } = status() else { panic!("{:?}", status()) };
-        assert_eq!(baud, 3_000_000);
-        assert!((1300..4000).contains(&woke_ms), "it took {woke_ms} ms to start");
-        while preview().0 < 3 && started.elapsed() < Duration::from_secs(15) {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(preview().0 >= 3, "previews arrive");
-        // Room for a busy machine: the whole suite runs beside it.
-        let r = results(Duration::from_secs(5)).expect("results arrive");
-        assert!(!r.faces.is_empty() && !r.codes.is_empty() && !r.tags.is_empty());
-        assert!(tags().is_some_and(|(_, t)| t[0].id == 7), "the field view's tags");
-        drop(lease);
-        std::thread::sleep(Duration::from_millis(200));
-        assert!(matches!(status(), Status::Ready { .. }), "warm: still answering a moment after");
-    }
-
-    /// The port changes hands at once, both ways: to the console, the
-    /// camera in use is let go of and unpowered at once (no warm time), and
-    /// nothing powers it while the port changes; back, it wakes again with
-    /// no restart.
-    #[test]
-    fn the_port_switches_at_once_and_lets_go_first() {
-        let _port = sim::exclusive(true);
-        let _lease = lease(Use::View);
-        let wait = |what: &dyn Fn() -> bool| {
-            let started = Instant::now();
-            while !what() && started.elapsed() < Duration::from_secs(10) {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            what()
-        };
-        assert!(wait(&|| matches!(status(), Status::Ready { .. })), "{:?}", status());
-        switch_grove(false);
-        assert!(wait(&|| !switching()), "the switch finished");
-        assert!(!chosen());
-        assert!(!PORT_OPEN.load(Ordering::Acquire));
-        assert!(wait(&|| status() == Status::PortIsConsole), "unpowered at once, no warm time: {:?}", status());
-        switch_grove(true);
-        assert!(wait(&|| !switching()));
-        assert!(chosen());
-        assert!(wait(&|| matches!(status(), Status::Ready { .. })), "awake again without a restart: {:?}", status());
-    }
-}
+mod tests;

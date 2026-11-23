@@ -64,6 +64,7 @@ mod dng;
 mod filters;
 mod pro;
 mod smartcam;
+mod smartcam_status;
 mod unitv;
 mod calc;
 mod capture;
@@ -702,6 +703,11 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--unitv-shots") {
         return unitv::shots(std::path::Path::new(&dir));
+    }
+    // Settings › Camera › Smart camera in each state, and its update (0.9.4).
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--smartcam-shots") {
+        return smartcam_status::shots(std::path::Path::new(&dir));
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--mech-shots") {
