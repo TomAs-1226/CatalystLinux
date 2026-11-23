@@ -65,7 +65,7 @@ All STLs in `stl/` are already oriented for the bed (z = 0 is the bed).
 - the lens ring;
 - the UnitV pins.
 
-It takes **about 3 h 17 min and 66.4 g**, brims included, as sliced by Creality Print 7.3.2. The fit test is not on it. Nor are the chassis and plunger, which are the white PETG parts.
+It takes **about 3 h 54 min and 86.8 g**, brims included, as sliced by Creality Print 7.3.2. The fit test is not on it. Nor are the chassis and plunger, which are the white PETG parts.
 
 **Settings.** The file uses Creality Print's own SPARKX i7 0.4 nozzle presets ("0.20mm Standard", "Generic PLA"). Each part keeps its layer height, walls and infill from the table above. On top of that:
 
