@@ -6401,7 +6401,8 @@ pub(crate) mod tests {
         frames(&mut shell, 120, FRAME);
         assert!(shell.lock.covering());
         assert!(shell.lock.drifting(), "idle, it turns");
-        assert_eq!(shell.ambient(), Some(crate::depth::DRIFT_EVERY), "12.5 frames a second");
+        // At least 12.5 a second (sooner if music's bars are up: the tests share a player).
+        assert!(shell.ambient().is_some_and(|d| d <= crate::depth::DRIFT_EVERY), "12.5 frames a second");
         assert!(!shell.moving() && !shell.animating(), "the frame beat rests");
         let dt = crate::depth::DRIFT_EVERY.as_secs_f32();
         for _ in 0..10 {
