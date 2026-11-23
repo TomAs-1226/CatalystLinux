@@ -156,10 +156,16 @@ pub fn start() -> Result<String, String> {
     if lm::healthy() {
         return Ok(lm::base_url());
     }
+    // Dictation's model, loaded and waiting, gives way first: it is back in
+    // a second or two when next asked, this one in ten.
+    let mut available = lm::available_mb();
+    if lm::room_for(chosen, available).is_err() && crate::whisper_local::give_way() {
+        available = lm::available_mb();
+    }
     // The chosen model, or, with no room for it now (the 350M needs more
     // than the handheld has free with Music on), the biggest one downloaded
     // that has room: an answer from a smaller model rather than none.
-    let model = lm::fitting(&dir, chosen, lm::available_mb())?;
+    let model = lm::fitting(&dir, chosen, available)?;
     // A live activity while it loads (seconds, from the card).
     let _loading = crate::liveactivity::task(crate::liveactivity::Kind::Assistant, format!("Loading {}", model.name), "on-device model");
     let mut child = lm::spawn_server(&dir, model)?;
@@ -267,7 +273,7 @@ pub(crate) fn let_go() -> bool {
 
 /// The resident memory (MB) in a /proc/<pid>/status: the model's mapped
 /// weights it has read, its cache and its working space.
-fn resident_mb(status: &str) -> Option<u64> {
+pub(crate) fn resident_mb(status: &str) -> Option<u64> {
     let line = status.lines().find(|l| l.starts_with("VmRSS:"))?;
     line.split_whitespace().nth(1)?.parse::<u64>().ok().map(|kb| (kb + 512) / 1024)
 }
@@ -280,7 +286,7 @@ fn time_to_stop(last: Instant, now: Instant, away: bool) -> bool {
 }
 
 /// The processor time a process has used (clock ticks), 0 if unknown.
-fn cpu_time(pid: u32) -> u64 {
+pub(crate) fn cpu_time(pid: u32) -> u64 {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
     cpu_ticks(&stat)
 }
@@ -354,7 +360,7 @@ pub fn summary() -> String {
     }
 }
 
-fn megabytes(bytes: u64) -> String {
+pub(crate) fn megabytes(bytes: u64) -> String {
     format!("{} MB", (bytes + 500_000) / 1_000_000)
 }
 
@@ -369,10 +375,10 @@ fn facts(model: &Model) -> [String; 3] {
 
 /// A download's progress, shared with the page that shows it.
 #[derive(Default)]
-struct Progress {
-    bytes: AtomicU64,
-    checking: AtomicBool,
-    cancel: AtomicBool,
+pub(crate) struct Progress {
+    pub(crate) bytes: AtomicU64,
+    pub(crate) checking: AtomicBool,
+    pub(crate) cancel: AtomicBool,
 }
 
 /// Room left on the filesystem `dir` is on, in bytes.
@@ -395,7 +401,7 @@ fn free_bytes(dir: &Path) -> Option<u64> {
     }
 }
 
-fn len(path: &Path) -> u64 {
+pub(crate) fn len(path: &Path) -> u64 {
     std::fs::metadata(path).map_or(0, |m| m.len())
 }
 
@@ -459,20 +465,21 @@ fn sha256_of(path: &Path) -> Result<String, String> {
     Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Download a model into `dir`, check it, and keep it.
-fn download(model: &'static Model, dir: &Path, progress: &Progress) -> Result<(), String> {
+/// Download a model into `dir`, check it, and keep it. (Dictation's model
+/// too: whisper_local.rs.)
+pub(crate) fn download(model: &dyn lm::Pinned, dir: &Path, progress: &Progress) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("making {}: {e}", dir.display()))?;
     if lm::present(dir, model) {
         return Ok(());
     }
     let part = lm::partial(dir, model);
     if let Some(free) = free_bytes(dir) {
-        let need = model.size.saturating_sub(len(&part)) + 16_000_000;
+        let need = model.size().saturating_sub(len(&part)) + 16_000_000;
         if free < need {
             return Err(format!("{} more room is needed on the card", megabytes(need - free)));
         }
     }
-    let sum = fetch(model.url, model.size, &part, progress)?;
+    let sum = fetch(model.url(), model.size(), &part, progress)?;
     lm::accept(dir, model, &sum)
 }
 

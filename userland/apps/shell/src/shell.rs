@@ -4048,9 +4048,10 @@ impl Shell {
         self.lights.tick(dt);
         // Nobody looking (the screen off, StandBy's faces, locked): the
         // on-device model gives its memory back, after the answer it is
-        // writing if it is writing one.
+        // writing if it is writing one; dictation's model too.
         if matches!(self.standby.state(), crate::standby::State::Off | crate::standby::State::Faces) || self.lock.engaged() {
             crate::local::away();
+            crate::whisper_local::away();
         }
         self.watch_queue(dt);
         self.watch_reminders(dt);

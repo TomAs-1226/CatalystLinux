@@ -174,6 +174,7 @@ mod upnext;
 mod vault;
 mod voice;
 mod weather;
+mod whisper_local;
 mod widgets;
 mod wifi;
 mod wpilog;
@@ -668,6 +669,11 @@ fn main() {
         std::fs::create_dir_all(&own).ok();
         std::env::set_var("CATALYST_CONF", own.join("robot"));
         return widgets::gallery::shots(std::path::Path::new(&dir));
+    }
+    // Settings › Offline dictation at each text size.
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--dictation-shots") {
+        return dictation_shots(std::path::Path::new(&dir));
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--notify-shots") {
@@ -1673,6 +1679,74 @@ fn model_shots(dir: &std::path::Path, text: Option<gfx::TextSize>) {
     save(&mut shell, "112f-on-device-model-smartest");
     std::fs::remove_dir_all(&models).ok();
     std::env::remove_var("CATALYST_MODELS");
+}
+
+/// Settings › Offline dictation at each text size: its row in Settings,
+/// the page with nothing downloaded, a download part way, the model here,
+/// and loaded with what a try wrote (a stand-in file of the model's size,
+/// accepted as checked). `--dictation-shots <dir>`.
+#[cfg(not(target_arch = "aarch64"))]
+fn dictation_shots(dir: &std::path::Path) {
+    use Key::*;
+    std::fs::create_dir_all(dir).expect("create the screenshot folder");
+    let settle = |shell: &mut Shell, frames: usize| {
+        for _ in 0..frames {
+            if shell.tick(1.0 / 60.0) {
+                shell.draw();
+            }
+        }
+    };
+    let save = |shell: &mut Shell, name: &str| {
+        shell.draw();
+        platform::sim::save_png(&shell.gfx.canvas, &dir.join(format!("{name}.png")), 3);
+    };
+    let press = |shell: &mut Shell, keys: &[Key], frames: usize| {
+        for key in keys {
+            shell.key(*key);
+            settle(shell, frames);
+        }
+    };
+    let models = std::env::temp_dir().join(format!("catalyst-dictation-shots-{}", std::process::id()));
+    std::env::set_var("CATALYST_MODELS", &models);
+    // Settings, on its row.
+    let at_row = |size: gfx::TextSize| {
+        let mut shell = Shell::new(Robot::demo());
+        shell.settings.text = size;
+        shell.apply_settings();
+        settle(&mut shell, 100);
+        press(&mut shell, &vec![Right; steps_to("Settings")], 20);
+        press(&mut shell, &[Enter], 90);
+        press(&mut shell, &vec![Down; screens::settings_row("Offline dictation")], 20);
+        shell
+    };
+    for size in [gfx::TextSize::Compact, gfx::TextSize::Standard, gfx::TextSize::Large] {
+        std::fs::remove_dir_all(&models).ok();
+        let name = |what: &str| format!("dictation-{}-{what}", size.name());
+        let mut shell = at_row(size);
+        save(&mut shell, &name("1-settings"));
+        press(&mut shell, &[Enter], 90);
+        save(&mut shell, &name("2-none-yet"));
+        shell.show(Box::new(whisper_local::DictationPage::showing_download(0.37)));
+        settle(&mut shell, 90);
+        save(&mut shell, &name("3-downloading"));
+        std::fs::create_dir_all(&models).ok();
+        if let Ok(stand_in) = std::fs::File::create(localmodel::partial(&models, &whisper_local::MODEL)) {
+            stand_in.set_len(whisper_local::MODEL.size).ok();
+        }
+        localmodel::accept(&models, &whisper_local::MODEL, whisper_local::MODEL.sha256).ok();
+        shell.show(Box::new(whisper_local::DictationPage::new()));
+        settle(&mut shell, 90);
+        save(&mut shell, &name("4-downloaded"));
+        shell.show(Box::new(whisper_local::DictationPage::showing_answer(whisper_local::DEMO_TEXT, 3.1, 2.9).showing_loaded(98)));
+        settle(&mut shell, 90);
+        save(&mut shell, &name("5-loaded-tried"));
+        // Settings again: its line, now that it is here.
+        let mut shell = at_row(size);
+        save(&mut shell, &name("6-settings-ready"));
+    }
+    std::fs::remove_dir_all(&models).ok();
+    std::env::remove_var("CATALYST_MODELS");
+    println!("dictation in {}", dir.display());
 }
 
 /// The assistant offline: with no key it answers on this handheld, from the

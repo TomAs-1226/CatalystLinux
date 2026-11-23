@@ -3216,6 +3216,39 @@ a scan of llama-server and its libraries finds none of the first four, and
 the few LSE atomics are GCC's outline helpers, each behind its run-time
 check.
 
+### Offline dictation
+
+Speech written down on the handheld with no key and no internet: OpenAI's
+Whisper (tiny.en, English) through whisper.cpp's `whisper-server` (v1.9.5,
+`os/package/whisper-cpp`, 2 MB, its own ggml linked in so that it never
+meets llama.cpp's libraries). Settings › Offline dictation downloads the
+model (`ggml-tiny.en-q8_0.bin`, 44 MB, MIT) to `/data/models` as the
+on-device model is downloaded, tries it (espeak says a sentence, Whisper
+writes it down, timed), unloads it (u) and removes it (d twice). The shell
+asks it through `userland/apps/shell/src/whisper_local.rs` (`ready`,
+`transcribe`, `cancel`, `stop`), by the on-device model's rules: started
+only when speech needs writing down, on 127.0.0.1:8089, three threads at
+nice 10 under SCHED_BATCH, stopped a minute after its last use or when the
+screen goes off, started only with 180 MB free, and first to give way when
+memory runs short or the on-device model needs the room.
+
+Whisper encodes a 30 s window however short the speech; each request asks
+for the speech's length plus 2.6 s, at least 6.4 s (`audio_ctx`), which on
+74 LibriSpeech clips and JFK's was as right as the whole window (9.6% of
+words wrong against 9.4%) for a third of the work. Two patches of ours:
+`max_tokens` per request (each decode held to 8 tokens a second of speech),
+and flash attention over exactly the audio encoded (upstream reads up to
+255 positions past it, left by earlier requests, and wrote the same clip
+differently from one request to the next). The 8-bit model rather than the
+5-bit one, which took a quarter longer and got 10.9% of words wrong (the
+16-bit original: 9.4%). Measured on a PC (three threads): 44 ms for 2 s of
+speech, 59 ms for 5 s, 110 ms for 10 s, about 100 MB resident. On the
+handheld, estimated from how much slower its cores run the same ggml (63
+times, by llama.cpp's reading speed on both): about 3 s for a 4 s sentence
+once loaded, a second or two more to load. Not yet measured on a
+CardputerZero: Settings › Offline dictation's try says how long it took.
+`catalyst-shell --dictation-shots <dir>` renders the page at each text size.
+
 ## ai in the Terminal
 
 `ai` is the assistant for a shell, using the same keys and choices as the

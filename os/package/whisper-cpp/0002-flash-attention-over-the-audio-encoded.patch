@@ -1,0 +1,48 @@
+From: Catalyst Linux
+Subject: [PATCH] flash attention over the audio encoded, not up to 256 past it
+
+With flash attention (on by default) the encoder's self-attention and the
+decoder's cross-attention read their keys and values in a span rounded up
+to 256 positions, and attend to all of it with no mask, though only
+n_ctx positions were written. The rest is whatever an earlier run left
+there: zeros at first, then keys and values of other audio. With the whole
+30 s window (1500) that is 36 positions of zeros; with a shorter audio_ctx
+(how the shell keeps the cost to the length of what was said) it is up to
+255 positions of someone else's speech, and the same clip came back worded
+differently from one request to the next.
+
+The round-up is for GPU kernels, which this build has none of: the CPU's
+flash attention takes any length. So the span is exactly what was encoded.
+Measured on 74 LibriSpeech clips and JFK's: every request answered the same
+way twice over, and with audio_ctx at the clip's length plus 128 (at least
+320), 9.6% of words wrong against 9.4% for the whole 30 s window.
+
+--- a/src/whisper.cpp
++++ b/src/whisper.cpp
+@@ -2094,7 +2094,7 @@
+ 
+     WHISPER_ASSERT(!!kv_pad.buffer);
+ 
+-    const int n_ctx_pad = GGML_PAD(n_ctx, 256);
++    const int n_ctx_pad = n_ctx;
+ 
+     struct ggml_init_params params = {
+         /*.mem_size   =*/ wstate.sched_encode.meta.size(),
+@@ -2323,7 +2323,7 @@
+ 
+     const int n_state_head = n_state/n_head;
+ 
+-    const int n_ctx_pad = GGML_PAD(n_ctx, 256);
++    const int n_ctx_pad = n_ctx;
+ 
+     struct ggml_init_params params = {
+         /*.mem_size   =*/ wstate.sched_cross.meta.size(),
+@@ -2541,7 +2541,7 @@
+     const int n_tokens    = batch.n_tokens;
+     const int n_audio_ctx = wstate.exp_n_audio_ctx > 0 ? wstate.exp_n_audio_ctx : hparams.n_audio_ctx;
+ 
+-    const int n_audio_ctx_pad = GGML_PAD(n_audio_ctx, 256);
++    const int n_audio_ctx_pad = n_audio_ctx;
+ 
+     const int32_t n_kv    = worst_case ? n_ctx            : kv_self.n;
+     const int32_t kv_head = worst_case ? n_ctx - n_tokens : kv_self.head;
