@@ -10,6 +10,11 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 0.9.3
+
+### Fixed
+- Settings › Camera › UnitV installs again: the smart camera's program, its face model and MaixPy were missing from 0.9.1 and 0.9.2, so it said main.py was missing.
+
 ## 0.9.2
 
 ### Camera

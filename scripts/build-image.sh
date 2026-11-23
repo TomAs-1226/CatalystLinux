@@ -19,12 +19,19 @@ export BR2_DL_DIR="$CATALYST_BUILD/dl"
 rm -rf "$CATALYST_BUILD/os"
 cp -r "$HERE/os" "$CATALYST_BUILD/os"
 chmod +x "$CATALYST_BUILD/os/board/cardputer-zero/"*.sh
+# The smart camera's program, which catalyst-unitv reads from beside os/
+# (../tools/unitv): copied too, or the package has nothing to install.
+rm -rf "$CATALYST_BUILD/tools/unitv"
+mkdir -p "$CATALYST_BUILD/tools"
+cp -r "$HERE/tools/unitv" "$CATALYST_BUILD/tools/unitv"
 
 BR=(make -C "$CATALYST_BUILD/buildroot" O="$CATALYST_BUILD/output" BR2_EXTERNAL="$CATALYST_BUILD/os")
-if [ ! -f "$CATALYST_BUILD/output/.config" ] || [ "${1:-}" = "reconfigure" ]; then
-	"${BR[@]}" catalyst_cardputer_zero_defconfig
-	[ "${1:-}" = "reconfigure" ] && shift
-fi
+# The defconfig every time, not only the first: a package added to it later
+# (0.9.1's catalyst-unitv) otherwise never reached a build, and the image
+# shipped without the camera's program. Packages whose options did not
+# change are not built again for it.
+"${BR[@]}" catalyst_cardputer_zero_defconfig
+[ "${1:-}" = "reconfigure" ] && shift
 # M5Stack's drivers are built apart from the kernel, against it: a kernel
 # rebuilt leaves them refused at load (0.5.5's panel stayed dark so), so
 # they are built again with it.
