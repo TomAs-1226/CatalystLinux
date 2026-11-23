@@ -225,6 +225,10 @@ pub struct Gfx {
     /// screen drawn.
     pub copy_field: Option<String>,
     pub copy_row: Option<String>,
+    /// What the hint line adds, where there is room, to say how this
+    /// screen's keys come up ("? keys"; `help::sheet_hint`). Set for each
+    /// screen drawn.
+    pub keys_hint: Option<&'static str>,
 }
 
 /// The focus ring's place, its size and its corners. It glides to whatever is
@@ -395,6 +399,7 @@ impl Gfx {
             ring_shift: 0.0,
             copy_field: None,
             copy_row: None,
+            keys_hint: Some("? keys"),
         }
     }
 
@@ -820,20 +825,43 @@ impl Gfx {
     /// The hint line at the bottom of a page: lowercase mono, quiet.
     /// The line along the bottom: what the keys do, or how things stand.
     /// Always whole on the panel: a long one is cut short with an ellipsis.
+    /// Where there is room, it ends saying how this screen's keys come up
+    /// (`keys_hint`: "· ? keys").
     pub fn hint(&mut self, s: &str) {
+        let with = self.with_keys_hint(s);
+        let style = self.ty.caption;
+        match with.filter(|w| self.measure(w, style) <= W - 2.0 * PAD) {
+            Some(w) => self.hint_line(&w),
+            None => self.hint_line(s),
+        }
+    }
+
+    fn with_keys_hint(&self, s: &str) -> Option<String> {
+        let keys = self.keys_hint?;
+        Some(if s.is_empty() { keys.to_owned() } else { format!("{s} · {keys}") })
+    }
+
+    fn hint_line(&mut self, s: &str) {
         self.take_foot(self.above_hint());
         let (style, color) = (self.ty.caption, self.tokens.dim);
         let fitted = self.text.fit(s, &style, W - 2.0 * PAD);
         self.text_at(W * 0.5, H - 2.0 - style.size * 0.5, Align::Center, &fitted, style, color);
     }
 
-    /// The first of `choices` (longest first) that fits whole, so a larger
-    /// text size leaves keys out rather than cutting one in half.
+    /// The first of `choices` (longest first) that fits whole with "· ? keys"
+    /// after it, so a larger text size leaves keys out rather than cutting
+    /// one in half, and always says where the rest are; failing that, the
+    /// first that fits whole alone.
     pub fn hint_any(&mut self, choices: &[&str]) {
         let style = self.ty.caption;
-        let fits = choices.iter().copied().find(|s| self.measure(s, style) <= W - 2.0 * PAD);
+        let room = W - 2.0 * PAD;
+        let withs: Vec<String> = choices.iter().filter_map(|s| self.with_keys_hint(s)).collect();
+        if let Some(w) = withs.into_iter().find(|w| self.measure(w, style) <= room) {
+            return self.hint_line(&w);
+        }
+        let fits = choices.iter().copied().find(|s| self.measure(s, style) <= room);
         if let Some(s) = fits.or(choices.last().copied()) {
-            self.hint(s);
+            self.hint_line(s);
         }
     }
 

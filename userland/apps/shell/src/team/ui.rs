@@ -255,6 +255,17 @@ impl Screen for TeamScreen {
         super::read_all();
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let Some(snap) = &self.snap else {
+            return vec![keys("team", &[("enter", "Start or join one")])];
+        };
+        if snap.rows.get(self.list.focus).is_some_and(|r| r.share.is_some()) {
+            return vec![keys("the thread", &[("enter", "Open the share"), ("1 to 6", "Send a call"), ("type", "Write to the team"), ("tab", "Members")])];
+        }
+        vec![keys("the thread", &[("1 to 6", "Send a call"), ("enter · type", "Write to the team"), ("tab", "Members")])]
+    }
+
     /// The thread changes from the network: looked in on four times a second.
     fn ambient_tick(&mut self, _dt: f32, _robot: &Robot) -> bool {
         if super::generation() != self.generation {
@@ -438,6 +449,14 @@ impl Screen for Compose {
         self.done
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.field.text.is_empty() {
+            return vec![keys("write", &[("enter", "Send it"), ("1 to 6", "Send a call")])];
+        }
+        vec![keys("write", &[("enter", "Send it")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         // A number on its own sends its call, as on the thread.
         if let (Key::Char(c @ '1'..='6'), true) = (key, self.field.text.is_empty()) {
@@ -555,6 +574,17 @@ impl Screen for Members {
             return true;
         }
         false
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let action = self.list.focus.checked_sub(self.snap.members.len()).and_then(|k| ACTIONS.get(k).copied());
+        vec![match action {
+            Some(Action::Invite) => keys("members", &[("enter", "Invite someone"), ("tab", "Back to the thread")]),
+            Some(Action::Calls) => keys("members", &[("enter", "Change the calls"), ("tab", "Back to the thread")]),
+            Some(Action::Leave) => keys("members", &[("enter twice", "Leave the team"), ("tab", "Back to the thread")]),
+            None => keys("members", &[("tab", "Back to the thread")]),
+        }]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -692,6 +722,11 @@ impl Screen for InvitePage {
         false
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("invite", &[("enter", "Done")])]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         match key {
             Key::Back | Key::Enter => Nav::Pop,
@@ -778,6 +813,14 @@ impl Screen for CreatePage {
 
     fn finished(&self) -> bool {
         self.done
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.team.is_some() {
+            return vec![keys("your name", &[("enter", "Make the team"), ("esc", "Back to its name")])];
+        }
+        vec![keys("a new team", &[("enter", "On to your name")])]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -899,6 +942,15 @@ impl Screen for JoinPage {
 
     fn wants_text(&self) -> bool {
         !matches!(self.step, Step::Asking(_))
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![match self.step {
+            Step::Code => keys("join", &[("enter", "On to your name")]),
+            Step::Name => keys("join", &[("enter", "Join the team")]),
+            Step::Asking(_) => keys("asking", &[("esc", "Stop asking")]),
+        }]
     }
 
     fn finished(&self) -> bool {
@@ -1046,6 +1098,14 @@ impl Screen for CallsPage {
         self.editing.is_some()
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.editing.is_some() {
+            return vec![keys("its words", &[("enter", "Keep them")])];
+        }
+        vec![keys("calls", &[("enter", "Change its words"), ("space", "Urgent or not")])]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         let at = self.list.focus.min(self.calls.len() - 1);
         if let Some(field) = &mut self.editing {
@@ -1098,5 +1158,40 @@ impl Screen for CallsPage {
         }
         self.list.scrollbar(g, self.calls.len(), top, bottom);
         g.hint_any(&["enter: words · space: urgent or not", "enter: words · space: urgent"]);
+    }
+}
+
+#[cfg(test)]
+mod sheet_tests {
+    use super::*;
+
+    #[test]
+    fn each_screens_keys_fit_the_sheet() {
+        crate::shell::tests::sandbox();
+        let mut g = Gfx::new(bezel::Tokens::dark());
+        let mut fits = |s: &dyn Screen| crate::keysheet::fits(&mut g, &s.key_sheet()).unwrap();
+        fits(&TeamScreen::new());
+        fits(&Compose::new(None));
+        fits(&Compose::new(Some('a')));
+        let mut create = CreatePage::new();
+        fits(&create);
+        create.team = Some("5805 pit".into());
+        fits(&create);
+        let mut join = JoinPage::by_code();
+        fits(&join);
+        join.step = Step::Name;
+        fits(&join);
+        let (_tx, rx) = std::sync::mpsc::channel();
+        join.step = Step::Asking(rx);
+        fits(&join);
+        let mut members = Members::new();
+        for at in 0..members.len() {
+            members.list.focus = at;
+            fits(&members);
+        }
+        let mut calls = CallsPage::new();
+        fits(&calls);
+        calls.editing = Some(Field::new("the call's words", "", 40));
+        fits(&calls);
     }
 }

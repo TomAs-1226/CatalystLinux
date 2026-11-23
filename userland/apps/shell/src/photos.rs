@@ -558,6 +558,14 @@ impl Screen for Album {
         Nav::Stay
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.deleting.is_some_and(|d| d == self.focus) {
+            return vec![keys("deleting", &[("d", "Delete it"), ("esc", "Keep it")])];
+        }
+        vec![keys("photos", &[("enter", "Open it"), ("d twice", "Delete it"), ("fn k · fn n", "First, last")])]
+    }
+
     fn tick(&mut self, dt: f32) -> bool {
         let moving = self.scroll.tick(dt);
         let generation = self.thumbs.generation();
@@ -858,6 +866,25 @@ impl Screen for Viewer {
         Nav::Stay
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.deleting {
+            return vec![keys("deleting", &[("d", "Delete it"), ("esc", "Keep it")])];
+        }
+        let mut v = Vec::new();
+        if self.zoom.target() > 1.01 {
+            v.push(keys("zoomed in", &[("↑ ↓ ← →", "Look around"), ("esc", "The whole photo")]));
+        } else {
+            v.push(keys("photo", &[("← →", "Last, next photo")]));
+        }
+        v.push(keys("zoom", &[("enter · +", "Closer"), ("-", "Further out")]));
+        v.push(keys("this photo", &[("e", "Edit it"), ("i", "Details"), ("d twice", "Delete it")]));
+        if self.has_original {
+            v.push(keys("its look", &[("o", "As taken, or the look")]));
+        }
+        v
+    }
+
     fn tick(&mut self, dt: f32) -> bool {
         let mut changed = self.zoom.tick(dt) | self.pan_x.tick(dt) | self.pan_y.tick(dt) | self.slide.tick(dt);
         if self.chrome > 0.0 && !self.details && !self.deleting {
@@ -1066,6 +1093,23 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn the_albums_and_a_photos_keys_fit_the_sheet() {
+        let mut g = Gfx::new(bezel::Tokens::dark());
+        let mut fits = |s: &dyn Screen| crate::keysheet::fits(&mut g, &s.key_sheet()).unwrap();
+        let mut album = Album { photos: Vec::new(), focus: 0, scroll: Animated::new(0.0, role::settle()), thumbs: Thumbs::new(), seen: 0, deleting: None };
+        fits(&album);
+        album.deleting = Some(0);
+        fits(&album);
+        let mut v = Viewer::new(Vec::new(), 0);
+        fits(&v);
+        v.has_original = true;
+        v.zoom.jump(2.0);
+        fits(&v);
+        v.deleting = true;
+        fits(&v);
     }
 
     #[test]

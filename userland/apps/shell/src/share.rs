@@ -128,6 +128,14 @@ impl Screen for Share {
         self.typing.is_some()
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.typing.is_some() {
+            return vec![keys("typing", &[("enter", "Show it as a code"), ("esc", "Cancel")])];
+        }
+        vec![keys("share", &[("enter · →", "Show it as a code")]), keys("moving", crate::screens::LIST_KEYS)]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         if let Some((field, link)) = &mut self.typing {
             let link = *link;
@@ -249,6 +257,10 @@ impl Screen for Code {
 
     fn keeps_awake(&self) -> bool {
         true
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        vec![crate::help::keys("the code", &[("enter · ←", "Done")])]
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {

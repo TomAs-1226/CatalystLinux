@@ -819,6 +819,10 @@ impl Screen for DeepPage {
         "Deep sleep"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        vec![crate::help::keys("deep standby", &[("← →", "Sooner or later"), ("enter", "Later")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         match key {
             Key::Back => return Nav::Pop,

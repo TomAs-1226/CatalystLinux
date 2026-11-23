@@ -114,6 +114,11 @@ impl Screen for UnitsApp {
         "Units"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("units", &[("enter · →", "Convert")]), keys("moving", crate::screens::LIST_KEYS)]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         match key {
             Key::Back => Nav::Pop,
@@ -192,6 +197,13 @@ impl Screen for Converter {
     fn copy(&mut self, _robot: &Robot) -> Option<String> {
         let unit = KINDS[self.kind].units.get(self.from)?;
         Some(format!("{} {}", self.typed, unit.name))
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        vec![crate::help::keys(
+            "converting",
+            &[("0 to 9", "Type an amount"), ("↑ ↓", "Type in another unit"), ("-", "Plus or minus"), ("e", "Exponent, as in 1e6"), ("bksp", "Delete one")],
+        )]
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {

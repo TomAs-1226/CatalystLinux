@@ -458,7 +458,7 @@ impl Gamepad {
             return g.hint_any(&["enter: keep it · esc: not now", "enter: keep it"]);
         }
         if self.forgetting.is_some() {
-            return g.hint_any(&["backspace again: forget it · esc: keep it", "backspace again: forget it"]);
+            return g.hint_any(&["del again: forget it · esc: keep it", "del again: forget it"]);
         }
         let name = self.current().map(|p| short_name(&p.name));
         match self.page {
@@ -563,6 +563,41 @@ impl Screen for Gamepad {
         secs.map(std::time::Duration::from_secs_f32)
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.naming.is_some() {
+            return vec![keys("keeping the check", &[("enter", "Keep it"), ("esc", "Not now")])];
+        }
+        if self.forgetting.is_some() {
+            return vec![keys("forgetting", &[("del", "Forget it"), ("esc", "Keep it")])];
+        }
+        if self.page == KEPT {
+            if self.kept.is_empty() {
+                return vec![keys("kept checks", &[("←", "Back to the check")])];
+            }
+            return vec![keys("kept checks", &[("↑ ↓", "Move"), ("del twice", "Forget one"), ("←", "Back to the check")])];
+        }
+        let Some(pad) = self.current() else {
+            return vec![keys("no controller", &[("→ · tab", "The checks kept")])];
+        };
+        let done = self.page == CHECK && matches!(self.check, Check::Done(_));
+        let here = match (self.page, &self.check) {
+            (CHECK, Check::Done(_)) => keys("the check", &[("enter", "Keep it"), ("r", "Check again"), ("↑ ↓", "Results")]),
+            (CHECK, Check::Sweep { .. }) => keys("the check", &[("enter", "Done now"), ("esc", "Stop")]),
+            (CHECK, Check::Rest { .. }) => keys("the check", &[("esc", "Stop")]),
+            (CHECK, _) => keys("the check", &[("enter", "Check this controller")]),
+            (INPUTS, _) => keys("every input", &[("↑ ↓", "Scroll"), ("enter", "Check it")]),
+            _ if self.pads.list.len() > 1 => keys("controller", &[("enter", "Check it"), ("↑ ↓", "Another controller")]),
+            _ => keys("controller", &[("enter", "Check it")]),
+        };
+        let pages: &'static [(&'static str, &'static str)] = if pad.rumble && !done {
+            &[("← →", "Turn the page"), ("tab", "Next page"), ("r", "Rumble")]
+        } else {
+            &[("← →", "Turn the page"), ("tab", "Next page")]
+        };
+        vec![here, keys("pages", pages)]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         if let Some(line) = &mut self.naming {
             match line.key(key, |c| c.is_alphanumeric() || " -_'#".contains(c)) {
@@ -582,10 +617,13 @@ impl Screen for Gamepad {
             }
             return Nav::Stay;
         }
+        // Backspace comes as Esc here (the shell's), so Fn-Backspace forgets.
+        let forgetting = self.forgetting;
         if key != Key::Backspace && key != Key::Delete {
             self.forgetting = None;
         }
         match key {
+            Key::Back if forgetting.is_some() => {}
             Key::Back if self.checking() => self.cancel(),
             Key::Back | Key::Leave => {
                 self.pads.sweep(false);

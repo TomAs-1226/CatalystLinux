@@ -514,6 +514,25 @@ impl Screen for Clock {
         shared(|s| s.stopwatch.running())
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        match &self.typing {
+            Some((_, true)) => return vec![keys("a new timer", &[("enter", "Start it"), ("esc", "Cancel")])],
+            Some((_, false)) => return vec![keys("a new place", &[("enter", "Add it"), ("esc", "Cancel")])],
+            None => {}
+        }
+        let pages = keys("pages", &[("← →", "Another page")]);
+        match PAGES[self.page] {
+            Page::Stopwatch => vec![keys("stopwatch", &[("enter · space", "Start or stop"), ("l · ↓", "Lap"), ("r", "Reset, once stopped")]), pages],
+            Page::Timers => vec![
+                keys("timers", &[("n", "New timer"), ("enter · space", "Pause or go on"), ("r", "Start it again"), ("d", "Remove it")]),
+                pages,
+                keys("moving", crate::screens::LIST_KEYS),
+            ],
+            Page::World => vec![keys("world clocks", &[("a", "Add a place"), ("d twice", "Remove it")]), pages, keys("moving", crate::screens::LIST_KEYS)],
+        }
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         if let Some((field, is_timer)) = &mut self.typing {
             let is_timer = *is_timer;

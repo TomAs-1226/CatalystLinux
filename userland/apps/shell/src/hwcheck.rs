@@ -281,6 +281,11 @@ impl Screen for HardwareScreen {
         "Hardware"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("hardware", &[("enter · →", "Test it, where it can")]), keys("moving", crate::screens::LIST_KEYS)]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         match key {
             Key::Back => Nav::Pop,
@@ -356,6 +361,14 @@ impl Screen for KeysTest {
 
     fn keep_in_recents(&self) -> bool {
         false
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.finished.is_some() {
+            return vec![keys("all typed", &[("any key", "Back")])];
+        }
+        vec![keys("typing", &[("type the line", "Test every key"), ("bksp", "Delete one")])]
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {

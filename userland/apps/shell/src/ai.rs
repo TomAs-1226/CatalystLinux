@@ -3163,6 +3163,29 @@ impl Screen for Assistant {
         }
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.service.is_none() {
+            return vec![keys("assistant", &[("enter", "Settings, keys")])];
+        }
+        let chat = keys(
+            "conversation",
+            &[("tab", "Choices"), ("ctrl n", "New conversation"), ("ctrl b", "Brief me"), ("ctrl r", "Last match's report"), ("↑ ↓", "Scroll")],
+        );
+        if matches!(self.busy, Busy::Approving { .. }) {
+            return vec![keys("asked first", &[("enter", "Look, then decide"), ("esc", "Skip it")]), chat];
+        }
+        if !self.idle() {
+            return vec![keys("answering", &[("esc", "Stop it")]), chat];
+        }
+        let offering = self.offline_mode() && self.entries.is_empty() && self.input.is_empty() && !self.suggestions.is_empty();
+        if offering {
+            return vec![keys("questions", &[("↑ ↓", "Pick one"), ("enter", "Ask it"), ("type", "Or your own")]), chat];
+        }
+        let ask = keys("asking", &[("type", "Your question"), ("enter", "Send it"), ("enter on empty", "The answer's pages"), ("esc", "Clear the line")]);
+        vec![ask, chat]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         if self.service.is_none() {
             return match key {
@@ -3855,6 +3878,17 @@ impl Screen for Confirm {
         self.session.as_mut().is_some_and(|s| s.tick(dt))
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if let Some(session) = &self.session {
+            return session.key_sheet();
+        }
+        if self.change {
+            return vec![keys("the change", &[("← →", "Yes or no"), ("enter", "Answer"), ("esc", "Don't make it")])];
+        }
+        vec![keys("the command", &[("↑ ↓", "Run it or not"), ("enter", "Answer"), ("esc", "Don't run it")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         if let Some(session) = &mut self.session {
             return session.key(key, cx);
@@ -4045,6 +4079,11 @@ impl Screen for Choices {
         Nav::Stay
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("choices", &[("enter · →", "Change it, or open it"), ("↑ ↓", "Move")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         match (key, self.list.focus) {
             (Key::Back | Key::Leave, _) => return Nav::Pop,
@@ -4197,6 +4236,14 @@ impl Screen for Conversations {
         "Chats"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.kept.is_empty() {
+            return vec![keys("chats", &[("esc", "Back to the assistant")])];
+        }
+        vec![keys("chats", &[("enter · →", "Carry on with it"), ("d twice", "Forget it"), ("↑ ↓", "Move")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let armed = self.deleting.take();
         let at = self.list.focus;
@@ -4328,6 +4375,17 @@ impl Screen for MemoryPage {
 
     fn tick(&mut self, dt: f32) -> bool {
         self.scroll.tick(dt)
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.facts.is_empty() {
+            return vec![keys("memory", &[("esc", "Back to the choices")])];
+        }
+        if self.focus == self.facts.len() {
+            return vec![keys("forget all", &[("enter twice", "Forget all of it"), ("↑ ↓", "Move")])];
+        }
+        vec![keys("memory", &[("d twice", "Forget this one"), ("enter · →", "Change the file"), ("↑ ↓", "Move")])]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -4501,6 +4559,11 @@ pub(crate) fn open_in_web(url: &str) -> Nav {
 impl Screen for SourcesPage {
     fn title(&self) -> &str {
         "Sources"
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("sources", &[("enter · →", "Open it in Web"), ("↑ ↓", "Move")])]
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {

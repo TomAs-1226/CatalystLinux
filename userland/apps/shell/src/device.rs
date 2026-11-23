@@ -540,6 +540,17 @@ impl Screen for ZonePicker {
         false
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.search.is_some() {
+            return vec![keys("searching", &[("enter", "Choose it"), ("↑ ↓", "Move"), ("esc", "The whole list")])];
+        }
+        vec![
+            keys("time zones", &[("enter", "Choose it"), ("space · /", "Search"), ("← →", "Part of the world")]),
+            keys("moving", crate::screens::LIST_KEYS),
+        ]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         if let Some(field) = &mut self.search {
             match key {

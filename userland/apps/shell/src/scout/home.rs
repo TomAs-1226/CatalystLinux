@@ -106,6 +106,15 @@ impl Screen for Scout {
         self.naming.is_some()
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.naming.is_some() {
+            return vec![keys("your name", &[("enter", "Keep it"), ("esc", "Leave it as it was")])];
+        }
+        let first = if self.on_list { keys("the list", &[("enter", "Open it"), ("←", "The next match")]) } else { keys("next match", &[("enter", "Scout it"), ("→ · ↓", "The list")]) };
+        vec![first, keys("scout", &[("s", "Next place"), ("shift s", "Last place")])]
+    }
+
     fn resume(&mut self) {
         self.generation = u64::MAX;
     }
@@ -296,6 +305,11 @@ impl Screen for Matches {
         self.done = None;
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("matches", &[("enter", "Scout it"), ("← →", "Another place"), ("n", "A match by hand")])]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         let len = self.event.as_ref().map_or(0, |e| e.matches.len());
         match key {
@@ -398,6 +412,12 @@ impl Screen for ByHand {
 
     fn wants_text(&self) -> bool {
         true
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let rows: &'static [(&str, &str)] = if self.number.is_none() { &[("enter", "On to the team"), ("← →", "Another place")] } else { &[("enter", "Scout it"), ("← →", "Another place")] };
+        vec![keys("by hand", rows)]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {

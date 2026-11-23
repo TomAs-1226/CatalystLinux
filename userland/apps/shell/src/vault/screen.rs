@@ -611,6 +611,24 @@ impl Screen for Vault {
         self.refresh();
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        match self.state() {
+            State::NeedsPasscode => vec![keys("vault", &[("enter", "Set a passcode")])],
+            State::Damaged => vec![keys("vault", &[("enter", "Set the file aside")])],
+            State::Create => vec![keys("new vault", &[("type", "A passcode"), ("enter", "Make the vault"), ("esc", "Back, when empty")])],
+            State::Locked => vec![keys("locked", &[("type", "Your passcode"), ("enter", "Open the vault"), ("esc", "Back, when empty")])],
+            State::Open if self.search.is_some() => vec![keys("search", &[("type", "Titles and usernames"), ("enter", "Done"), ("esc", "Cancel")])],
+            State::Open => {
+                let mut v = vec![keys("vault", &[("enter · →", "Open"), ("/", "Search"), ("n", "New item"), ("g", "Password generator"), ("i", "Import and back up"), ("l", "Lock now")])];
+                if !self.query.is_empty() {
+                    v.push(keys("searched", &[("esc", "Show everything")]));
+                }
+                v
+            }
+        }
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         super::touch();
         match self.state() {
@@ -960,6 +978,22 @@ impl Screen for EntryPage {
         self.load();
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let item = keys("item", &[("e", "Edit it"), ("d twice", "Delete it")]);
+        if self.entry.as_ref().is_some_and(|e| e.kind == Kind::Note) {
+            return vec![keys("note", &[("↑ ↓", "Scroll"), ("enter", "Copy the note")]), item];
+        }
+        let fields = self.fields();
+        let here = match fields.get(self.list.focus) {
+            Some(Field::Password) => keys("password", &[("enter", "Copy it"), ("space", "Show or hide it"), ("↑ ↓", "Move")]),
+            Some(Field::Notes) => keys("notes", &[("enter · →", "Read them all"), ("↑ ↓", "Move")]),
+            _ if fields.contains(&Field::Password) => keys("fields", &[("enter", "Copy it"), ("space", "Show the password"), ("↑ ↓", "Move")]),
+            _ => keys("fields", &[("enter", "Copy it"), ("↑ ↓", "Move")]),
+        };
+        vec![here, item]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         super::touch();
         let armed = std::mem::take(&mut self.deleting);
@@ -1124,6 +1158,14 @@ impl Screen for TextPage {
         false
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if let Text::Notes(_) = self.text {
+            return vec![keys("notes", &[("↑ ↓", "Scroll"), ("enter", "Copy them"), ("home · end", "Top or end")])];
+        }
+        vec![keys("reading", &[("↑ ↓", "Scroll"), ("pg up · pg dn", "A page at a time"), ("home · end", "Top or end")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         super::touch();
         if self.view.key(key) {
@@ -1279,6 +1321,22 @@ impl Screen for EditPage {
             self.draft.set(Field::Password, &picked);
             self.changed = true;
         }
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.editing.is_some() {
+            return vec![keys("typing", &[("enter", "Done"), ("esc", "Cancel")])];
+        }
+        let item = keys("item", &[("ctrl s", "Save"), ("esc twice", "Drop the changes")]);
+        let here = match self.rows().get(self.list.focus) {
+            Some(EditRow::Kind) => keys("its kind", &[("← → · enter", "Another kind")]),
+            Some(EditRow::Field(Field::Password)) => keys("password", &[("enter · →", "Type it"), ("g", "Generate one"), ("del", "Clear it")]),
+            Some(EditRow::Field(Field::Title)) if self.draft.kind != Kind::Note => keys("field", &[("enter · →", "Type it")]),
+            Some(EditRow::Field(_)) => keys("field", &[("enter · →", "Type it"), ("del", "Clear it")]),
+            _ => keys("save", &[("enter", "Save")]),
+        };
+        vec![here, item]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -1509,6 +1567,19 @@ impl Screen for GeneratorPage {
         false
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let here = match self.rows().get(self.list.focus) {
+            Some(GenRow::Kind) => keys("kind", &[("← → · enter", "Words or characters")]),
+            Some(GenRow::Size) => keys("length", &[("← →", "Shorter or longer"), ("enter", "Make another")]),
+            Some(GenRow::Signs) => keys("signs", &[("← → · enter", "With signs or not")]),
+            Some(GenRow::Copy) => keys("copy", &[("enter", "Copy it")]),
+            Some(GenRow::Use) => keys("use", &[("enter", "Use this password")]),
+            _ => keys("again", &[("enter", "Make another")]),
+        };
+        vec![here, keys("generator", &[("space", "Make another"), ("↑ ↓", "Move")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         super::touch();
         let calm = cx.settings.calm;
@@ -1703,6 +1774,14 @@ impl Screen for ToolsPage {
         self.files = import::files(&crate::files::storage());
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if matches!(self.rows().get(self.list.focus), Some(ToolRow::Delete)) {
+            return vec![keys("delete the vault", &[("enter twice", "Delete it all"), ("↑ ↓", "Move")])];
+        }
+        vec![keys("import and back up", &[("enter · →", "Choose"), ("↑ ↓", "Move")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         super::touch();
         if self.reading.is_some() {
@@ -1868,6 +1947,11 @@ impl Screen for ShredPage {
         false
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("the export", &[("enter · →", "Shred it, or keep it"), ("↑ ↓", "Move")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         super::touch();
         match key {
@@ -2023,6 +2107,14 @@ impl Screen for PasswordPage {
 
     fn busy(&self) -> bool {
         self.job.is_some()
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.restore.is_some() {
+            return vec![keys("restore", &[("type", "The backup's password"), ("enter", "Restore it"), ("esc", "Clear, then back")])];
+        }
+        vec![keys("back up", &[("type", "A password for it"), ("enter", "Make the backup"), ("esc", "Clear, then back")])]
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {

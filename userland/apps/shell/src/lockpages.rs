@@ -46,6 +46,9 @@ impl Rows {
         Rows { focus: 0, extra: 0, first: 0, scroll: Animated::new(0.0, role::hold()).with_rest(0.05) }
     }
 
+    /// The keys `key` moves by, for a key sheet.
+    const KEYS: &'static [(&'static str, &'static str)] = &[("↑ ↓", "Move"), ("home · end", "First or last")];
+
     /// Up and Down along `rows` rows and then the note.
     fn key(&mut self, key: Key, rows: usize) -> bool {
         let last = rows + self.extra;
@@ -168,6 +171,16 @@ impl LockPage {
 impl Screen for LockPage {
     fn title(&self) -> &str {
         "Lock screen"
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let here = match lock_rows(self.armed).get(self.rows.focus) {
+            Some(LockRow::Previews | LockRow::Depth | LockRow::Follows) => Some(keys("this row", &[("enter · ← →", "On or off")])),
+            Some(_) => Some(keys("this row", &[("enter · →", "Open")])),
+            None => None,
+        };
+        here.into_iter().chain([keys("moving", Rows::KEYS)]).collect()
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -395,6 +408,10 @@ impl Screen for PasscodeFlow {
         false
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        vec![crate::help::keys("passcode", &[("enter", "Next"), ("bksp", "Delete one"), ("esc", "Clear, then back")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         if self.working() {
             return Nav::Stay;
@@ -570,6 +587,10 @@ impl Screen for Editor {
         false
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        vec![crate::help::keys("customising", &[("↑ ↓ · tab", "What to change"), ("← →", "Change it"), ("enter · space", "The next one")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let all = params();
         self.at = self.at.min(all.len() - 1);
@@ -693,6 +714,16 @@ impl Screen for StandByPage {
         "StandBy"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let here = match STANDBY_ROWS.get(self.rows.focus) {
+            Some(StandByRow::Show) => Some(keys("this row", &[("enter · →", "Show it now")])),
+            Some(_) => Some(keys("this row", &[("enter · ← →", "On or off")])),
+            None => None,
+        };
+        here.into_iter().chain([keys("moving", Rows::KEYS)]).collect()
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         if key == Key::Back {
             return Nav::Pop;
@@ -763,6 +794,10 @@ impl Screen for Preview {
 
     fn keep_in_recents(&self) -> bool {
         false
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        vec![crate::help::keys("standby", &[("↑ ↓", "Another face"), ("← →", "Its style"), ("any other", "Back")])]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {

@@ -319,6 +319,10 @@ impl Screen for Pit {
         CLOCK.lock().unwrap().running(Instant::now())
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        vec![crate::help::keys("pit", &[("enter", "Open"), ("← →", "Checklist or timer")])]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         match key {
             Key::Back => Nav::Pop,
@@ -425,6 +429,17 @@ impl Screen for Checklist {
     /// Copy: the item being named (else the shell copies the one in focus).
     fn copy(&mut self, _robot: &Robot) -> Option<String> {
         self.naming.clone()
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.naming.is_some() {
+            return vec![keys("a new item", &[("enter", "Add it"), ("esc", "Cancel")])];
+        }
+        vec![
+            keys("checklist", &[("enter", "Tick or untick"), ("n", "New item"), ("d twice", "Delete it"), ("r", "Untick them all")]),
+            keys("moving", crate::screens::LIST_KEYS),
+        ]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -550,6 +565,10 @@ impl Screen for Timer {
     /// While the match clock runs, someone is timing by it: the screen stays on.
     fn keeps_awake(&self) -> bool {
         CLOCK.lock().unwrap().running(Instant::now())
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        vec![crate::help::keys("practice clock", &[("enter · space", "Start or pause"), ("← →", "Phase before or after"), ("r", "Reset")])]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {

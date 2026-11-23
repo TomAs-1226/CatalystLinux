@@ -100,6 +100,11 @@ impl Screen for Teams {
         self.reload();
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("teams", &[("enter", "Open the team"), ("← →", "Sort by another")])]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         let metrics = self.form.metrics().len();
         match key {
@@ -225,10 +230,16 @@ impl Screen for TeamPage {
         self.reload();
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("the team", &[("p", "Do not pick, or pick"), ("enter", "Read a note whole")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         match key {
             Key::Back => return Nav::Pop,
-            Key::Char('x') => {
+            // P, not X: outside typing the shell makes a bare X the down arrow.
+            Key::Char('p') => {
                 let root = super::dir();
                 let mut list = Picklist::load(&root, &self.event);
                 if list.picks.iter().all(|p| p.team != self.team) {
@@ -309,7 +320,7 @@ impl Screen for TeamPage {
         }
         self.list.scrollbar(g, self.lines.len(), list_top, bottom);
         let note = matches!(self.lines.get(self.list.focus), Some(Line::Note(..)));
-        g.hint_any(if note { &["enter: read it all · x: do not pick", "enter: read · x: do not pick", "enter: read"] } else { &["x: do not pick, or pick again", "x: do not pick"] });
+        g.hint_any(if note { &["enter: read it all · p: do not pick", "enter: read · p: do not pick", "enter: read"] } else { &["p: do not pick, or pick again", "p: do not pick"] });
     }
 }
 
@@ -326,6 +337,11 @@ impl Screen for NotePage {
 
     fn app(&self) -> &str {
         "Scout"
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("a note", &[("enter · ←", "Back to the team")])]
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
@@ -401,6 +417,14 @@ impl Screen for PicklistScreen {
         self.note.is_some()
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.note.is_some() {
+            return vec![keys("a note", &[("enter", "Keep it")])];
+        }
+        vec![keys("picklist", &[("u · d", "Move it up, down"), ("t", "To the top"), ("p", "Do not pick, or pick"), ("n", "A note on the team"), ("enter", "Open the team")])]
+    }
+
     fn resume(&mut self) {
         self.list = Picklist::load(&super::dir(), &self.event);
         self.reload();
@@ -436,7 +460,8 @@ impl Screen for PicklistScreen {
                 self.rows.focus = self.list.to_top(at);
                 self.save();
             }
-            Key::Char('x') if at < self.list.picks.len() => {
+            // P, not X: outside typing the shell makes a bare X the down arrow.
+            Key::Char('p') if at < self.list.picks.len() => {
                 self.rows.focus = self.list.toggle_dnp(at);
                 let p = &self.list.picks[self.rows.focus];
                 *cx.say = Some(if p.dnp { format!("{}: do not pick", p.team) } else { format!("{} back on the list", p.team) });
@@ -501,6 +526,6 @@ impl Screen for PicklistScreen {
             }
         }
         self.rows.scrollbar(g, len, top, bottom);
-        g.hint_any(&["u d: move · t: top · x: do not pick · n: note", "u d: move · t: top · x: no pick", "u d: move · x: no pick"]);
+        g.hint_any(&["u d: move · t: top · p: do not pick · n: note", "u d: move · t: top · p: no pick", "u d: move · p: no pick"]);
     }
 }

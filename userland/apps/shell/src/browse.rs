@@ -514,6 +514,22 @@ impl Screen for Browse {
         self.job.is_some()
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.service.is_none() {
+            return vec![keys("browse", &[("enter", "Settings, keys")])];
+        }
+        if self.job.is_some() {
+            return vec![keys("reading", &[("esc", "Stop")])];
+        }
+        let page = if self.focus_on_starts() {
+            keys("start", &[("↑ ↓", "Choose a place"), ("enter", "Go there")])
+        } else {
+            keys("page", &[("← →", "Link before or after"), ("enter", "Follow the link"), ("↑ ↓", "Scroll"), ("bksp", "Page before")])
+        };
+        vec![page, keys("address", &[("type", "Address or question"), ("enter", "Go"), ("tab", "Start a new one"), ("esc", "Clear it")])]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         if self.service.is_none() {
             return match key {

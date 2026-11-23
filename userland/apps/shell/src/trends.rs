@@ -166,6 +166,11 @@ impl Screen for Trends {
         "Trends"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("trends", &[("← →", "Earlier or later match"), ("enter", "Open that match")]), keys("moving", crate::screens::LIST_KEYS)]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let rows = cx.robot.logs.list();
         let read = matches(&rows);

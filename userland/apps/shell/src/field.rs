@@ -908,6 +908,10 @@ impl Screen for FieldPage {
         self.pose.map(|p| format!("Pose2d({:.2}, {:.2}, Rotation2d.fromDegrees({}))", p.x, p.y, p.degrees()))
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        vec![crate::help::keys("field", &[("+ · -", "Zoom in or out"), ("arrows", "Look around"), ("enter", "Follow the robot")])]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         let (r, calm) = (self.local(), self.calm);
         match key {

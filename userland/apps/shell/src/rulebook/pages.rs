@@ -221,6 +221,14 @@ impl Screen for Entries {
         }
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.kind == ListKind::Bookmarks {
+            return vec![keys("bookmarks", &[("enter", "Read it"), ("b", "Remove the bookmark"), ("↑ ↓", "Move")])];
+        }
+        vec![keys("rules", &[("enter · →", "Read it"), ("↑ ↓", "Move"), ("←", "Back")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         match key {
             Key::Back | Key::Left => Nav::Pop,
@@ -452,6 +460,16 @@ impl Screen for Reader {
         &self.title
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let reading: &'static [(&'static str, &'static str)] = if self.marked {
+            &[("↑ ↓", "Scroll"), ("enter · space", "A page on"), ("← →", "Rule before or after"), ("b", "Remove the bookmark"), ("home · end", "Top or end")]
+        } else {
+            &[("↑ ↓", "Scroll"), ("enter · space", "A page on"), ("← →", "Rule before or after"), ("b", "Bookmark it"), ("home · end", "Top or end")]
+        };
+        vec![keys("reading", reading)]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         match key {
             Key::Back => return Nav::Pop,
@@ -594,6 +612,14 @@ impl Screen for Searching {
 
     fn wants_text(&self) -> bool {
         true
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys(
+            "search",
+            &[("type", "A rule's ID, or words"), ("enter · →", "Read the result"), ("↑ ↓", "Move"), ("enter on ask", "Ask it instead")],
+        )]
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
@@ -917,6 +943,17 @@ impl Screen for Asking {
         self.typing
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.typing {
+            return vec![keys("your question", &[("enter", "Ask it"), ("bksp", "Take a letter off"), ("esc", "Leave it as it was")])];
+        }
+        vec![keys(
+            "the answer",
+            &[("↑ ↓", "Scroll, pick a rule"), ("enter on rule", "Read it"), ("enter on question", "Change it"), ("type", "Ask something new")],
+        )]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         if self.typing {
             match key {
@@ -1176,6 +1213,14 @@ impl ManualPage {
 impl Screen for ManualPage {
     fn title(&self) -> &str {
         "Manual"
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.removing {
+            return vec![keys("removing", &[("enter", "Remove the manual"), ("↑ ↓", "Keep it")])];
+        }
+        vec![keys("manual", &[("enter · →", "Choose"), ("↑ ↓", "Move"), ("←", "Back")])]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {

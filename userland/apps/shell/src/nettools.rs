@@ -255,6 +255,11 @@ impl Screen for NetTools {
         "Net tools"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("net tools", &[("enter · →", "Open the tool"), ("↑ ↓", "Move")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         match key {
             Key::Back => Nav::Pop,
@@ -383,6 +388,14 @@ impl Screen for Finder {
 
     fn wants_text(&self) -> bool {
         self.field.is_some()
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.field.is_some() {
+            return vec![keys("team number", &[("enter", "Look for it"), ("esc", "Back")])];
+        }
+        vec![keys("finder", &[("enter", "Use this robot"), ("t", "Another team"), ("r", "Look again"), ("↑ ↓", "Move")])]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -532,6 +545,14 @@ impl Screen for Ping {
         self.field.is_some()
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.field.is_some() {
+            return vec![keys("host", &[("enter", "Ping it"), ("esc", "Back")])];
+        }
+        vec![keys("ping", &[("enter", "Ping another host")])]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         if let Some(field) = &mut self.field {
             match field.key(key, host_char) {
@@ -671,6 +692,15 @@ impl Screen for Ports {
         self.field.is_some()
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        match &self.field {
+            Some((_, true)) => vec![keys("host", &[("enter", "Check its ports"), ("esc", "Back")])],
+            Some((_, false)) => vec![keys("ports", &[("type 22 80", "Ports, or 5800-5810"), ("enter", "Check them"), ("esc", "Back")])],
+            None => vec![keys("ports", &[("enter", "Another host"), ("p", "Which ports"), ("r", "Check again"), ("↑ ↓", "Move")])],
+        }
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         if let Some((field, is_host)) = &mut self.field {
             let is_host = *is_host;
@@ -802,6 +832,14 @@ impl Screen for Lookup {
         self.field.is_some()
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.field.is_some() {
+            return vec![keys("name", &[("enter", "Look it up"), ("esc", "Back")])];
+        }
+        vec![keys("lookup", &[("enter", "Look up another"), ("↑ ↓", "Move")])]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         if let Some(field) = &mut self.field {
             match field.key(key, host_char) {
@@ -885,6 +923,14 @@ impl Survey {
 impl Screen for Survey {
     fn title(&self) -> &str {
         "Wi-Fi survey"
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if !self.wifi.state().enabled {
+            return vec![keys("wi-fi is off", &[("enter", "Switch it on")])];
+        }
+        vec![keys("survey", &[("r", "Look again now"), ("↑ ↓", "Move")])]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {

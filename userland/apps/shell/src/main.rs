@@ -100,6 +100,7 @@ mod flow;
 mod gpu;
 mod graphs;
 mod help;
+mod keysheet;
 mod hex;
 mod http;
 mod hwcheck;
@@ -613,6 +614,8 @@ fn main() {
     // Reminders chime through the speaker.
     sound::start();
     let mut shell = Shell::new(robot);
+    // The first time each app opens, it says how its keys come up.
+    shell.tips = true;
     load_settings(&mut shell.settings);
     shell.settings.light |= flag("--light");
     shell.settings.calm |= flag("--calm");
@@ -649,6 +652,18 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--clip-shots") {
         return shell::clip_gallery(std::path::Path::new(&dir));
+    }
+    // Each screen's keys on their sheet, and the Camera's bar (1.1).
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--keys-shots") {
+        let own = std::env::temp_dir().join(format!("catalyst-keys-shots-{}", std::process::id()));
+        std::fs::remove_dir_all(&own).ok();
+        std::fs::create_dir_all(own.join("files")).ok();
+        std::env::set_var("CATALYST_CONF", own.join("robot"));
+        std::env::set_var("CATALYST_FILES", own.join("files"));
+        keysheet::shots(std::path::Path::new(&dir));
+        std::fs::remove_dir_all(&own).ok();
+        return;
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--activity-shots") {

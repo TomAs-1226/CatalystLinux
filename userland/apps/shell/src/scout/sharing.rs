@@ -88,6 +88,17 @@ impl Screen for ShareMenu {
         self.reload();
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let row = ROWS[self.list.focus.min(ROWS.len() - 1)];
+        vec![match row {
+            Row::Match => keys("a match", &[("enter", "Show its codes"), ("t", "Send to the team"), ("← →", "Another match")]),
+            Row::Event => keys("the event", &[("enter", "Show its codes"), ("t", "Send to the team")]),
+            Row::Read => keys("read codes", &[("enter", "Open the camera")]),
+            Row::Csv => keys("csv file", &[("enter", "Write it for Files")]),
+        }]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let row = ROWS[self.list.focus.min(ROWS.len() - 1)];
         match key {
@@ -233,6 +244,15 @@ impl Screen for Codes {
             return true;
         }
         false
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.paused {
+            vec![keys("codes", &[("space", "Go on"), ("← →", "Last, next code")])]
+        } else {
+            vec![keys("codes", &[("space", "Hold this one"), ("← →", "Last, next code")])]
+        }
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {

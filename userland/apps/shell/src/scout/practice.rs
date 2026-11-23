@@ -187,6 +187,18 @@ impl Screen for Practice {
         self.naming.is_some()
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.naming.is_some() {
+            return vec![keys("a driver", &[("enter", "Add them")])];
+        }
+        vec![
+            keys("practice", &[("space", "Start, then split"), ("enter", "End the session"), ("fn bksp", "Take off the last")]),
+            keys("drivers", &[("← →", "Another driver"), ("n", "A new driver")]),
+            keys("sessions", &[("h", "Past sessions")]),
+        ]
+    }
+
     fn keeps_awake(&self) -> bool {
         self.running()
     }
@@ -256,7 +268,8 @@ impl Screen for Practice {
                 self.list.focus = 0;
             }
             Key::Enter => self.end(cx),
-            Key::Backspace => {
+            // Fn + Backspace on the handheld: Backspace alone is Esc here.
+            Key::Backspace | Key::Delete => {
                 if self.session.splits.pop().is_some() {
                     *cx.say = Some("last cycle taken off".into());
                 }
@@ -355,6 +368,11 @@ impl Screen for Sessions {
         "Scout"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("sessions", &[("enter", "Each driver's cycles")])]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         match key {
             Key::Back => Nav::Pop,
@@ -411,6 +429,11 @@ impl Screen for SessionPage {
 
     fn app(&self) -> &str {
         "Scout"
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("session", &[("↑ ↓", "Drivers, then cycles"), ("pg up · pg dn", "A page at a time")])]
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {

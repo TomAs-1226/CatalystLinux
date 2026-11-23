@@ -195,6 +195,11 @@ impl Screen for Handover {
         true
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("opening", &[("esc", "Turn it back")])]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         // Keys only arrive here while the page grows (the program has every
         // key once it starts): Esc turns it back.

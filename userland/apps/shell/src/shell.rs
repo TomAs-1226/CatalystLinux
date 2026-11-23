@@ -311,6 +311,12 @@ pub trait Screen {
     fn wants_text(&self) -> bool {
         false
     }
+    /// This screen's own keys, as it is now, for the sheet `?` brings up
+    /// over it (`keysheet.rs`): groups of (keys, what they do), the most
+    /// used first. The keys that work everywhere follow them on the sheet.
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        Vec::new()
+    }
     /// Advance the screen in time. True when it should be redrawn.
     fn tick(&mut self, _dt: f32) -> bool {
         false
@@ -455,6 +461,9 @@ pub trait Screen {
 }
 
 const MESSAGE_SECONDS: f32 = 2.4;
+/// How long the first-open tip shows over a screen of the whole panel
+/// (my own tuning: a little longer than a message, as it is read once).
+const TIP_SECONDS: f32 = 3.2;
 
 /// The most stops the pager shows a dot each for; past that, a track
 /// `SCRUB_W` wide with the place marked on it.
@@ -804,6 +813,14 @@ pub struct Shell {
     /// (a held key keeps coming, repeating), the countdown last said, and
     /// whether the shortcut list has opened.
     help_hold: Option<HelpHold>,
+    /// The first time each app opens, a one-line tip says how its keys come
+    /// up (`offer_tip`). Off in the tests and the galleries; `main` turns it
+    /// on. The apps tipped so far (read from their file when first needed),
+    /// and the tip showing over a screen of the whole panel, which has no
+    /// island to say it: its words and seconds left.
+    pub tips: bool,
+    tipped: Option<std::collections::BTreeSet<String>>,
+    tip: Option<(String, f32)>,
     /// Apps left recently, kept alive as they were; the switcher while it
     /// shows, and the screen it came up over (held still behind it).
     recents: crate::recents::Recents,
@@ -1049,6 +1066,9 @@ impl Shell {
             echo: Vec::new(),
             clock: 0.0,
             help_hold: None,
+            tips: false,
+            tipped: None,
+            tip: None,
             recents: crate::recents::Recents::default(),
             switcher: None,
             switcher_under: None,
@@ -1088,15 +1108,24 @@ impl Shell {
         }
     }
 
-    /// `?` came, on a screen not taking text. Held for five seconds, it
-    /// brings up the shortcut list; the island counts the last seconds
-    /// down. A `?` pressed and let go does nothing.
+    /// `?` came, on a screen not taking text (or Fn 1, on any but a
+    /// terminal). Tapped, it brings up the sheet of the screen's own keys,
+    /// or puts it away. Held on for five seconds, it brings up the list of
+    /// every shortcut; the sheet (else the island) counts the last seconds
+    /// down.
     fn question_mark(&mut self) {
         let now = self.clock;
-        let mut hold = match self.help_hold {
-            Some(h) if now - h.last <= HELD_GAP => HelpHold { last: now, ..h },
-            _ => HelpHold { since: now, last: now, said: 0, opened: false },
+        let Some(held_on) = self.help_hold.filter(|h| now - h.last <= HELD_GAP) else {
+            self.help_hold = Some(HelpHold { since: now, last: now, said: 0, opened: false });
+            if self.sheets.keys.is_open() {
+                self.sheets.keys.dismiss();
+                self.moving = true;
+            } else {
+                self.summon_sheet(clip::Sheet::Keys);
+            }
+            return;
         };
+        let mut hold = HelpHold { last: now, ..held_on };
         // Over the list itself, holding ? does nothing more.
         if self.top_title() == "Shortcuts" {
             hold.opened = true;
@@ -1106,15 +1135,46 @@ impl Shell {
             hold.opened = true;
             self.help_hold = Some(hold);
             self.message = None;
+            self.sheets.keys.gone_now();
             return self.open(Box::new(crate::help::Shortcuts::new()), Path::Slide);
         }
         // Held a second or more: say what holding on will do.
         let left = (HOLD_FOR_SHORTCUTS - held).ceil() as u32;
         if !hold.opened && held >= 1.0 && left != hold.said {
             hold.said = left;
-            self.say(format!("shortcuts in {left} s"));
+            let words = format!("every shortcut in {left} s");
+            if self.sheets.keys.is_open() {
+                self.sheets.keys.note = Some(words);
+                self.moving = true;
+            } else {
+                self.say(words);
+            }
         }
         self.help_hold = Some(hold);
+    }
+
+    /// An app opening for the first time on this handheld: a one-line tip
+    /// says how its keys come up, once an app, ever. In the island, or over
+    /// a screen of the whole panel (the Camera) on a little pill of its own.
+    fn offer_tip(&mut self, screen: &dyn Screen) {
+        if !self.tips {
+            return;
+        }
+        let Some(how) = crate::help::sheet_hint(screen) else { return };
+        let file = crate::config_dir().join("tipped");
+        let tipped = self.tipped.get_or_insert_with(|| std::fs::read_to_string(&file).unwrap_or_default().lines().map(str::to_owned).collect());
+        if !tipped.insert(screen.app().to_owned()) {
+            return;
+        }
+        let text: String = tipped.iter().map(|app| format!("{app}\n")).collect();
+        crate::sys::write_atomic(&file, text.as_bytes()).ok();
+        let words = if how.starts_with("fn") { "fn 1 shows this screen's keys" } else { "? shows this screen's keys" };
+        if screen.full_screen() {
+            self.tip = Some((words.to_owned(), TIP_SECONDS));
+            self.moving = true;
+        } else {
+            self.say(words);
+        }
     }
 
     /// Take the tour now, over whatever is showing (Home, after setup or from
@@ -1575,12 +1635,15 @@ impl Shell {
         if key == Key::Ctrl(crate::platform::NOTIFICATIONS) {
             return self.show_notifications();
         }
-        // ? held for five seconds brings the shortcut list up over any
-        // screen that is not taking text (in a terminal or a text field, it
-        // types as ever).
-        if key == Key::Char('?') {
+        // ? tapped brings the sheet of the screen's keys up over any screen
+        // that is not taking text, and held on for five seconds, the list of
+        // every shortcut (in a terminal or a text field, it types as ever:
+        // there Fn 1 does it, but for a terminal's program, which takes F1).
+        // A screen of the whole panel with no keys to show (setup) takes it.
+        if matches!(key, Key::Char('?') | Key::F(1)) {
             let (top, _) = self.stack.last().expect("the home screen is always there");
-            if !top.wants_text() && !top.full_screen() {
+            let ours = if key == Key::F(1) { !top.keeps_ctrl() } else { !top.wants_text() };
+            if ours && !(top.full_screen() && top.key_sheet().is_empty()) {
                 return self.question_mark();
             }
         }
@@ -1720,6 +1783,8 @@ impl Shell {
         self.gfx.focus_reset();
         if let Some(words) = screen.greeting() {
             self.say(words);
+        } else if self.stack.len() == 1 {
+            self.offer_tip(screen.as_ref());
         }
         // Asked back while it was leaving by the same path: it returns from
         // where it is, and the new copy is not needed. Only the same screen:
@@ -2126,9 +2191,12 @@ impl Shell {
         // `?` let go: its hold is over, and a countdown it left in the island goes.
         if let Some(hold) = self.help_hold.filter(|h| self.clock - h.last > HELD_GAP) {
             self.help_hold = None;
-            if !hold.opened && self.message.as_ref().is_some_and(|(text, _)| text.starts_with("shortcuts in")) {
+            if !hold.opened && self.message.as_ref().is_some_and(|(text, _)| text.starts_with("every shortcut in")) {
                 self.message = None;
                 self.dirty = true;
+            }
+            if self.sheets.keys.note.take().is_some() {
+                self.moving = true;
             }
         }
         self.gfx.tick_gpu();
@@ -2240,6 +2308,14 @@ impl Shell {
         }
         moving |= self.tick_spotlight(motion_dt);
         moving |= self.tick_sheets(dt, motion_dt);
+        // The first-open tip over a screen of the whole panel, fading as it goes.
+        if let Some((_, left)) = &mut self.tip {
+            *left -= dt;
+            moving = true;
+            if *left <= 0.0 || !self.stack.last().is_some_and(|(s, _)| s.full_screen()) {
+                self.tip = None;
+            }
+        }
         if self.transition.is_none() {
             moving |= self.stack.last_mut().is_some_and(|(s, _)| s.tick(motion_dt));
             // Work that reached the screen from outside, and a screen that is done.
@@ -2755,8 +2831,19 @@ impl Shell {
             self.last_depth = depth;
         }
         g.ox = 0.0;
-        // A screen that takes the whole panel has no island or status over it.
+        // A screen that takes the whole panel has no island or status over
+        // it: only the first-open tip, on a pill at its top.
         if self.stack.last().is_some_and(|(s, _)| s.full_screen()) {
+            if let Some((words, left)) = &self.tip {
+                let a = (left / 0.4).clamp(0.0, 1.0) * ((TIP_SECONDS - left) / 0.2).clamp(0.0, 1.0);
+                let cap = g.ty.caption;
+                let h = cap.size + 8.0;
+                let words = g.text.fit(words, &cap, W - 4.0 * PAD);
+                let w = g.measure(&words, cap) + 16.0;
+                let r = Rect::new(((W - w) * 0.5).round(), 7.0, w.round(), h);
+                g.canvas.rrect(r, h * 0.5, Color::BLACK, 0.6 * a);
+                g.text_alpha(r.x + 8.0, r.cy(), &words, cap, Color(255, 255, 255), a);
+            }
             if g.take_motion_started() {
                 self.moving = true;
             }
@@ -3037,6 +3124,7 @@ impl Shell {
         g.viewports.clear();
         g.copy_field = None;
         g.copy_row = None;
+        g.keys_hint = crate::help::sheet_hint(screen);
         screen.draw(g, robot);
         // Page dots asked for sit on their glass along the foot (`draw_chrome`).
         if g.pager.is_some() {
@@ -5549,27 +5637,32 @@ pub(crate) mod tests {
                 held += 4.0 * FRAME;
             }
         };
-        // Typed in passing, even a few at once: nothing at all.
-        for _ in 0..3 {
-            shell.key(Key::Char('?'));
-            frames(&mut shell, 40, FRAME);
-        }
-        assert_eq!(title(&shell), "Catalyst");
-        assert!(shell.message.is_none(), "not even a word");
-        // Held three seconds: not yet, but the island says what holding on will do.
+        // Tapped: the sheet of this screen's keys, and away again.
+        shell.key(Key::Char('?'));
+        frames(&mut shell, 40, FRAME);
+        assert_eq!((title(&shell), shell.sheet_open()), ("Catalyst".to_owned(), Some(clip::Sheet::Keys)));
+        shell.key(Key::Char('?'));
+        frames(&mut shell, 40, FRAME);
+        assert_eq!(shell.sheet_open(), None);
+        // Held three seconds: not yet, but the sheet says what holding on will do.
         hold(&mut shell, 3.0);
         assert_eq!(title(&shell), "Catalyst");
-        assert!(shell.message.as_ref().is_some_and(|(m, _)| m == "shortcuts in 2 s" || m == "shortcuts in 3 s"), "{:?}", shell.message);
+        assert!(shell.sheets.keys.note.as_ref().is_some_and(|m| m == "every shortcut in 2 s" || m == "every shortcut in 3 s"), "{:?}", shell.sheets.keys.note);
         frames(&mut shell, 60, FRAME);
-        assert!(shell.message.is_none(), "let go, the countdown goes");
-        // Held five: the list.
+        assert!(shell.sheets.keys.note.is_none(), "let go, the countdown goes");
+        shell.key(Key::Back);
+        frames(&mut shell, 40, FRAME);
+        assert_eq!(shell.sheet_open(), None, "esc puts the sheet away");
+        // Held five: the list, the sheet gone.
         hold(&mut shell, 5.3);
         frames(&mut shell, 60, FRAME);
-        assert_eq!(title(&shell), "Shortcuts");
-        // Held again over it: it stays, and no second list comes.
+        assert_eq!((title(&shell), shell.sheet_open()), ("Shortcuts".to_owned(), None));
+        // Held again over it: its own sheet, and no second list.
         hold(&mut shell, 6.0);
         frames(&mut shell, 60, FRAME);
         assert_eq!((title(&shell), shell.stack.len()), ("Shortcuts".to_owned(), 2));
+        shell.key(Key::Back);
+        frames(&mut shell, 60, FRAME);
         shell.key(Key::Back);
         frames(&mut shell, 60, FRAME);
         assert_eq!(title(&shell), "Catalyst");
@@ -5579,6 +5672,87 @@ pub(crate) mod tests {
         let searching = title(&shell);
         hold(&mut shell, 5.5);
         assert_eq!(title(&shell), searching);
+    }
+
+    /// A built-in app opened over Home by name, as from its tile.
+    fn show_app(shell: &mut Shell, name: &str) {
+        let (index, _, _) = crate::screens::builtin_apps().find(|(_, _, n)| *n == name).unwrap();
+        let screen = crate::screens::open_builtin(index, &shell.robot);
+        shell.show(screen);
+        frames(shell, 60, FRAME);
+        assert_eq!(title(shell), name);
+    }
+
+    #[test]
+    fn question_mark_shows_the_screens_own_keys_and_is_typed_where_text_is() {
+        let mut shell = shell();
+        show_app(&mut shell, "Logs");
+        shell.key(Key::Char('?'));
+        frames(&mut shell, 40, FRAME);
+        assert_eq!(shell.sheet_open(), Some(clip::Sheet::Keys));
+        assert_eq!(shell.sheets.keys.title(), "Logs");
+        let rows = shell.sheets.keys.rows();
+        assert!(rows.len() > crate::help::EVERYWHERE.keys.len(), "its own keys, then everywhere's: {rows:?}");
+        assert!(rows.ends_with(crate::help::EVERYWHERE.keys));
+        // ↓ scrolls it; Esc puts it away, the app staying.
+        shell.key(Key::Down);
+        assert_eq!(shell.sheet_open(), Some(clip::Sheet::Keys));
+        shell.key(Key::Back);
+        frames(&mut shell, 40, FRAME);
+        assert_eq!((shell.sheet_open(), title(&shell)), (None, "Logs".to_owned()));
+        // Where text is typed, ? is typed: Fn 1 brings the sheet up there.
+        back_home(&mut shell);
+        show_app(&mut shell, "Calculator");
+        assert!(shell.stack.last().unwrap().0.wants_text());
+        shell.key(Key::Char('?'));
+        frames(&mut shell, 40, FRAME);
+        assert_eq!(shell.sheet_open(), None, "typed, not taken");
+        shell.key(Key::F(1));
+        frames(&mut shell, 40, FRAME);
+        assert_eq!(shell.sheet_open(), Some(clip::Sheet::Keys));
+        shell.key(Key::F(1));
+        frames(&mut shell, 40, FRAME);
+        assert_eq!(shell.sheet_open(), None, "and puts it away");
+    }
+
+    #[test]
+    fn the_cameras_letters_reach_it_and_its_sheet_lists_them() {
+        let _port = crate::smartcam::sim::exclusive(false);
+        let mut shell = shell();
+        shell.show(Box::new(crate::camera::Camera::new()));
+        frames(&mut shell, 60, FRAME);
+        // Over a screen of the whole panel, ? brings its keys up too.
+        shell.key(Key::Char('?'));
+        frames(&mut shell, 40, FRAME);
+        assert_eq!(shell.sheet_open(), Some(clip::Sheet::Keys));
+        let rows = shell.sheets.keys.rows();
+        assert!(rows.contains(&("k", "Looks")) && rows.contains(&("tab", "The controls bar")), "{rows:?}");
+        // A key looked up there goes straight on to the camera as the
+        // sheet goes: k opens the looks (f, as it was, was the ↑ arrow).
+        shell.key(Key::Char('k'));
+        assert_eq!(shell.sheet_open(), None);
+        let groups = shell.stack.last().unwrap().0.key_sheet();
+        assert!(groups.iter().any(|g| g.title == "looks"), "the looks are open");
+        shell.key(Key::Back);
+        // Tab takes the keys into the bar.
+        shell.key(Key::Tab);
+        let groups = shell.stack.last().unwrap().0.key_sheet();
+        assert!(groups.iter().any(|g| g.title == "the bar"), "the bar has the keys");
+    }
+
+    #[test]
+    fn an_app_opening_for_the_first_time_says_how_its_keys_come_up_once() {
+        let mut shell = shell();
+        shell.tips = true;
+        std::fs::remove_file(crate::config_dir().join("tipped")).ok();
+        shell.tipped = None;
+        show_app(&mut shell, "Logs");
+        assert_eq!(says(&shell), "? shows this screen's keys");
+        back_home(&mut shell);
+        frames(&mut shell, 200, FRAME);
+        show_app(&mut shell, "Logs");
+        assert_ne!(says(&shell), "? shows this screen's keys", "once only");
+        assert!(std::fs::read_to_string(crate::config_dir().join("tipped")).unwrap().lines().any(|l| l == "Logs"), "kept for the next start");
     }
 
     #[test]

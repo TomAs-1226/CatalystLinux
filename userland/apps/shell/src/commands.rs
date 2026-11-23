@@ -305,6 +305,17 @@ impl Screen for Commands {
         self.list.focus = self.list.focus.min(self.len() - 1);
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let at = self.list.focus;
+        let here = match at.cmp(&self.saved.len()) {
+            std::cmp::Ordering::Less => keys("the team's own", &[("enter · →", "Run it"), ("e", "Edit it"), ("d twice", "Remove it")]),
+            std::cmp::Ordering::Equal => keys("new command", &[("enter · →", "Make one")]),
+            std::cmp::Ordering::Greater => keys("built in", &[("enter · →", "Run it"), ("e", "A copy to change")]),
+        };
+        vec![here, keys("actions", &[("n", "New command"), ("↑ ↓", "Move")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let armed = self.deleting.take();
         let at = self.list.focus;
@@ -418,6 +429,15 @@ impl Screen for Edit {
 
     fn wants_text(&self) -> bool {
         self.field.is_some()
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        match &self.field {
+            Some((_, true)) => vec![keys("its name", &[("enter", "Done"), ("esc", "Cancel")])],
+            Some((_, false)) => vec![keys("the command", &[("{robot} · {team}", "Filled in for you"), ("enter", "Done"), ("esc", "Cancel")])],
+            None => vec![keys("command", &[("enter · →", "Change it"), ("enter on keep", "Keep the command"), ("↑ ↓", "Move")])],
+        }
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {

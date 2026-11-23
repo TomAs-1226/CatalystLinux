@@ -122,7 +122,8 @@ struct Card {
 
 /// The fleet as cards, three across (two at the large text size): each
 /// battery's name, its state's icon and words, its health and trend.
-/// Enter opens one; `c` puts it on the charger or takes it off; `p` picks
+/// Enter opens one; `o` puts it on the charger or takes it off (not `c`:
+/// outside typing the shell makes a bare C the right arrow); `p` picks
 /// the battery for the next match; `n` adds one; `s` sorts; `l` makes the
 /// QR labels.
 pub struct Fleet {
@@ -172,6 +173,13 @@ pub fn card_h(g: &Gfx) -> f32 {
     5.0 + ty.name.size + 3.0 + ty.label.size + 3.0 + ty.caption.size + 6.0
 }
 
+/// The fleet's keys, for the sheet `?` brings up: with no batteries yet, and with some.
+const NO_FLEET: crate::help::KeyGroup = crate::help::keys("batteries", &[("enter · n", "Add a battery")]);
+const FLEET: [crate::help::KeyGroup; 2] = [
+    crate::help::keys("a battery", &[("enter", "Open it"), ("o", "On or off the charger")]),
+    crate::help::keys("the fleet", &[("p", "Pick for the next match"), ("n", "Add a battery"), ("s", "Sort another way"), ("l", "Make QR labels")]),
+];
+
 impl Screen for Fleet {
     fn title(&self) -> &str {
         "Batteries"
@@ -189,6 +197,13 @@ impl Screen for Fleet {
 
     fn resume(&mut self) {
         self.drawn = (0, 0);
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        if read(|f| f.batteries.is_empty()) {
+            return vec![NO_FLEET];
+        }
+        FLEET.to_vec()
     }
 
     fn update(&mut self, cx: &mut Cx) -> Nav {
@@ -234,7 +249,7 @@ impl Screen for Fleet {
                 return Nav::Push(Box::new(Add::new()));
             }
             Key::Char('n') => return Nav::Push(Box::new(Add::new())),
-            Key::Char('c') => {
+            Key::Char('o') => {
                 if let Some(id) = self.focused_id() {
                     *cx.say = Some(super::charger(&id));
                 }
@@ -310,7 +325,7 @@ impl Screen for Fleet {
         }
         self.list.scrollbar(g, rows, top, bottom);
         let _ = ty;
-        g.hint_any(&["enter: open · c: charger · p: pick · s: sort", "enter: open · c: charger · p: pick", "c: charger · p: pick"]);
+        g.hint_any(&["enter: open · o: charger · p: pick · s: sort", "enter: open · o: charger · p: pick", "o: charger · p: pick"]);
     }
 }
 
@@ -357,7 +372,7 @@ pub const SPARK_GAP: f32 = 5.0;
 // ---------------------------------------------------------- one battery ---
 
 /// One battery: its state (and how long), its health with its trend, and
-/// its matches, newest first. `c` the charger, `p` puts it in for the next
+/// its matches, newest first. `o` the charger, `p` puts it in for the next
 /// match, `d` twice deletes it.
 pub struct Detail {
     id: String,
@@ -399,12 +414,20 @@ impl Screen for Detail {
         (super::generation(), now() / 60) != self.drawn
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.deleting {
+            return vec![keys("deleting", &[("d", "Delete it"), ("esc", "Keep it")])];
+        }
+        vec![keys("this battery", &[("o", "On or off the charger"), ("p", "Put it in the robot"), ("d twice", "Delete it")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let armed = std::mem::take(&mut self.deleting);
         let len = read(|f| f.uses.iter().filter(|u| u.battery == self.id).count()) + 2;
         match key {
             Key::Back => return Nav::Pop,
-            Key::Char('c') => *cx.say = Some(super::charger(&self.id)),
+            Key::Char('o') => *cx.say = Some(super::charger(&self.id)),
             Key::Char('p') => *cx.say = Some(super::pick(&self.id, &next_label(cx.robot))),
             Key::Char('d') => {
                 if armed {
@@ -529,7 +552,7 @@ impl Screen for Detail {
             }
         }
         self.list.scrollbar(g, lines.len(), list_top, bottom);
-        g.hint_any(&["c: charger · p: put it in · d: delete", "c: charger · p: put it in"]);
+        g.hint_any(&["o: charger · p: put it in · d: delete", "o: charger · p: put it in"]);
     }
 }
 
@@ -576,6 +599,14 @@ impl Screen for Pick {
 
     fn ambient_tick(&mut self, _dt: f32, _robot: &Robot) -> bool {
         false
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.asked {
+            return vec![keys("pick one", &[("enter", "Put it in")])];
+        }
+        vec![keys("pick one", &[("enter", "Put it in"), ("n", "Add a battery")])]
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -688,6 +719,14 @@ impl Screen for Add {
         true
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.on_year {
+            return vec![keys("its year", &[("enter", "Add it"), ("tab · ↑ ↓", "Back to the name")])];
+        }
+        vec![keys("its name", &[("enter", "On to the year"), ("tab · ↑ ↓", "The year")])]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         match key {
             Key::Back => return Nav::Pop,
@@ -754,5 +793,30 @@ impl Screen for Add {
             g.text_fit(strip.x + 16.0 + icon, strip.cy(), &words, ty.caption, t.dim, strip.w - 26.0 - icon);
         }
         g.hint_any(if self.on_year { &["enter: add it · tab: name · esc: cancel", "enter: add it · esc: cancel", "enter: add it"] } else { &["enter: next · tab: year · esc: cancel", "enter: next · esc: cancel", "enter: next"] });
+    }
+}
+
+#[cfg(test)]
+mod sheet_tests {
+    use super::*;
+
+    #[test]
+    fn each_screens_keys_fit_the_sheet() {
+        crate::shell::tests::sandbox();
+        let mut g = Gfx::new(bezel::Tokens::dark());
+        crate::keysheet::fits(&mut g, &FLEET).unwrap();
+        crate::keysheet::fits(&mut g, &[NO_FLEET]).unwrap();
+        let mut fits = |s: &dyn Screen| crate::keysheet::fits(&mut g, &s.key_sheet()).unwrap();
+        let mut detail = Detail::new("none");
+        fits(&detail);
+        detail.deleting = true;
+        fits(&detail);
+        let robot = Robot::none();
+        fits(&Pick::new("Q1", &robot, false));
+        fits(&Pick::new("Q1", &robot, true));
+        let mut add = Add::new();
+        fits(&add);
+        add.on_year = true;
+        fits(&add);
     }
 }

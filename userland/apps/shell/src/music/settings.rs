@@ -150,6 +150,11 @@ impl Screen for MusicSettings {
         Nav::Stay
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("music", &[("enter · ← →", "Turn on or off"), ("← →", "Played songs' limit"), ("enter twice", "Clear played songs"), ("enter", "Look for new music")])]
+    }
+
     fn tick(&mut self, _dt: f32) -> bool {
         let now = library::stamp() + store::played_stamp();
         if now != self.seen {

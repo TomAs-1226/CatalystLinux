@@ -89,6 +89,33 @@ impl Screen for Review {
         false
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let n = self.pages();
+        if n == 0 {
+            return vec![keys("document", &[("enter · a", "Back to the camera")])];
+        }
+        if self.deleting {
+            return vec![keys("deleting", &[("d", "Delete the page"), ("esc", "Keep it")])];
+        }
+        let arrows = match self.focus {
+            0 => keys("the pages", &[("← →", "Another page"), ("↓", "Enhance, paper")]),
+            1 => keys("enhance", &[("← →", "Change it"), ("↑ ↓", "Pages, paper")]),
+            _ => keys("paper", &[("← →", "Change it"), ("↑", "Pages, enhance")]),
+        };
+        if self.at >= n && self.focus == 0 {
+            return vec![keys("document", &[("a · enter", "Add a page"), ("s", "Save as a PDF")]), arrows];
+        }
+        if self.at >= n {
+            return vec![keys("document", &[("a", "Add a page"), ("s", "Save as a PDF")]), arrows];
+        }
+        vec![
+            keys("document", &[("a", "Add a page"), ("s", "Save as a PDF")]),
+            arrows,
+            keys("this page", &[("e", "Next enhance"), ("p", "Next paper"), (", · .", "Move it earlier, later"), ("d twice", "Delete it")]),
+        ]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         let deleting = std::mem::take(&mut self.deleting);
         let n = self.pages();

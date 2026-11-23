@@ -596,6 +596,15 @@ impl Screen for Calculator {
         self.answer.as_ref().map(|(_, v)| shown(*v))
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let sums = keys("sums", &[("enter · =", "Work it out"), ("↑ ↓", "Earlier sums"), ("esc", "Clear")]);
+        match self.mode {
+            Mode::Standard { .. } => vec![sums, keys("standard", &[("tab", "Programmer"), ("ctrl r", "Degrees or radians")])],
+            Mode::Programmer { .. } => vec![sums, keys("programmer", &[("tab", "Standard"), ("ctrl w", "8, 16, 32 or 64 bits")])],
+        }
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         match key {
             Key::Back if self.input.is_empty() && self.answer.is_none() => return Nav::Pop,

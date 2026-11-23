@@ -249,6 +249,11 @@ impl Screen for About {
         }
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        vec![keys("about", &[("enter · →", "Open the row"), ("←", "Back")]), keys("moving", crate::screens::LIST_KEYS)]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let act = self.rows.get(self.list.focus).map_or(Act::Nothing, |r| r.act);
         let nav = match key {
@@ -485,6 +490,10 @@ impl Screen for Confetti {
 
     fn full_screen(&self) -> bool {
         true
+    }
+
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        vec![crate::help::keys("confetti", &[("enter · space", "More confetti")])]
     }
 
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {

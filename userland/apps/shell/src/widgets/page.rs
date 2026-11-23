@@ -43,6 +43,15 @@ impl Screen for WidgetsPage {
         "Widgets"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let here = match ROWS[self.list.focus.min(ROWS.len() - 1)] {
+            Row::StartOver => keys("start over", &[("enter twice", "Widgets as new")]),
+            Row::Glance | Row::Home => keys("this board", &[("enter · →", "Edit it on Home")]),
+        };
+        vec![here, keys("moving", crate::screens::LIST_KEYS)]
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let row = ROWS[self.list.focus.min(ROWS.len() - 1)];
         let armed = std::mem::take(&mut self.armed);

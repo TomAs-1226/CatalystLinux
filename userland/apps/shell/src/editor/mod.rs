@@ -5,7 +5,7 @@
 //!
 //! - adjust: exposure, contrast, highlights, shadows, saturation, warmth,
 //!   tint, vibrance, sharpness and a vignette, each a row with its track
-//!   (← → by five, Backspace back to nothing);
+//!   (← → by five, Fn + Backspace back to nothing);
 //! - looks: the Camera's fifteen, each row showing it over this photo (↑ ↓
 //!   lays it on; ← → turn Tint's colour);
 //! - crop: the crop's shape (free, 4:3, 3:2, 16:9, 1:1; Enter moves and
@@ -15,7 +15,7 @@
 //!   start, Enter at the end; a label is typed in).
 //!
 //! Nothing is written to the photo. The edit is kept beside it in a small
-//! sidecar (edits.rs), taken up again when the photo is next edited; `x`
+//! sidecar (edits.rs), taken up again when the photo is next edited; `s`
 //! exports a new full-size JPEG beside it (`IMG_…_edit.jpg`, export.rs) on
 //! the cores, its progress along the picture's foot. `o` shows the photo
 //! as it was.
@@ -433,7 +433,8 @@ impl Editor {
             (CropTool::Size, Key::Right) => [x - step * 0.5, y, w + step, h],
             (CropTool::Size, Key::Up) => [x, y - step * 0.5, w, h + step],
             (CropTool::Size, Key::Down) => [x, y + step * 0.5, w, h - step],
-            (_, Key::Backspace) => self.aspect_box(),
+            // Fn + Backspace on the handheld (Backspace alone is Esc here).
+            (_, Key::Backspace | Key::Delete) => self.aspect_box(),
             _ => return,
         };
         self.edits.crop = edits::clamp_crop(self.edits.crop);
@@ -670,6 +671,41 @@ impl Screen for Editor {
         matches!(self.placing, Some(Placing::Typing(..)))
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        if self.work.is_none() {
+            return vec![keys("opening", &[("esc", "Back to the photo")])];
+        }
+        match (&self.placing, self.crop_tool) {
+            (Some(Placing::Typing(..)), _) => return vec![keys("a label", &[("enter", "Place it"), ("bksp", "Take a letter back"), ("esc", "No label")])],
+            (Some(Placing::Start), _) if self.tool == Shape::Text => return vec![keys("a label", &[("↑ ↓ ← →", "Its place"), ("enter", "Type it there"), ("esc", "No label")])],
+            (Some(Placing::Start), _) => return vec![keys("a mark", &[("↑ ↓ ← →", "Where it starts"), ("enter", "Start it here"), ("esc", "No mark")])],
+            (Some(Placing::End(_)), _) => return vec![keys("a mark", &[("↑ ↓ ← →", "Where it ends"), ("enter", "Draw it"), ("esc", "No mark")])],
+            (None, Some(CropTool::Move)) => {
+                return vec![keys("moving the crop", &[("↑ ↓ ← →", "Move it"), ("+ · -", "Larger, smaller"), ("tab", "Size it instead"), ("fn bksp", "The whole shape"), ("enter · esc", "Done")])];
+            }
+            (None, Some(CropTool::Size)) if self.edits.aspect != Aspect::Free => {
+                return vec![keys("sizing the crop", &[("→ · ↑ · +", "Larger"), ("← · ↓ · -", "Smaller"), ("tab", "Move it instead"), ("fn bksp", "The whole shape"), ("enter · esc", "Done")])];
+            }
+            (None, Some(CropTool::Size)) => {
+                return vec![keys("sizing the crop", &[("← →", "Width"), ("↑ ↓", "Height"), ("+ · -", "Both at once"), ("tab", "Move it instead"), ("fn bksp", "The whole shape"), ("enter · esc", "Done")])];
+            }
+            _ if self.before => return vec![keys("before", &[("o · esc", "Back to the edit")])],
+            _ => {}
+        }
+        let panel = match (self.panel, self.row()) {
+            (Panel::Adjust, _) => keys("adjust", &[("↑ ↓", "Pick a setting"), ("← →", "Change it"), ("fn bksp", "Back to nothing")]),
+            (Panel::Looks, _) if self.edits.look == Look::Tint => keys("looks", &[("↑ ↓", "Lay a look on"), ("← →", "The tint's colour"), ("fn bksp", "No look")]),
+            (Panel::Looks, _) => keys("looks", &[("↑ ↓", "Lay a look on"), ("fn bksp", "No look")]),
+            (Panel::Geometry, 0) => keys("crop", &[("← →", "Its shape"), ("enter", "Move and size it"), ("fn bksp", "The whole photo")]),
+            (Panel::Geometry, 1) => keys("rotate", &[("← →", "A quarter turn"), ("fn bksp", "Upright")]),
+            (Panel::Geometry, STRAIGHTEN) => keys("straighten", &[("← →", "Half a degree"), ("fn bksp", "Level")]),
+            (Panel::Geometry, _) => keys("flip", &[("← →", "Flip it"), ("fn bksp", "Unflip")]),
+            (Panel::Markup, _) => keys("markup", &[("enter", "Place a mark"), ("← →", "Tool, or colour"), ("fn bksp", "Undo a mark")]),
+        };
+        vec![panel, keys("editor", &[("s", "Export a copy"), ("tab", "Next panel"), ("1 · 2 · 3 · 4", "A panel"), ("o", "As it was")])]
+    }
+
     fn key(&mut self, key: Key, _cx: &mut Cx) -> Nav {
         if let Some(Placing::Typing(at, words)) = self.placing.clone() {
             self.type_key(at, words, key);
@@ -706,7 +742,8 @@ impl Screen for Editor {
             Key::Tab => self.set_panel(PANELS[(self.panel.index() + 1) % PANELS.len()].0),
             Key::Char(c @ '1'..='4') => self.set_panel(PANELS[c as usize - '1' as usize].0),
             Key::Char('o') => self.before = !self.before,
-            Key::Char('x') => self.start_export(),
+            // S, not X: outside typing the shell makes a bare X the down arrow.
+            Key::Char('s') => self.start_export(),
             Key::Up | Key::Down => {
                 let list = &mut self.lists[self.panel.index()];
                 if key == Key::Up {
@@ -965,7 +1002,16 @@ impl Editor {
             let shape = self.tab_shape[i].value();
             let radius = lay.tab_h * (0.25 + 0.25 * shape).clamp(0.0, 0.5);
             g.surface(r, radius, t.surface2.mix(t.ice, on));
-            g.icon(icon, on > 0.5, r.cx(), r.cy(), 14.0, t.ink.mix(t.on_ice, on));
+            // Each wears its key (1 to 4; Tab goes round them), where it fits.
+            let digit = ["1", "2", "3", "4"][i];
+            let dw = g.measure(digit, ty.caption);
+            if 14.0 + 3.0 + dw + 6.0 <= r.w {
+                let left = r.cx() - (14.0 + 3.0 + dw) * 0.5;
+                g.icon(icon, on > 0.5, left + 7.0, r.cy(), 14.0, t.ink.mix(t.on_ice, on));
+                g.text_at(left + 17.0, r.cy(), Align::Left, digit, ty.caption, t.dim.mix(t.on_ice, on));
+            } else {
+                g.icon(icon, on > 0.5, r.cx(), r.cy(), 14.0, t.ink.mix(t.on_ice, on));
+            }
         }
         let (top, bottom) = (lay.list_top, lay.bottom);
         let i = self.panel.index();
@@ -1107,14 +1153,14 @@ impl Editor {
             (None, Some(CropTool::Size)) => &["←→ width · ↑↓ height · tab: move · enter: done", "←→ ↑↓ size · enter: done"],
             _ if self.before => &["o: after · esc: back to the edit"],
             _ => match (self.panel, self.row()) {
-                (Panel::Adjust, _) => &["←→ change · backspace: reset · tab: panels · x: export", "←→ change · tab: panels · x: export", "←→ · tab · x: export"],
-                (Panel::Looks, _) if self.edits.look == Look::Tint => &["↑↓ looks · ←→ tint's colour · tab: panels · x: export", "↑↓ looks · ←→ colour · x: export"],
-                (Panel::Looks, _) => &["↑↓ lay a look on · backspace: none · tab · x: export", "↑↓ looks · tab: panels · x: export", "↑↓ · tab · x: export"],
-                (Panel::Geometry, 0) => &["←→ shape · enter: move the crop · tab · x: export", "←→ shape · enter: move it · x: export", "←→ · enter · x"],
-                (Panel::Geometry, 1) => &["←→ turn a quarter · backspace: upright · x: export", "←→ turn · x: export"],
-                (Panel::Geometry, STRAIGHTEN) => &["←→ half a degree · backspace: level · x: export", "←→ straighten · x: export"],
-                (Panel::Geometry, _) => &["←→ flip · backspace: unflip · tab: panels · x: export", "←→ flip · x: export"],
-                (Panel::Markup, _) => &["enter: place a mark · ←→ change · backspace: undo · x", "enter: place · backspace: undo", "enter: place"],
+                (Panel::Adjust, _) => &["←→ change · del: reset · tab: panels · s: export", "←→ change · tab: panels · s: export", "←→ · tab · s: export"],
+                (Panel::Looks, _) if self.edits.look == Look::Tint => &["↑↓ looks · ←→ tint's colour · tab: panels · s: export", "↑↓ looks · ←→ colour · s: export"],
+                (Panel::Looks, _) => &["↑↓ lay a look on · del: none · tab · s: export", "↑↓ looks · tab: panels · s: export", "↑↓ · tab · s: export"],
+                (Panel::Geometry, 0) => &["←→ shape · enter: move the crop · tab · s: export", "←→ shape · enter: move it · s: export", "←→ · enter · s"],
+                (Panel::Geometry, 1) => &["←→ turn a quarter · del: upright · s: export", "←→ turn · s: export"],
+                (Panel::Geometry, STRAIGHTEN) => &["←→ half a degree · del: level · s: export", "←→ straighten · s: export"],
+                (Panel::Geometry, _) => &["←→ flip · del: unflip · tab: panels · s: export", "←→ flip · s: export"],
+                (Panel::Markup, _) => &["enter: place a mark · ←→ change · del: undo · s", "enter: place · del: undo", "enter: place"],
             },
         };
         g.hint_any(choices);

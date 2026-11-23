@@ -640,6 +640,23 @@ impl Screen for BluetoothScreen {
         "Bluetooth"
     }
 
+    fn key_sheet(&self) -> Vec<crate::help::KeyGroup> {
+        use crate::help::keys;
+        let here = match self.rows().get(self.list.focus).copied().unwrap_or(Row::Switch) {
+            Row::Switch => Some(keys("bluetooth", &[("enter", "On or off")])),
+            Row::Restart => Some(keys("restart", &[("enter twice", "Restart now")])),
+            Row::Device(i) => match self.devices().get(i) {
+                Some(d) if d.connected => Some(keys("this device", &[("enter", "Disconnect"), ("del twice", "Forget it")])),
+                Some(d) if d.paired => Some(keys("this device", &[("enter", "Connect"), ("del twice", "Forget it")])),
+                Some(_) => Some(keys("this device", &[("enter", "Pair and play here")])),
+                None => None,
+            },
+            Row::Look => Some(keys("devices", &[("enter", "Look again")])),
+            _ => None,
+        };
+        here.into_iter().chain([keys("moving", crate::screens::LIST_KEYS)]).collect()
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let rows = self.rows();
         let row = rows.get(self.list.focus).copied().unwrap_or(Row::Switch);

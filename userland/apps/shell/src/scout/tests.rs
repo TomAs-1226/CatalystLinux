@@ -375,6 +375,44 @@ fn practice_sums_up_each_drivers_cycles() {
 // ------------------------------------------------------------------ screen ---
 
 #[test]
+fn each_screens_keys_fit_the_sheet_in_each_state() {
+    use crate::platform::Key;
+    use crate::shell::Screen;
+    crate::shell::tests::sandbox();
+    let mut g = crate::gfx::Gfx::new(bezel::Tokens::dark());
+    let mut robot = crate::robot::Robot::none();
+    let mut settings = crate::shell::Settings::default();
+    let mut say = None;
+    let mut cx = crate::shell::Cx { robot: &mut robot, settings: &mut settings, say: &mut say, at_rest: true };
+    let mut fits = |s: &dyn Screen| {
+        let groups = s.key_sheet();
+        assert!(!groups.is_empty(), "{}: no keys", s.title());
+        crate::keysheet::fits(&mut g, &groups).unwrap();
+    };
+    let mut walk = |s: &mut dyn Screen, keys: &[Key], cx: &mut crate::shell::Cx| {
+        fits(s);
+        for k in keys {
+            s.key(*k, cx);
+            fits(s);
+        }
+    };
+    // Home: the next match, the list, the name typed.
+    walk(&mut super::home::Scout::new(), &[Key::Right, Key::End, Key::Enter], &mut cx);
+    walk(&mut super::home::Matches::new(Some(super::event::demo()), Station(1)), &[], &mut cx);
+    walk(&mut super::home::ByHand::new(Station(4)), &[Key::Char('4'), Key::Enter], &mut cx);
+    // The form: before the clock, running, then after the match, on each row.
+    let mut form = super::scouting::Scouting::new("2026sheet", "2026sheet_qm1", "Q1", 6328, Station(4));
+    walk(&mut form, &[Key::Char(' '), Key::Right, Key::Right, Key::Right, Key::Down, Key::Down, Key::Down, Key::Enter], &mut cx);
+    walk(&mut super::practice::Practice::new(), &[Key::Char('n')], &mut cx);
+    walk(&mut super::practice::Sessions::new(), &[], &mut cx);
+    walk(&mut super::teams::Teams::new("2026sheet".into()), &[], &mut cx);
+    walk(&mut super::teams::TeamPage::new("2026sheet".into(), 6328), &[], &mut cx);
+    walk(&mut super::teams::PicklistScreen::new("2026sheet".into()), &[Key::Char('n')], &mut cx);
+    walk(&mut super::sharing::ShareMenu::new("2026sheet".into(), None), &[Key::Down, Key::Down, Key::Down], &mut cx);
+    walk(&mut super::sharing::Codes::new("Event".into(), vec!["a".into(), "b".into()]), &[Key::Char(' ')], &mut cx);
+}
+
+#[test]
 fn scouting_a_match_on_the_keys_keeps_one_record_with_its_history() {
     use crate::platform::Key;
     use crate::shell::Screen;
