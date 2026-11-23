@@ -74,7 +74,7 @@ struct App {
     open: fn(&Robot) -> Box<dyn Screen>,
 }
 
-const APPS: [App; 38] = [
+const APPS: [App; 39] = [
     App { icon: "smart_toy", name: "Robot", open: |_| Box::new(RobotScreen::default()) },
     App { icon: "monitor_heart", name: "Health", open: |_| Box::new(Health::default()) },
     App { icon: "description", name: "Logs", open: |_| Box::new(LogsScreen::default()) },
@@ -97,6 +97,8 @@ const APPS: [App; 38] = [
     App { icon: "qr_code_scanner", name: "AprilTag", open: |_| Box::new(crate::apriltags::Reader::new()) },
     App { icon: "insights", name: "Graphs", open: |_| Box::new(crate::graphs::Graphs::new()) },
     App { icon: "checklist", name: "Pit", open: |_| Box::new(crate::pit::Pit::default()) },
+    // The match's plan on the field, for the drive team (strategy/).
+    App { icon: "strategy", name: "Strategy", open: |robot| Box::new(crate::strategy::Strategy::new(robot)) },
     App { icon: "settings_remote", name: "Remote", open: |_| Box::new(crate::irremote::Remotes::new()) },
     App { icon: "straighten", name: "Level", open: |_| Box::new(crate::level::Level::new()) },
     App { icon: "explore", name: "Compass", open: |_| Box::new(crate::level::Compass::new()) },
@@ -4463,7 +4465,7 @@ mod tests {
         pretend(Some(Found::Nothing));
         let shown = builtin(&Home::new());
         assert!(!shown.iter().any(|n| n == "Level" || n == "Compass"), "{shown:?}");
-        assert_eq!(shown.len(), 36, "the thirty-six the emulator's run counts on (all but Level and Compass are on every unit)");
+        assert_eq!(shown.len(), 37, "the thirty-seven the emulator's run counts on (all but Level and Compass are on every unit)");
         assert_eq!(shown.last().map(String::as_str), Some("Settings"), "Settings stays last");
         assert_eq!(builtin_apps().position(|(_, _, n)| n == "Terminal"), Some(8), "Terminal where it was");
         assert!(!builtin_apps().any(|(_, _, n)| n == "Level"), "nor in search");

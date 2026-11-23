@@ -146,6 +146,7 @@ mod shell;
 mod sound;
 mod spotlight;
 mod standby;
+mod strategy;
 mod sys;
 mod tailscale;
 mod sysupdate;
@@ -657,6 +658,12 @@ fn main() {
         std::fs::create_dir_all(&own).ok();
         std::env::set_var("CATALYST_CONF", own.join("robot"));
         return field::shots(std::path::Path::new(&dir));
+    }
+    // Strategy: a match's plan on the field (1.0).
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--strategy-shots") {
+        tour_fixtures();
+        return strategy::shots(std::path::Path::new(&dir));
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--camera-shots") {

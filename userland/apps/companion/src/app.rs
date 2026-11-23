@@ -33,7 +33,7 @@ pub enum Page {
 const PAGES: [(Page, &str, &str); 5] = [(Page::SignIns, "Sign-ins", "key"), (Page::Music, "Music", "library_music"), (Page::Files, "Files", "folder"), (Page::Settings, "Settings", "tune"), (Page::System, "System", "sync")];
 
 /// The places Files shows, and what the handheld calls them.
-pub const AREAS: [(&str, &str, &str); 4] = [("logs", "Match logs", "insights"), ("photos", "Photos", "photo"), ("screenshots", "Screenshots", "photo_library"), ("notes", "Notes", "description")];
+pub const AREAS: [(&str, &str, &str); 5] = [("logs", "Match logs", "insights"), ("photos", "Photos", "photo"), ("screenshots", "Screenshots", "photo_library"), ("notes", "Notes", "description"), ("strategy", "Strategy", "strategy")];
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Phase {
@@ -1552,7 +1552,7 @@ fn browse(ui: &mut Ui, b: &mut Browser, area: Rect, root: &str, target: Option<&
         } else {
             match b.area.as_str() {
                 "music" => "music_note",
-                "photos" | "screenshots" => "photo",
+                "photos" | "screenshots" | "strategy" => "photo",
                 "logs" => "insights",
                 _ => "description",
             }

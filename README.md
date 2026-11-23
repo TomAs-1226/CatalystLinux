@@ -15,7 +15,7 @@ windows that grow out of tiles whenever it is there.
 | `userland/crates/bezel` | Bezel on the CPU: tonal surfaces, the two type voices, Material Symbols, and the full glass pass (refraction, frost, edge light, groups, shadow). |
 | `userland/crates/nt4` | A NetworkTables 4.1 client: one thread, read-only, reconnects on its own. |
 | `userland/crates/apriltag` | AprilTag detection: AprilRobotics' C library (3.4.5, BSD 2-Clause, vendored with the 36h11 family FRC uses) behind a small flat shim, with each tag's pose. |
-| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, Camera, Photos, AprilTag, Graphs, Pit, Remote, Level, Compass, Weather, Calculator, Clock, Notes, Units, HTTP, Share, Browse, Assistant, Web, Music, Settings) and the launcher for external ones. |
+| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, Camera, Photos, AprilTag, Graphs, Pit, Strategy, Remote, Level, Compass, Weather, Calculator, Clock, Notes, Units, HTTP, Share, Browse, Assistant, Web, Music, Settings) and the launcher for external ones. |
 | `userland/apps/update` | `catalyst-update`: system updates on the handheld (A/B, tried once, rolled back if it does not come up), and the release tool that makes and signs them. |
 | `userland/apps/flasher` | Catalyst Flasher: the newest release onto an SD card in one go. |
 | `userland/assets/app-icon` | Catalyst's icon (the FrcCatalyst bolt) at each size Windows uses, built into the simulator; `assets/` holds it for Raspberry Pi Imager's listing. |
@@ -2064,6 +2064,39 @@ The Pit app opens on two cards, the checklist and the match timer.
   2.0 fills from the FMS), that is shown instead, its period told from what
   it counted before (the clock alone cannot tell AUTO's 0:15 from END
   GAME's).
+
+## Strategy: the match plan on the field
+
+The Strategy app is a board for the drive team: the 2026 field (the same one
+the Robot app draws), the team's alliance on the left as its drivers stand,
+and a board for each of the team's matches, filled from the schedule with
+all six robots at their starting lines, each on a chip of its team number.
+
+- **Drawing, by keys.** F X Z C move the cursor half a metre; with Fn (the
+  arrows) ten centimetres. 1 to 6 pick a robot; Enter on one picks it up and
+  Enter drops it where the cursor is, `r` puts the picked one at the cursor.
+  `p` starts a path from where the robot is, Enter adds each waypoint (the
+  leg to come is dashed) and `p` or Esc ends it; each robot's paths are in
+  its own colour with an arrowhead. `n` writes a short note and `d` a drop
+  zone; Enter on a note changes its words. Backspace removes what is under
+  the cursor (the last waypoint while drawing), `u` undoes. `+` and `-` zoom,
+  the view following the cursor; `?` lists the keys.
+- **Phases.** Auto, teleop and the endgame are layers of their own (`a`, `t`,
+  `e`, or Tab): a phase starts each robot where the one before left it.
+  Space plays them in turn, each robot driving its paths on Detent's springs.
+- **Templates and sharing** (`m`). Another match's board; a board kept as a
+  template ("our standard auto", "defense on 1507") and put on any match, on
+  whichever side the team is; the board as QR codes (version 6, Base45 in
+  the codes' alphanumeric mode) that another handheld's Camera gathers in
+  any order and opens; and a picture of all three phases in
+  `/data/strategy` for Catalyst Companion (its Strategy area).
+- **Before a match.** With a plan made for the match being queued, the
+  island's queue notice offers it: Enter opens the board.
+
+Boards and templates are kept beside the settings (`/data/catalyst/strategy`).
+The field and everything at rest on it are one cached picture: moving the
+cursor lays it down and draws only the cursor, and at rest the board asks
+for no frames.
 
 ## Event schedule
 
