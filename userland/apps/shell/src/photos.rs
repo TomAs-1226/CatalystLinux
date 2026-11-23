@@ -12,7 +12,7 @@
 //! times, panning with the arrows; Left and Right go between photos when it
 //! is not zoomed. It decodes only as much as the zoom needs (an eighth, a
 //! quarter, half), on a thread, showing the thumbnail meanwhile; only one
-//! photo is ever held at a time.
+//! photo is ever held at a time. `e` opens the editor (editor/, 1.0).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -328,6 +328,7 @@ pub fn delete(photo: &Photo) -> std::io::Result<()> {
     // And what was kept beside it: the photo as taken (under a look), its RAW.
     std::fs::remove_file(crate::filters::original_of(&photo.path)).ok();
     std::fs::remove_file(photo.path.with_extension("dng")).ok();
+    std::fs::remove_file(crate::editor::edits::sidecar(&photo.path)).ok();
     TILE_COUNT.store(u64::MAX, Ordering::Relaxed);
     Ok(())
 }
@@ -780,6 +781,19 @@ impl Screen for Viewer {
         false
     }
 
+    /// Back from the editor: an export it made is in the album beside the
+    /// photo, which stays in sight.
+    fn resume(&mut self) {
+        let Some(here) = self.photos.get(self.at).map(|p| p.path.clone()) else { return };
+        if self.photos.len() > 1 || here.parent() == Some(dir().as_path()) {
+            let fresh = list();
+            if let Some(at) = fresh.iter().position(|p| p.path == here) {
+                self.photos = fresh;
+                self.at = at;
+            }
+        }
+    }
+
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let zoomed = self.zoom.target() > 1.01;
         let deleting = std::mem::take(&mut self.deleting);
@@ -811,6 +825,12 @@ impl Screen for Viewer {
                 self.chrome = 2.5;
             }
             Key::Char('o') => *cx.say = Some("no look: this is the original".into()),
+            // The editor (1.0): its edits kept beside the photo, never in it.
+            Key::Char('e') => {
+                if let Some(photo) = self.photos.get(self.at) {
+                    return Nav::Push(Box::new(crate::editor::Editor::open(photo.path.clone())));
+                }
+            }
             Key::Char('d') => {
                 if deleting {
                     let photo = self.photos[self.at].clone();
@@ -948,7 +968,16 @@ impl Screen for Viewer {
             let mp = self.dims.map_or(String::new(), |(w, h)| format!(" · {:.1} mp", (w * h) as f32 / 1e6));
             let mut lines = vec![photo.name.clone(), format!("{dims}{mp}"), size_words(photo.bytes), photo.taken.format("%A %-d %B %Y, %H:%M:%S").to_string()];
             // What it wears and what is kept beside it.
-            let kept: Vec<String> = [self.look.as_ref().map(|l| format!("look: {}", l.to_lowercase())), self.has_original.then(|| "o: the original".to_owned()), self.has_raw.then(|| "raw kept (.dng)".to_owned())].into_iter().flatten().collect();
+            let edited = crate::editor::edits::has_edit(&photo.path);
+            let kept: Vec<String> = [
+                self.look.as_ref().map(|l| format!("look: {}", l.to_lowercase())),
+                self.has_original.then(|| "o: the original".to_owned()),
+                self.has_raw.then(|| "raw kept (.dng)".to_owned()),
+                Some(if edited { "e: its edit" } else { "e: edit" }.to_owned()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
             if !kept.is_empty() {
                 lines.push(kept.join(" · "));
             }

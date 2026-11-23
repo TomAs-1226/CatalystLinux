@@ -84,6 +84,13 @@
 //! the smart camera on the Grove port (smartcam.rs) its codes are taken too,
 //! read on its own processor.
 //!
+//! Doc mode (1.0, the carousel's fourth) scans documents: the page found
+//! in the preview a few times a second on a thread of its own and outlined,
+//! taken by itself once held still for a second (the shutter's ring
+//! filling meanwhile) or at once with Enter, as the camera's own full-size
+//! still; then flattened, enhanced and gathered into a document that is
+//! saved as a PDF and PNGs (docscan/). ↓ shows the pages taken.
+//!
 //! The smart camera: with the Grove port set to it, the Camera holds it
 //! while open. Its faces lean the exposure toward the people in the picture
 //! (mapped into this camera's picture, `a` in the AI view to align the two),
@@ -667,7 +674,7 @@ pub fn focus_view(x: f32, y: f32) -> [f32; 4] {
 /// The simulated camera: its scene at the camera's pace, metered and
 /// exposed as the dials say and developed as the screen asks; photos
 /// written by the shell's own JPEG encoder behind the preview.
-fn run_simulated(live: &Arc<Mutex<Live>>, stop: &AtomicBool, orders: &Receiver<Order>, scanning: &AtomicBool, luma: &(Mutex<Luma>, Condvar), develop: &Mutex<Develop>) {
+fn run_simulated(live: &Arc<Mutex<Live>>, stop: &AtomicBool, orders: &Receiver<Order>, scanning: &AtomicBool, luma: &(Mutex<Luma>, Condvar), develop: &Mutex<Develop>, paging: &AtomicBool) {
     let started = Instant::now();
     let (mut night, mut face) = (false, None);
     let mut controls = pro::preview(None, false);
@@ -679,6 +686,10 @@ fn run_simulated(live: &Arc<Mutex<Live>>, stop: &AtomicBool, orders: &Receiver<O
         let scan = scanning.load(Ordering::Relaxed);
         let view = focus.map_or([0.0, 0.0, 1.0, 1.0], |(x, y)| focus_view(x, y));
         let mut pic = scene_part(PREVIEW_W, PREVIEW_H, t, scan && focus.is_none(), view);
+        // Doc mode: a page on the table (docscan's).
+        if paging.load(Ordering::Relaxed) {
+            crate::docscan::sim::paint(&mut pic, view, t);
+        }
         let (mut meta, bright) = sim_meter(&controls, focus.is_some());
         sim_expose(&mut pic, bright, meta.ct);
         let yuv = rgb_to_yuv420(&pic);
@@ -750,6 +761,9 @@ fn sim_photo(live: &Arc<Mutex<Live>>, path: PathBuf, t: f32, scan: bool, burst: 
     for i in 0..burst.max(1) {
         // About 8 frames a second at full size, a hand's drift between them.
         let mut pic = scene(fw, fh, t + i as f32 * 0.12, scan);
+        if still_word(words, "doc").is_some() {
+            crate::docscan::sim::paint(&mut pic, [0.0, 0.0, 1.0, 1.0], t + i as f32 * 0.12);
+        }
         sim_expose(&mut pic, bright, ct);
         let mut yuv = rgb_to_yuv420(&pic);
         if burst > 0 {
@@ -1021,18 +1035,20 @@ enum Mode {
     Scan,
     Photo,
     Pro,
+    /// The document scanner (docscan/, 1.0).
+    Doc,
 }
 
-const MODES: [(Mode, &str); 3] = [(Mode::Scan, "scan"), (Mode::Photo, "photo"), (Mode::Pro, "pro")];
+const MODES: [(Mode, &str); 4] = [(Mode::Scan, "scan"), (Mode::Photo, "photo"), (Mode::Pro, "pro"), (Mode::Doc, "doc")];
 
 impl Mode {
     fn index(self) -> usize {
         MODES.iter().position(|(m, _)| *m == self).unwrap_or(1)
     }
 
-    /// A photo is taken in it.
+    /// A photo is taken in it (doc mode takes pages, with none of its kit).
     fn shoots(self) -> bool {
-        self != Mode::Scan
+        matches!(self, Mode::Photo | Mode::Pro)
     }
 }
 
@@ -1213,6 +1229,10 @@ pub struct Camera {
     waking_drawn: u64,
     /// Held as set (the shots): nothing taken in, nothing moving.
     frozen: bool,
+    /// Doc mode: the page found, held still and taken (docscan/), and the
+    /// simulated camera told to lay a page on its table.
+    doc: Option<crate::docscan::Finding>,
+    paging: Arc<AtomicBool>,
 }
 
 /// Settings › Camera › Smart camera: how it stands, and how fast its link
@@ -1257,14 +1277,15 @@ impl Camera {
         let live = Arc::new(Mutex::new(Live::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let scanning = Arc::new(AtomicBool::new(false));
+        let paging = Arc::new(AtomicBool::new(false));
         let luma: Arc<(Mutex<Luma>, Condvar)> = Arc::default();
         let prefs = Prefs::load();
         let develop = Arc::new(Mutex::new(Develop { look: Arc::new(prefs.look.compiled(prefs.hue)), ..Develop::default() }));
         let simulated = !cfg!(target_arch = "aarch64");
         let control = if simulated {
             let (tx, rx) = mpsc::channel();
-            let (l, s, sc, lu, d) = (live.clone(), stop.clone(), scanning.clone(), luma.clone(), develop.clone());
-            std::thread::Builder::new().name("camera".into()).spawn(move || run_simulated(&l, &s, &rx, &sc, &lu, &d)).ok();
+            let (l, s, sc, lu, d, pg) = (live.clone(), stop.clone(), scanning.clone(), luma.clone(), develop.clone(), paging.clone());
+            std::thread::Builder::new().name("camera".into()).spawn(move || run_simulated(&l, &s, &rx, &sc, &lu, &d, &pg)).ok();
             Control::Simulated(tx)
         } else {
             let slot: Arc<Mutex<Option<ChildStdin>>> = Arc::default();
@@ -1355,6 +1376,8 @@ impl Camera {
             face_told: (Instant::now(), None),
             waking_drawn: 0,
             frozen: false,
+            doc: None,
+            paging,
         };
         camera.hold_smart();
         // The level, if it was on when the Camera was last left.
@@ -1457,11 +1480,19 @@ impl Camera {
         self.mode = mode;
         self.mode_at.set(mode.index() as f32);
         self.scanning.store(mode == Mode::Scan, Ordering::Relaxed);
+        self.paging.store(mode == Mode::Doc, Ordering::Relaxed);
         self.countdown = None;
         self.set_dial(None);
-        if mode == Mode::Scan {
+        if matches!(mode, Mode::Scan | Mode::Doc) {
             self.set_strip(false);
             self.set_focus(None);
+        }
+        // Doc mode looks for the page (its finder's thread waits while not
+        // given frames); its pages wait in the work folder meanwhile.
+        if mode == Mode::Doc {
+            let finding = self.doc.get_or_insert_with(crate::docscan::Finding::new);
+            let waiting = finding.doc.borrow().pages.len();
+            self.say(if waiting > 0 { format!("{waiting} page{} waiting · ↓ to see", if waiting == 1 { "" } else { "s" }) } else { "point it at a page".to_owned() });
         }
         if (was == Mode::Pro) != (mode == Mode::Pro) {
             self.tell_develop();
@@ -1651,6 +1682,39 @@ impl Camera {
             self.flash.jump(1.0);
             self.flash.set(0.0);
         }
+    }
+
+    /// Doc mode's photo: the camera's own still at the sensor's full size,
+    /// with the exposure the preview settled on and none of the photo's
+    /// kit (no look, aspect, burst or RAW), into the scans' work folder;
+    /// the page found in it goes with it.
+    fn shoot_doc(&mut self) {
+        let busy = self.saving.is_some() && !self.captured;
+        let Some(finding) = &mut self.doc else { return };
+        if finding.shot.is_some() || busy {
+            return;
+        }
+        if self.preview.is_none() {
+            self.say("the camera is not ready yet");
+            return;
+        }
+        let path = crate::docscan::Finding::shot_path();
+        let corners = finding.corners();
+        let mut words = self.metered.map(|m| pro::still(None, &m, self.night).words()).unwrap_or_default();
+        words.push("doc=1".into());
+        if !self.control.send(Order::Still(path.clone(), words)) {
+            self.say("the camera is not ready yet");
+            return;
+        }
+        finding.shot = Some((path.clone(), corners));
+        self.saving = Some(Instant::now());
+        self.captured = false;
+        self.pending += 1;
+        self.pending_paths.push(path);
+        self.press.jump(1.0);
+        self.press.set(0.0);
+        self.flash.jump(1.0);
+        self.flash.set(0.0);
     }
 
     /// The shutter's answer, at once: the frame in sight as it was taken,
@@ -1931,6 +1995,10 @@ impl Screen for Camera {
         if self.refining.is_some() {
             want(Duration::from_millis(500));
         }
+        // Doc mode: the hold filling while the page keeps still.
+        if self.mode == Mode::Doc && self.doc.as_ref().is_some_and(|f| f.hold().is_some()) {
+            want(Duration::from_millis(33));
+        }
         soonest
     }
 
@@ -2032,6 +2100,7 @@ impl Screen for Camera {
             Key::Tab => self.set_mode(MODES[(self.mode.index() + 1) % MODES.len()].0),
             Key::Enter | Key::Char(' ') | Key::Ctrl('p' | 'P') if self.quick || matches!(key, Key::Enter | Key::Char(' ')) => match self.mode {
                 Mode::Scan => return self.act(),
+                Mode::Doc => self.shoot_doc(),
                 _ if self.countdown.is_some() => {}
                 _ if self.timer > 0 => self.countdown = Some(Instant::now() + Duration::from_secs(self.timer.into())),
                 _ => self.shoot(cx.settings.calm, cx.settings.detail),
@@ -2080,6 +2149,12 @@ impl Screen for Camera {
                     self.say("arrows · +/− · enter: keep");
                 } else {
                     self.say("align once both cameras show a picture");
+                }
+            }
+            // Doc mode: the pages taken so far.
+            Key::Down if self.mode == Mode::Doc && self.doc.as_ref().is_some_and(|f| !f.doc.borrow().pages.is_empty()) => {
+                if let Some(f) = &self.doc {
+                    return Nav::Push(Box::new(crate::docscan::Review::new(f.doc.clone())));
                 }
             }
             Key::Down => {
@@ -2182,6 +2257,12 @@ impl Screen for Camera {
 
     fn update(&mut self, cx: &mut Cx) -> Nav {
         let now = Instant::now();
+        // Doc mode's page is in: its review opens while it is flattened.
+        if let Some(f) = self.doc.as_mut() {
+            if f.take_open() {
+                return Nav::Push(Box::new(crate::docscan::Review::new(f.doc.clone())));
+            }
+        }
         // The timer ran out: the photo now, timed from then.
         if let Some(at) = self.countdown.filter(|at| now >= *at) {
             self.countdown = None;
@@ -2235,6 +2316,9 @@ impl Screen for Camera {
         self.clock += dt;
         let mut changed = self.mode_at.tick(dt) | self.flash.tick(dt) | self.press.tick(dt) | self.last_pop.tick(dt) | self.found_rise.tick(dt) | self.lens_at.tick(dt) | self.lens_fade.tick(dt);
         changed |= self.dial_at.tick(dt) | self.dial_fade.tick(dt) | self.strip_at.tick(dt) | self.strip_fade.tick(dt) | self.focus_fade.tick(dt);
+        if let Some(f) = &mut self.doc {
+            changed |= f.tick(dt);
+        }
         // The shot lands in the corner, and the thumbnail pops as it does.
         let flying = self.flying.is_some();
         changed |= self.fly.tick(dt);
@@ -2305,6 +2389,14 @@ impl Screen for Camera {
                     self.thumbs_seen = l.thumbs_made;
                     self.thumbs = std::mem::take(&mut l.thumbs);
                 }
+                // Doc mode: the frame's brightness to the page's finder, a
+                // few times a second.
+                if let (Mode::Doc, Some(f)) = (self.mode, &mut self.doc) {
+                    let (w, h) = l.yuv_size;
+                    if w > 0 && l.yuv.len() >= w * h && f.wants() {
+                        f.give(&l.yuv[..w * h], w, h);
+                    }
+                }
                 changed = true;
             }
             if l.trouble != self.trouble {
@@ -2362,7 +2454,32 @@ impl Screen for Camera {
             self.say("slow shutter: hold steady");
         }
         self.shaky_said = shaky;
+        // Doc mode: the page found, and held still long enough to take.
+        let mut take_page = false;
+        if let (Mode::Doc, Some(f)) = (self.mode, &mut self.doc) {
+            let (ch, take) = f.ambient(dt.min(0.25));
+            changed |= ch | f.doc.borrow_mut().poll();
+            take_page = take;
+        }
+        if take_page && !self.frozen {
+            self.shoot_doc();
+        }
         for event in events {
+            // Doc mode's photo: its page goes to the document, not the album.
+            if let Event::Saved { path, .. } = &event {
+                if self.doc.as_mut().is_some_and(|f| f.took(path)) {
+                    self.pending = self.pending.saturating_sub(1);
+                    self.pending_paths.retain(|p| p != path);
+                    if self.pending == 0 {
+                        self.saving = None;
+                    }
+                    changed = true;
+                    continue;
+                }
+            }
+            if let (Event::Failed(_), Some(f)) = (&event, &mut self.doc) {
+                f.failed();
+            }
             match event {
                 Event::Exposing(line) => {
                     if let Some(t) = &mut self.kit.shot {
@@ -2551,6 +2668,10 @@ impl Screen for Camera {
                     line(g, pts[i], pts[(i + 1) % 4], 2.0, t.signal);
                 }
             }
+        }
+        // Doc mode: the page found, outlined.
+        if let (Mode::Doc, Some(f), true) = (self.mode, &self.doc, ka < 0.5) {
+            f.draw(g, vf, t.signal);
         }
         // The timer counting down.
         if let Some(at) = self.countdown {
@@ -3387,7 +3508,7 @@ impl Camera {
         g.canvas.rrect(Rect::new(x + g.ox, dy, w, dot), dot * 0.5, t.ink, 1.0);
         // The lens's aperture: fixed, so said, never a dial; and who sets
         // the exposure (p, s, iso, m), where there is room for both.
-        let pro_k = (at - 1.0).clamp(0.0, 1.0);
+        let pro_k = (1.0 - (at - 2.0).abs()).clamp(0.0, 1.0);
         if pro_k > 0.01 && self.lens == Lens::Main {
             let program = Program::of(&self.pro).word();
             let both = format!("{program} · {}", pro::APERTURE);
@@ -3411,6 +3532,13 @@ impl Camera {
                 }
             }
             Mode::Scan => g.icon("qr_code_scanner", false, sx, sy, 18.0, t.ink),
+            // Doc mode: the page held still fills the ring, and is taken as it closes.
+            Mode::Doc => {
+                g.icon("document_scanner", false, sx, sy, 18.0, t.ink);
+                if let Some(hold) = self.doc.as_ref().and_then(crate::docscan::Finding::hold).filter(|h| *h > 0.01) {
+                    g.canvas.arc(sx + g.ox, sy, ring - 1.25, 2.5, -std::f32::consts::FRAC_PI_2, hold * std::f32::consts::TAU, t.signal, 1.0);
+                }
+            }
         }
 
         // The last photo, opening the album (↓); while a shot flies into
@@ -3419,12 +3547,37 @@ impl Camera {
         let (tw, th) = (thumb.w, thumb.h);
         let pop = self.last_pop.value();
         let grown = Rect::new(thumb.cx() - tw * pop * 0.5, thumb.cy() - th * pop * 0.5, tw * pop, th * pop);
-        match &self.last {
-            Some((_, pic)) if self.flying.is_none() => draw_picture(g, grown, pic, whole(pic), 5.0, 1.0),
-            Some(_) => g.surface(thumb, 5.0, t.surface1),
-            None => {
-                g.surface(thumb, 5.0, t.surface1);
-                g.icon("photo_library", false, thumb.cx(), thumb.cy(), 13.0, t.faint);
+        // Doc mode: the newest page in the thumbnail's place, and how many.
+        let pages = self.doc.as_ref().filter(|_| self.mode == Mode::Doc).map(|f| {
+            let mut doc = f.doc.borrow_mut();
+            let n = doc.pages.len();
+            (n, doc.pages.last_mut().and_then(|p| p.shown().cloned()))
+        });
+        if let Some((n, page)) = pages {
+            g.surface(thumb, 5.0, t.surface1);
+            match &page {
+                Some(pic) => {
+                    let (w, h) = crate::editor::fit_size(pic.w as f32, pic.h as f32, tw - 6.0, th - 6.0);
+                    draw_picture(g, Rect::new((thumb.cx() - w * 0.5).round(), (thumb.cy() - h * 0.5).round(), w.round(), h.round()), pic, whole(pic), 2.0, 1.0);
+                }
+                None => g.icon("description", false, thumb.cx(), thumb.cy(), 13.0, if n > 0 { t.ink } else { t.faint }),
+            }
+            if n > 0 {
+                let words = n.to_string();
+                let bh = cap.size + 4.0;
+                let bw = (g.measure(&words, cap) + 8.0).max(bh);
+                let b = Rect::new(thumb.right() - bw + 3.0, thumb.y - 3.0, bw, bh);
+                g.surface(b, bh * 0.5, t.ice);
+                g.text_at(b.cx(), b.cy(), Align::Center, &words, cap, t.on_ice);
+            }
+        } else {
+            match &self.last {
+                Some((_, pic)) if self.flying.is_none() => draw_picture(g, grown, pic, whole(pic), 5.0, 1.0),
+                Some(_) => g.surface(thumb, 5.0, t.surface1),
+                None => {
+                    g.surface(thumb, 5.0, t.surface1);
+                    g.icon("photo_library", false, thumb.cx(), thumb.cy(), 13.0, t.faint);
+                }
             }
         }
         // Being refined: a badge with the seconds left where the ↓ is.
@@ -4192,6 +4345,41 @@ pub fn pro_shots(dir: &std::path::Path) {
     }
     crate::platform::sim::save_png(&sheet, &dir.join("looks-on-the-sample-scene.png"), 2);
     println!("camera 0.9.2 shots in {}", dir.display());
+}
+
+/// Doc mode as set for the shots (docscan's): the simulated page in the
+/// preview, found by the finder itself, held still for `hold` seconds.
+#[cfg(not(target_arch = "aarch64"))]
+pub fn doc_camera(hold: f32, t: f32) -> Camera {
+    let mut c = Camera::new();
+    c.frozen = true;
+    c.flash.jump(0.0);
+    c.last = None;
+    c.last_rx = None;
+    c.set_mode(Mode::Doc);
+    let mut pic = scene_part(PREVIEW_W, PREVIEW_H, t, false, [0.0, 0.0, 1.0, 1.0]);
+    crate::docscan::sim::paint(&mut pic, [0.0, 0.0, 1.0, 1.0], t);
+    sim_expose(&mut pic, 1.0, SIM_CT);
+    let luma = brightness_of(&pic);
+    if let (Some(f), Some(q)) = (&mut c.doc, crate::docscan::quad::find(&luma, PREVIEW_W, PREVIEW_H)) {
+        f.place(q, hold);
+        // The pages waiting, read back for the rail.
+        let began = Instant::now();
+        while f.doc.borrow().working() && began.elapsed() < Duration::from_secs(20) {
+            f.doc.borrow_mut().poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    c.preview = Some(pic);
+    c.note = None;
+    c.mode_at.jump(c.mode_at.target());
+    c
+}
+
+/// A picture's brightness (BT.601), as the camera's Y plane would be.
+#[cfg(not(target_arch = "aarch64"))]
+pub fn brightness_of(pic: &Picture) -> Vec<u8> {
+    pic.rgb.chunks_exact(3).map(|p| ((77 * u32::from(p[0]) + 150 * u32::from(p[1]) + 29 * u32::from(p[2])) >> 8) as u8).collect()
 }
 
 /// The kit's overlays and modes (0.9.4), each at the three text sizes in

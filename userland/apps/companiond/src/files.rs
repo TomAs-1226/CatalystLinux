@@ -1,7 +1,6 @@
 //! The handheld's files as a computer sees them: the music library, match
-//! logs, photos, screenshots, notes and the batteries' QR labels (listed
-//! logs, photos, screenshots, notes and strategy boards' pictures (listed
-//! and downloaded), songs
+//! logs, photos, screenshots, notes, the batteries' QR labels, strategy
+//! boards' pictures and scanned documents (listed and downloaded), songs
 //! added to the library, and /data backed up and restored as a tar stream.
 
 use std::io::{self, Read, Write};
@@ -13,7 +12,7 @@ use serde_json::{json, Value};
 use crate::store::Paths;
 
 /// The places a computer may look in, and where each is under /data.
-pub const AREAS: [(&str, &str); 7] = [("music", "music/library"), ("logs", "logs"), ("photos", "photos"), ("screenshots", "screenshots"), ("notes", "notes"), ("batteries", "batteries"), ("strategy", "strategy")];
+pub const AREAS: [(&str, &str); 8] = [("music", "music/library"), ("logs", "logs"), ("photos", "photos"), ("screenshots", "screenshots"), ("notes", "notes"), ("batteries", "batteries"), ("strategy", "strategy"), ("scans", "scans")];
 
 /// Songs the library takes from a computer.
 pub const SONGS: [&str; 7] = ["mp3", "m4a", "flac", "opus", "ogg", "aac", "wav"];
