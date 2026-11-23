@@ -658,6 +658,36 @@ impl Objects {
         Some(f)
     }
 
+    /// Where an object stands in its frame at its own size, turned and
+    /// posed as `view` says: the first and last columns and rows (left,
+    /// top, right, bottom) it covers more than a quarter of a pixel of, its
+    /// shadow aside. None if there is no such object. (For the lock
+    /// screen's depth, which keeps the robot off the top of the time.)
+    #[cfg(test)]
+    pub fn extent(&mut self, tokens: &Tokens, fault: Color, name: &str, size: &str, view: View) -> Option<(usize, usize, usize, usize)> {
+        let at = self.find(name)?;
+        let si = self.packs[at.0].entries[at.1].sizes.iter().position(|s| s.label == size)?;
+        let (px, weights) = {
+            let e = &self.packs[at.0].entries[at.1];
+            let s = &e.sizes[si];
+            (s.px as usize, blend(e, s, view))
+        };
+        self.follow(tokens, fault);
+        let mut out: Option<(usize, usize, usize, usize)> = None;
+        for (index, code, _) in weights {
+            let f = self.frame(at, si, index, code, &Looks::plain(), 0)?;
+            for (i, p) in f.px.iter().enumerate() {
+                // Covered (little of what is under it kept), and coloured: a
+                // shadow keeps less of what is under it too, but is black.
+                if 255 - (p >> 24) > 64 && p & 0x00ff_ffff != 0 {
+                    let (x, y) = (i % px, i / px);
+                    out = Some(out.map_or((x, y, x, y), |(l, t, r, b)| (l.min(x), t.min(y), r.max(x), b.max(y))));
+                }
+            }
+        }
+        out
+    }
+
     /// Draw an object centred on (`cx`, `cy`), turned and posed as `view`
     /// says, `scale` times its size, faded by `alpha`, in the palette's
     /// colours. False if there is no such object (the caller draws

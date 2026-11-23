@@ -64,7 +64,7 @@ macro_rules! choice {
 }
 
 choice!(Face { Clock => "clock", Music => "now playing", Charge => "charge", Match => "next match", Weather => "weather", Photos => "photos", Everything => "everything" });
-choice!(ClockStyle { Digits => "digits", Dial => "dial", Dots => "dots" });
+choice!(ClockStyle { Digits => "digits", Dial => "dial", Dots => "dots", Robot => "robot" });
 choice!(LockFace { Centre => "centre", Stacked => "stacked", Dots => "dots" });
 choice!(LockColour { White => "white", Ice => "ice", Amber => "amber", Accent => "accent" });
 choice!(Show { Date => "date", Charge => "charge", Match => "next match", Notices => "notices", Reminder => "next reminder" });
@@ -96,6 +96,10 @@ pub struct Choices {
     pub shows: u8,
     /// Notices' words on the lock screen (otherwise only how many).
     pub previews: bool,
+    /// The robot stands in front of the time (depth.rs), on the centred
+    /// and dotted clocks; and its pose follows the charge and the next match.
+    pub depth: bool,
+    pub follows: bool,
 }
 
 impl Default for Choices {
@@ -109,6 +113,8 @@ impl Default for Choices {
             colour: LockColour::White,
             shows: [Show::Date, Show::Charge, Show::Match, Show::Notices, Show::Reminder].iter().fold(0, |m, s| m | 1 << s.index()),
             previews: false,
+            depth: true,
+            follows: true,
         }
     }
 }
@@ -123,7 +129,7 @@ impl Choices {
     }
 
     /// As the settings file keeps them.
-    pub fn lines(&self) -> [(&'static str, String); 8] {
+    pub fn lines(&self) -> [(&'static str, String); 10] {
         let shows: Vec<&str> = Show::ALL.iter().filter(|s| self.shows(**s)).map(|s| s.name()).collect();
         [
             ("standby", self.standby.to_string()),
@@ -134,7 +140,15 @@ impl Choices {
             ("lock_colour", self.colour.name().to_owned()),
             ("lock_shows", shows.join(",")),
             ("lock_previews", self.previews.to_string()),
+            ("lock_depth", self.depth.to_string()),
+            ("lock_pose_follows", self.follows.to_string()),
         ]
+    }
+
+    /// The robot stands in front of the time on this face (the stacked
+    /// clock keeps the right for the date and the chips).
+    pub fn depth_on(&self) -> bool {
+        self.depth && matches!(self.lock_face, LockFace::Centre | LockFace::Dots)
     }
 
     /// One line of the settings file, if it is one of these.
@@ -148,6 +162,8 @@ impl Choices {
             "lock_colour" => self.colour = LockColour::from_name(value).unwrap_or(self.colour),
             "lock_shows" => self.shows = value.split(',').filter_map(|n| Show::from_name(n.trim())).fold(0, |m, s| m | 1 << s.index()),
             "lock_previews" => self.previews = value == "true",
+            "lock_depth" => self.depth = value != "false",
+            "lock_pose_follows" => self.follows = value != "false",
             _ => return false,
         }
         true
@@ -410,6 +426,13 @@ pub struct Info {
     /// Seconds since the lock screen began to come in, while its parts are
     /// still rising into place (none: all in place).
     pub rise: Option<f32>,
+    /// The team's next match is near (depth.rs: the robot stands ready).
+    pub soon: bool,
+    /// The robot in front of the time as the lock screen has it now, on its
+    /// springs (none: at rest in the pose this says).
+    pub depth: Option<crate::depth::Shot>,
+    /// The robot is left out, for the lock screen to lay over the rest.
+    pub robot_apart: bool,
 }
 
 /// How far below its place a part of the lock screen still is, and how
@@ -604,11 +627,18 @@ pub fn draw_face(g: &mut Gfx, choices: &Choices, info: &Info, now: NaiveDateTime
     let date_alpha = if date_on { 1.0 } else { 0.3 };
     let mut chips = items(choices, info, unix, editing);
     let notes = choices.shows(Show::Notices) && !info.notes.is_empty();
-    if !info.activities.is_empty() || notes {
+    // A match coming is the robot's to show, standing ready (depth.rs): its
+    // activity alone keeps the time large with the robot in front of it.
+    let matches_only = info.activities.iter().all(|a| a.kind == crate::liveactivity::Kind::Match);
+    let depth = choices.depth_on() && !notes && matches_only;
+    if (!info.activities.is_empty() || notes) && !depth {
         // What an activity already shows is not a chip as well.
         use crate::liveactivity::Kind;
         chips.retain(|c| !info.activities.iter().any(|a| (c.0 == Show::Match && a.kind == Kind::Match) || (c.0 == Show::Reminder && a.kind == Kind::Reminder)));
         return band(g, choices, info, now, &time, &chips, editing, tint, date_alpha);
+    }
+    if depth {
+        return depth_face(g, choices, info, now, &time, chips, editing, tint, date_alpha);
     }
     let mut ink: Vec<(String, Rect)> = Vec::new();
     match choices.lock_face {
@@ -679,6 +709,121 @@ pub fn draw_face(g: &mut Gfx, choices: &Choices, info: &Info, now: NaiveDateTime
             Layout::of(places, (col + width * 0.5, width), ink)
         }
     }
+}
+
+/// How large the robot stands on the lock screen: small enough that the
+/// time behind it can be large, its feet just above the field. (Our own
+/// tuning.)
+pub const DEPTH_SCALE: f32 = 0.78;
+const DEPTH_GROUND: f32 = FIELD_Y - 5.0;
+
+/// The bumpers in the alliance's colour when it stands ready for a match
+/// the team is in.
+pub fn ready_paint(pose: crate::depth::Pose, info: &Info) -> Option<Color> {
+    (pose == crate::depth::Pose::Ready).then(|| info.next.as_ref().filter(|m| m.side.is_some()).map(|m| m.color)).flatten()
+}
+
+/// The match is near: the schedule says so, or its live activity shows.
+fn match_near(info: &Info) -> bool {
+    info.soon || info.activities.iter().any(|a| a.kind == crate::liveactivity::Kind::Match)
+}
+
+/// The robot's pose for what the lock screen shows.
+pub fn depth_pose(choices: &Choices, info: &Info) -> crate::depth::Pose {
+    crate::depth::choose(choices.follows, info.reading.as_ref(), match_near(info))
+}
+
+/// The lock screen with the robot in front of the time (depth.rs): along
+/// the top, the date at the left and the chips at the right; the time
+/// large beneath them; the robot standing just above the field, in front
+/// of the lower part of the digits (`depth::COVER` of them, never more than
+/// a third). Drawn back to front: the charge light, the time, the robot,
+/// then the date and the chips over everything. Standing ready, the match
+/// it is ready for shows among the chips, chosen or not.
+#[allow(clippy::too_many_arguments)]
+fn depth_face(g: &mut Gfx, choices: &Choices, info: &Info, now: NaiveDateTime, time: &str, mut chips: Vec<Item>, editing: bool, tint: Color, date_alpha: f32) -> Layout {
+    use crate::depth::{self, Pose};
+    let t = g.tokens;
+    let ty = g.ty;
+    let mut places = Vec::new();
+    let mut ink: Vec<(String, Rect)> = Vec::new();
+    let shot = info.depth.unwrap_or_else(|| {
+        let pose = depth_pose(choices, info);
+        depth::Shot::settled(pose, ready_paint(pose, info))
+    });
+    // The match, as its live activity says it ("Q31 · queue 8:00") where
+    // there is one, else as the schedule does; standing ready, chosen or not.
+    let activity = info.activities.iter().find(|a| a.kind == crate::liveactivity::Kind::Match);
+    let colour = info.next.as_ref().map(|m| m.color).or(activity.and_then(|a| match &a.mark {
+        crate::liveactivity::Mark::Icon(_, crate::liveactivity::Tint::Fixed(c)) => Some(*c),
+        _ => None,
+    }));
+    let words = activity.map(|a| (a.short.clone(), a.title.clone())).or(info.next.as_ref().map(|m| (format!("{} · {}", m.label, m.when), m.label.clone())));
+    let shown = choices.shows(Show::Match) || shot.pose == Pose::Ready;
+    chips.retain(|c| c.0 != Show::Match);
+    if let Some((words, label)) = words.filter(|_| shown || editing) {
+        let at = chips.iter().position(|c| c.0 != Show::Charge).unwrap_or(chips.len());
+        chips.insert(at, (Show::Match, None, Some(colour.unwrap_or(t.dim)), words, Some(label), shown));
+    }
+    // The row along the top, and beneath it the time and the robot.
+    let chip_h = (ty.caption.size + 9.0).round();
+    let row_cy = (5.0 + chip_h * 0.5).round();
+    let from = row_cy + chip_h * 0.5 + 7.0;
+    let (scale, ground, cx) = (DEPTH_SCALE, DEPTH_GROUND, W * 0.5);
+    let room = W - 2.0 * PAD - 8.0;
+    let probe = if info.h24 { "88:88" } else { "18:88" };
+    let (dy, alpha) = rise(info, 1.5);
+    depth::draw_light(g, &shot, cx, ground + dy, scale, alpha);
+    let (dy, alpha) = rise(info, 1.0);
+    let time_ink = if choices.lock_face == LockFace::Dots {
+        // As many dots high as the cap would be: seven rows, as wide as fits.
+        let cols = crate::faces::dot_time(probe).0 as f32;
+        let (want, _) = depth::time_for(from, ground, scale, f32::MAX);
+        let pitch = (want / 7.0).min(room / cols).floor();
+        let (cap, baseline) = depth::time_for(from, ground, scale, 7.0 * pitch);
+        let top = baseline - cap + pitch * 0.5;
+        draw_dots(g, time, time, 1.0, cx, top + dy, pitch, tint, alpha);
+        let w = crate::faces::dot_time(time).0 as f32 * pitch;
+        Rect::new(cx - w * 0.5, baseline - cap, w, cap)
+    } else {
+        let wide = Tab::sized_to(g, ty.display(100.0), probe, room, 200.0);
+        let k = g.text.cap_height(&wide) / wide.size;
+        let (cap, _) = depth::time_for(from, ground, scale, g.text.cap_height(&wide));
+        let style = bezel::TextStyle { size: (cap / k).floor(), ..wide };
+        // Its own cap, so the robot covers no more than it should.
+        let (cap, baseline) = depth::time_for(from, ground, scale, g.text.cap_height(&style));
+        let tab = Tab::new(g, style);
+        let w = tab.width(time);
+        let x = ((W - w) * 0.5).round();
+        tab.draw(g, time, time, 1.0, x, baseline + dy, tint, alpha);
+        Rect::new(x, baseline - cap, w, cap)
+    };
+    places.push((Part::Time, time_ink.inset(-4.0)));
+    ink.push(("time".into(), time_ink));
+    // (Laid over the rest afterwards by the lock screen, when it keeps the rest.)
+    if !info.robot_apart {
+        let (dy, alpha) = rise(info, 1.5);
+        depth_robot(g, &shot, dy, alpha);
+    }
+    ink.push(("robot".into(), depth::bounds(cx, ground + shot.sink.max(0.0), scale)));
+    // Over everything: the date at the left, the chips at the right (the
+    // whole date where the chips leave it room).
+    let x = PAD + 2.0;
+    let right = W - PAD;
+    let mut left = x;
+    if choices.shows(Show::Date) || editing {
+        let want: f32 = chips.iter().map(|c| chip_width(g, c.1.is_some() || c.2.is_some(), &c.3)).sum::<f32>() + 6.0 * chips.len().saturating_sub(1) as f32;
+        let long = date_text(now);
+        let date = if g.measure(&long, ty.caption) <= right - x - want - 12.0 { long } else { short_date(now) };
+        let w = g.measure(&date, ty.caption);
+        let (dy, alpha) = rise(info, 0.0);
+        g.text.draw(&mut g.canvas, x, (row_cy + dy + ty.caption.size * 0.36).round(), &date, &ty.caption, t.dim, date_alpha * alpha);
+        places.push((Part::Date, Rect::new(x - 6.0, row_cy - 8.0, w + 12.0, 16.0)));
+        ink.push(("date".into(), Rect::new(x, row_cy - ty.caption.size * 0.5, w, ty.caption.size)));
+        left = x + w + 12.0;
+    }
+    flow(g, &chips, left, right - left, row_cy, Align::Right, row_cy + chip_h * 0.5, info, 2.0, &mut places);
+    Layout::of(places, (W * 0.5, W - 2.0 * PAD - 12.0), ink)
 }
 
 /// The lock screen with live activities or notifications: the time along
@@ -897,6 +1042,83 @@ pub struct Lock {
     alert: Option<String>,
     /// The second last drawn of a wait, and the minute of the clock.
     drawn: (u64, String),
+    /// The robot in front of the time, and whether it is held still (the
+    /// battery saver, StandBy over it, the calm version).
+    robot: crate::depth::Robot,
+    still: bool,
+    /// The picture under the robot, kept while it shows the same.
+    kept: Option<Kept>,
+}
+
+/// The lock screen under its robot, kept: the backdrop, the time, the date
+/// and the chips as `scene` has them; where the field goes; and the field's
+/// strip, as `field` (its words, dots typed and width) had it.
+struct Kept {
+    scene: Scene,
+    under: Vec<u32>,
+    place: (f32, f32),
+    field: Option<((Prompt, usize, i32), Vec<u32>)>,
+}
+
+/// The rows the field takes (and a row either side of it): the robot stops above them.
+fn field_strip() -> std::ops::Range<usize> {
+    let w = W as usize;
+    (FIELD_Y as usize - 1) * w..((FIELD_Y + FIELD_H) as usize + 3).min(H as usize) * w
+}
+
+/// What the picture under the lock screen's robot shows, as far as it
+/// changes it: while it is the same, the picture is kept.
+#[derive(PartialEq)]
+struct Scene {
+    choices: Choices,
+    time: String,
+    day: chrono::NaiveDate,
+    h24: bool,
+    reading: Option<Reading>,
+    next: Option<crate::upnext::NextMatch>,
+    reminder: Option<crate::upnext::Reminder>,
+    notices: usize,
+    acts: usize,
+    counting: Option<String>,
+    soon: bool,
+    pose: crate::depth::Pose,
+    glow: i32,
+    colours: [(u8, u8, u8); 6],
+    caption: i32,
+    calm: bool,
+}
+
+impl Scene {
+    fn of(g: &Gfx, choices: &Choices, info: &Info, now: NaiveDateTime, shot: &crate::depth::Shot) -> Scene {
+        let t = g.tokens;
+        Scene {
+            choices: *choices,
+            time: time_text(now, info.h24),
+            day: now.date(),
+            h24: info.h24,
+            reading: info.reading.clone(),
+            next: info.next.clone(),
+            reminder: info.reminder.clone(),
+            notices: info.notes.len().max(info.notices),
+            acts: info.activities.len(),
+            // The match's activity counting down to its queue.
+            counting: info.activities.iter().find(|a| a.kind == crate::liveactivity::Kind::Match).map(|a| a.short.clone()),
+            soon: match_near(info),
+            pose: shot.pose,
+            glow: (shot.glow * 1000.0).round() as i32,
+            colours: [t.ground, t.ink, t.dim, t.signal, t.surface2, t.ice].map(|c| (c.0, c.1, c.2)),
+            caption: (g.ty.caption.size * 10.0) as i32,
+            calm: g.calm,
+        }
+    }
+}
+
+/// The lock screen's robot: centred, its feet just above the field, cut
+/// off above it (its shadow does not reach under the glass).
+fn depth_robot(g: &mut Gfx, shot: &crate::depth::Shot, dy: f32, alpha: f32) {
+    g.canvas.set_clip(Rect::new(0.0, 0.0, W, FIELD_Y - 1.0));
+    crate::depth::draw(g, shot, W * 0.5, DEPTH_GROUND + dy, DEPTH_SCALE, alpha);
+    g.canvas.clear_clip();
 }
 
 impl Default for Lock {
@@ -927,7 +1149,22 @@ impl Lock {
             opened: None,
             alert: None,
             drawn: (0, String::new()),
+            robot: crate::depth::Robot::new(),
+            still: false,
+            kept: None,
         }
+    }
+
+    /// The robot is to stand still (the battery saver, or StandBy over the
+    /// lock screen): it neither turns by itself nor eases between poses.
+    pub fn hold_still(&mut self, still: bool) {
+        self.still = still;
+    }
+
+    /// The robot is turning on its stand: the shell draws a few frames a
+    /// second for it (`depth::DRIFT_EVERY`), ambient, not motion.
+    pub fn drifting(&self) -> bool {
+        self.covering() && self.robot.drifts(self.still)
     }
 
     /// A passcode is set.
@@ -1176,6 +1413,17 @@ impl Lock {
         }
         let mut moving = self.shown.tick(md) | self.field.tick(md, calm);
         moving |= self.checking.is_some() || self.entering.is_some();
+        // The robot between poses is motion; turning on its stand is not
+        // (a frame wanted, the beat left to rest).
+        moving |= self.robot.tick(md);
+        if self.drifting() {
+            self.robot.drift(dt);
+            changed = true;
+        }
+        if !self.visible() {
+            self.robot.shown = false;
+            self.kept = None;
+        }
         // A wait counting down, and the clock: a frame when either changes.
         let drawn = (self.wait(), time_text(crate::faces::local_now(), h24));
         if self.visible() && drawn != self.drawn {
@@ -1220,10 +1468,47 @@ impl Lock {
             scratch.clone_from(&g.canvas.px);
         }
         let now = crate::faces::local_now();
-        let layout = if self.pick.is_some() {
-            draw_face(g, choices, &Info { pick: self.pick, ..info.clone() }, now, false)
-        } else {
-            draw_face(g, choices, info, now, false)
+        // The robot takes up the pose the handheld's state asks for.
+        let pose = depth_pose(choices, info);
+        if self.robot.aim(pose, ready_paint(pose, info), self.still || g.calm) {
+            g.started_moving();
+        }
+        let shot = self.robot.shot();
+        let prompt = self.prompt();
+        // With the robot in front of the time, the picture under it (the
+        // backdrop, the time, the date and the chips) is kept while it shows
+        // the same, and the field's strip with it while the field is at
+        // rest: a frame of the turntable is a copy and the robot laid over
+        // it; a key in the field, a copy, the field and the robot.
+        let scene = (!fading && info.rise.is_none()).then(|| Scene::of(g, choices, info, now, &shot));
+        let field_key = (!self.field.moving()).then(|| (prompt.clone(), self.field.len(), self.field.width.target().round() as i32));
+        if let (Some(s), Some(kept)) = (&scene, &mut self.kept) {
+            if kept.scene == *s && kept.under.len() == g.canvas.px.len() {
+                g.canvas.px.copy_from_slice(&kept.under);
+                let strip = field_strip();
+                match (&field_key, &kept.field) {
+                    (Some(now), Some((was, px))) if now == was => g.canvas.px[strip].copy_from_slice(px),
+                    _ => {
+                        self.field.draw(g, kept.place.0, FIELD_Y, kept.place.1, &prompt);
+                        kept.field = field_key.map(|k| (k, g.canvas.px[strip].to_vec()));
+                    }
+                }
+                depth_robot(g, &shot, 0.0, 1.0);
+                return;
+            }
+        }
+        // The robot is laid over the rest last, after the field (whose glass
+        // so never sees it, and keeps its own picture while the rest stands).
+        let info = Info { pick: self.pick, depth: Some(shot), robot_apart: true, ..info.clone() };
+        let layout = draw_face(g, choices, &info, now, false);
+        self.robot.shown = layout.parts.iter().any(|(what, _)| what == "robot");
+        let mut kept = match (scene, self.robot.shown) {
+            (Some(scene), true) => {
+                let mut under = self.kept.take().map(|k| k.under).unwrap_or_default();
+                under.clone_from(&g.canvas.px);
+                Some(Kept { scene, under, place: layout.field, field: None })
+            }
+            _ => None,
         };
         // What can be picked is what shows; one picked that went (opened
         // elsewhere, put away) is let go.
@@ -1232,9 +1517,18 @@ impl Lock {
             self.pick = None;
         }
         let (cx, most) = layout.field;
-        let prompt = self.prompt();
-        let (dy, _) = rise(info, 5.0);
+        let (dy, _) = rise(&info, 5.0);
         self.field.draw(g, cx, FIELD_Y + dy.round(), most, &prompt);
+        // The field's strip kept with the picture under the robot, and the
+        // robot laid over them.
+        if let Some(k) = &mut kept {
+            k.field = field_key.map(|key| (key, g.canvas.px[field_strip()].to_vec()));
+        }
+        self.kept = kept;
+        if self.robot.shown {
+            let (dy, alpha) = rise(&info, 1.5);
+            depth_robot(g, &shot, dy, alpha);
+        }
         if fading {
             // Coming down over the screen in front, or opening: the lock
             // screen slides from or up and away to the top, revealing where
@@ -1271,7 +1565,7 @@ mod tests {
         let c = Choices::default();
         assert!(c.standby && c.night && !c.previews, "StandBy on, notices' words hidden");
         assert!(Show::ALL.iter().all(|s| c.shows(*s)));
-        let mut changed = Choices { standby: false, night: false, face: Face::Weather, clock: ClockStyle::Dots, lock_face: LockFace::Stacked, colour: LockColour::Ice, shows: 0, previews: true };
+        let mut changed = Choices { standby: false, night: false, face: Face::Weather, clock: ClockStyle::Robot, lock_face: LockFace::Stacked, colour: LockColour::Ice, shows: 0, previews: true, depth: false, follows: false };
         changed.toggle(Show::Match);
         let mut back = Choices::default();
         for (k, v) in changed.lines() {
@@ -1378,6 +1672,51 @@ mod tests {
         }
     }
 
+    /// The robot stands in front of the lower part of the time and never
+    /// more than its lower third (the hours and minutes read), on the
+    /// centred and dotted clocks, at every text size, in every pose, on a
+    /// 12- or 24-hour clock; it reaches the time, and nothing else (the
+    /// date, the chips and the field are tested apart in the next test).
+    /// Its extent at every angle is held by depth.rs's own test.
+    #[test]
+    fn the_robot_covers_at_most_the_lower_third_of_the_time() {
+        crate::shell::tests::sandbox();
+        use crate::depth::{Pose, Shot, MOST_COVER};
+        let mut checked = 0;
+        for (hm, h24) in [((9, 41), false), ((12, 59), false), ((23, 58), true)] {
+            let now = chrono::NaiveDate::from_ymd_opt(2026, 11, 21).unwrap().and_hms_opt(hm.0, hm.1, 0).unwrap();
+            for size in [crate::gfx::TextSize::Compact, crate::gfx::TextSize::Standard, crate::gfx::TextSize::Large] {
+                let mut g = Gfx::new(bezel::Tokens::dark());
+                g.set_text_size(size);
+                for face in [LockFace::Centre, LockFace::Dots] {
+                    for pose in Pose::ALL {
+                        let c = Choices { lock_face: face, ..Choices::default() };
+                        let mut info = info(0);
+                        info.h24 = h24;
+                        info.depth = Some(Shot::settled(pose, None));
+                        let layout = draw_face(&mut g, &c, &info, now, false);
+                        let find = |what: &str| layout.parts.iter().find(|(n, _)| n == what).map(|(_, r)| *r).unwrap_or_else(|| panic!("no {what}: {face:?} {size:?}"));
+                        let (time, robot) = (find("time"), find("robot"));
+                        let covered = (time.bottom() - robot.y) / time.h;
+                        let case = format!("{face:?} {} {pose:?} {}:{:02}", size.name(), hm.0, hm.1);
+                        assert!(covered <= MOST_COVER + 1e-3, "covers {covered:.2} of the time: {case}");
+                        assert!(covered >= 0.18, "hardly in front ({covered:.2}): {case}");
+                        assert!(robot.x > time.x && robot.right() < time.right(), "in front of the time, not beside it: {case}");
+                        assert!(time.x >= PAD - 0.5 && time.right() <= W - PAD + 0.5, "the time on the panel: {case}");
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 72);
+        // Off, or on the stacked clock: no robot.
+        let mut g = Gfx::new(bezel::Tokens::dark());
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 11, 21).unwrap().and_hms_opt(9, 41, 0).unwrap();
+        for c in [Choices { depth: false, ..Choices::default() }, Choices { lock_face: LockFace::Stacked, ..Choices::default() }] {
+            assert!(!draw_face(&mut g, &c, &info(0), now, false).parts.iter().any(|(n, _)| n == "robot"));
+        }
+    }
+
     /// The live activities a lock screen may show, the most important first.
     fn activities(n: usize) -> Vec<crate::liveactivity::Activity> {
         let song = crate::nowplaying::NowPlaying {
@@ -1438,6 +1777,10 @@ mod tests {
                                                 wrong.push(format!("{a} {ra:?} off the panel: {case}"));
                                             }
                                             for (b, rb) in &parts[i + 1..] {
+                                                // The robot stands in front of the time by design (depth.rs).
+                                                if [a.as_str(), b.as_str()] == ["time", "robot"] || [a.as_str(), b.as_str()] == ["robot", "time"] {
+                                                    continue;
+                                                }
                                                 let apart = ra.right() + 2.0 <= rb.x || ra.x >= rb.right() + 2.0 || ra.bottom() + 2.0 <= rb.y || ra.y >= rb.bottom() + 2.0;
                                                 if !apart {
                                                     wrong.push(format!("{a} {ra:?} meets {b} {rb:?}: {case}"));

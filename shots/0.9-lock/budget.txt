@@ -1,0 +1,8 @@
+the robot depth lock screen, drawn on this PC (the handheld estimated at 20x, README's factor):
+a frame of the turntable (the picture under the robot kept; two angles blended, scaled to 0.78): 99 µs (2.0 ms on the handheld)
+the whole lock screen drawn again with the robot (the minute turning, a key): 456 µs (9.1 ms)
+the same screen with the depth effect off: 361 µs (7.2 ms)
+the robot alone, a frame of the turntable: 94 µs (1.9 ms)
+a new angle decoded and coloured (every 4° of the turn: once in 0.8 s at 5°/s): 197 µs (3.9 ms)
+frames: 12.5 a second while it turns (80 ms apart: ambient, not motion); none while it stands still
+angles decoded over the first turns: 91; the cache of coloured frames stays within 384 kB

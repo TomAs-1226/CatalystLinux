@@ -407,6 +407,11 @@ struct Cache {
     weather: Option<crate::weather::Glance>,
     next: Option<Result<crate::upnext::NextMatch, String>>,
     reminder: Option<crate::upnext::Reminder>,
+    /// The next match is near: the robot clock's robot stands ready.
+    soon: bool,
+    /// The galleries' own answer to that.
+    #[cfg(not(target_arch = "aarch64"))]
+    pretend_soon: Option<bool>,
     age: f32,
     generation: u64,
     /// To be read again at the next frame drawn.
@@ -445,6 +450,9 @@ pub struct Faces {
     /// and whether music was playing at the last tick.
     auto_music: bool,
     music_seen: bool,
+    /// The robot clock's robot (depth.rs): still on StandBy, easing only
+    /// between poses.
+    robot: crate::depth::Robot,
 }
 
 impl Default for Faces {
@@ -476,7 +484,15 @@ impl Faces {
             scratch: Vec::new(),
             auto_music: false,
             music_seen: false,
+            robot: crate::depth::Robot::new(),
         }
+    }
+
+    /// For the galleries: the next match is near (or not), whatever the schedule says.
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn pretend_soon(&mut self, soon: bool) {
+        self.cache.pretend_soon = Some(soon);
+        self.cache.soon = soon;
     }
 
     pub fn showing(&self) -> bool {
@@ -694,6 +710,8 @@ impl Faces {
             changed = true;
         }
         moving |= self.charge.tick(md);
+        // The robot clock's robot, between poses (it never turns by itself here).
+        moving |= self.robot.tick(md);
         // What the faces show, read again once a minute (at the next frame).
         self.cache.age += dt;
         if self.cache.age >= 60.0 || feed.generation != self.cache.generation || self.minute != Some(now.minute()) {
@@ -756,6 +774,11 @@ impl Faces {
             self.cache.weather = crate::weather::glance(feed.h24);
             self.cache.next = Some(crate::upnext::next_match(robot, unix));
             self.cache.reminder = crate::upnext::next_reminder(unix);
+            self.cache.soon = crate::depth::match_soon(robot, unix);
+            #[cfg(not(target_arch = "aarch64"))]
+            if let Some(soon) = self.cache.pretend_soon {
+                self.cache.soon = soon;
+            }
         }
         let fading = shown < 0.999;
         if fading {
@@ -846,7 +869,7 @@ impl Faces {
                         continue;
                     }
                     let style = ClockStyle::ALL[i];
-                    self.draw_clock(g, style, feed, (o.0 + ox, o.1));
+                    self.draw_clock(g, style, feed, choices, (o.0 + ox, o.1));
                 }
             }
             Face::Charge => self.draw_charge(g, feed, (o.0 + self.give(), o.1)),
@@ -873,7 +896,7 @@ impl Faces {
         }
     }
 
-    fn draw_clock(&mut self, g: &mut Gfx, style: ClockStyle, feed: &Feed, o: (f32, f32)) {
+    fn draw_clock(&mut self, g: &mut Gfx, style: ClockStyle, feed: &Feed, choices: &Choices, o: (f32, f32)) {
         let t = g.tokens;
         let ty = g.ty;
         let now = local_now();
@@ -895,6 +918,7 @@ impl Faces {
                 g.text.draw_aligned(&mut g.canvas, o.0 + W * 0.5, o.1 + baseline + 18.0 + caption_h * 0.72, Align::Center, &line, &ty.caption, t.dim, 1.0);
             }
             ClockStyle::Dial => self.draw_dial(g, feed, now, o),
+            ClockStyle::Robot => self.draw_robot_clock(g, feed, choices, now, o),
             ClockStyle::Dots => {
                 let pitch = 10.0;
                 let (cols, rows) = ((W / pitch) as usize, (H / pitch) as usize);
@@ -912,6 +936,54 @@ impl Faces {
                 draw_dots(g, &self.time_before, &self.time, roll, o.0 + W * 0.5, o.1 + 45.0, pitch, t.ink, 1.0);
                 let line = self.date_line(g, feed, now, W - 2.0 * PAD);
                 g.text.draw_aligned(&mut g.canvas, o.0 + W * 0.5, o.1 + caption_y + ty.caption.size * 0.36, Align::Center, &line, &ty.caption, t.dim, 1.0);
+            }
+        }
+    }
+
+    /// The robot clock (depth.rs): the date along the top, the time as
+    /// large as the panel takes, and Numbers standing on the foot of the
+    /// panel in front of the lower part of the digits, at its own size,
+    /// still, in the pose the handheld's state asks for. Standing ready, the
+    /// match shows at the right of the date, in a chip with its alliance's dot.
+    fn draw_robot_clock(&mut self, g: &mut Gfx, feed: &Feed, choices: &Choices, now: NaiveDateTime, o: (f32, f32)) {
+        use crate::depth::{self, Pose};
+        let t = g.tokens;
+        let ty = g.ty;
+        // Near: the schedule says so, or the match's live activity shows.
+        let activity = feed.activities.iter().find(|a| a.kind == crate::liveactivity::Kind::Match);
+        let pose = depth::choose(choices.follows, feed.reading, self.cache.soon || activity.is_some());
+        let next = self.cache.next.as_ref().and_then(|n| n.as_ref().ok()).cloned();
+        let paint = (pose == Pose::Ready).then(|| next.as_ref().filter(|m| m.side.is_some()).map(|m| m.color)).flatten();
+        if self.robot.aim(pose, paint, g.calm) {
+            g.started_moving();
+        }
+        let shot = self.robot.shot();
+        let (style, _, baseline, row_cy) = robot_clock_layout(g, feed.h24);
+        let (cx, ground) = (o.0 + W * 0.5, o.1 + ROBOT_GROUND);
+        depth::draw_light(g, &shot, cx, ground, 1.0, 1.0);
+        let tab = Tab::new(g, style);
+        let w = tab.width(&self.time);
+        tab.draw(g, &self.time_before, &self.time, self.roll.value(), o.0 + ((W - w) * 0.5).round(), o.1 + baseline, t.ink, 1.0);
+        depth::draw(g, &shot, cx, ground, 1.0, 1.0);
+        // Over everything: the date (and the charge); ready, the match beside it.
+        let baseline_row = o.1 + (row_cy + ty.caption.size * 0.36).round();
+        match next.filter(|_| pose == Pose::Ready) {
+            Some(m) => {
+                // The match and when, beside the date as short as it goes;
+                // where that is too long, the match alone.
+                let shortest = self.date_line(g, feed, now, 0.0);
+                let room = W - 2.0 * PAD - 24.0 - g.measure(&shortest, ty.caption);
+                let full = activity.map_or_else(|| format!("{} · {}", m.label, m.when), |a| a.short.clone());
+                let words = if chip_width(g, true, &full) <= room { full } else { m.label.clone() };
+                let cw = chip_width(g, true, &words);
+                let x = o.0 + W - PAD - 6.0 - cw;
+                chip(g, x, o.1 + row_cy, None, Some(m.color), &words, t.surface2, t.ink, 1.0);
+                let line = self.date_line(g, feed, now, x - o.0 - PAD - 18.0);
+                g.text.draw(&mut g.canvas, o.0 + PAD + 6.0, baseline_row, &line, &ty.caption, t.dim, 1.0);
+            }
+            None => {
+                let line = self.date_line(g, feed, now, W - 2.0 * PAD);
+                g.text.draw_aligned(&mut g.canvas, o.0 + W * 0.5, baseline_row, Align::Center, &line, &ty.caption, t.dim, 1.0);
             }
         }
     }
@@ -1252,6 +1324,26 @@ impl Faces {
 }
 
 /// How the charging goes: "full in 40 m", "charged", "plugged in".
+/// Where the robot clock's robot stands: on the foot of the panel.
+const ROBOT_GROUND: f32 = H - 8.0;
+
+/// The robot clock's time: its style, cap height and baseline, and the
+/// middle of the row along the top. As large as the panel's width takes,
+/// its digits reaching down so the robot (at its own size, on the foot of
+/// the panel) stands in front of `depth::COVER` of them.
+pub fn robot_clock_layout(g: &mut Gfx, h24: bool) -> (TextStyle, f32, f32, f32) {
+    let ty = g.ty;
+    let row_cy = (5.0 + (ty.caption.size + 9.0).round() * 0.5).round();
+    let from = row_cy + (ty.caption.size + 9.0).round() * 0.5 + 7.0;
+    let probe = if h24 { "88:88" } else { "18:88" };
+    let wide = Tab::sized_to(g, ty.display(100.0), probe, W - 2.0 * PAD - 16.0, 118.0);
+    let k = g.text.cap_height(&wide) / wide.size;
+    let (cap, _) = crate::depth::time_for(from, ROBOT_GROUND, 1.0, g.text.cap_height(&wide));
+    let style = TextStyle { size: (cap / k).floor(), ..wide };
+    let (cap, baseline) = crate::depth::time_for(from, ROBOT_GROUND, 1.0, g.text.cap_height(&style));
+    (style, cap, baseline, row_cy)
+}
+
 pub fn charge_words(r: &Reading) -> String {
     match r.flow {
         Flow::Charging => r.minutes_to_full.map_or_else(|| "charging".into(), |m| format!("full in {}", crate::sys::minutes_text(m))),
@@ -1313,6 +1405,28 @@ mod tests {
         let (cols, _) = dot_time("9:41");
         assert_eq!(cols, 19);
         assert_eq!(dot_time("8").1.len(), 17);
+    }
+
+    /// StandBy's robot clock: the robot, at its own size on the foot of the
+    /// panel, stands in front of no more than the lower third of the time
+    /// (and of some of it), which stays on the panel and clear of the date
+    /// row above it, at every text size, 12- and 24-hour.
+    #[test]
+    fn the_robot_clock_keeps_the_time_legible() {
+        crate::shell::tests::sandbox();
+        for size in [crate::gfx::TextSize::Compact, crate::gfx::TextSize::Standard, crate::gfx::TextSize::Large] {
+            let mut g = Gfx::new(Tokens::dark());
+            g.set_text_size(size);
+            for (h24, widest) in [(false, "12:59"), (true, "23:58")] {
+                let (style, cap, baseline, row_cy) = robot_clock_layout(&mut g, h24);
+                let top = crate::depth::top_for(ROBOT_GROUND, 1.0);
+                let covered = (baseline - top) / cap;
+                assert!(covered <= crate::depth::MOST_COVER && covered >= 0.2, "{covered:.2} at {size:?}");
+                assert!(baseline - cap > row_cy + g.ty.caption.size, "the time under the date row at {size:?}");
+                assert!(Tab::new(&mut g, style).width(widest) <= W - 2.0 * PAD, "{widest} on the panel at {size:?}");
+                assert!(crate::depth::bounds(W * 0.5, ROBOT_GROUND, 1.0).bottom() <= H, "on the panel");
+            }
+        }
     }
 
     #[test]

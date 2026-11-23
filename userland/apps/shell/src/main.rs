@@ -68,6 +68,7 @@ mod companion;
 mod connect;
 mod control;
 mod deep;
+mod depth;
 mod device;
 mod faces;
 mod files;
@@ -630,6 +631,12 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--standby-shots") {
         return standby_shots(std::path::Path::new(&dir));
+    }
+    // The robot depth lock screen and StandBy's robot clock in each pose,
+    // and what drawing them costs.
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--depth-shots") {
+        return depth::shots(std::path::Path::new(&dir));
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--cjk-shots") {

@@ -2285,12 +2285,18 @@ impl Shell {
     }
 
     /// Something drawn a few times a second that is not motion (Music's
-    /// bars on the island): how often the main loop looks in for it.
+    /// bars on the island, the lock screen's robot turning on its stand):
+    /// how often the main loop looks in for it.
     pub fn ambient(&self) -> Option<std::time::Duration> {
+        if self.standby.asleep() {
+            return None;
+        }
         // My own tuning: 15 a second, lively enough for bars that follow
         // the music, and about a quarter of the frames (and the panel's
         // time, as only the island's rows change) of keeping to the beat.
-        (!self.standby.asleep() && self.activities.bars_live).then_some(std::time::Duration::from_millis(66))
+        let bars = self.activities.bars_live.then_some(std::time::Duration::from_millis(66));
+        let robot = (self.lock.drifting() && !self.faces.visible()).then_some(crate::depth::DRIFT_EVERY);
+        bars.into_iter().chain(robot).min()
     }
 
     /// Whether something on screen is in motion.
@@ -2419,6 +2425,10 @@ impl Shell {
             let feed = crate::faces::Feed { reading: reading.as_ref(), h24: self.settings.clock24, notices: self.notes.unread(), generation: self.robot.schedule.generation(), activities: self.activities.list(), opened: self.activities.opened(), open: self.activities.open.value(), level: self.activities.level.value() };
             let Shell { gfx, faces, robot, settings, .. } = self;
             faces.draw(gfx, robot, &feed, &settings.lock);
+            // The robot clock's robot taking up a new pose.
+            if self.gfx.take_motion_started() {
+                self.moving = true;
+            }
         }
     }
 
@@ -3776,6 +3786,9 @@ impl Shell {
             self.lock.woke(calm);
         }
         self.lit_was = lit;
+        // The lock screen's robot stands still in the battery saver, under
+        // StandBy and in the calm version (depth.rs).
+        self.lock.hold_still(self.settings.battery.saver || self.faces.visible() || calm);
         let (lock_moving, lock_changed, unlocked) = self.lock.tick(dt, motion_dt, calm, self.settings.clock24);
         // Live activities: read once a second while the screen is lit, not
         // at all while it is off.
@@ -6311,6 +6324,51 @@ pub(crate) mod tests {
             assert!(!shell.activities.bars.tick(FRAME, FRAME, false, 0), "still");
             assert!(shell.ambient().is_none(), "and they ask for no frames");
         }
+    }
+
+    /// The lock screen's robot turning on its stand (depth.rs) is ambient,
+    /// as Music's bars are: a frame every `DRIFT_EVERY` (12.5 a second),
+    /// the frame beat at rest; still (no frames) in the battery saver, in
+    /// the calm version, under StandBy, and with the depth effect off.
+    #[test]
+    fn the_lock_screens_robot_turns_a_few_times_a_second_and_is_not_motion() {
+        // Its own minute, so the clock turning never draws a frame meanwhile.
+        crate::faces::pretend_time(chrono::NaiveDate::from_ymd_opt(2026, 11, 21).and_then(|d| d.and_hms_opt(9, 41, 0)));
+        let mut shell = shell();
+        shell.settings.lock.follows = false;
+        shell.apply_settings();
+        // No live activity (the demo robot's queue would bring the time up top).
+        shell.pretend_activities(Vec::new());
+        shell.lock_as_if_held();
+        frames(&mut shell, 120, FRAME);
+        assert!(shell.lock.covering());
+        assert!(shell.lock.drifting(), "idle, it turns");
+        assert_eq!(shell.ambient(), Some(crate::depth::DRIFT_EVERY), "12.5 frames a second");
+        assert!(!shell.moving() && !shell.animating(), "the frame beat rests");
+        let dt = crate::depth::DRIFT_EVERY.as_secs_f32();
+        for _ in 0..10 {
+            assert!(shell.tick(dt), "each look draws the turn");
+            shell.draw();
+            assert!(!shell.moving(), "and it is never motion");
+        }
+        // Held still: no frames of its own.
+        for (name, set) in [("saver", 0), ("calm", 1), ("depth off", 2)] {
+            match set {
+                0 => shell.settings.battery.saver = true,
+                1 => shell.settings.calm = true,
+                _ => shell.settings.lock.depth = false,
+            }
+            frames(&mut shell, 3, dt);
+            assert!(!shell.lock.drifting(), "{name}");
+            assert_eq!(shell.ambient(), None, "{name}");
+            assert!(!shell.tick(dt), "{name}: nothing to draw");
+            shell.settings.battery.saver = false;
+            shell.settings.calm = false;
+            shell.settings.lock.depth = true;
+            frames(&mut shell, 3, dt);
+            assert_eq!(shell.ambient(), Some(crate::depth::DRIFT_EVERY), "{name}: turning again");
+        }
+        crate::faces::pretend_time(None);
     }
 
     #[test]

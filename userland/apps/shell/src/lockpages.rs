@@ -123,16 +123,21 @@ enum LockRow {
     Change,
     TurnOff,
     Customise,
+    Depth,
+    Follows,
     Previews,
 }
 
 fn lock_rows(armed: bool) -> &'static [LockRow] {
     if armed {
-        &[LockRow::Change, LockRow::TurnOff, LockRow::Customise, LockRow::Previews]
+        &[LockRow::Change, LockRow::TurnOff, LockRow::Customise, LockRow::Depth, LockRow::Follows, LockRow::Previews]
     } else {
-        &[LockRow::Set, LockRow::Customise, LockRow::Previews]
+        &[LockRow::Set, LockRow::Customise, LockRow::Depth, LockRow::Follows, LockRow::Previews]
     }
 }
+
+/// What Settings says of the robot on the lock screen.
+const DEPTH_NOTE: &str = "Depth effect: Numbers, 5805's robot, stands in front of the time on the centred and dotted clocks, while no notices or activities show. Its pose can follow the handheld: docked on the charger, slumped when the battery is low, ready and facing you before a match; otherwise it turns slowly. It stands still in the battery saver and with reduced motion.";
 
 /// Settings › Lock screen.
 pub struct LockPage {
@@ -189,6 +194,16 @@ impl Screen for LockPage {
                 crate::save_settings(cx.settings);
                 Nav::Stay
             }
+            (LockRow::Depth, Key::Enter | Key::Left | Key::Right) => {
+                cx.settings.lock.depth = !cx.settings.lock.depth;
+                crate::save_settings(cx.settings);
+                Nav::Stay
+            }
+            (LockRow::Follows, Key::Enter | Key::Left | Key::Right) => {
+                cx.settings.lock.follows = !cx.settings.lock.follows;
+                crate::save_settings(cx.settings);
+                Nav::Stay
+            }
             _ => Nav::Stay,
         }
     }
@@ -218,9 +233,11 @@ impl Screen for LockPage {
                 LockRow::TurnOff => ("Turn passcode off".to_owned(), "›".to_owned(), true),
                 LockRow::Customise => ("Customise lock screen".to_owned(), format!("{} ›", c.lock_face.name()), true),
                 LockRow::Previews => ("Notices on it".to_owned(), (if c.previews { "words shown" } else { "how many" }).to_owned(), c.previews),
+                LockRow::Depth => ("Depth effect".to_owned(), (if c.depth { "on" } else { "off" }).to_owned(), c.depth),
+                LockRow::Follows => ("Pose follows status".to_owned(), (if c.follows { "on" } else { "off" }).to_owned(), c.follows && c.depth),
             })
             .collect();
-        let note = if self.armed { LOCK_NOTE.to_owned() } else { format!("{NO_PASSCODE} {LOCK_NOTE}") };
+        let note = if self.armed { format!("{LOCK_NOTE} {DEPTH_NOTE}") } else { format!("{NO_PASSCODE} {LOCK_NOTE} {DEPTH_NOTE}") };
         self.rows.draw(g, &rows, &note);
     }
 }
@@ -517,7 +534,7 @@ fn params() -> Vec<Param> {
 /// preview, and the shell's lock screen).
 pub fn info_now(robot: &Robot, h24: bool, reading: Option<crate::power::Reading>) -> Info {
     let unix = chrono::Utc::now().timestamp();
-    Info { h24, reading, next: crate::upnext::next_match(robot, unix).ok(), reminder: crate::upnext::next_reminder(unix), ..Info::default() }
+    Info { h24, reading, next: crate::upnext::next_match(robot, unix).ok(), reminder: crate::upnext::next_reminder(unix), soon: crate::depth::match_soon(robot, unix), ..Info::default() }
 }
 
 /// Settings › Lock screen › Customise: the lock screen itself, live, with
