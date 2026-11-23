@@ -345,8 +345,8 @@ impl Compiled {
         self.identity
     }
 
-    /// One pixel (the definition, as the tests check it).
-    #[cfg(test)]
+    /// One pixel (the definition, as the tests check it; the photo editor
+    /// lays looks on with it).
     #[inline]
     pub fn pixel(&self, r: u8, g: u8, b: u8) -> [u8; 3] {
         let (r, g, b) = (i32::from(r), i32::from(g), i32::from(b));

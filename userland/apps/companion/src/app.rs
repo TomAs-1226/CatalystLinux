@@ -33,7 +33,7 @@ pub enum Page {
 const PAGES: [(Page, &str, &str); 5] = [(Page::SignIns, "Sign-ins", "key"), (Page::Music, "Music", "library_music"), (Page::Files, "Files", "folder"), (Page::Settings, "Settings", "tune"), (Page::System, "System", "sync")];
 
 /// The places Files shows, and what the handheld calls them.
-pub const AREAS: [(&str, &str, &str); 6] = [("logs", "Match logs", "insights"), ("photos", "Photos", "photo"), ("screenshots", "Screenshots", "photo_library"), ("notes", "Notes", "description"), ("batteries", "Batteries", "battery_full"), ("strategy", "Strategy", "photo")];
+pub const AREAS: [(&str, &str, &str); 7] = [("logs", "Match logs", "insights"), ("photos", "Photos", "photo"), ("screenshots", "Screenshots", "photo_library"), ("notes", "Notes", "description"), ("batteries", "Batteries", "battery_full"), ("strategy", "Strategy", "photo"), ("scans", "Scans", "description")];
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Phase {
@@ -1157,9 +1157,11 @@ impl App {
     // -------------------------------------------------------------- files ---
 
     fn page_files(&mut self, ui: &mut Ui) {
-        self.header(ui, "Files", "Match logs, photos, screenshots, notes and battery labels from the handheld, to this computer.");
+        self.header(ui, "Files", "Match logs, photos, scans, screenshots, notes and battery labels from the handheld, to this computer.");
         let names: Vec<&str> = AREAS.iter().map(|a| a.1).collect();
-        if let Some(i) = ui.segmented(Rect::new(X0, 106.0, 460.0, 36.0), &names, self.area) {
+        // As wide as the row leaves beside the button, so each area's name is whole.
+        let room = CW - ui.button_w("Open downloads") - 16.0;
+        if let Some(i) = ui.segmented(Rect::new(X0, 106.0, room.min(560.0), 36.0), &names, self.area) {
             self.area = i;
             self.files.area = AREAS[i].0.into();
             if let Some(t) = self.target() {

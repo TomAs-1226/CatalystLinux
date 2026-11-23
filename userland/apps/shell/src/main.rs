@@ -24,6 +24,8 @@
 //! catalyst-shell --assistant-shots <dir>  the assistant's tasks, briefings and memory, to PNG
 //! catalyst-shell --mech-shots <dir>     Mech's calculators, dark and light, at each text size
 //! catalyst-shell --gamepad-shots <dir>  Gamepad on a simulated controller, dark and light, at each size
+//! catalyst-shell --editor-shots <dir>   the photo editor's panels and markup, dark and light, at each size
+//! catalyst-shell --scan-shots <dir>     the document scanner: finding, a page, enhanced, the pages, saved
 //!     --robot <team|ip|host>     robot to connect to (overrides the saved one)
 //!     --demo                     a scripted robot instead of a real one
 //!     --arrive <seconds>         the scripted robot, plugged in that long after start
@@ -61,6 +63,8 @@ mod burst;
 mod camera;
 mod camkit;
 mod dng;
+mod docscan;
+mod editor;
 mod filters;
 mod pro;
 mod smartcam;
@@ -712,6 +716,15 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--camera-kit-shots") {
         return camera::kit_shots(std::path::Path::new(&dir));
+    }
+    // The photo editor and the document scanner (1.0).
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--editor-shots") {
+        return editor::shots::shots(std::path::Path::new(&dir));
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--scan-shots") {
+        return docscan::shots::shots(std::path::Path::new(&dir));
     }
     // The smart camera's install over USB-A, and Settings › Camera (0.9.1).
     #[cfg(not(target_arch = "aarch64"))]
