@@ -39,8 +39,10 @@ BR=(make -C "$CATALYST_BUILD/buildroot" O="$CATALYST_BUILD/output" BR2_EXTERNAL=
 # The boot partition's config.txt and cmdline.txt are copied from os/ only
 # when the firmware package installs, which a build that has already made it
 # skips: 0.6.1's cma=64M never reached an image so. Copied again every time
-# (it is only files).
-targets=(rpi-firmware-reinstall)
+# (it is only files). So is the smart camera's program (catalyst-unitv reads
+# tools/unitv when it installs, which a built package otherwise skips: a new
+# main.py would never reach the image, and the camera never be updated).
+targets=(rpi-firmware-reinstall catalyst-unitv-reinstall)
 for target in "${@:-all}"; do
 	targets+=("$target")
 	case "$target" in

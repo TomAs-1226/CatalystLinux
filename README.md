@@ -2421,18 +2421,77 @@ shows its AI view: what it sees, with what it found drawn on it.
   config.txt is left alone. The USB serial console (ttyGS0) is untouched
   either way.
 - **Power only when used.** The Grove 5 V is on while the Camera is open
-  (or something else holds the camera), kept warm 15 s after, then off. The
-  AI view says "waking the smart camera…" with the seconds, then how long it
-  took to start (a K210 answers in about 1.5 s) and the link's rate.
+  (or something else holds the camera, or its status page is open), kept
+  warm 15 s after, then off. The AI view says "waking the smart camera…"
+  with the seconds, then how long it took to start (main.py answers two or
+  three seconds after power: MaixPy, the sensor, the face model) and the
+  link's rate. It is given 12 s before the 5 V goes off for a second and it
+  is tried again.
+- **Its power, from the board (CardputerZero schematic V0.6.1).** The Grove
+  5 V comes from the 5.2 V boost (VSYS_5V, an SY7088) through an AW35112FDR
+  load switch (reverse-current blocking, a controlled rise; enabled by the
+  I/O expander's G4, `grove_5v_out`, active high), and the schematic rates
+  it at 0.5 A at most; on battery the whole 5 V rail has under 3 W left over
+  the CM0. M5Stack rates the UnitV at 5 V, 500 mA. So the Grove port can
+  just carry it, with nothing to spare at its peaks (the KPU, the sensor
+  starting), and a tired battery or a long cable can tip it over. What that
+  looks like: a camera that starts again by itself, or one that never
+  answers. The link counts the first (a start far longer than a start
+  takes, or one found again after it went quiet having been up for less
+  time than it was gone), and the status page says "give the UnitV its own
+  USB-C power". Its own power: a USB power bank (or a charger) into the
+  UnitV's USB-C, the Grove cable still in for the link (its 5 V switch stays
+  on: the port's data lines pass only while it is on, through an FSW7227
+  whose enable follows it; the load switch blocks current coming back).
 - **The link.** Frames: a sync word (`C5 7A`), the kind, a sequence number,
   the length with a check of its own, the payload, a CRC-32; junk between
-  frames is skipped. 115 200 baud to start, then the fastest both ends hold,
-  tried from the top: 3 Mbaud (the PL011's limit at its default clock; the
-  K210's UART runs from a 195 MHz clock with a fractional divider), 2, 1.5,
-  1 Mbaud and down, each confirmed by a ping at the new rate and stepped down
-  when too many frames are refused. At 3 Mbaud a QVGA preview (6–10 kB)
-  takes about 30 ms on the wire, so the AI view runs at the camera's own
-  pace (10–15 frames a second); at 115 200 it would be about one a second.
+  frames is skipped. 115 200 baud to start, then up a step at a time (460.8
+  k, 921.6 k, 1, 1.5, 2, 3 Mbaud: the PL011's limit at its default clock;
+  the K210's UART runs from a 195 MHz clock with a fractional divider), each
+  step asked and answered at the old rate, then a ping heard and answered at
+  the new one; the first that fails sends both back to the last that held
+  (main.py goes back by itself after a second with no frame). Too many
+  frames refused: a step down. The handheld says something every two
+  seconds; nothing heard for five, and both go back to 115 200 and find
+  each other again. At 3 Mbaud a QVGA preview (6–10 kB) takes about 30 ms
+  on the wire, so the AI view runs at the camera's own pace (10–15 frames a
+  second); at 115 200 it would be about one a second. The port is opened
+  fully raw (no XON/XOFF, no RTS/CTS, nothing a getty left set), and
+  `catalyst-grove power on` holds the port's lines on the UART (GPIO4,
+  `grove_fun`, low; high would route them to I2C1), switches the 5 V on and
+  reads it back: a switch that is missing or does not hold is an error, said
+  on the status page, never taken for on.
+- **Its program, kept up to date over the Grove port (0.9.4).** When the
+  camera answers with an older main.py or face model than the image's
+  (`/usr/share/catalyst/unitv`, by the stamp's SHA-256), the new ones go
+  over the link: each file begun with its size, CRC-32 and an id, then in
+  chunks (4 kB, 1 kB below 921.6 kbaud), each answered with how much the
+  camera holds (a transfer cut off by the power or the link resumes there),
+  then read back on the camera and checked whole (one that fails is sent
+  again). main.py writes each as `name.new`, and on the commit moves them
+  all into place with the old ones kept as `name.old`, from a journal (a
+  commit cut off is finished at the next start), and starts again. boot.py
+  counts the new program's starts: two that never reach the handheld, and
+  the third start has the old files back (the status page says so). The
+  island shows it under way, as a download. MaixPy itself cannot go over
+  the Grove port (flashing it needs the K210's boot pin, which only the USB
+  bridge's DTR and RTS reach): when the camera's MaixPy lacks what main.py
+  needs, or its program is 0.9.3's (which takes no update over the link),
+  the status page and a notification say "USB-A, once", and only then.
+- **Settings › Camera › Smart camera** (Enter on the row) shows how it
+  stands, live: the 5 V and for how long, the bytes each way, the frames
+  and those refused, the rate in use and the fastest that failed, the
+  camera's hello (its program, MaixPy), how long it took to start, its
+  program's update, the last error; and above them what it means: "no bytes
+  from the camera: check the cable, or give the UnitV its own USB-C power",
+  "bytes but no frames: the wrong speed, or an old program", "the camera
+  answered: program v2 · MaixPy 0.6.3". While open it holds the camera
+  awake. `c` writes a short report to `/data/logs/smartcam-report.txt` (and
+  copies it) to show or send; `u` checks its program again. The camera's own
+  RGB LED says how it stands too: amber from main.py's first line (it has
+  power and MaixPy started it), green while it listens, blue once the
+  handheld has spoken to it, violet while an update arrives, red if its
+  sensor did not start.
 - **Alignment.** Side by side in a case, the two cameras look the same way
   a few centimetres apart: the smart camera's 80° picture maps into the
   IMX219's 62° by a scale (from the two lenses, about 1.1) and an offset.
@@ -2457,27 +2516,37 @@ UnitV, which opens the same page). Enter, then about a minute
    at 1.5 Mbaud (115 200 if the bridge cannot), 64 KiB at a time, every
    request SLIP-framed with a CRC-32 and answered.
 2. **The face model** at 0x300000, where main.py loads it, the same way.
-3. **main.py**, and a boot.py that does nothing (a firmware's own demo
-   boot.py can loop for ever), into the camera's `/flash` over the raw REPL
-   the way mpremote writes files (raw-paste mode where MicroPython has it,
-   which MaixPy's older one does not), each read back to check.
+3. **main.py**, and Catalyst's boot.py (in place of a firmware's own demo
+   boot.py, which can loop for ever; it finishes or rolls back an update
+   over the Grove port), into the camera's `/flash` over the raw REPL the
+   way mpremote writes files (raw-paste mode where MicroPython has it, which
+   MaixPy's older one does not), each read back to check. A microSD card in
+   the camera matters: MaixPy starts `/sd/main.py` instead of `/flash`'s
+   whenever a card is in (and writes a demo main.py onto a card without
+   one), so a card with no program, or an older Catalyst one, gets a few
+   lines that start `/flash`'s; a card with someone else's main.py is left
+   alone and the page says to take it out.
 4. **A version stamp** (`/flash/catalyst.json`: this release, main.py's and
    the model's SHA-256), a soft reset, and a hello on the framed protocol
    over the same USB line: main.py answers there as on the Grove port.
 
 The stamp is how a later Catalyst knows: when its main.py or model differs,
-Settings › Camera › UnitV says "update on the camera", read the
-next time the camera is on USB-A (or from main.py's hello on the Grove
-port), and only main.py (and the model, if it changed) is written again.
-Then Settings › Camera › Grove port › Smart camera, and the UnitV into the
-Grove port.
+a camera running 0.9.4's program or later takes the new ones over the
+Grove port by itself (above); an older one is offered "update on the
+camera" the next time it is on USB-A, and only main.py (and the model, if
+it changed) is written again. Then the Grove port as the camera's: the
+install page's Enter does it when the port is still the console (or
+Settings › Camera › Grove port › Smart camera), and the UnitV into the
+Grove port. The island's "install on the camera" notice opens the install
+page with Ctrl-Enter while it shows (any island notice that leads
+somewhere does, since 0.9.4; otherwise Ctrl-Enter is search, as ever).
 
 What the image carries for this, in `/usr/share/catalyst/unitv`
 (`catalyst-unitv`, 2.6 MB, with `SOURCES` and the licences): MaixPy v0.6.3
 for the M5StickV (`maixpy_v0.6.3_2_gd8901fd22_m5stickv.bin`, Sipeed's
 release download, source github.com/sipeed/MaixPy-v1 at v0.6.3; MIT and
 Apache-2.0), Sipeed's face model (MaixPy_scripts, MIT), kflash.py's flash
-loader (its ISP_PROG; Kendryte, MIT) and main.py. The USB serial drivers
+loader (its ISP_PROG; Kendryte, MIT), main.py and boot.py. The USB serial drivers
 are modules: FTDI and CH340 were already in the kernel; CDC-ACM is added in
 0.9.1 (`CONFIG_USB_ACM`). USB-A works while the handheld is the USB host
 (Settings › USB › charging only).
@@ -2512,9 +2581,9 @@ about 380 kB); no object model (Sipeed's 20-class VOC model states no
 licence). The rest is MaixPy's own vision (QR, AprilTag 36h11, LAB
 thresholds for blobs). To check on the UnitV: which way up its picture is
 (`FLIP`, `MIRROR`), the tag distance against a tape measure (`TAG_MM`), the
-blob colours in the field's light, and whether it draws its power from the
-Grove port (M5Stack says USB-C; a Grove 5 V output powers it on M5's own
-cores).
+blob colours in the field's light, and whether the Grove port's 5 V holds
+it up through its peaks (above: if it starts again by itself, give it its
+own USB-C power).
 
 In the simulator a stand-in camera answers behind the same bytes (a person
 drifting about, a scouting QR code, tag 7 on the wall, an orange game piece),

@@ -64,9 +64,20 @@ const STAMP_FILE: &str = "/flash/catalyst.json";
 /// How long each port is given to answer on MaixPy's REPL (a reset, then
 /// MaixPy starting, about two seconds on a K210).
 const PROBE_WAIT: Duration = if cfg!(test) { Duration::from_millis(800) } else { Duration::from_secs(5) };
-/// Nothing runs before main.py: a boot.py of the camera's firmware's own
-/// (M5Stack's demo loops for ever) would keep it from starting.
-const BOOT_PY: &[u8] = b"# Catalyst Linux: nothing before main.py, the smart camera's program.\n";
+/// Before main.py: Catalyst's boot.py (tools/unitv), in place of a
+/// firmware's own (M5Stack's demo loops for ever), which finishes an update
+/// cut off part way and rolls back a new program that never starts.
+#[cfg(any(test, not(target_arch = "aarch64")))]
+const BOOT_PY: &[u8] = include_bytes!("../../../../tools/unitv/boot.py");
+/// What the install tidies on the camera, and what it finds on a microSD
+/// card there. MaixPy starts /sd/main.py instead of /flash's whenever a card
+/// is in (and writes a demo main.py onto a card without one), so a card with
+/// no program of its own, or an older Catalyst one, gets a few lines that
+/// start /flash's; a card with someone else's main.py is left alone and the
+/// page says to take it out. A pending update's trial ends (this install is
+/// what runs now), and a face model sent over the Grove port goes when the
+/// model is written to flash again.
+const TIDY: &str = "import os\nfor n in ('catalyst.trial','catalyst.commit','catalyst.rolledback','main.py.new','main.py.part','boot.py.new','boot.py.part','face.kmodel.new','face.kmodel.part'@MODEL@):\n try:os.remove('/flash/'+n)\n except OSError:pass\nc='none'\ntry:\n if 'sd' in os.listdir('/'):\n  try:\n   h=open('/sd/main.py').read(40)\n  except OSError:\n   h=''\n  if h=='' or h.startswith('# Catalyst Linux'):\n   f=open('/sd/main.py','w')\n   f.write(\"# Catalyst Linux: the smart camera's program is in /flash; this card's\\n# main.py only starts it (MaixPy starts a card's ahead of /flash's).\\nimport os\\nos.chdir('/flash')\\nexec(open('/flash/boot.py').read())\\nexec(open('/flash/main.py').read())\\n\")\n   f.close()\n   c='shim'\n  else:\n   c='own'\nexcept Exception:\n c='?'\nprint('CARD|'+c)";
 /// What a probe prints: whether this MaixPy has what main.py needs, its
 /// version, and the stamp.
 const PROBE: &str = "import sys\nok=1\ntry:\n import KPU,image,ujson\n from fpioa_manager import fm\n from machine import UART\n for n in ('find_apriltags','find_qrcodes','find_blobs'):\n  if not hasattr(image.Image,n):ok=0\n if not hasattr(KPU,'init_yolo2'):ok=0\nexcept Exception:\n ok=0\ntry:\n v='.'.join(str(x) for x in sys.implementation.version)\nexcept Exception:\n v='?'\ntry:\n s=open('/flash/catalyst.json').read()\nexcept Exception:\n s='{}'\nprint('CATALYST|%d|%s|%s'%(ok,v,s.replace('\\n','')))";
@@ -111,6 +122,7 @@ fn short_sum(bytes: &[u8]) -> String {
 /// The files to install.
 pub struct Payload {
     pub main: Vec<u8>,
+    pub boot: Vec<u8>,
     pub model: Vec<u8>,
     pub firmware: Vec<u8>,
     pub firmware_name: String,
@@ -123,6 +135,7 @@ impl Payload {
         let read = |name: &str| std::fs::read(Path::new(DIR).join(name)).map_err(|_| format!("{DIR}/{name} is missing"));
         Ok(Payload {
             main: read("main.py")?,
+            boot: read("boot.py")?,
             model: read("face.kmodel")?,
             firmware: read("maixpy.bin")?,
             firmware_name: std::fs::read_to_string(Path::new(DIR).join("maixpy.version")).map(|v| v.trim().to_owned()).unwrap_or_else(|_| "MaixPy".into()),
@@ -136,11 +149,25 @@ impl Payload {
         let made = |n: usize, seed: u8| (0..n).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed)).collect::<Vec<u8>>();
         Ok(Payload {
             main: include_bytes!("../../../../tools/unitv/main.py").to_vec(),
+            boot: BOOT_PY.to_vec(),
             model: made(388_776, 7),
             firmware: made(2_100_672, 3),
             firmware_name: "maixpy_v0.6.3_2_gd8901fd22_m5stickv".into(),
             isp: made(66_304, 11),
         })
+    }
+
+    /// Only what goes over the Grove port (main.py, boot.py, the model):
+    /// no firmware or loader read for it.
+    #[cfg(target_arch = "aarch64")]
+    pub fn program() -> Result<Payload, String> {
+        let read = |name: &str| std::fs::read(Path::new(DIR).join(name)).map_err(|_| format!("{DIR}/{name} is missing"));
+        Ok(Payload { main: read("main.py")?, boot: read("boot.py")?, model: read("face.kmodel")?, firmware: Vec::new(), firmware_name: String::new(), isp: Vec::new() })
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn program() -> Result<Payload, String> {
+        Payload::load()
     }
 
     pub fn stamp(&self, firmware: &str) -> Stamp {
@@ -156,7 +183,9 @@ pub fn expected() -> Option<Stamp> {
 
 static EXPECTED: OnceLock<Option<Stamp>> = OnceLock::new();
 
-fn work_out_expected() {
+/// Worked out now if it has not been (off the screen's thread: it reads the
+/// image's files).
+pub fn work_out_expected() {
     EXPECTED.get_or_init(|| Payload::load().ok().map(|p| p.stamp("")));
 }
 
@@ -395,7 +424,9 @@ pub fn words() -> String {
     }
     match need(&s, expected.as_ref()) {
         Need::Unplugged => match (known_stamp(), expected) {
-            (Some(k), Some(e)) if !k.same_program(&e) => "update on the camera".into(),
+            // 0.9.4's program on it takes newer ones over the Grove port.
+            (Some(k), Some(e)) if !k.same_program(&e) && crate::smartcam::diag().hello.is_some_and(|h| h.updates) => "updates over the Grove port".into(),
+            (Some(k), Some(e)) if !k.same_program(&e) => "update on the camera · USB-A".into(),
             (Some(_), _) => "up to date".into(),
             _ => "plug it into USB-A".into(),
         },
@@ -570,7 +601,13 @@ fn run_install(board: &Board, first: Option<String>) {
                     s.found = Found::MaixPy { full: true, version: firmware_version(&stamp.firmware), stamp: Some(stamp.clone()) };
                 }
             });
-            say(if answered { "installed on the camera · move it to the Grove port" } else { "installed on the camera" });
+            let card = CARD_OWN.load(std::sync::atomic::Ordering::Acquire);
+            say(match (card, answered, crate::smartcam::chosen()) {
+                (true, ..) => "installed · take the microSD card out of the camera",
+                (false, true, true) => "installed on the camera · move it to the Grove port",
+                (false, true, false) => "installed · now Settings › Camera › Grove port › Smart camera",
+                (false, false, _) => "installed · not heard over USB: the camera's status page has more",
+            });
         }
         Err(why) => {
             set(|s| s.job = Job::Failed(why.clone()));
@@ -629,16 +666,19 @@ pub fn install_on(board: &Board, first: Option<String>, payload: &Payload, repor
     let mut port = open(&tty).ok_or("its USB port went away")?;
     report(Step::Program, 0.0, plan);
     let stamp = Stamp { firmware: firmware_name, ..expected };
+    let card: String;
     {
         // A fresh MaixPy makes its /flash filesystem at its first start.
         let mut repl = repl::Repl::enter(port.as_mut(), Duration::from_secs(if plan.firmware { 40 } else { 12 }))?;
-        let total = (BOOT_PY.len() + payload.main.len() + stamp.json().len()) as f32;
+        let total = (payload.boot.len() + payload.main.len() + stamp.json().len()) as f32;
         let mut sent = 0usize;
-        repl.write_file("/flash/boot.py", BOOT_PY, &mut |_| {})?;
-        sent += BOOT_PY.len();
+        repl.write_file("/flash/boot.py", &payload.boot, &mut |_| {})?;
+        sent += payload.boot.len();
         repl.write_file("/flash/main.py", &payload.main, &mut |n| report(Step::Program, (sent + n) as f32 / total, plan))?;
         sent += payload.main.len();
         repl.write_file(STAMP_FILE, stamp.json().as_bytes(), &mut |n| report(Step::Program, (sent + n) as f32 / total, plan))?;
+        let tidy = TIDY.replace("@MODEL@", if plan.model { ",'face.kmodel','face.kmodel.old'" } else { "" });
+        card = repl.exec(&tidy, Duration::from_secs(5)).ok().and_then(|out| out.lines().find_map(|l| l.trim().strip_prefix("CARD|").map(str::to_owned))).unwrap_or_default();
         report(Step::Program, 1.0, plan);
         repl.restart();
     }
@@ -647,8 +687,14 @@ pub fn install_on(board: &Board, first: Option<String>, payload: &Payload, repor
     report(Step::Check, 0.0, plan);
     let answered = check(port.as_mut(), &mut |f| report(Step::Check, f, plan));
     report(Step::Check, 1.0, plan);
+    // A card with a program of its own would start instead of this one.
+    CARD_OWN.store(card == "own", std::sync::atomic::Ordering::Release);
     Ok((answered, plan, stamp))
 }
+
+/// The last install found a microSD card in the camera with a main.py of
+/// its own, which MaixPy starts instead of /flash's.
+pub static CARD_OWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// MaixPy and the model written through the ISP, then the camera reset
 /// into its flash.
@@ -865,6 +911,7 @@ impl InstallScreen {
                 Step::Program => "writing main.py…",
                 Step::Check => "listening for it over USB…",
             }]),
+            (Job::Done { .. }, _) if CARD_OWN.load(std::sync::atomic::Ordering::Acquire) => words(&["installed · take the microSD card out of it", "installed · take its card out"]),
             (Job::Done { answered: true, .. }, _) => words(&["installed, and answering over USB", "installed, and answering"]),
             (Job::Done { answered: false, .. }, _) => words(&["installed · not heard over USB: a card in it?", "installed · not heard over USB", "installed"]),
             (Job::Failed(why), _) => vec![why.clone(), "not installed".into()],
@@ -971,6 +1018,10 @@ impl Screen for InstallScreen {
             Key::Back | Key::Leave => return Nav::Pop,
             Key::Enter => match (&self.state.job, self.need()) {
                 (Job::Running { .. }, _) => *cx.say = Some("installing · keep it plugged in".into()),
+                // Installed with the port still the console: the port given
+                // to the camera; after that, the camera's status page.
+                (Job::Done { .. }, _) if !crate::smartcam::chosen() => crate::smartcam::switch_grove(true),
+                (Job::Done { .. }, _) => return Nav::Push(Box::new(crate::smartcam_status::StatusPage::new())),
                 (_, Need::Unplugged) => *cx.say = Some("plug the UnitV into USB-A".into()),
                 (_, Need::NoDriver) => *cx.say = Some("no driver for its USB serial bridge".into()),
                 (_, Need::Looking) => *cx.say = Some("still asking what it runs".into()),
@@ -1020,7 +1071,8 @@ impl Screen for InstallScreen {
         self.list.scrollbar(g, rows.len(), rows_top, bottom);
         let hint: &[&str] = match (&self.state.job, self.need()) {
             (Job::Running { .. }, _) => &["keep it plugged in · about a minute", "keep it plugged in"],
-            (Job::Done { .. }, _) => &["done · move it to the Grove port", "done · to the Grove port", "done"],
+            (Job::Done { .. }, _) if !crate::smartcam::chosen() => &["enter: Grove port to smart camera, then move it", "enter: Grove port to smart camera", "enter: smart camera"],
+            (Job::Done { .. }, _) => &["done · move it to the Grove port · enter: status", "done · to the Grove port · enter: status", "enter: status"],
             (Job::Failed(_), _) => &["enter: try again", "enter: again"],
             (_, Need::Unplugged) => &["plug the UnitV's USB-C into USB-A", "plug it into USB-A"],
             (_, Need::NoDriver | Need::Looking) => &["esc: back"],

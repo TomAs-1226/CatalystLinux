@@ -2598,7 +2598,7 @@ impl Camera {
         let (icon, line, more) = match &self.smart_status {
             Status::PortIsConsole => ("cable", "the Grove port is the console".to_owned(), "Settings › Camera › Grove port".to_owned()),
             Status::PortBusy => ("cable", "the Grove port is not free yet".to_owned(), "a login or the console still on it".to_owned()),
-            Status::Absent(_) => ("developer_board", "no smart camera answers".to_owned(), "its program: plug it into USB-A once".to_owned()),
+            Status::Absent(why) => ("developer_board", "no smart camera answers".to_owned(), why.clone()),
             Status::Waking { since } => ("developer_board", "waking the smart camera…".to_owned(), format!("{} s", since.elapsed().as_secs())),
             Status::Ready { .. } => ("developer_board", "waiting for its picture".to_owned(), String::new()),
             Status::Asleep => ("developer_board", "waking the smart camera…".to_owned(), String::new()),
