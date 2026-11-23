@@ -45,8 +45,17 @@ const fn shutter(label: &'static str, us: u32) -> Shutter {
     Shutter { label, us }
 }
 
-/// The shutter dial: 1/2000 to 1 s in thirds of a stop, as cameras mark them.
-pub const SHUTTERS: [Shutter; 34] = [
+/// The IMX219's longest exposure at its full size, by its kernel driver
+/// (drivers/media/i2c/imx219.c): a frame of at most 0xfffe lines, exposing
+/// up to four fewer, each line at most 0x7ff0 pixels at 182.4 million a
+/// second (two CSI-2 lanes): 65530 × 32752 / 182.4 MHz, 11.77 s.
+/// catalyst-camera's still.h has the same, and holds a photo to what the
+/// pipeline says the mode allows.
+pub const LONGEST_US: u32 = 11_766_000;
+
+/// The shutter dial: 1/2000 to 10 s in thirds of a stop, as cameras mark
+/// them, and the sensor's longest at the end (0.9.4: past 1 s).
+pub const SHUTTERS: [Shutter; 45] = [
     shutter("1/2000", 500),
     shutter("1/1600", 625),
     shutter("1/1250", 800),
@@ -81,6 +90,17 @@ pub const SHUTTERS: [Shutter; 34] = [
     shutter("0.6s", 600_000),
     shutter("0.8s", 800_000),
     shutter("1s", 1_000_000),
+    shutter("1.3s", 1_300_000),
+    shutter("1.6s", 1_600_000),
+    shutter("2s", 2_000_000),
+    shutter("2.5s", 2_500_000),
+    shutter("3.2s", 3_200_000),
+    shutter("4s", 4_000_000),
+    shutter("5s", 5_000_000),
+    shutter("6s", 6_000_000),
+    shutter("8s", 8_000_000),
+    shutter("10s", 10_000_000),
+    shutter("11.7s", LONGEST_US),
 ];
 
 /// The ISO dial: 100 to 800 in thirds. ISO 100 is the sensor's analogue
@@ -122,22 +142,39 @@ pub enum Wb {
     #[default]
     Auto,
     Kelvin(u32),
+    /// From a grey card (camkit.rs): the red and blue gains, in thousandths.
+    Grey(u16, u16),
 }
 
 impl Wb {
-    /// How the dial shows it: "awb", a preset's name, or "5200K".
+    /// How the dial shows it: "awb", a preset's name, "5200K", or "grey".
     pub fn words(self) -> String {
         match self {
             Wb::Auto => "awb".into(),
             Wb::Kelvin(k) => format!("{k}K"),
+            Wb::Grey(..) => "grey".into(),
         }
+    }
+
+    /// A grey card's gains (red, blue).
+    pub fn gains(self) -> Option<[f32; 2]> {
+        match self {
+            Wb::Grey(r, b) => Some([f32::from(r) / 1000.0, f32::from(b) / 1000.0]),
+            _ => None,
+        }
+    }
+
+    /// The white balance a grey card's gains give.
+    pub fn grey(gains: [f32; 2]) -> Wb {
+        let milli = |g: f32| (g * 1000.0).round().clamp(100.0, 9000.0) as u16;
+        Wb::Grey(milli(gains[0]), milli(gains[1]))
     }
 
     /// A preset's name, if the temperature is one.
     pub fn preset(self) -> Option<&'static str> {
         match self {
             Wb::Kelvin(k) => WB_PRESETS.iter().find(|(_, pk)| *pk == k).map(|(n, _)| *n),
-            Wb::Auto => None,
+            Wb::Auto | Wb::Grey(..) => None,
         }
     }
 
@@ -181,6 +218,7 @@ impl Pro {
         let wb = match self.wb {
             Wb::Auto => "auto".to_owned(),
             Wb::Kelvin(k) => k.to_string(),
+            Wb::Grey(r, b) => format!("g{r}:{b}"),
         };
         format!("shutter={} iso={} ev={} wb={wb}", opt(self.shutter), opt(self.iso), self.ev)
     }
@@ -193,7 +231,10 @@ impl Pro {
                 "shutter" => pro.shutter = v.parse().ok().filter(|i| *i < SHUTTERS.len()),
                 "iso" => pro.iso = v.parse().ok().filter(|i| *i < ISOS.len()),
                 "ev" => pro.ev = v.parse::<i8>().unwrap_or(0).clamp(-EV_THIRDS, EV_THIRDS),
-                "wb" => pro.wb = v.parse::<u32>().ok().filter(|k| (KELVIN_MIN..=KELVIN_MAX).contains(k)).map_or(Wb::Auto, Wb::Kelvin),
+                "wb" => {
+                    let grey = v.strip_prefix('g').and_then(|g| g.split_once(':')).and_then(|(r, b)| Some(Wb::Grey(r.parse().ok()?, b.parse().ok()?)));
+                    pro.wb = grey.unwrap_or_else(|| v.parse::<u32>().ok().filter(|k| (KELVIN_MIN..=KELVIN_MAX).contains(k)).map_or(Wb::Auto, Wb::Kelvin));
+                }
                 _ => {}
             }
         }
@@ -350,6 +391,8 @@ pub struct PreviewControls {
     pub ev: f32,
     pub ct: Option<u32>,
     pub frame_max_us: u32,
+    /// A grey card's white balance gains (red, blue), before `ct`.
+    pub gains: Option<[f32; 2]>,
 }
 
 impl PreviewControls {
@@ -359,14 +402,15 @@ impl PreviewControls {
         let exp = self.exposure_us.map_or("auto".to_owned(), |e| e.to_string());
         let gain = self.gain.map_or("auto".to_owned(), |g| format!("{g:.3}"));
         let ct = self.ct.map_or("auto".to_owned(), |k| k.to_string());
-        format!("pro exp={exp} gain={gain} ev={:.3} ct={ct} max={}", self.ev, self.frame_max_us)
+        let gains = self.gains.map_or(String::new(), |[r, b]| format!(" gains={r:.4},{b:.4}"));
+        format!("pro exp={exp} gain={gain} ev={:.3} ct={ct} max={}{gains}", self.ev, self.frame_max_us)
     }
 }
 
 /// The preview's controls for the dials (`None`: the plain photo mode).
 pub fn preview(pro: Option<&Pro>, night: bool) -> PreviewControls {
     let cap = if night { NIGHT_CAP_US } else { PREVIEW_CAP_US };
-    let Some(pro) = pro else { return PreviewControls { exposure_us: None, gain: None, ev: 0.0, ct: None, frame_max_us: cap } };
+    let Some(pro) = pro else { return PreviewControls { exposure_us: None, gain: None, ev: 0.0, ct: None, frame_max_us: cap, gains: None } };
     let mut exposure_us = pro.shutter.map(|i| SHUTTERS[i].us);
     let mut gain = pro.iso.map(|i| iso_gain(ISOS[i]));
     // Longer than a frame: shown at a frame's length, the gain making up the
@@ -379,10 +423,10 @@ pub fn preview(pro: Option<&Pro>, night: bool) -> PreviewControls {
     }
     let ev = if pro.manual() { 0.0 } else { f32::from(pro.ev) / 3.0 };
     let ct = match pro.wb {
-        Wb::Auto => None,
         Wb::Kelvin(k) => Some(k),
+        Wb::Auto | Wb::Grey(..) => None,
     };
-    PreviewControls { exposure_us, gain, ev, ct, frame_max_us: cap.max(exposure_us.unwrap_or(0)) }
+    PreviewControls { exposure_us, gain, ev, ct, frame_max_us: cap.max(exposure_us.unwrap_or(0)), gains: pro.wb.gains() }
 }
 
 /// The sensor's noise filter for a photo, as libcamera's NoiseReductionMode.
@@ -495,16 +539,24 @@ pub fn still(pro: Option<&Pro>, m: &Metered, night: bool) -> StillControls {
     };
     let ct = pro.and_then(|p| match p.wb {
         Wb::Kelvin(k) => Some(k),
-        Wb::Auto => None,
+        Wb::Auto | Wb::Grey(..) => None,
     });
+    let grey = pro.and_then(|p| p.wb.gains());
     let (sharpness, denoise) = processing(gain);
-    StillControls { exposure_us, gain, gains: if ct.is_some() { None } else { Some(m.gains) }, ct, sharpness, denoise }
+    StillControls { exposure_us, gain, gains: if ct.is_some() { None } else { Some(grey.unwrap_or(m.gains)) }, ct, sharpness, denoise }
 }
 
-/// Real low light, where detail mode's "auto" merges a burst: the photo
-/// needs most of the sensor's gain even at a slow hand-held shutter.
+/// Below this, detail mode's "auto" merges a burst (lux).
+pub const DETAIL_LUX: f32 = 25.0;
+
+/// Real low light, where detail mode's "auto" merges a burst: under 25 lux
+/// by the camera's own measure, and the photo out of room as well (all of
+/// the gain at a shutter of 1/20 s or slower), both. 0.9.3 took either,
+/// and a gain of 8 at 1/40 s, which an evening room under about 140 lux
+/// needs: every photo indoors at night was a burst, its "hold still" for
+/// all of it.
 pub fn low_light(m: &Metered, s: &StillControls) -> bool {
-    m.lux < 25.0 || (s.gain >= 8.0 && s.exposure_us >= 25_000)
+    m.lux < DETAIL_LUX && s.gain >= MAX_GAIN - 0.01 && s.exposure_us >= 50_000
 }
 
 // ------------------------------------------------- histogram and zebras ---
@@ -645,7 +697,7 @@ mod tests {
         assert_eq!(SHUTTERS[12].label, "1/125");
         assert_eq!(SHUTTERS[12].us, 8_000);
         assert_eq!(SHUTTERS.first().map(|s| s.us), Some(500));
-        assert_eq!(SHUTTERS.last().map(|s| s.us), Some(1_000_000));
+        assert_eq!(SHUTTERS.last().map(|s| s.us), Some(LONGEST_US));
         assert!(SHUTTERS.windows(2).all(|w| w[1].us > w[0].us), "longer each step");
         // Each step a third of a stop (within the marks' rounding).
         for w in SHUTTERS.windows(2) {
@@ -672,7 +724,7 @@ mod tests {
 
         // A second at ISO 100: the preview at a frame's length with fifteen
         // times the gain (the same brightness), the photo the whole second.
-        let long = Pro { shutter: Some(SHUTTERS.len() - 1), iso: Some(0), ev: 0, wb: Wb::Auto };
+        let long = Pro { shutter: Some(nearest_shutter(1_000_000)), iso: Some(0), ev: 0, wb: Wb::Auto };
         let p = preview(Some(&long), false);
         assert_eq!(p.exposure_us, Some(PREVIEW_CAP_US));
         assert!((p.gain.unwrap() - MAX_GAIN).abs() < 1e-3, "capped at the sensor's gain: {:?}", p.gain);
@@ -754,7 +806,8 @@ mod tests {
         assert_eq!(shutter_words(8_000), "1/125");
         assert_eq!(shutter_words(16_000), "1/60");
         assert_eq!(shutter_words(1_000_000), "1s");
-        assert_eq!(shutter_words(3_000_000), "3.0s");
+        assert_eq!(shutter_words(3_000_000), "3.2s");
+        assert_eq!(shutter_words(14_000_000), "14s");
         assert_eq!(iso_words(242), "ISO 250");
         assert!(shaky(66_667) && !shaky(33_333) && !shaky(16_667));
         // The meter: right at the tuning's reference, a stop over at twice.

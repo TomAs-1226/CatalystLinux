@@ -146,6 +146,9 @@ pub struct Standby {
     /// The wait last ticked with, in seconds: leaving the faces, the time is
     /// counted from where the screen would have gone off.
     off_at: f32,
+    /// Something runs unwatched (the Camera's intervalometer): dimmed after
+    /// a few seconds without a key, and held there, never off.
+    hold_dim: bool,
 }
 
 impl Standby {
@@ -164,7 +167,13 @@ impl Standby {
             down: false,
             faces: None,
             off_at: 60.0,
+            hold_dim: false,
         }
+    }
+
+    /// Something runs unwatched: dim the screen soon, and never further.
+    pub fn set_hold_dim(&mut self, on: bool) {
+        self.hold_dim = on;
     }
 
     /// Whether StandBy may show where the screen would go off (on the
@@ -334,18 +343,26 @@ impl Standby {
     pub fn tick(&mut self, dt: f32, screen_off: u32, keep_awake: bool, calm: bool) -> bool {
         // Only a look: off again soon (sooner than the wait chosen).
         let screen_off = if self.glance && (screen_off == 0 || screen_off > GLANCE) { GLANCE } else { screen_off };
-        if (keep_awake && !self.down) || screen_off == 0 {
+        // Held dim: the idle time counts whatever keeps it awake, and the
+        // screen dims at it, but goes no further.
+        if self.hold_dim {
+            self.idle += dt;
+        } else if (keep_awake && !self.down) || screen_off == 0 {
             self.idle = 0.0;
         } else {
             self.idle += dt;
         }
-        let off_at = screen_off as f32;
-        let dim_at = (off_at - DIM_BEFORE).max(off_at * 0.5);
-        if screen_off > 0 {
+        let (off_at, dim_at) = if self.hold_dim {
+            (f32::INFINITY, crate::camkit::RUN_DIMS_AFTER)
+        } else {
+            let off_at = screen_off as f32;
+            (off_at, (off_at - DIM_BEFORE).max(off_at * 0.5))
+        };
+        if screen_off > 0 && !self.hold_dim {
             self.off_at = off_at;
         }
         match self.state {
-            State::Awake if screen_off > 0 && self.idle >= dim_at => {
+            State::Awake if (screen_off > 0 || self.hold_dim) && self.idle >= dim_at => {
                 self.state = State::Dim;
                 self.base = if self.backlight { crate::sys::brightness() } else { None };
                 self.level.set_with(DIM_LEVEL, role::smooth());

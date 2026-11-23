@@ -393,6 +393,13 @@ pub trait Screen {
     fn keeps_awake(&self) -> bool {
         false
     }
+    /// Something runs on its own while nobody watches (the Camera's
+    /// intervalometer): the screen dims after a few seconds without a key
+    /// and stays dimmed, never going off, and the handheld never goes to
+    /// standby while it does.
+    fn holds_dim(&self) -> bool {
+        false
+    }
     /// Enter held down repeats, as a remote's button does when held (the
     /// Remote app's buttons). Elsewhere Enter counts once a press.
     fn repeats_enter(&self) -> bool {
@@ -3618,6 +3625,7 @@ impl Shell {
         moving |= self.lift_and_lay_down();
         let keep = self.stack.last().is_some_and(|(s, _)| s.keeps_awake()) || self.saving.is_some();
         self.standby.set_faces(self.faces_wanted());
+        self.standby.set_hold_dim(self.stack.last().is_some_and(|(s, _)| s.holds_dim()));
         moving |= self.watch_charger();
         moving |= self.standby.tick(dt, self.settings.screen_off, keep, self.settings.calm);
         moving |= self.tick_lock_and_faces(dt, motion_dt);
