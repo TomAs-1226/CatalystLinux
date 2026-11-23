@@ -10,7 +10,7 @@ Settings: Creality Print's own SPARKX i7 system presets (machine, "0.20mm Standa
 PLA"), resolved through their inheritance chains, plus the black-PLA profile below. Per-part
 layer height, walls, infill, brim and support placement go on each object.
 
-Every STL in ../stl/ is printed except the fit test, in the orientation it was exported in.
+Every STL in ../stl/ is printed except those in SKIP, in the orientation it was exported in.
 Parts the tables below do not name get DEFAULT_PART.
 
 Needs, under .tools/ (gitignored), and numpy:
@@ -138,9 +138,11 @@ PARTS = {
     # cable-channel ceiling 2.6 mm up, a few mm wide
     'link-cover-camera': part('Link cover', '0.16', 4, '30%', block=LOW),
     'plunger-camera': part('Button-B plunger', '0.12', 4, '100%', SMALL_BRIM),
-    'accent-plain': part('Gold accent', '0.12', 3, '100%', SMALL_BRIM),
+    'accent-plain': part('Accent', '0.12', 3, '100%', SMALL_BRIM),
 }
-SKIP = ('fit-test',)
+# not on the black plate: the fit test, and the chassis and plunger (printed separately in
+# white PETG from the current STLs; their geometry does not change)
+SKIP = ('fit-test', 'chassis', 'plunger-camera')
 
 def default_part(key):
     return part(key.replace('-', ' ').capitalize())

@@ -43,7 +43,7 @@ All STLs in `stl/` are already oriented for the bed. Each file is named `part__m
 - **Light blue:** link cover.
 - **White PETG:** chassis and plunger.
 
-**Ready-to-print plate for the Creality SPARKX i7.** `plates/make_plates.py` builds `plates/black-PLA.3mf`. Every part prints in black PLA, packed onto as few 260 × 260 mm plates as fit (one for the current parts). Each part keeps its layer height, walls and infill from the table above. The file uses Creality Print's own SPARKX i7 presets ("0.20mm Standard", "Generic PLA") with these changes:
+**Ready-to-print plate for the Creality SPARKX i7.** `plates/make_plates.py` builds `plates/black-PLA.3mf`. It holds the frame, both backplates, the link cover, the trim and the accent, all in black PLA, packed onto as few 260 × 260 mm plates as fit. The chassis and plunger are not on it: they print separately in white PETG and do not change. Each part keeps its layer height, walls and infill from the table above. The file uses Creality Print's own SPARKX i7 presets ("0.20mm Standard", "Generic PLA") with these changes:
 
 - **Adhesion:**
   - first layer 0.25 mm thick and 0.44 mm wide, at 30 mm/s (35 mm/s infill);
@@ -52,7 +52,7 @@ All STLs in `stl/` are already oriented for the bed. Each file is named `part__m
 - **Supports:**
   - organic tree, auto, for faces under 40°, with 3 top and 2 bottom interface layers and 0.2 mm gaps;
   - from the build plate only where that reaches every overhang, otherwise everywhere (the frame's window tops sit over the sills);
-  - a support blocker keeps supports out of the bottom 3 mm of the backplates, chassis and link cover. Those are shallow recesses, screw counterbores and nut pockets, so they are bridged instead.
+  - a support blocker keeps supports out of the bottom 3 mm of the backplates and link cover. Those are shallow recesses and screw counterbores, so they are bridged instead.
 - **Stringing:**
   - 205 °C (210 °C first layer), flow capped at 11 mm³/s;
   - retraction 1.0 mm at 40 mm/s (the i7 is direct drive), wipe on, 0.2 mm z-hop;
@@ -67,7 +67,6 @@ All STLs in `stl/` are already oriented for the bed. Each file is named `part__m
 3. Press **Slice**, then **Print**.
 
 - **Fit test:** optional. Its STL is still in `stl/`.
-- **Chassis:** PLA is fine for a first case. PETG holds up better against the warm back of the device.
 
 **If a print fails:**
 
