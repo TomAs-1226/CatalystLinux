@@ -96,13 +96,14 @@
 // lens are known; libcamera picks otherwise.
 //
 // Memory: every camera buffer comes from the kernel's contiguous pool (CMA,
-// 64 MB, shared with the GPU, which keeps 16 MB of it for its binner while
-// the shell draws with it). libcamera's Raspberry Pi pipeline keeps four raw
-// frames of its own by default: at the full 3280 × 2464 that is 39 MB, and
-// with the ISP's output frame and ours (12 MB each) 63 MB, which never fit,
-// so until 1.3 every photo fell back to the binned 1640 × 1232. Now the
-// pipeline is told to keep one raw frame of its own (vc4.yaml beside this
-// program, through LIBCAMERA_RPI_CONFIG_FILE): a photo needs 35 MB. The
+// 128 MB since 1.1.0, shared with the GPU, which keeps 16 MB of it for its
+// binner while the shell draws with it). libcamera's Raspberry Pi pipeline
+// keeps four raw frames of its own by default: at the full 3280 × 2464 that
+// is 39 MB, and with the ISP's output frame and ours (12 MB each) 63 MB. The
+// pipeline is told to keep two (vc4.yaml beside this program, through
+// LIBCAMERA_RPI_CONFIG_FILE): a photo needs about 45 MB. One was too few: the
+// sensor had nowhere to write while the ISP held it, and no photo ever came
+// (1.1.1). The
 // preview gives the sensor raw frames of ours in each request instead, so it
 // still never waits for one. The photo's frame is copied out of the camera's
 // memory at once and the camera handed back to the preview; the JPEG is

@@ -10,6 +10,11 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 1.1.1
+
+### Fixed
+- Photos: taken at last, at the full 8 MP in under a second. The camera's pipeline kept one frame for the sensor, which had nowhere to write while the picture was being made, so no photo ever came; it keeps two now.
+
 ## 1.1.0
 
 Photos are taken again, every control says its key, and the smart camera
