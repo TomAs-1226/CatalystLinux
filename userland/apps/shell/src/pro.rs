@@ -393,6 +393,8 @@ pub struct PreviewControls {
     pub frame_max_us: u32,
     /// A grey card's white balance gains (red, blue), before `ct`.
     pub gains: Option<[f32; 2]>,
+    /// Metered on the middle alone (the exposure lock taking its reading).
+    pub spot: bool,
 }
 
 impl PreviewControls {
@@ -403,14 +405,20 @@ impl PreviewControls {
         let gain = self.gain.map_or("auto".to_owned(), |g| format!("{g:.3}"));
         let ct = self.ct.map_or("auto".to_owned(), |k| k.to_string());
         let gains = self.gains.map_or(String::new(), |[r, b]| format!(" gains={r:.4},{b:.4}"));
-        format!("pro exp={exp} gain={gain} ev={:.3} ct={ct} max={}{gains}", self.ev, self.frame_max_us)
+        let spot = if self.spot { " meter=spot" } else { "" };
+        format!("pro exp={exp} gain={gain} ev={:.3} ct={ct} max={}{gains}{spot}", self.ev, self.frame_max_us)
+    }
+
+    /// The camera's own exposure, with a compensation, up to `cap`.
+    pub fn auto(ev: f32, cap: u32) -> PreviewControls {
+        PreviewControls { exposure_us: None, gain: None, ev, ct: None, frame_max_us: cap, gains: None, spot: false }
     }
 }
 
 /// The preview's controls for the dials (`None`: the plain photo mode).
 pub fn preview(pro: Option<&Pro>, night: bool) -> PreviewControls {
     let cap = if night { NIGHT_CAP_US } else { PREVIEW_CAP_US };
-    let Some(pro) = pro else { return PreviewControls { exposure_us: None, gain: None, ev: 0.0, ct: None, frame_max_us: cap, gains: None } };
+    let Some(pro) = pro else { return PreviewControls::auto(0.0, cap) };
     let mut exposure_us = pro.shutter.map(|i| SHUTTERS[i].us);
     let mut gain = pro.iso.map(|i| iso_gain(ISOS[i]));
     // Longer than a frame: shown at a frame's length, the gain making up the
@@ -426,7 +434,7 @@ pub fn preview(pro: Option<&Pro>, night: bool) -> PreviewControls {
         Wb::Kelvin(k) => Some(k),
         Wb::Auto | Wb::Grey(..) => None,
     };
-    PreviewControls { exposure_us, gain, ev, ct, frame_max_us: cap.max(exposure_us.unwrap_or(0)), gains: pro.wb.gains() }
+    PreviewControls { exposure_us, gain, ev, ct, frame_max_us: cap.max(exposure_us.unwrap_or(0)), gains: pro.wb.gains(), spot: false }
 }
 
 /// The sensor's noise filter for a photo, as libcamera's NoiseReductionMode.
@@ -535,6 +543,11 @@ pub fn still(pro: Option<&Pro>, m: &Metered, night: bool) -> StillControls {
         Some((Some(e), None)) => (e, (total / e as f32).clamp(1.0, MAX_GAIN)),
         // ISO priority: the time that keeps it, up to a quarter of a second.
         Some((None, Some(g))) => ((total / g).round().clamp(100.0, 250_000.0) as u32, g),
+        // Photo mode before the camera's exposure has settled (just opened,
+        // or the scene just changed): where it is going, by its light
+        // meter, not where it has got to (1.3.1: a photo taken then was off
+        // by as much as the exposure had still to move).
+        None if !m.settled && m.lux > 0.05 => split(settling_total(m), longest),
         _ => split(total, longest),
     };
     let ct = pro.and_then(|p| match p.wb {
@@ -544,6 +557,12 @@ pub fn still(pro: Option<&Pro>, m: &Metered, night: bool) -> StillControls {
     let grey = pro.and_then(|p| p.wb.gains());
     let (sharpness, denoise) = processing(gain);
     StillControls { exposure_us, gain, gains: if ct.is_some() { None } else { Some(grey.unwrap_or(m.gains)) }, ct, sharpness, denoise }
+}
+
+/// Where the camera's own exposure is going while it settles: what its
+/// light meter says the light needs, within what it can reach.
+pub fn settling_total(m: &Metered) -> f32 {
+    (AE_OF_LUX * LUX_REFERENCE / m.lux.max(0.05)).clamp(100.0, AE_LONGEST_US as f32 * MAX_GAIN)
 }
 
 /// Below this, detail mode's "auto" merges a burst (lux).
@@ -557,6 +576,496 @@ pub const DETAIL_LUX: f32 = 25.0;
 /// all of it.
 pub fn low_light(m: &Metered, s: &StillControls) -> bool {
     m.lux < DETAIL_LUX && s.gain >= MAX_GAIN - 0.01 && s.exposure_us >= 50_000
+}
+
+// ------------------------------------------------------------------ night ---
+//
+// Night (1.3.1): in the dark a photo is a stack of short frames merged as
+// they come (catalyst-camera's stack.h), not one long frame. It goes on by
+// itself where the camera's own exposure has no room left (all of its gain
+// at its longest shutter) or the light is low; its length comes from how
+// still the handheld is (imu.rs's Steadiness): about a second in the hand,
+// up to four braced or lying on something.
+//
+// Why: the camera's own exposure stops at the tuning's normal profile's
+// 1/15 s and a gain of 10 (rpi.agc's exposure_modes: libcamera's AGC never
+// goes past a profile's last shutter, whatever the frame allows), so from
+// about 35 lux down the preview, and every photo taken from it, simply got
+// darker. Night's 1/5 s cap before 1.3.1 changed only the frame's limit,
+// which the AGC never reached: a photo was 1/15 s at a gain of 10 with
+// night on or off.
+
+/// The camera's own longest exposure: the IMX219 tuning's normal profile.
+pub const AE_LONGEST_US: u32 = 66_666;
+
+/// The camera's mid-grey against its light meter's reference: the AGC's
+/// y_target (0.16 to 0.17) against rpi.lux's reference Y (12744 of 65536,
+/// 0.194). What the meter says is needed, times this, is what the camera's
+/// own exposure settles on (checked as it goes: [`LuxScale`]).
+pub const AE_OF_LUX: f32 = 0.85;
+
+/// Under this light the camera's own exposure has no room left: its
+/// longest shutter at all of its gain is just enough (35 lux).
+pub const NIGHT_ON_LUX: f32 = LUX_REFERENCE * AE_OF_LUX / (AE_LONGEST_US as f32 * MAX_GAIN);
+/// And Night gives way again above this: two thirds of a stop brighter, so
+/// it never flickers on and off at the edge (my own tuning).
+pub const NIGHT_OFF_LUX: f32 = NIGHT_ON_LUX * 1.6;
+
+/// Whether the camera's own exposure is out of room: all of its gain at its
+/// longest shutter (within a tenth of each, as it gets there).
+pub fn out_of_room(m: &Metered) -> bool {
+    m.analogue * m.digital >= MAX_GAIN * 0.9 && m.exposure_us as f32 >= AE_LONGEST_US as f32 * 0.9
+}
+
+/// What the light needs (µs at a gain of 1, for the camera's mid-grey):
+/// the camera's own exposure where it is its own (`auto`), settled and with
+/// room to spare; else its light meter's reading (which goes on falling
+/// after the exposure can follow it no further, and is the light whatever
+/// the exposure was set to), scaled by `scale` ([`LuxScale`]).
+pub fn needed_us(m: &Metered, scale: f32, auto: bool) -> f32 {
+    if auto && m.settled && !out_of_room(m) {
+        m.total()
+    } else {
+        scale * LUX_REFERENCE / m.lux.max(0.05)
+    }
+}
+
+/// The light meter's scale against the camera's own exposure, learnt as
+/// frames come where both are right: [`AE_OF_LUX`] to begin with.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LuxScale {
+    pub k: f32,
+}
+
+impl Default for LuxScale {
+    fn default() -> Self {
+        LuxScale { k: AE_OF_LUX }
+    }
+}
+
+impl LuxScale {
+    /// A frame taken in, its exposure the camera's own and uncompensated:
+    /// where it has settled with room to spare in light enough to read well,
+    /// eased a tenth of the way toward what it shows (a stop either side of
+    /// the reference's at the most).
+    pub fn feed(&mut self, m: &Metered) {
+        if !m.settled || out_of_room(m) || m.lux < 5.0 {
+            return;
+        }
+        let k = m.total() * m.lux / LUX_REFERENCE;
+        if k.is_finite() {
+            self.k += 0.1 * (k.clamp(AE_OF_LUX * 0.5, AE_OF_LUX * 2.0) - self.k);
+        }
+    }
+}
+
+/// Night's setting (`n` steps through it, and it is remembered): on by
+/// itself in the dark, off, or on always at a length.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum NightMode {
+    #[default]
+    Auto,
+    Off,
+    /// Seconds: 1, 2 or 4.
+    Fixed(u8),
+}
+
+pub const NIGHT_MODES: [NightMode; 5] = [NightMode::Auto, NightMode::Off, NightMode::Fixed(1), NightMode::Fixed(2), NightMode::Fixed(4)];
+
+impl NightMode {
+    /// The next in turn: auto, off, 1 s, 2 s, 4 s, then auto again.
+    pub fn next(self) -> NightMode {
+        let at = NIGHT_MODES.iter().position(|m| *m == self).unwrap_or(0);
+        NIGHT_MODES[(at + 1) % NIGHT_MODES.len()]
+    }
+
+    /// As kept in the Camera's file.
+    pub fn name(self) -> &'static str {
+        match self {
+            NightMode::Auto => "auto",
+            NightMode::Off => "off",
+            NightMode::Fixed(1) => "1",
+            NightMode::Fixed(2) => "2",
+            NightMode::Fixed(_) => "4",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<NightMode> {
+        NIGHT_MODES.into_iter().find(|m| m.name() == name)
+    }
+
+    /// As its chip's choices say it.
+    pub fn words(self) -> &'static str {
+        match self {
+            NightMode::Auto => "auto",
+            NightMode::Off => "off",
+            NightMode::Fixed(1) => "1 s",
+            NightMode::Fixed(2) => "2 s",
+            NightMode::Fixed(_) => "4 s",
+        }
+    }
+}
+
+/// How the handheld is held, from the motion sensor (imu.rs's
+/// Steadiness): in the hand, or braced (on a surface, against a wall).
+/// Without a motion sensor, always in the hand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Steady {
+    #[default]
+    Hand,
+    Braced,
+}
+
+/// How long the light must say so before Night goes on or off (s): long
+/// enough that a lamp passing through the picture changes nothing, short
+/// enough that it is on by the time the camera is raised (my own tuning).
+pub const NIGHT_SETTLE_S: f32 = 0.6;
+
+/// Night's "auto": dark or not, from each frame, with a moment's patience
+/// each way and two thirds of a stop between on and off.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct NightSense {
+    pub dark: bool,
+    held: f32,
+}
+
+impl NightSense {
+    /// A frame taken in, `dt` after the last: whether dark changed. Dark
+    /// is the camera's own exposure out of room (settled there), or the
+    /// light under [`NIGHT_ON_LUX`]; light again only over [`NIGHT_OFF_LUX`]
+    /// (Night's own preview is always out of room: the light says).
+    pub fn feed(&mut self, m: &Metered, dt: f32) -> bool {
+        let want = if self.dark { m.lux < NIGHT_OFF_LUX } else { m.lux < NIGHT_ON_LUX || (m.settled && out_of_room(m)) };
+        if want == self.dark {
+            self.held = 0.0;
+            return false;
+        }
+        self.held += dt.clamp(0.0, 0.25);
+        if self.held >= NIGHT_SETTLE_S {
+            self.dark = want;
+            self.held = 0.0;
+            return true;
+        }
+        false
+    }
+}
+
+/// A night photo: its frames, each one's exposure and gain, and the
+/// brightness they could not reach, given back as it is finished (stops).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NightPlan {
+    pub frames: u32,
+    pub frame_us: u32,
+    pub gain: f32,
+    pub lift: f32,
+}
+
+impl NightPlan {
+    /// All of its frames together (µs).
+    pub fn total_us(&self) -> u32 {
+        self.frames * self.frame_us
+    }
+
+    /// Its length as the chip says it: "1 s", "2.5 s", or "1/2 s".
+    pub fn length_words(&self) -> String {
+        length_words(self.total_us())
+    }
+}
+
+/// A length as Night's chip says it: whole seconds or a half, tenths
+/// under a second, 1/N under a third.
+pub fn length_words(us: u32) -> String {
+    let s = us as f32 / 1e6;
+    if s >= 0.95 {
+        let halves = (s * 2.0).round() / 2.0;
+        if (halves - halves.round()).abs() < 0.01 { format!("{halves:.0} s") } else { format!("{halves:.1} s") }
+    } else if s >= 0.3 {
+        format!("{s:.1} s")
+    } else {
+        format!("1/{} s", (1.0 / s.max(1e-4)).round() as u32)
+    }
+}
+
+/// Each frame's longest: about an eighth of a second in the hand (a hand's
+/// tremor blurs past that at this lens's 29 mm), a second braced.
+pub const HAND_FRAME_US: u32 = 125_000;
+pub const BRACED_FRAME_US: u32 = 1_000_000;
+/// A night photo in the hand: about a second in all.
+pub const HAND_NIGHT_US: u32 = 1_000_000;
+/// Braced: two to four seconds, as the dark asks.
+pub const BRACED_NIGHT_US: (u32, u32) = (2_000_000, 4_000_000);
+/// A stack's frames: four at the least (fewer cannot tell what moved from
+/// the noise), 32 at the most (stack.h's).
+pub const NIGHT_FRAMES_LEAST: u32 = 4;
+pub const NIGHT_FRAMES_MOST: u32 = 32;
+/// Night looks like night: half a stop under the day's mid-grey (my own
+/// tuning, as phones' night modes leave the dark dark).
+pub const NIGHT_LOOK: f32 = 0.707;
+/// The most brightness given back after the merge (stops): past that the
+/// noise left shows more than the picture gains.
+pub const NIGHT_LIFT_MOST: f32 = 2.0;
+
+/// How long a night photo is, all of its frames together (µs): a length
+/// chosen; else about a second in the hand, and braced twice what the light
+/// needs at the most gain, in whole seconds from two to four.
+pub fn night_length(mode: NightMode, steady: Steady, needed_us: f32) -> u32 {
+    match (mode, steady) {
+        (NightMode::Fixed(s), _) => u32::from(s) * 1_000_000,
+        (_, Steady::Hand) => HAND_NIGHT_US,
+        (_, Steady::Braced) => {
+            let want = 2.0 * needed_us * NIGHT_LOOK / MAX_GAIN / 1e6;
+            let (least, most) = BRACED_NIGHT_US;
+            (want.round().clamp(least as f32 / 1e6, most as f32 / 1e6) * 1e6) as u32
+        }
+    }
+}
+
+/// A night photo's frames for the light (`needed_us`), the setting and the
+/// hand: as many of the hand's or the brace's longest frames as the length
+/// takes (four at the least), each at the gain that brings the night's
+/// look, and what the gain cannot reach given back as it is finished. In
+/// more light than that needs (a length chosen by hand in a lit room), each
+/// frame is no longer than one at the least gain needs.
+pub fn night_plan(needed_us: f32, mode: NightMode, steady: Steady) -> NightPlan {
+    let total = night_length(mode, steady, needed_us) as f32;
+    let target = needed_us * NIGHT_LOOK;
+    let longest = match steady {
+        Steady::Hand => HAND_FRAME_US,
+        Steady::Braced => BRACED_FRAME_US,
+    } as f32;
+    let longest = longest.min(target.max(100.0));
+    let frames = ((total / longest).ceil() as u32).clamp(NIGHT_FRAMES_LEAST, NIGHT_FRAMES_MOST);
+    let frame_us = (total / frames as f32).min(longest).max(100.0);
+    let gain = (target / frame_us).clamp(1.0, MAX_GAIN);
+    let lift = (target / (frame_us * gain)).log2().clamp(0.0, NIGHT_LIFT_MOST);
+    NightPlan { frames, frame_us: frame_us.round() as u32, gain, lift }
+}
+
+/// Night's preview: a tenth of a second (ten frames a second, still a
+/// moving picture to frame with) and as much gain as brings the night's
+/// look, up to 24 (all of the sensor's 10.7, the ISP's digital gain the
+/// rest), in sixths of a stop so the order changes only with the light.
+pub const NIGHT_PREVIEW_US: u32 = 100_000;
+pub const NIGHT_PREVIEW_GAIN: f32 = 24.0;
+
+pub fn night_preview(needed_us: f32) -> PreviewControls {
+    let gain = (needed_us * NIGHT_LOOK / NIGHT_PREVIEW_US as f32).clamp(1.0, NIGHT_PREVIEW_GAIN);
+    let gain = 2f32.powf((gain.log2() * 6.0).round() / 6.0).clamp(1.0, NIGHT_PREVIEW_GAIN);
+    PreviewControls { exposure_us: Some(NIGHT_PREVIEW_US), gain: Some(gain), ev: 0.0, ct: None, frame_max_us: NIGHT_PREVIEW_US, gains: None, spot: false }
+}
+
+// ----------------------------------------------------- highlights and HDR ---
+
+/// What the preview's brightness says of the light's spread: the share
+/// clipped (250 and over, as the zebras), bright (232 and over), in deep
+/// shadow (under 24), and the middle brightness.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Tones {
+    pub clipped: f32,
+    pub bright: f32,
+    pub deep: f32,
+    pub median: u8,
+}
+
+impl Tones {
+    pub fn of(h: &Histogram) -> Tones {
+        let n = h.bins.iter().sum::<u32>().max(1) as f32;
+        let share = |range: std::ops::Range<usize>| h.bins[range].iter().sum::<u32>() as f32 / n;
+        let mut run = 0u32;
+        let half = h.bins.iter().sum::<u32>() / 2;
+        let mut median = 0u8;
+        for (i, b) in h.bins.iter().enumerate() {
+            run += b;
+            if run > half {
+                median = ((i * 256 + 128) / BINS) as u8;
+                break;
+            }
+        }
+        Tones { clipped: h.clipped, bright: share(BINS * 232 / 256..BINS), deep: share(0..BINS * 24 / 256), median }
+    }
+}
+
+/// Over this share clipped, the exposure eases down to keep the highlights.
+pub const GUARD_CLIPPED: f32 = 0.015;
+/// Under this (and little bright), it comes back up.
+pub const GUARD_CLEAR: f32 = 0.003;
+/// A sixth of a stop at a time, a quarter of a second apart: the camera's
+/// exposure follows in a few frames, so it never hunts (my own tuning).
+pub const GUARD_STEP: f32 = 1.0 / 6.0;
+pub const GUARD_EVERY_S: f32 = 0.25;
+/// Down a stop and a half at the most; half a stop with a face in the
+/// picture (the face's own exposure comes first).
+pub const GUARD_MOST: f32 = 1.5;
+pub const GUARD_MOST_FACE: f32 = 0.5;
+/// While the middle of the picture is brighter than this, the rest can
+/// spare the exposure; darker, the highlights are HDR's to keep.
+pub const GUARD_MEDIAN_FLOOR: u8 = 64;
+
+/// Highlight protection (1.3.1): the photo's exposure compensation (0 or
+/// under) eased down while part of the picture is blown and the rest can
+/// spare it, and back up once nothing is; the photo gives the mid-tones
+/// back as it is finished, the highlights rolled into white on a shoulder.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HighlightGuard {
+    pub ev: f32,
+    wait: f32,
+}
+
+impl HighlightGuard {
+    /// A frame's tones taken in, `dt` after the last: whether the
+    /// compensation changed.
+    pub fn feed(&mut self, t: &Tones, face: bool, dt: f32) -> bool {
+        self.wait -= dt.clamp(0.0, 0.25);
+        if self.wait > 0.0 {
+            return false;
+        }
+        let most = if face { GUARD_MOST_FACE } else { GUARD_MOST };
+        let before = self.ev;
+        if self.ev < -most - 1e-3 {
+            self.ev = (self.ev + GUARD_STEP).min(-most);
+        } else if t.clipped > GUARD_CLIPPED && t.median > GUARD_MEDIAN_FLOOR {
+            self.ev = (self.ev - GUARD_STEP).max(-most);
+        } else if t.clipped < GUARD_CLEAR && t.bright < 0.02 {
+            self.ev = (self.ev + GUARD_STEP).min(0.0);
+        }
+        self.ev = (self.ev * 6.0).round() / 6.0;
+        let changed = (self.ev - before).abs() > 1e-3;
+        if changed {
+            self.wait = GUARD_EVERY_S;
+        }
+        changed
+    }
+
+    /// The mid-tones a guarded photo gets back as it is finished (stops):
+    /// most of what was taken, the shoulder keeping the highlights.
+    pub fn lift(&self) -> f32 {
+        (-self.ev * 0.6).max(0.0)
+    }
+}
+
+/// HDR's setting (its chip, `b`): on by itself in a backlit or high
+/// contrast scene, or off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum HdrMode {
+    #[default]
+    Auto,
+    Off,
+}
+
+impl HdrMode {
+    pub fn next(self) -> HdrMode {
+        match self {
+            HdrMode::Auto => HdrMode::Off,
+            HdrMode::Off => HdrMode::Auto,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            HdrMode::Auto => "auto",
+            HdrMode::Off => "off",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<HdrMode> {
+        [HdrMode::Auto, HdrMode::Off].into_iter().find(|m| m.name() == name)
+    }
+}
+
+/// Deep shadow over this share, with the highlights blown (or kept only by
+/// pulling the exposure down), is a scene for HDR.
+pub const HDR_DEEP: f32 = 0.08;
+
+/// Whether the scene wants HDR: highlights clipped, or kept only by the
+/// guard's pulling the exposure down half a stop or more, and deep shadow
+/// besides.
+pub fn hdr_scene(t: &Tones, guard_ev: f32) -> bool {
+    (t.clipped > GUARD_CLIPPED || guard_ev <= -0.5 + 1e-3) && t.deep > HDR_DEEP
+}
+
+/// HDR's "auto", with a moment's patience each way, as Night's.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HdrSense {
+    pub on: bool,
+    held: f32,
+}
+
+impl HdrSense {
+    pub fn feed(&mut self, t: &Tones, guard_ev: f32, dt: f32) -> bool {
+        let want = hdr_scene(t, guard_ev);
+        if want == self.on {
+            self.held = 0.0;
+            return false;
+        }
+        self.held += dt.clamp(0.0, 0.25);
+        if self.held >= NIGHT_SETTLE_S {
+            self.on = want;
+            self.held = 0.0;
+            return true;
+        }
+        false
+    }
+}
+
+/// HDR's frames: four, at an exposure that keeps the highlights, merged as
+/// Night's are (aligned, what moved left as the first frame had it), then
+/// the shadows and mid-tones given back on the finish's shoulder. All at
+/// one exposure (as Google's HDR+): nothing can ghost between exposures, and
+/// the merge's lower noise is what pays for lifting the shadows.
+pub const HDR_FRAMES: u32 = 4;
+
+pub fn hdr_plan(m: &Metered, t: &Tones, guard_ev: f32) -> NightPlan {
+    // Half a stop under the guarded exposure while anything still clips.
+    let extra = if t.clipped > GUARD_CLEAR { 0.5 } else { 0.0 };
+    let safe = m.total() * 2f32.powf(-extra);
+    let (frame_us, gain) = split(safe, PREVIEW_CAP_US);
+    NightPlan { frames: HDR_FRAMES, frame_us, gain, lift: (extra - guard_ev).clamp(0.5, 2.5) }
+}
+
+// ------------------------------------------------------------------- lock ---
+
+/// The exposure lock (`e`, 1.3.1): read on the middle of the picture alone,
+/// then held there until it is let go. The lens is fixed-focus, so there is
+/// no focus distance to hold with it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Lock {
+    #[default]
+    Off,
+    /// Metering on the middle, this long so far (s).
+    Reading(f32),
+    Held { exposure_us: u32, gain: f32 },
+}
+
+/// The reading: half a second for the camera's exposure to follow the
+/// middle (settled by then, or a second and a half at the most).
+pub const LOCK_READ_S: f32 = 0.5;
+pub const LOCK_READ_MOST_S: f32 = 1.5;
+
+impl Lock {
+    pub fn on(&self) -> bool {
+        !matches!(self, Lock::Off)
+    }
+
+    /// A frame taken in while it reads: whether it is now held.
+    pub fn feed(&mut self, m: &Metered, dt: f32) -> bool {
+        let Lock::Reading(t) = *self else { return false };
+        let t = t + dt.clamp(0.0, 0.25);
+        if (t >= LOCK_READ_S && m.settled) || t >= LOCK_READ_MOST_S {
+            *self = Lock::Held { exposure_us: m.exposure_us, gain: (m.analogue * m.digital).max(1.0) };
+            return true;
+        }
+        *self = Lock::Reading(t);
+        false
+    }
+
+    /// The preview's controls while it is on.
+    pub fn controls(&self) -> Option<PreviewControls> {
+        match *self {
+            Lock::Off => None,
+            Lock::Reading(_) => Some(PreviewControls { spot: true, ..PreviewControls::auto(0.0, PREVIEW_CAP_US) }),
+            Lock::Held { exposure_us, gain } => Some(PreviewControls { exposure_us: Some(exposure_us), gain: Some(gain), ..PreviewControls::auto(0.0, PREVIEW_CAP_US.max(exposure_us)) }),
+        }
+    }
 }
 
 // ------------------------------------------------- histogram and zebras ---
@@ -862,5 +1371,220 @@ mod tests {
         // The same step blurred over twenty pixels: nothing strong enough.
         let soft: Vec<u8> = (0..w * h).map(|i| (30.0 + 190.0 * (((i % w) as f32 - 22.0) / 20.0).clamp(0.0, 1.0)) as u8).collect();
         assert!(!peaks(&soft, w, h).iter().any(|m| *m), "a blur shows no peaks");
+    }
+
+    /// The camera's own metering of a scene in `lux`, as its exposure
+    /// follows it: settled, up to the normal profile's 1/15 s at 10.
+    fn metered_at(lux: f32) -> Metered {
+        let need = AE_OF_LUX * LUX_REFERENCE / lux;
+        let (e, g) = if need <= AE_LONGEST_US as f32 * MAX_GAIN { (((need / MAX_GAIN).max(10_000.0)) as u32, (need / (need / MAX_GAIN).max(10_000.0)).max(1.0)) } else { (AE_LONGEST_US, MAX_GAIN) };
+        Metered { exposure_us: e, analogue: g, digital: 1.0, lux, settled: true, ..Metered::default() }
+    }
+
+    fn sense_for(sense: &mut NightSense, m: &Metered, seconds: f32) -> bool {
+        let mut changed = false;
+        for _ in 0..(seconds * 30.0) as usize {
+            changed |= sense.feed(m, 1.0 / 30.0);
+        }
+        changed
+    }
+
+    #[test]
+    fn night_goes_on_in_the_dark_by_the_cameras_own_metering_and_not_at_the_edge() {
+        // Where the camera's own exposure runs out: its 1/15 s at a gain of
+        // 10, about 35 lux by its own light reference.
+        assert!((NIGHT_ON_LUX - 35.2).abs() < 0.5, "{NIGHT_ON_LUX}");
+        assert!(!out_of_room(&metered_at(300.0)) && !out_of_room(&metered_at(40.0)));
+        assert!(out_of_room(&metered_at(30.0)) && out_of_room(&metered_at(2.0)));
+        // An evening room (100 lux): never.
+        let mut sense = NightSense::default();
+        assert!(!sense_for(&mut sense, &metered_at(100.0), 3.0) && !sense.dark);
+        // Dark: on, but only once it has stayed dark a moment.
+        let dark = metered_at(12.0);
+        sense_for(&mut sense, &dark, 0.3);
+        assert!(!sense.dark, "a moment's dark (a hand over the lens) changes nothing");
+        assert!(sense_for(&mut sense, &dark, 1.0) && sense.dark);
+        // Out of room though the meter reads a little more (its scale off): dark too.
+        let mut other = NightSense::default();
+        let edge = Metered { lux: 40.0, ..metered_at(20.0) };
+        assert!(sense_for(&mut other, &edge, 1.0) && other.dark);
+        // Between on and off it stays as it is, either way: no flicker at the edge.
+        let between = metered_at(45.0);
+        assert!(!sense_for(&mut sense, &between, 3.0) && sense.dark);
+        let mut light = NightSense::default();
+        assert!(!sense_for(&mut light, &between, 3.0) && !light.dark);
+        // Light again: off.
+        assert!(sense_for(&mut sense, &metered_at(90.0), 1.0) && !sense.dark);
+        // Its own bright preview (a manual 1/10 s at 24) is out of room by
+        // the camera's numbers: the light meter decides, not that.
+        let mut lit = NightSense { dark: true, ..NightSense::default() };
+        let preview = Metered { exposure_us: NIGHT_PREVIEW_US, analogue: 10.6, digital: 2.2, lux: 300.0, settled: true, ..Metered::default() };
+        assert!(sense_for(&mut lit, &preview, 1.0) && !lit.dark);
+    }
+
+    #[test]
+    fn nights_length_comes_from_the_hand_and_its_frames_stay_short_in_it() {
+        let need = |lux: f32| needed_us(&metered_at(lux), AE_OF_LUX, true);
+        // Out of room, the light meter says how dark it really is.
+        assert!(need(2.0) > 9.0 * need(20.0) && need(2.0) < 11.0 * need(20.0));
+        // In the hand: a second in all, of eighths of a second.
+        for lux in [30.0, 10.0, 1.0, 0.1] {
+            let p = night_plan(need(lux), NightMode::Auto, Steady::Hand);
+            assert_eq!((p.frames, p.frame_us), (8, HAND_FRAME_US), "{lux} lux: {p:?}");
+            assert_eq!(p.length_words(), "1 s");
+        }
+        // Braced: two seconds and more as the dark deepens, four at most,
+        // frames up to a second.
+        let braced: Vec<NightPlan> = [10.0, 1.0, 0.5, 0.1].iter().map(|l| night_plan(need(*l), NightMode::Auto, Steady::Braced)).collect();
+        assert_eq!(braced.iter().map(NightPlan::length_words).collect::<Vec<_>>(), ["2 s", "3 s", "4 s", "4 s"]);
+        assert!(braced.iter().all(|p| p.frame_us <= BRACED_FRAME_US && p.frames >= NIGHT_FRAMES_LEAST), "{braced:?}");
+        assert_eq!((braced[3].frames, braced[3].frame_us), (4, 1_000_000));
+        // A length chosen is kept, in the hand's short frames.
+        let four = night_plan(need(5.0), NightMode::Fixed(4), Steady::Hand);
+        assert_eq!((four.frames, four.frame_us, four.length_words()), (32, HAND_FRAME_US, "4 s".to_owned()));
+        // The gain brings the night's look; what it cannot reach is given
+        // back after the merge, two stops at most.
+        let dim = night_plan(need(30.0), NightMode::Auto, Steady::Hand);
+        assert!(dim.gain < MAX_GAIN && dim.lift == 0.0, "{dim:?}");
+        let dark = night_plan(need(1.0), NightMode::Auto, Steady::Hand);
+        assert_eq!(dark.gain, MAX_GAIN);
+        assert!(dark.lift > 1.5 && dark.lift <= NIGHT_LIFT_MOST);
+        // A length chosen in a lit room: frames no longer than the light needs.
+        let lit = night_plan(need(300.0), NightMode::Fixed(1), Steady::Hand);
+        assert!(lit.frame_us as f32 * lit.gain <= need(300.0) * NIGHT_LOOK * 1.01 && lit.frames <= NIGHT_FRAMES_MOST, "{lit:?}");
+        // Its preview: a tenth of a second, brighter than the camera's own
+        // could be, in sixths of a stop.
+        let p = night_preview(need(5.0));
+        assert_eq!((p.exposure_us, p.frame_max_us), (Some(NIGHT_PREVIEW_US), NIGHT_PREVIEW_US));
+        assert!(p.gain.unwrap() * NIGHT_PREVIEW_US as f32 > AE_LONGEST_US as f32 * MAX_GAIN, "{p:?}");
+        assert_eq!(night_preview(need(0.01)).gain, Some(NIGHT_PREVIEW_GAIN));
+        assert_eq!(night_preview(need(20.0)), night_preview(need(20.0) * 1.01), "the same order for a flicker of light");
+        assert!(night_preview(need(20.0)).gain < night_preview(need(10.0)).gain);
+        // The setting steps auto, off, 1 s, 2 s, 4 s and round, by name.
+        let mut m = NightMode::Auto;
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            seen.push(m.words());
+            m = m.next();
+            assert_eq!(NightMode::from_name(m.name()), Some(m));
+        }
+        assert_eq!(seen, ["auto", "off", "1 s", "2 s", "4 s", "auto"]);
+        assert_eq!(length_words(2_500_000), "2.5 s");
+        assert_eq!(length_words(754_000), "0.8 s");
+        assert_eq!(length_words(250_000), "1/4 s");
+    }
+
+    #[test]
+    fn the_light_meters_scale_is_learnt_from_the_cameras_own_exposure() {
+        let mut scale = LuxScale::default();
+        // The camera settles a third brighter than the reference says.
+        let m = Metered { exposure_us: 20_000, analogue: 2.0, lux: AE_OF_LUX * 1.33 * LUX_REFERENCE / 40_000.0, settled: true, ..Metered::default() };
+        for _ in 0..60 {
+            scale.feed(&m);
+        }
+        assert!((scale.k / AE_OF_LUX - 1.33).abs() < 0.02, "{scale:?}");
+        // Out of room, or unsettled, it learns nothing.
+        let k = scale.k;
+        scale.feed(&metered_at(2.0));
+        scale.feed(&Metered { settled: false, ..m });
+        assert_eq!(scale.k, k);
+        // Settling, a photo is taken where the exposure is going.
+        let settling = Metered { exposure_us: 2_000, analogue: 1.0, lux: 50.0, settled: false, ..Metered::default() };
+        let s = still(None, &settling, false);
+        assert!(s.exposure_us as f32 * s.gain > 0.9 * settling_total(&settling), "{s:?}");
+    }
+
+    fn tones(clipped: f32, bright: f32, deep: f32, median: u8) -> Tones {
+        Tones { clipped, bright, deep, median }
+    }
+
+    #[test]
+    fn highlights_are_kept_by_easing_the_exposure_down_and_given_back_after() {
+        // From the histogram: a window clipping over a lit room.
+        let mut h = Histogram::default();
+        h.bins[BINS - 1] = 5;
+        h.bins[BINS * 120 / 256] = 80;
+        h.bins[2] = 15;
+        h.clipped = 0.05;
+        let t = Tones::of(&h);
+        assert!((t.bright - 0.05).abs() < 1e-6 && (t.deep - 0.15).abs() < 1e-6 && t.median > 100, "{t:?}");
+        // A sky blown over a bright picture: down a sixth at a time, a
+        // quarter second apart, a stop and a half at most.
+        let mut guard = HighlightGuard::default();
+        let sky = tones(0.06, 0.1, 0.0, 120);
+        let mut steps = 0;
+        for _ in 0..200 {
+            steps += usize::from(guard.feed(&sky, false, 1.0 / 30.0));
+        }
+        assert_eq!((guard.ev, steps), (-GUARD_MOST, 9));
+        assert!((guard.lift() - 0.9).abs() < 1e-3);
+        // With a face, half a stop at most.
+        let mut face = HighlightGuard::default();
+        for _ in 0..200 {
+            face.feed(&sky, true, 1.0 / 30.0);
+        }
+        assert_eq!(face.ev, -GUARD_MOST_FACE);
+        // Held while some is bright but none clips; back up once none is.
+        let held = guard.ev;
+        for _ in 0..60 {
+            guard.feed(&tones(0.005, 0.04, 0.0, 120), false, 1.0 / 30.0);
+        }
+        assert_eq!(guard.ev, held);
+        for _ in 0..200 {
+            guard.feed(&tones(0.0, 0.0, 0.0, 110), false, 1.0 / 30.0);
+        }
+        assert_eq!(guard.ev, 0.0);
+        // A dark picture with a lamp in it: the rest cannot spare it.
+        let mut lamp = HighlightGuard::default();
+        for _ in 0..60 {
+            lamp.feed(&tones(0.03, 0.04, 0.5, 30), false, 1.0 / 30.0);
+        }
+        assert_eq!(lamp.ev, 0.0);
+    }
+
+    #[test]
+    fn hdr_is_for_blown_highlights_over_deep_shadows_and_keeps_the_sky() {
+        // Backlit: the sky clipped, the people in deep shadow.
+        assert!(hdr_scene(&tones(0.08, 0.2, 0.25, 70), 0.0));
+        // Kept by the guard, the shadows still deep: HDR still.
+        assert!(hdr_scene(&tones(0.0, 0.03, 0.2, 60), -1.0));
+        // Bright all over (snow), or dark all over (a room at night): not.
+        assert!(!hdr_scene(&tones(0.08, 0.6, 0.01, 200), 0.0));
+        assert!(!hdr_scene(&tones(0.0, 0.0, 0.6, 20), 0.0));
+        let mut sense = HdrSense::default();
+        let backlit = tones(0.08, 0.2, 0.25, 70);
+        sense.feed(&backlit, 0.0, 0.3);
+        assert!(!sense.on, "a moment's glare changes nothing");
+        sense.feed(&backlit, 0.0, 0.2);
+        sense.feed(&backlit, 0.0, 0.2);
+        assert!(sense.on);
+        // Its frames: four, under the camera's exposure while anything
+        // clips, the mid-tones given back after.
+        let m = Metered { exposure_us: 4_000, analogue: 1.0, settled: true, ..Metered::default() };
+        let p = hdr_plan(&m, &backlit, -1.0);
+        assert_eq!(p.frames, HDR_FRAMES);
+        assert!((p.frame_us as f32 * p.gain - 4_000.0 / 2f32.sqrt()).abs() < 2.0, "{p:?}");
+        assert!((p.lift - 1.5).abs() < 1e-3);
+        assert_eq!(HdrMode::from_name(HdrMode::Auto.next().name()), Some(HdrMode::Off));
+    }
+
+    #[test]
+    fn the_lock_reads_the_middle_then_holds_its_exposure() {
+        let mut lock = Lock::Reading(0.0);
+        assert!(lock.controls().unwrap().spot && lock.controls().unwrap().order().ends_with(" meter=spot"));
+        let m = Metered { exposure_us: 12_000, analogue: 3.0, digital: 1.0, settled: true, ..Metered::default() };
+        assert!(!lock.feed(&m, 0.25), "the camera's exposure is given time to follow the middle");
+        assert!(lock.feed(&m, 0.3));
+        assert_eq!(lock, Lock::Held { exposure_us: 12_000, gain: 3.0 });
+        let held = lock.controls().unwrap();
+        assert_eq!((held.exposure_us, held.gain, held.spot), (Some(12_000), Some(3.0), false));
+        // Never settling, it holds what it has after a second and a half.
+        let mut slow = Lock::Reading(0.0);
+        let mut n = 0;
+        while !slow.feed(&Metered { settled: false, ..m }, 0.125) {
+            n += 1;
+        }
+        assert_eq!(n, 11);
+        assert!(Lock::Off.controls().is_none() && !Lock::Off.on());
     }
 }

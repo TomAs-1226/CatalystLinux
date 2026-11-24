@@ -573,6 +573,81 @@ impl Gestures {
     }
 }
 
+// ------------------------------------------------------------- steadiness ---
+
+/// How long the handheld must keep still to count as braced for Night (s):
+/// longer than a held hand's pauses between its tremors, short enough to be
+/// known by the time it is set down and the shutter pressed (my own tuning).
+pub const BRACED_FOR: f32 = 0.8;
+/// Its turning, the gyroscope's zero-rate offset taken off, under this
+/// throughout (degrees a second): a hand holding still shakes at 0.5 to 2,
+/// a bench or a wall leaves the BMI270's noise, about 0.1.
+pub const BRACED_DPS: f32 = 0.6;
+/// And its way up within this of where it was (degrees).
+pub const BRACED_TILT: f32 = 0.5;
+/// A jolt part way through a night photo: turning this fast (a hand moving
+/// off the subject, not shaking), or turned this far since it began.
+pub const JOLT_DPS: f32 = 25.0;
+pub const JOLT_TILT: f32 = 5.0;
+/// A zero-rate offset more than this is a turn, not an offset.
+const OFFSET_MOST: f32 = 3.0;
+
+/// Whether the handheld is held still enough for a long night (Night's
+/// length), and whether it was jolted while one is taken, from the motion
+/// sensor's readings as the Camera takes them in.
+///
+/// The BMI270's gyroscope reads a little turning even lying still (its
+/// zero-rate offset, up to half a degree a second on each axis): what is
+/// measured is the turning about its own slow mean, not its size.
+#[derive(Clone, Debug, Default)]
+pub struct Steadiness {
+    /// The turning's slow mean (the offset), once there is one.
+    offset: Option<Vec3>,
+    /// How long it has kept still, and its way up when it began to.
+    still_for: f32,
+    rest: Option<Vec3>,
+    /// The way up when the night photo began, for a jolt.
+    start: Option<Vec3>,
+}
+
+impl Steadiness {
+    /// A reading `dt` seconds after the last.
+    pub fn feed(&mut self, r: &Reading, dt: f32) {
+        let dt = dt.clamp(0.0, 0.25);
+        let offset = *self.offset.get_or_insert(if r.turn.len() < OFFSET_MOST { r.turn } else { Vec3::default() });
+        let wobble = r.turn.sub(offset).len();
+        let tilted = self.rest.is_some_and(|rest| r.up.angle_to(rest) > BRACED_TILT);
+        if wobble < BRACED_DPS && !tilted {
+            // Still: the offset learnt (slowly, over about two seconds).
+            if r.turn.len() < OFFSET_MOST {
+                self.offset = Some(offset.add(r.turn.sub(offset).scale((dt / 2.0).min(1.0))));
+            }
+            self.rest.get_or_insert(r.up);
+            self.still_for += dt;
+        } else {
+            self.still_for = 0.0;
+            self.rest = Some(r.up);
+        }
+    }
+
+    /// Braced: still for [`BRACED_FOR`].
+    pub fn braced(&self) -> bool {
+        self.still_for >= BRACED_FOR
+    }
+
+    /// A night photo begins: its jolts are counted from here.
+    pub fn begin(&mut self, r: Option<&Reading>) {
+        self.start = r.map(|r| r.up);
+    }
+
+    /// Whether a reading is a jolt: turning fast, or turned well away from
+    /// where the photo began.
+    pub fn jolted(&self, r: &Reading) -> bool {
+        let offset = self.offset.unwrap_or_default();
+        r.turn.sub(offset).len() > JOLT_DPS || self.start.is_some_and(|s| r.up.angle_to(s) > JOLT_TILT)
+    }
+}
+
 // ------------------------------------------------------- what the shell sees ---
 
 /// What answered on the bus.
@@ -1154,6 +1229,70 @@ fn simulated(t: f32, heading: f32, swing: f32) -> Reading {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Readings 30 ms apart (the sensor's rate while held): turning about a
+    /// zero-rate offset by `shake` degrees a second, the way up wandering by
+    /// `drift` degrees a second.
+    fn readings(n: usize, offset: Vec3, shake: f32, drift: f32, seed: &mut u32) -> Vec<Reading> {
+        let mut out = Vec::new();
+        let mut tilt = 0.0f32;
+        for _ in 0..n {
+            let mut rnd = || {
+                *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (*seed >> 8) as f32 / 16_777_216.0 * 2.0 - 1.0
+            };
+            let turn = offset.add(Vec3::new(rnd(), rnd(), rnd()).scale(shake));
+            tilt += drift * 0.03;
+            let a = tilt.to_radians();
+            out.push(Reading { up: Vec3::new(a.sin(), 0.0, a.cos()), turn, field: None });
+        }
+        out
+    }
+
+    #[test]
+    fn braced_is_turning_no_more_than_the_sensors_noise_for_most_of_a_second() {
+        let mut seed = 7;
+        // The BMI270's offset, as one lying still reads it.
+        let offset = Vec3::new(0.4, -0.3, 0.25);
+        // On a bench: its noise about the offset. Braced after 0.8 s, not before.
+        let mut s = Steadiness::default();
+        let bench = readings(40, offset, 0.15, 0.0, &mut seed);
+        for r in &bench[..20] {
+            s.feed(r, 0.03);
+        }
+        assert!(!s.braced(), "not yet: 0.6 s");
+        for r in &bench[20..] {
+            s.feed(r, 0.03);
+        }
+        assert!(s.braced(), "still for 1.2 s, its offset taken off");
+        // In the hand: a degree or two a second of tremor, never braced.
+        let mut hand = Steadiness::default();
+        for r in readings(100, offset, 1.5, 0.0, &mut seed) {
+            hand.feed(&r, 0.03);
+        }
+        assert!(!hand.braced());
+        // Leant on a wall but slowly tipping over: not braced either.
+        let mut tipping = Steadiness::default();
+        for r in readings(100, offset, 0.1, 1.0, &mut seed) {
+            tipping.feed(&r, 0.03);
+        }
+        assert!(!tipping.braced());
+        // Picked up from the bench: in the hand at once.
+        for r in readings(3, offset, 4.0, 0.0, &mut seed) {
+            s.feed(&r, 0.03);
+        }
+        assert!(!s.braced());
+        // A jolt while a night photo is taken: turning fast, or turned away.
+        let mut s = Steadiness::default();
+        for r in &bench {
+            s.feed(r, 0.03);
+        }
+        s.begin(bench.last());
+        assert!(!s.jolted(&bench[0]));
+        assert!(s.jolted(&Reading { turn: Vec3::new(30.0, 0.0, 0.0), ..bench[0] }));
+        let a = 7f32.to_radians();
+        assert!(s.jolted(&Reading { up: Vec3::new(a.sin(), 0.0, a.cos()), ..bench[0] }));
+    }
 
     /// A BMI270 with a BMM150 behind it (or not), as registers: what the
     /// driver writes lands here, and what it reads comes from here.

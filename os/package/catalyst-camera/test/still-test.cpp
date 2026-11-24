@@ -92,6 +92,24 @@ int main()
 	check(deadline_ms(LONGEST_US, 1) > LONGEST_US / 1000 * 2, "the longest exposure is waited for");
 	check(matches(16000, 16000) && matches(16100, 16000) && !matches(20000, 16000) && !matches(5000, 0), "an exposure matches within a tenth");
 
+	// Night and HDR's stacks: each frame's wait grows with its exposure.
+	check(stack_frame_ms(125000) == 2 * 126 + MERGE_MS && stack_frame_ms(1000000) == 2 * 1001 + MERGE_MS, "a stack's frame waits two of its lengths and a merge");
+	check(stack_frame_ms(4000) == stack_frame_ms(60000), "short frames wait the sensor's fastest full-size frame");
+	check(stack_frame_ms(1000000) > 2 * stack_frame_ms(125000) && stack_frame_ms(1000000) > 1000, "a one-second frame waits longer than it takes");
+	check(stack_ms(125000, 8) == 4000 + 8 * stack_frame_ms(125000) && stack_ms(125000, 8) < 10000, "a hand-held night (8 x 1/8 s) is bounded under ten seconds");
+	check(stack_ms(1000000, 4) > 4 * 1000000 / 1000 && stack_ms(1000000, 4) == 4000 + 4 * stack_frame_ms(1000000), "a braced night (4 x 1 s) is bounded past its four seconds");
+	check(stack_ms(125000, 1000) == stack_ms(125000, STACK_MOST), "no more frames than a stack holds");
+	{
+		long hand = stack_expect_ms(125000, 8), braced = stack_expect_ms(1000000, 4);
+		std::printf("     expected: 8 x 1/8 s %ld ms, 4 x 1 s %ld ms\n", hand, braced);
+		check(hand >= 1000 && hand < stack_ms(125000, 8) && braced >= 4000 && braced < stack_ms(1000000, 4), "what a stack should take: its frames' time, and inside its bound");
+	}
+	check(!enough(1, 8) && !enough(2, 8) && enough(3, 8) && enough(2, 4) && !enough(1, 2) && enough(2, 2), "enough of a stack: a third of it, two frames at least");
+	check(stack_mb(3280, 2464) == 45 && stack_mb(1640, 1232) == 12, "a stack's memory: 45 MB at full size, 12 binned");
+	check(stack_size(400) == StackSize::Full && stack_size(96 + 12 + 45) == StackSize::Full, "room for the full size: merged at 3280 x 2464");
+	check(stack_size(96 + 12 + 44) == StackSize::Binned && stack_size(96 + 12 + 12) == StackSize::Binned, "short of it: merged binned, at 1640 x 1232");
+	check(stack_size(96 + 12 + 11) == StackSize::None && stack_size(-1) == StackSize::Full, "too short for either: no stack; not known: full");
+
 	struct Case {
 		unsigned W, H, a, b, x, y, w, h;
 	} cases[] = {

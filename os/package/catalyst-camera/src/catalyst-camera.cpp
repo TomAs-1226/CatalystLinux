@@ -31,6 +31,8 @@
 //           "still", "detail" or "bracket" (the shell's "hold still")
 //   kind 7  the sensor is done with the photo (or its burst or set): it
 //           may move now; the line is the timing marks so far
+//   kind 8  a stack's frames so far (Night and HDR, 1.9): "<taken>
+//           <planned> <merged> <ms left>", after each frame
 //   kind 5  what the camera said of the frame that follows, a line:
 //           "exp=16000 ag=2.000 dg=1.000 r=1.9000 b=1.6000 ct=4800
 //           lux=210.0 ae=1 fom=1234 zoom=0.00" (exposure µs, analogue and
@@ -68,6 +70,19 @@
 //                                          bracketing: one more frame of the
 //                                          same session at that exposure,
 //                                          saved there (a word for each)
+//                       stack=<n>          Night and HDR (1.9): n frames at
+//                                          the exposure given, merged as
+//                                          they come (stack.h), at the full
+//                                          size where memory has room for
+//                                          its sums, else binned; the first
+//                                          frame, made small, is shown in
+//                                          the preview's place meanwhile
+//                       stackfor=night|hdr what it is for (its Exif)
+//                       lift=<stops> toe=<0..0.5> neutral=<0..1>
+//                                          the finish (stack.h): brightness
+//                                          given back, the shadows lifted,
+//                                          near-grey pulled toward neutral
+//                                          (also for a single photo)
 //   detail auto|on <path>[\t<word>…]
 //                     detail mode: the photo as above, then up to five more
 //                     full-size frames with its exposure and white balance
@@ -79,13 +94,21 @@
 //   face x0 y0 x1 y1  where a face is, 0 to 1 across this camera's picture
 //   face none         (from the smart camera on the Grove port): the
 //                     exposure leans toward it
+//   stack end         a stack ends as soon as enough of it is merged (the
+//                     hand moved: still.h's enough), and is kept
+//   stack cancel      a stack ends at once with no photo (kind 3 "cancelled")
+//                     (both read as they come, not after the photo)
 //   night on|off      longer exposures allowed (down to 5 frames a second,
-//                     a fifth of a second for a photo) when the light is low
+//                     a fifth of a second for a photo) when the light is low;
+//                     into the next request, as the dials are (it restarted
+//                     the camera until 1.9: the picture went dark and its
+//                     exposure started again each time)
 //   pro exp=<µs|auto> gain=<g|auto> ev=<stops> ct=<K|auto> max=<µs>
-//       [gains=<r>,<b>]
+//       [gains=<r>,<b>] [meter=spot]
 //                     the preview's exposure and white balance (pro mode's
 //                     dials): fixed where given, the camera's own where auto;
-//                     white balance gains (the grey card's) before ct
+//                     white balance gains (the grey card's) before ct; the
+//                     exposure metered on the middle alone (the lock, 1.9)
 //   focus on <x> <y>  the focus check: the preview from the full sensor,
 //   focus off         cropped one pixel to one around (x, y) (0 to 1 of
 //                     the picture); the binned mode cropped (half scale)
@@ -161,6 +184,7 @@
 #include <libcamera/libcamera.h>
 
 #include "photo.h"
+#include "stack.h"
 #include "still.h"
 
 #include <fcntl.h>
@@ -222,10 +246,16 @@ struct ProControls {
 	int64_t max_us = 0;
 	// White balance gains fixed (red, blue: the grey card's), else 0.
 	float gains[2] = { 0, 0 };
+	// Metered on the middle alone (the exposure lock), else centre-weighted.
+	bool spot = false;
 };
 std::mutex pro_lock;
 ProControls pro;
 std::atomic<bool> pro_dirty{false};
+
+// A stack under way told to end once it has enough (1), or at once with
+// no photo (2); 0 while nothing is asked. Set as the order is read.
+std::atomic<int> stack_order{0};
 
 // The focus check: asked for, where (0 to 1, the picture's way up), and its
 // scale once running (1: the full sensor one to one; 0.5: the binned mode;
@@ -514,6 +544,8 @@ enum class Phase { Preview, Still, Burst, Stopped };
 std::mutex burst_lock;
 std::condition_variable burst_ready;
 std::deque<Request *> burst_done;
+// A stack's order has come (under burst_lock): its wait looks up.
+bool stack_woken = false;
 
 // The light as the preview last saw it (lux, and the gain it took), for
 // detail mode's "auto": on in dim light.
@@ -658,6 +690,7 @@ void pro_into(ControlList &c, bool with_limits)
 	}
 	// The face's lean rides on the compensation asked for.
 	c.set(controls::ExposureValue, p.ev + ev);
+	c.set(controls::AeMeteringMode, p.spot ? controls::MeteringSpot : controls::MeteringCentreWeighted);
 	if (p.gains[0] > 0 && p.gains[1] > 0) {
 		c.set(controls::AwbEnable, false);
 		c.set(controls::ColourGains, Span<const float, 2>({ p.gains[0], p.gains[1] }));
@@ -1144,6 +1177,11 @@ struct Asked {
 		std::string path;
 	};
 	std::vector<Also> also;
+	// Night and HDR: the frames to merge (0 or 1: none), what for, and the
+	// finish (any photo may have one).
+	int stack = 0;
+	std::string stack_for;
+	stack::Finish finish;
 };
 
 Asked asked_of(const std::string &words)
@@ -1184,6 +1222,16 @@ Asked asked_of(const std::string &words)
 			a.bias_thirds = std::atoi(value.c_str());
 		else if (key == "program")
 			a.program = std::clamp(std::atoi(value.c_str()), 0, 8);
+		else if (key == "stack")
+			a.stack = std::clamp(std::atoi(value.c_str()), 0, still::STACK_MOST);
+		else if (key == "stackfor")
+			a.stack_for = value == "hdr" ? "hdr" : "night";
+		else if (key == "lift")
+			a.finish.lift = std::clamp(std::strtof(value.c_str(), nullptr), 0.0f, 4.0f);
+		else if (key == "toe")
+			a.finish.toe = std::clamp(std::strtof(value.c_str(), nullptr), 0.0f, 0.5f);
+		else if (key == "neutral")
+			a.finish.neutral = std::clamp(std::strtof(value.c_str(), nullptr), 0.0f, 1.0f);
 		else if (key == "also") {
 			Asked::Also more;
 			int used = 0;
@@ -1227,6 +1275,10 @@ struct Shot {
 	// Its compensation (Exif), and its timing marks.
 	int bias_thirds = 0;
 	still::Marks marks;
+	// A stack: the frames merged of those asked, each frame's exposure
+	// (`exposure_us` is then all of them together, as its Exif says).
+	int stacked = 0, stack_planned = 0;
+	int64_t frame_us = 0;
 };
 
 // ------------------------------------------------------------------ exif ---
@@ -1340,6 +1392,23 @@ std::vector<uint8_t> exif(const Shot &s)
 	zero.shorts(0x0128, 2);
 	zero.ascii(0x0131, software());
 	zero.ascii(0x0132, when);
+	// A stack (Night, HDR): what it was made of. Its exposure time below is
+	// all of its frames' together.
+	if (s.stacked > 1) {
+		auto seconds = [](int64_t us) {
+			char t[24];
+			if (us >= 300000)
+				std::snprintf(t, sizeof t, "%.1f", double(us) / 1e6);
+			else
+				std::snprintf(t, sizeof t, "1/%d", int(std::lround(1e6 / double(std::max<int64_t>(us, 1)))));
+			std::string out = t;
+			if (out.size() > 2 && out.compare(out.size() - 2, 2, ".0") == 0)
+				out.resize(out.size() - 2);
+			return out;
+		};
+		std::string words = (s.with.stack_for == "hdr" ? "HDR: " : "Night: ") + std::to_string(s.stacked) + " frames of " + seconds(s.frame_us) + " s merged, " + seconds(s.exposure_us) + " s in all";
+		zero.ascii(0x010e, words);
+	}
 	zero.shorts(0x0213, 1);
 	zero.longs(0x8769, 0);
 	uint32_t us = uint32_t(std::clamp<int64_t>(s.exposure_us, 1, 60000000));
@@ -1470,7 +1539,9 @@ int frame_file(const Mapped &m, unsigned int w, unsigned int h, unsigned int str
 Request *next_done(std::chrono::steady_clock::time_point until)
 {
 	std::unique_lock<std::mutex> lock(burst_lock);
-	burst_ready.wait_until(lock, until, [] { return !burst_done.empty() || !running; });
+	// A stack's order ("stack end", "stack cancel") wakes it too, once.
+	burst_ready.wait_until(lock, until, [] { return !burst_done.empty() || !running || stack_woken; });
+	stack_woken = false;
 	if (burst_done.empty())
 		return nullptr;
 	Request *request = burst_done.front();
@@ -1629,6 +1700,125 @@ void take_set(Session &s, Request *first, const Shot &base, still::Crop crop, co
 	}
 }
 
+// Night and HDR (1.9): the rest of a stack after its first frame (`first`,
+// not yet copied out), each frame merged into the running sum as it comes
+// (stack.h) while the sensor exposes the next, the exposure and white
+// balance held as the first had them. One frame is copied out at a time;
+// the sums are the only other memory. The first frame, made small, is the
+// viewfinder's picture meanwhile. Each frame is waited for on its own
+// (still.h's stack_frame_ms) and the whole within stack_ms: whatever was
+// merged by then is the photo. "stack end" ends it as soon as enough is
+// merged; "stack cancel" ends it with nothing (false, `cancelled`).
+bool take_stack(Session &s, Request *first, Shot &shot, still::Crop crop, const Held_as &as, bool &cancelled)
+{
+	cancelled = false;
+	const int planned = std::clamp(shot.with.stack, 2, still::STACK_MOST);
+	auto m = s.planes.find(first->findBuffer(s.stream));
+	if (m == s.planes.end())
+		return false;
+	std::vector<uint8_t> frame(size_t(crop.w) * crop.h * 3 / 2);
+	dma_sync(s.external_fd, true);
+	copy_frame(m->second, s.stride, s.w, s.h, crop, turn_here, frame.data());
+	dma_sync(s.external_fd, false);
+	{
+		std::lock_guard<std::mutex> lock(burst_lock);
+		burst_done.clear();
+	}
+	// The rest held as the first, the sensor at the next while it is merged.
+	ControlList hold = held_controls(as.exposure_us, as.analogue, as.wb);
+	phase = Phase::Burst;
+	first->reuse(Request::ReuseBuffers);
+	first->controls().merge(hold);
+	bool queued = camera->queueRequest(first) >= 0;
+	auto began = std::chrono::steady_clock::now();
+	stack::Stack sum(crop.w, crop.h);
+	sum.first(frame.data());
+	int taken = 1;
+	// The viewfinder: the first frame, small and toned as the photo will be
+	// (only the whole picture: an aspect's crop would not fill it).
+	if (colour && crop.w * 3 == crop.h * 4) {
+		uint8_t table[256];
+		stack::tone_table(shot.with.finish.lift, shot.with.finish.toe, table);
+		std::vector<uint8_t> small;
+		stack::small_copy(frame.data(), crop.w, crop.h, width, height, table, small);
+		{
+			std::lock_guard<std::mutex> hold_frames(lock);
+			newest.swap(small);
+			newest_said.clear();
+			made++;
+		}
+		fresh.notify_one();
+	}
+	auto progress = [&] {
+		long per = taken > 1 ? ms_since(began) / (taken - 1) : still::stack_frame_ms(as.exposure_us) / 2;
+		char line[64];
+		std::snprintf(line, sizeof line, "%d %d %d %ld", taken, planned, sum.frames, long(planned - taken) * per);
+		tell(8, 0, line);
+	};
+	progress();
+	const auto until_all = began + std::chrono::milliseconds(still::stack_ms(as.exposure_us, planned));
+	int bad = 0;
+	while (queued && taken < planned && running) {
+		int order = stack_order.load();
+		if (order == 2) {
+			cancelled = true;
+			break;
+		}
+		if (order == 1 && still::enough(sum.frames, planned))
+			break;
+		auto until = std::min(until_all, std::chrono::steady_clock::now() + std::chrono::milliseconds(still::stack_frame_ms(as.exposure_us)));
+		Request *request = next_done(until);
+		if (!request) {
+			// Woken by an order, not a frame: looked at again.
+			if (std::chrono::steady_clock::now() < until && running)
+				continue;
+			std::fprintf(stderr, "stack: the wait for frame %d ran out (%d of %d merged)\n", taken + 1, sum.frames, planned);
+			break;
+		}
+		still::Status status = status_of(request, s.stream);
+		if (status == still::Cancelled)
+			break;
+		bool copied = false;
+		if (status == still::Success || status == still::Startup) {
+			auto p = s.planes.find(request->findBuffer(s.stream));
+			if (p != s.planes.end()) {
+				dma_sync(s.external_fd, true);
+				copy_frame(p->second, s.stride, s.w, s.h, crop, turn_here, frame.data());
+				dma_sync(s.external_fd, false);
+				copied = true;
+			}
+		} else if (++bad >= 3) {
+			break;
+		}
+		// Straight back to the sensor, then merged while it exposes the next.
+		request->reuse(Request::ReuseBuffers);
+		if (camera->queueRequest(request) < 0)
+			queued = false;
+		if (!copied)
+			continue;
+		taken++;
+		if (!sum.add(frame.data(), 3))
+			std::fprintf(stderr, "stack: frame %d would not line up; left out\n", taken);
+		progress();
+	}
+	if (cancelled || !running)
+		return false;
+	shot.stacked = sum.frames;
+	shot.stack_planned = planned;
+	shot.frame_us = as.exposure_us;
+	shot.exposure_us = as.exposure_us * sum.frames;
+	shot.w = crop.w;
+	shot.h = crop.h;
+	// Into the frame's own memory: no third full-size picture at any time.
+	sum.result(frame.data());
+	shot.yuv.swap(frame);
+	// The filter's reach: the noise left, as merged (the finish runs as it
+	// is written, the sums gone by then).
+	shot.with.finish.noise = sum.residual();
+	std::fprintf(stderr, "stack: %d of %d frames merged (%d taken) in %ld ms, noise %.1f, left %.1f\n", sum.frames, planned, taken, ms_since(began), double(sum.noise[8]), double(sum.residual()));
+	return true;
+}
+
 // Bytes in a memory file of their own, for a helper to read: -1 if there is
 // no room for them.
 int bytes_file(const char *name, const uint8_t *data, size_t size)
@@ -1666,7 +1856,7 @@ bool last_try_held = false;
 // still gives its photo when the others ran out.
 static int still_patience = 1;
 
-bool take_still_at(Size size, Shot &shot, std::string &why, bool want_raw, bool use_held, int extra, std::vector<int> *files, std::vector<Shot> *set, bool &held_suspect)
+bool take_still_at(Size size, Shot &shot, std::string &why, bool want_raw, bool use_held, int extra, std::vector<int> *files, std::vector<Shot> *set, bool &held_suspect, bool *cancelled = nullptr)
 {
 	held_suspect = false;
 	last_try_held = false;
@@ -1697,6 +1887,9 @@ bool take_still_at(Size size, Shot &shot, std::string &why, bool want_raw, bool 
 		std::fprintf(stderr, "still: %lld us asked, %lld us is this mode's longest\n", (long long)a.exposure_us, (long long)fixed);
 	still_fixed_us = fixed;
 	const bool is_set = set && !a.also.empty() && extra <= 0;
+	// Night or HDR: frames merged as they come (take_stack), never with a
+	// burst or a set.
+	const bool stacking = a.stack > 1 && cancelled && extra <= 0 && !is_set;
 	int64_t longest = fixed;
 	if (is_set)
 		for (const Asked::Also &more : a.also)
@@ -1738,13 +1931,17 @@ bool take_still_at(Size size, Shot &shot, std::string &why, bool want_raw, bool 
 	const int64_t f0 = still::frame_us(fixed > 0 ? fixed : 66667);
 	int64_t expect_us = 2 * f0 + std::max(0, extra) * 2 * f0;
 	int frames = 1 + std::max(0, extra);
+	if (stacking) {
+		expect_us = int64_t(still::stack_expect_ms(fixed > 0 ? fixed : 66667, a.stack)) * 1000;
+		frames = a.stack;
+	}
 	if (is_set)
 		for (const Asked::Also &more : a.also) {
 			expect_us += 5 * still::frame_us(std::min(more.exposure_us, longest_allowed));
 			frames++;
 		}
 	char exposing[64];
-	std::snprintf(exposing, sizeof exposing, "%lld %d %s", (long long)(expect_us / 1000), frames, is_set ? "bracket" : extra > 0 ? "detail" : "still");
+	std::snprintf(exposing, sizeof exposing, "%lld %d %s", (long long)(expect_us / 1000), frames, is_set ? "bracket" : extra > 0 ? "detail" : stacking ? a.stack_for.c_str() : "still");
 	tell(6, 0, exposing);
 	const long wait = still::deadline_ms(fixed, still::Judge::most(fixed > 0, fixed > 1000000) + 1, still_patience);
 	Request *got = nullptr;
@@ -1781,9 +1978,22 @@ bool take_still_at(Size size, Shot &shot, std::string &why, bool want_raw, bool 
 			if (auto black = said.get(controls::SensorBlackLevels))
 				shot.black = (*black)[0];
 			// A single photo: the sensor is done with it, the hand may move.
-			if (extra <= 0 && !is_set)
+			if (extra <= 0 && !is_set && !stacking)
 				tell(7, 0, shot.marks.line);
 			const still::Crop crop = still::crop_for(s->w, s->h, a.aspect_a, a.aspect_b);
+			if (stacking) {
+				bool stopped = false;
+				ok = take_stack(*s, got, shot, crop, as, stopped);
+				*cancelled = stopped;
+				shot.marks.mark("frames");
+				tell(7, 0, shot.marks.line);
+				if (!ok)
+					why = stopped ? "cancelled" : "the stack's frames did not come";
+				stop_camera();
+				s->close();
+				still_fixed_us = 0;
+				return ok;
+			}
 			shot.w = crop.w;
 			shot.h = crop.h;
 			shot.yuv.resize(size_t(crop.w) * crop.h * 3 / 2);
@@ -1941,6 +2151,11 @@ void write_shot(Shot &shot)
 {
 	auto began = std::chrono::steady_clock::now();
 	std::string why;
+	// Night's and HDR's finish (or a single photo's lift): before the look,
+	// so the photo as taken has it too.
+	if (shot.with.finish.any())
+		stack::finish(shot.yuv.data(), shot.w, shot.h, shot.with.finish, PHOTO_THREADS);
+	long finish_ms = ms_since(began);
 	photo::Lut lut = shot.with.look.empty() ? photo::Lut() : photo::read_lut(shot.with.look);
 	if (lut.empty())
 		shot.with.look.clear();
@@ -1964,6 +2179,9 @@ void write_shot(Shot &shot)
 	std::string news = "\tshot " + std::to_string(shot.shot_ms) + " write " + std::to_string(ms_since(began));
 	if (!shot.burst.empty())
 		news += " detail " + std::to_string(shot.burst.size() + 1);
+	// A stack: "night 5 8" (merged, asked), and the finish's time.
+	if (shot.stacked > 0)
+		news += " " + (shot.with.stack_for.empty() ? std::string("night") : shot.with.stack_for) + " " + std::to_string(shot.stacked) + " " + std::to_string(shot.stack_planned) + " finish " + std::to_string(finish_ms);
 	if (shot.raw_fd >= 0) {
 		start_dng(shot);
 		news += " raw";
@@ -2079,6 +2297,13 @@ void take_still(const std::string &path, const std::string &words, int detail)
 			std::fprintf(stderr, "still: no room to keep it after 4 s of waiting (photos being written); taken anyway\n");
 	}
 	shot.marks.mark("room");
+	// A stack's order left from before (it came after its stack ended) is
+	// not this photo's.
+	stack_order = 0;
+	{
+		std::lock_guard<std::mutex> hold(burst_lock);
+		stack_woken = false;
+	}
 	stop_camera();
 	preview.reset();
 	shot.marks.mark("stop");
@@ -2110,36 +2335,65 @@ void take_still(const std::string &path, const std::string &words, int detail)
 	// then once more after a breath if memory was short (pages being moved
 	// out of the pool's way), and only then the binned half each way, so a
 	// photo is never lost. Each try is bounded by its frames' time.
-	const Size full(3280, 2464);
+	Size full(3280, 2464);
 	std::vector<Shot> set;
+	// Night and HDR: merged at the full size where memory has room for the
+	// sums, else binned, else a photo as usual (still.h's stack_size); never
+	// with a burst, a set or a RAW.
+	bool cancelled = false;
+	bool *stacking = nullptr;
+	if (shot.with.stack > 1) {
+		stack_order = 0;
+		detail = 0;
+		shot.with.also.clear();
+		shot.with.raw.clear();
+		long mb = available_mb();
+		switch (still::stack_size(mb)) {
+		case still::StackSize::Full:
+			stacking = &cancelled;
+			break;
+		case still::StackSize::Binned:
+			stacking = &cancelled;
+			full = Size(1640, 1232);
+			std::fprintf(stderr, "stack: %ld MB free: merged binned, at 1640 x 1232\n", mb);
+			break;
+		case still::StackSize::None:
+			shot.with.stack = 0;
+			std::fprintf(stderr, "stack: %ld MB free: no room for a stack; one frame\n", mb);
+			break;
+		}
+	}
 	bool want_raw = !shot.with.raw.empty() && detail <= 1 && shot.with.also.empty();
 	bool suspect = false;
-	bool ok = take_still_at(full, shot, why, want_raw, !held.failed, detail - 1, &shot.burst, &set, suspect);
+	bool ok = take_still_at(full, shot, why, want_raw, !held.failed, detail - 1, &shot.burst, &set, suspect, stacking);
 	// Whether a try has already run as the plainest would (no RAW, no held
-	// frame): no use running it again.
+	// frame): no use running it again. A stack cancelled is not tried again.
 	bool plain_tried = !want_raw && !last_try_held;
 	if (!ok && suspect)
 		held.give_up(why);
 	if (!ok && running && want_raw) {
 		want_raw = false;
 		shot.raw_skipped = true;
-		ok = take_still_at(full, shot, why, false, !held.failed, detail - 1, &shot.burst, &set, suspect);
+		ok = take_still_at(full, shot, why, false, !held.failed, detail - 1, &shot.burst, &set, suspect, stacking);
 		plain_tried = !last_try_held;
 		if (!ok && suspect)
 			held.give_up(why);
 	}
-	if (!ok && running && !plain_tried)
-		ok = take_still_at(full, shot, why, false, false, detail - 1, &shot.burst, &set, suspect);
-	if (!ok && running && why.find("memory") != std::string::npos) {
+	if (!ok && running && !plain_tried && !cancelled)
+		ok = take_still_at(full, shot, why, false, false, detail - 1, &shot.burst, &set, suspect, stacking);
+	if (!ok && running && !cancelled && why.find("memory") != std::string::npos) {
 		std::this_thread::sleep_for(std::chrono::milliseconds(150));
-		ok = take_still_at(full, shot, why, false, false, detail - 1, &shot.burst, &set, suspect);
+		ok = take_still_at(full, shot, why, false, false, detail - 1, &shot.burst, &set, suspect, stacking);
 	}
-	if (!ok && running) {
+	if (!ok && running && !cancelled) {
 		std::string again;
 		still_patience = 2;
-		ok = take_still_at(Size(1640, 1232), shot, again, false, false, 0, nullptr, &set, suspect);
+		ok = take_still_at(Size(1640, 1232), shot, again, false, false, 0, nullptr, &set, suspect, stacking);
 		still_patience = 1;
 	}
+	stack_order = 0;
+	if (cancelled)
+		why = "cancelled";
 	// Its picture is in: the shell may take the next as soon as the preview
 	// is back.
 	if (ok) {
@@ -2180,6 +2434,16 @@ void read_orders()
 {
 	std::string line;
 	while (running && std::getline(std::cin, line)) {
+		// A stack's orders take as they come: the main thread is taking it.
+		if (line == "stack end" || line == "stack cancel") {
+			stack_order = line == "stack end" ? std::max(1, stack_order.load()) : 2;
+			{
+				std::lock_guard<std::mutex> hold(burst_lock);
+				stack_woken = true;
+			}
+			burst_ready.notify_all();
+			continue;
+		}
 		{
 			std::lock_guard<std::mutex> hold(order_lock);
 			orders.push_back(line);
@@ -2325,9 +2589,11 @@ int main(int argc, char **argv)
 		} else if (order.rfind("face ", 0) == 0) {
 			take_face(order);
 		} else if (order == "night on" || order == "night off") {
+			// Into the next request with the dials' controls (frame limits
+			// and all): until 1.9 the camera was restarted, the picture going
+			// dark and its exposure starting over at every change.
 			night = order == "night on";
-			// The new limits take with the camera's next start.
-			restart();
+			pro_dirty = true;
 		} else if (order.rfind("pro ", 0) == 0) {
 			ProControls p;
 			char exp[24] = "", gain[24] = "", ct[24] = "";
@@ -2341,6 +2607,7 @@ int main(int argc, char **argv)
 				p.max_us = longest;
 				if (const char *g = std::strstr(order.c_str(), " gains="))
 					std::sscanf(g, " gains=%f,%f", &p.gains[0], &p.gains[1]);
+				p.spot = std::strstr(order.c_str(), " meter=spot") != nullptr;
 				{
 					std::lock_guard<std::mutex> hold(pro_lock);
 					pro = p;

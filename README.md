@@ -2429,8 +2429,47 @@ an album, and QR codes read. The AprilTag reader is still there beside it.
   takes a photo: the shutter presses in, the picture flashes, the photo is
   saved and its thumbnail drops into the corner. `t` sets a timer (3 s, then
   10 s, then off), counted down over the picture; Esc stops it. `g` lays a
-  rule-of-thirds grid over the picture. `n` is for low light: the exposure may
-  run to a fifth of a second, so the preview slows down too.
+  rule-of-thirds grid over the picture. `n` is Night (below).
+- **Night** (1.3.1; `n` steps auto, off, 1 s, 2 s, 4 s, remembered; a chip
+  in the bar, with its length while it is in play: "☾ 1s n"). On auto it goes
+  on by itself once the dark has lasted 0.6 s: the camera's own exposure out
+  of room (its tuning stops at 1/15 s and a gain of 10), or under 35 lux by
+  its own light meter; off again over 56. Its preview is its own: 1/10 s and
+  as much gain as the light needs, up to 24 (the ISP's digital gain past the
+  sensor's 10.7), ten frames a second. The shutter takes a **stack**: short
+  frames at one exposure, merged by `catalyst-camera` as they come into a
+  running sum (`stack.h`: each aligned to the first as one shift, found on its
+  brightness at a sixteenth, a quarter and then full size; each pixel weighed
+  against the merge so far, in full within three times the noise measured
+  from the second frame, none past six, so what moved never ghosts), then a
+  gentle noise filter, near-grey pulled half way to neutral (no orange or
+  green lamps), and the brightness the frames could not reach given back on
+  a shoulder, two stops at most. Its length comes from the motion sensor: in
+  the hand, eighths of a second for about a second; braced or set down (the
+  gyroscope still within 0.6°/s of its offset for 0.8 s), frames up to a
+  second for 2 to 4 s as the dark asks; without one, as in the hand. While it
+  is taken a ring counts down over the picture (held, then the stack's own
+  first frame in its place), Esc cancels it with no photo, and a jolt (25°/s,
+  or 5° away) ends it as soon as a third of it is merged, keeping that. The
+  Exif's exposure time is all the frames together, and its description says
+  how many ("Night: 8 frames of 1/8 s merged, 1 s in all"). Merged at the
+  full size where memory has room for the sums (46 MB) beside 96 MB for
+  everything else and a photo being written, else binned (12 MB), else one
+  frame.
+- **HDR** (`b` in photo mode: auto, off; a chip). Where the highlights are
+  blown (or kept only by pulling the exposure down half a stop or more) over
+  deep shadows (8% of the picture under 24 of 255), four frames short enough
+  for the sky are merged as Night's are, and the shadows given back as it is
+  finished. All at one exposure, as Google's HDR+: nothing can ghost between
+  exposures, and the merge's lower noise pays for lifting the shadows.
+- **Highlights** (photo mode, always): while more than 1.5% of the picture is
+  clipped and the rest can spare it, the exposure eases down a sixth of a
+  stop at a time (a stop and a half at most, half a stop with a face); the
+  photo gives the mid-tones back as it is finished, the highlights on a
+  shoulder, and its Exif says the compensation.
+- **The exposure lock** (`e` in photo mode, or its chip): read on the middle
+  of the picture alone for half a second, then held ("ae lock"), until `e`
+  again or another mode. The lens is fixed-focus: there is no focus to lock.
 - **Photos are full size, every time.** The preview is 320 × 240 YUV 4:2:0
   at up to 30 frames a second from the sensor's binned full-view mode. A
   photo stops the preview and asks the sensor for all 3280 × 2464 pixels,
@@ -2473,7 +2512,8 @@ an album, and QR codes read. The AprilTag reader is still there beside it.
   faces the smart camera saw, whose colour it leaves as merged. The
   thumbnail wears a "refining" badge with the seconds left until the merged
   photo takes its place (it keeps the first frame's Exif). Auto takes the
-  burst only in dim light (under 60 lux, or a gain of 3 or more).
+  burst only in real low light (under 25 lux with all of the gain at 1/20 s
+  or slower); with Night in play (1.3.1), Night's stack takes its place.
 - **Where they go:** `/data/photos`, named for when they were taken
   (`IMG_20261121_140312.jpg`, with `_2` added if two land in the same
   second). Files opens a photo in the viewer too.
@@ -2581,7 +2621,10 @@ an album, and QR codes read. The AprilTag reader is still there beside it.
 Not yet checked on a CardputerZero: how long a full-size photo and a detail
 merge take there (estimated: under a second to the picture, about a second
 more to write it; a six-frame merge 5 to 8 s at idle priority), and how far
-away a QR code can be read at 320 × 240.
+away a QR code can be read at 320 × 240; how long each of Night's frames
+takes to merge at full size (estimated 0.1 to 0.15 s on three cores, inside
+an eighth of a second's frame), and how still the gyroscope reads on a
+bench.
 
 ## The smart camera on the Grove port
 

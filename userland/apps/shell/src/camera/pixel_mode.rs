@@ -584,7 +584,7 @@ impl Camera {
                     crate::sys::write_atomic(&path, &frame.png(scale, &look)?).map_err(|e| format!("the picture cannot be kept: {e}"))
                 };
                 let event = match write() {
-                    Ok(()) => Event::Saved { path, size: ((frame.w * scale) as u32, (frame.h * scale) as u32), detail: false, raw_skipped: false },
+                    Ok(()) => Event::Saved { path, size: ((frame.w * scale) as u32, (frame.h * scale) as u32), detail: false, raw_skipped: false, stacked: None },
                     Err(why) => Event::Failed(why),
                 };
                 live.lock().map(|mut l| l.events.push(event)).ok();
@@ -831,7 +831,7 @@ mod tests {
 /// The Camera as the shots set it: frozen, as its defaults, with `pic` in
 /// sight.
 #[cfg(not(target_arch = "aarch64"))]
-fn shot_camera() -> Camera {
+pub(super) fn shot_camera() -> Camera {
     let mut camera = Camera::new();
     camera.frozen = true;
     camera.flash.jump(0.0);
@@ -847,7 +847,7 @@ fn shot_camera() -> Camera {
 /// Renders a set of scenes dark and light at the three text sizes into
 /// `dir`, each alone (`name-tone-size.png`) and on a sheet of its six.
 #[cfg(not(target_arch = "aarch64"))]
-fn render(dir: &std::path::Path, scenes: &[(String, Box<dyn Fn(&mut crate::shell::Shell)>)]) {
+pub(super) fn render(dir: &std::path::Path, scenes: &[(String, Box<dyn Fn(&mut crate::shell::Shell)>)]) {
     use crate::gfx::TextSize;
     use crate::shell::Shell;
     std::fs::create_dir_all(dir).ok();

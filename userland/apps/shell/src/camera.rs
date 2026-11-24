@@ -159,7 +159,10 @@ use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
 
 mod bar;
+mod night;
 mod pixel_mode;
+
+use night::Stacking;
 
 /// The bar's pictures, for `--keys-shots` (keysheet.rs).
 #[cfg(not(target_arch = "aarch64"))]
@@ -177,6 +180,12 @@ pub fn pixel_shots(dir: &std::path::Path) {
 #[cfg(not(target_arch = "aarch64"))]
 pub fn film_shots(dir: &std::path::Path) {
     pixel_mode::film_shots(dir);
+}
+
+/// Night, HDR and the lock (`--camera-night-shots DIR`).
+#[cfg(not(target_arch = "aarch64"))]
+pub fn night_shots(dir: &std::path::Path) {
+    night::shots(dir);
 }
 
 /// The preview's size: the panel's height and a little more, at 4:3.
@@ -287,9 +296,12 @@ enum Event {
     /// written; the camera program's timing marks.
     Captured(String),
     /// Saved: its size, and whether a detail merge now refines it (what it
-    /// took, "shot 812 write 640", goes to the shell's log), and whether a
-    /// RAW asked for found no room in the camera's memory.
-    Saved { path: PathBuf, size: (u32, u32), detail: bool, raw_skipped: bool },
+    /// took, "shot 812 write 640", goes to the shell's log), whether a
+    /// RAW asked for found no room in the camera's memory, and a stack's
+    /// frames (Night, HDR: merged of asked).
+    Saved { path: PathBuf, size: (u32, u32), detail: bool, raw_skipped: bool, stacked: Option<(camkit::Exposing, u32, u32)> },
+    /// A stack's frames so far (kind 8).
+    Stack(String),
     Failed(String),
 }
 
@@ -480,6 +492,10 @@ enum Order {
     Pro(pro::PreviewControls),
     /// The focus check's crop, centred here (0 to 1 of the picture), or none.
     Focus(Option<(f32, f32)>),
+    /// A stack under way (Night, HDR): end it once enough is merged (the
+    /// hand moved), or cancel it (no photo).
+    StackEnd,
+    StackCancel,
 }
 
 impl Order {
@@ -495,6 +511,8 @@ impl Order {
             Order::Pro(c) => format!("{}\n", c.order()),
             Order::Focus(Some((x, y))) => format!("focus on {x:.4} {y:.4}\n"),
             Order::Focus(None) => "focus off\n".to_owned(),
+            Order::StackEnd => "stack end\n".to_owned(),
+            Order::StackCancel => "stack cancel\n".to_owned(),
         }
     }
 }
@@ -633,7 +651,8 @@ fn run_program(live: &Mutex<Live>, stop: &AtomicBool, slot: &Mutex<Option<ChildS
                     eprintln!("camera: {} × {} {took}", number >> 16, number & 0xffff);
                 }
                 let raw_skipped = took.contains("raw-skipped");
-                live.lock().map(|mut l| l.events.push(Event::Saved { path, size: (number >> 16, number & 0xffff), detail, raw_skipped })).ok();
+                let stacked = camkit::read_stacked(&took);
+                live.lock().map(|mut l| l.events.push(Event::Saved { path, size: (number >> 16, number & 0xffff), detail, raw_skipped, stacked })).ok();
             }
             5 => said_of = Metered::parse(&String::from_utf8_lossy(&frame)),
             3 => {
@@ -651,6 +670,10 @@ fn run_program(live: &Mutex<Live>, stop: &AtomicBool, slot: &Mutex<Option<ChildS
             }
             7 => {
                 live.lock().map(|mut l| l.events.push(Event::Exposed)).ok();
+            }
+            8 => {
+                let line = String::from_utf8_lossy(&frame).trim().to_owned();
+                live.lock().map(|mut l| l.events.push(Event::Stack(line))).ok();
             }
             _ => {}
         }
@@ -686,16 +709,27 @@ fn run_program(live: &Mutex<Live>, stop: &AtomicBool, slot: &Mutex<Option<ChildS
     finish_luma(luma);
 }
 
-/// The simulated room's light: a lit room in the evening.
-const SIM_LUX: f32 = 320.0;
+/// The simulated room's light: a lit room in the evening (320 lux, as
+/// f32 bits), unless the shots or tests dim it (`sim_light`).
+static SIM_LUX: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x43A0_0000);
 /// The simulated scene's light, as a white balance would find it.
 const SIM_CT: u32 = 5200;
+
+/// The simulator's light, in lux: Night's shots and tests set it dark.
+#[cfg(not(target_arch = "aarch64"))]
+pub fn sim_light(lux: f32) {
+    SIM_LUX.store(lux.to_bits(), Ordering::Relaxed);
+}
+
+fn sim_lux() -> f32 {
+    f32::from_bits(SIM_LUX.load(Ordering::Relaxed))
+}
 
 /// The whole exposure (µs at a gain of 1) the simulated scene needs, by the
 /// IMX219 tuning's own reference (27.7 ms at gain 1 for 998 lux), with
 /// compensation in stops.
 fn sim_needs(ev: f32) -> f32 {
-    27_685.0 * 998.0 / SIM_LUX * 2f32.powf(ev)
+    27_685.0 * 998.0 / sim_lux() * 2f32.powf(ev)
 }
 
 /// What the simulated camera does with the preview's controls: its own
@@ -707,15 +741,19 @@ fn sim_meter(c: &pro::PreviewControls, focus: bool) -> (Metered, f32) {
         (Some(e), Some(g)) => (e, g),
         (Some(e), None) => (e, (needs / e as f32).clamp(1.0, pro::MAX_GAIN)),
         (None, Some(g)) => (((needs / g).round() as u32).clamp(100, c.frame_max_us), g),
-        // The camera's own exposure, as the tuning's normal profile has it.
+        // The camera's own exposure, as the tuning's normal profile has it:
+        // gain first, then the shutter up to its 1/15 s, no further.
         (None, None) => {
-            let e = (needs / 4.0).clamp(100.0, 30_000.0f32.min(c.frame_max_us as f32));
+            let mut e = (needs / 4.0).clamp(100.0, 30_000.0f32.min(c.frame_max_us as f32));
+            if needs / e > pro::MAX_GAIN {
+                e = (needs / pro::MAX_GAIN).clamp(100.0, (pro::AE_LONGEST_US as f32).min(c.frame_max_us as f32));
+            }
             (e as u32, (needs / e).clamp(1.0, pro::MAX_GAIN))
         }
     };
     let ct = c.ct.unwrap_or(SIM_CT);
     let (r, b) = crate::dng::Tuning::stock().white(f64::from(ct));
-    let m = Metered { exposure_us, analogue: gain, digital: 1.0, gains: [(1.0 / r) as f32, (1.0 / b) as f32], ct, lux: SIM_LUX, settled: true, fom: 0, zoom: if focus { 1.0 } else { 0.0 } };
+    let m = Metered { exposure_us, analogue: gain, digital: 1.0, gains: [(1.0 / r) as f32, (1.0 / b) as f32], ct, lux: sim_lux(), settled: true, fom: 0, zoom: if focus { 1.0 } else { 0.0 } };
     (m, exposure_us as f32 * gain / sim_needs(0.0))
 }
 
@@ -777,8 +815,17 @@ fn run_simulated(live: &Arc<Mutex<Live>>, stop: &AtomicBool, orders: &Receiver<O
         develop_frame(live, develop, &yuv, PREVIEW_W, PREVIEW_H, &mut out, Some(meta));
         give_luma(luma, &yuv[..PREVIEW_W * PREVIEW_H]);
         crate::platform::wake();
-        while let Ok(order) = orders.try_recv() {
+        let mut pending: std::collections::VecDeque<Order> = orders.try_iter().collect();
+        while let Some(order) = pending.pop_front() {
             match order {
+                // Night and HDR: a stack, its orders taken as it goes (the
+                // rest kept for after).
+                Order::Still(path, words) if still_word(&words, "stack").is_some_and(|n| n.parse::<u32>().is_ok_and(|n| n > 1)) => {
+                    // Orders already waiting are the stack's to see first.
+                    let mut later: Vec<Order> = pending.drain(..).collect();
+                    sim_stack(live, develop, orders, path, t, &words, &mut later);
+                    pending.extend(later);
+                }
                 Order::Still(path, words) => sim_photo(live, path, t, scan, 0, None, &words),
                 // "Dim light" in the simulator: night on.
                 Order::Detail(path, auto, words) => sim_photo(live, path, t, scan, if auto && !night { 0 } else { SIM_BURST }, face, &words),
@@ -786,10 +833,181 @@ fn run_simulated(live: &Arc<Mutex<Live>>, stop: &AtomicBool, orders: &Receiver<O
                 Order::Face(f) => face = f,
                 Order::Pro(c) => controls = c,
                 Order::Focus(f) => focus = f,
+                Order::StackEnd | Order::StackCancel => {}
             }
         }
     }
     finish_luma(luma);
+}
+
+/// The simulator's Night and HDR, as catalyst-camera's stack: its frames
+/// (binned, as the handheld merges them when memory is short), noisy at
+/// their gain with a hand's drift between them, each told as it comes, the
+/// first in the viewfinder's place, toned as the photo will be; Esc
+/// cancels, a jolt ends it once enough is merged; then merged (burst.rs's
+/// merge standing in for stack.h's) and finished with its lift behind the
+/// preview.
+fn sim_stack(live: &Arc<Mutex<Live>>, develop: &Mutex<Develop>, orders: &Receiver<Order>, path: PathBuf, t: f32, words: &[String], later: &mut Vec<Order>) {
+    let asked = Instant::now();
+    let word = |k: &str| still_word(words, k).and_then(|v| v.parse::<f32>().ok());
+    let planned = word("stack").unwrap_or(4.0).clamp(2.0, 32.0) as u32;
+    let what = if still_word(words, "stackfor") == Some("hdr") { camkit::Exposing::Hdr } else { camkit::Exposing::Night };
+    let frame_us = word("exp").unwrap_or(66_667.0);
+    let gain = word("gain").unwrap_or(1.0);
+    let (lift, toe) = (word("lift").unwrap_or(0.0), word("toe").unwrap_or(0.0));
+    let ct = still_word(words, "ct").and_then(|v| v.parse().ok()).unwrap_or(SIM_CT);
+    let (w, h) = (FULL.0 / 2, FULL.1 / 2);
+    let frame_ms = (frame_us / 1000.0).max(66.7);
+    let expect = 2.0 * frame_ms + (planned - 1) as f32 * (frame_ms + 60.0);
+    let word_of = if what == camkit::Exposing::Hdr { "hdr" } else { "night" };
+    let tell = |e: Event| {
+        live.lock().map(|mut l| l.events.push(e)).ok();
+        crate::platform::wake();
+    };
+    tell(Event::Exposing(format!("{expect:.0} {planned} {word_of}")));
+    let bright = frame_us * gain / sim_needs(0.0);
+    let sigma = 1.5 + 0.8 * gain;
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64 ^ u64::from(t.to_bits());
+    let table = sim_tone(lift, toe);
+    // The scene drawn once; each frame it, moved a pixel or two as a hand
+    // drifts, with its own noise (light enough not to hold up the rest).
+    let base = {
+        let mut pic = scene(w, h, t, false);
+        sim_expose(&mut pic, bright, ct);
+        rgb_to_yuv420(&pic)
+    };
+    let (mut frames, mut end, mut cancelled) = (Vec::new(), false, false);
+    let waiting: Vec<Order> = std::mem::take(later);
+    for order in waiting {
+        match order {
+            Order::StackCancel => cancelled = true,
+            Order::StackEnd => end = true,
+            other => later.push(other),
+        }
+    }
+    for i in 0..planned {
+        for order in orders.try_iter() {
+            match order {
+                Order::StackCancel => cancelled = true,
+                Order::StackEnd => end = true,
+                other => later.push(other),
+            }
+        }
+        if cancelled || (end && frames.len() as u32 >= (planned + 2) / 3) {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs_f32((frame_ms / 2.0).min(125.0) / 1000.0));
+        let mut yuv = sim_drift(&base, w, h, (i % 3) as i32 - 1, ((i / 3) % 2) as i32);
+        sim_noise(&mut yuv, w * h, sigma, &mut seed);
+        // The first, small and toned, in the viewfinder's place.
+        if i == 0 {
+            let mut small = shrink_yuv420(&yuv, w, h, PREVIEW_W, PREVIEW_H);
+            for v in &mut small[..PREVIEW_W * PREVIEW_H] {
+                *v = table[usize::from(*v)];
+            }
+            develop_frame(live, develop, &small, PREVIEW_W, PREVIEW_H, &mut Picture::default(), None);
+        }
+        frames.push(yuv);
+        let left = (planned - i - 1) as f32 * (frame_ms + 60.0);
+        tell(Event::Stack(format!("{} {planned} {} {left:.0}", i + 1, frames.len())));
+    }
+    tell(Event::Exposed);
+    if cancelled || frames.is_empty() {
+        tell(Event::Failed("cancelled".into()));
+        return;
+    }
+    let shot = asked.elapsed().as_millis();
+    tell(Event::Captured(format!("room 0 stop 0 config 0 start 0 frame {shot} frames {shot} captured {shot}")));
+    let live = live.clone();
+    std::thread::Builder::new()
+        .name("photo-write".into())
+        .spawn(move || {
+            let merged = frames.len() as u32;
+            let refs: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
+            let (mut yuv, _) = if refs.len() > 1 { crate::burst::merge(&refs, w, h, &[], 2, &mut |_| {}) } else { (frames[0].clone(), crate::burst::Report::default()) };
+            sim_finish(&mut yuv, w, h, &table);
+            let event = match crate::burst::write_jpeg(&path, &yuv, w, h, None) {
+                Ok(()) => Event::Saved { path, size: (w as u32, h as u32), detail: false, raw_skipped: false, stacked: Some((what, merged, planned)) },
+                Err(why) => Event::Failed(why),
+            };
+            live.lock().map(|mut l| l.events.push(event)).ok();
+            crate::platform::wake();
+        })
+        .ok();
+}
+
+/// A YUV 4:2:0 frame moved by (dx, dy) whole pixels (chroma by half),
+/// its edges held.
+fn sim_drift(yuv: &[u8], w: usize, h: usize, dx: i32, dy: i32) -> Vec<u8> {
+    let mut out = vec![0u8; yuv.len()];
+    let plane = |src: &[u8], dst: &mut [u8], pw: usize, ph: usize, dx: i32, dy: i32| {
+        for y in 0..ph {
+            let sy = (y as i32 - dy).clamp(0, ph as i32 - 1) as usize;
+            for x in 0..pw {
+                let sx = (x as i32 - dx).clamp(0, pw as i32 - 1) as usize;
+                dst[y * pw + x] = src[sy * pw + sx];
+            }
+        }
+    };
+    let (cw, ch) = (w / 2, h / 2);
+    let (ys, rest) = out.split_at_mut(w * h);
+    let (us, vs) = rest.split_at_mut(cw * ch);
+    plane(&yuv[..w * h], ys, w, h, dx, dy);
+    plane(&yuv[w * h..w * h + cw * ch], us, cw, ch, dx / 2, dy / 2);
+    plane(&yuv[w * h + cw * ch..], vs, cw, ch, dx / 2, dy / 2);
+    out
+}
+
+/// A stack's finish in the simulator, as stack.h's tone: the lift in linear
+/// light on an extended Reinhard shoulder, then the toe.
+fn sim_tone(lift: f32, toe: f32) -> [u8; 256] {
+    let gain = 2f32.powf(lift.max(0.0));
+    let mut out = [0u8; 256];
+    for (i, o) in out.iter_mut().enumerate() {
+        let lin = (i as f32 / 255.0).powf(2.2);
+        let x = lin * gain;
+        let t = if gain <= 1.0001 { lin } else { x * (1.0 + x / (gain * gain)) / (1.0 + x) };
+        let mut s = t.clamp(0.0, 1.0).powf(1.0 / 2.2);
+        s += toe * 1.5 * s * (1.0 - s).powi(4);
+        *o = (s * 255.0).round().clamp(0.0, 255.0) as u8;
+    }
+    out
+}
+
+/// The tone over a frame, its colour with it.
+fn sim_finish(yuv: &mut [u8], w: usize, h: usize, table: &[u8; 256]) {
+    let (cw, ch) = (w / 2, h / 2);
+    let (ys, uv) = yuv.split_at_mut(w * h);
+    let (us, vs) = uv.split_at_mut(cw * ch);
+    for cy in 0..ch {
+        for cx in 0..cw {
+            let a = 2 * cy * w + 2 * cx;
+            let mean = (u32::from(ys[a]) + u32::from(ys[a + 1]) + u32::from(ys[a + w]) + u32::from(ys[a + w + 1]) + 2) / 4;
+            for i in [a, a + 1, a + w, a + w + 1] {
+                ys[i] = table[usize::from(ys[i])];
+            }
+            let r = ((f32::from(table[mean as usize]) + 8.0) / (mean as f32 + 8.0)).powf(0.8).clamp(0.5, 2.5);
+            let i = cy * cw + cx;
+            us[i] = (128.0 + (f32::from(us[i]) - 128.0) * r).round().clamp(0.0, 255.0) as u8;
+            vs[i] = (128.0 + (f32::from(vs[i]) - 128.0) * r).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+}
+
+/// A small sensor's noise at a gain: `sigma` in the brightness, half that
+/// in the colour.
+fn sim_noise(yuv: &mut [u8], ysize: usize, sigma: f32, seed: &mut u64) {
+    let mut next = || {
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 7;
+        *seed ^= *seed << 17;
+        let u = |s: u64, k: u32| ((s >> k) & 0xFFFF) as f32 / 65535.0;
+        (u(*seed, 0) + u(*seed, 16) + u(*seed, 32) + u(*seed, 48) - 2.0) * 1.732
+    };
+    for (i, p) in yuv.iter_mut().enumerate() {
+        let s = if i < ysize { sigma } else { sigma * 0.5 };
+        *p = (f32::from(*p) + next() * s).round().clamp(0.0, 255.0) as u8;
+    }
 }
 
 /// The simulator's burst: as many frames as the handheld takes with room to spare.
@@ -886,7 +1104,7 @@ fn sim_photo(live: &Arc<Mutex<Live>>, path: PathBuf, t: f32, scan: bool, burst: 
                     crate::filters::apply_yuv420(table, &mut yuv, w, h);
                 }
                 let event = match crate::burst::write_jpeg(&p, &yuv, w, h, exif.clone()) {
-                    Ok(()) => Event::Saved { path: p, size: (w as u32, h as u32), detail: false, raw_skipped: false },
+                    Ok(()) => Event::Saved { path: p, size: (w as u32, h as u32), detail: false, raw_skipped: false, stacked: None },
                     Err(why) => Event::Failed(why),
                 };
                 live.lock().map(|mut l| l.events.push(event)).ok();
@@ -948,7 +1166,7 @@ fn sim_write(path: &std::path::Path, mut frames: Vec<Vec<u8>>, burst: usize, fac
     }
     let took = format!("shot {shot} write {}{}{raw_note}", began.elapsed().as_millis(), if detail { format!(" detail {burst}") } else { String::new() });
     eprintln!("camera: {w} × {h} {took} (simulated)");
-    Event::Saved { path: path.to_path_buf(), size: (w as u32, h as u32), detail, raw_skipped: raw_note.contains("skipped") }
+    Event::Saved { path: path.to_path_buf(), size: (w as u32, h as u32), detail, raw_skipped: raw_note.contains("skipped"), stacked: None }
 }
 
 /// The simulator's RAW: the picture back to the sensor's own light (its
@@ -1164,11 +1382,25 @@ struct Prefs {
     kit: Kit,
     texture: Strength,
     pixel: pixel::Settings,
+    /// Night and HDR (1.3.1).
+    night: pro::NightMode,
+    hdr: pro::HdrMode,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { pro: Pro::default(), look: Look::Original, hue: 32.0, raw: false, zebras: true, kit: Kit::default(), texture: Strength::default(), pixel: pixel::Settings::default() }
+        Prefs {
+            pro: Pro::default(),
+            look: Look::Original,
+            hue: 32.0,
+            raw: false,
+            zebras: true,
+            kit: Kit::default(),
+            texture: Strength::default(),
+            pixel: pixel::Settings::default(),
+            night: pro::NightMode::Auto,
+            hdr: pro::HdrMode::Auto,
+        }
     }
 }
 
@@ -1189,6 +1421,8 @@ impl Prefs {
                 "zebras" => p.zebras = v != "0",
                 "texture" => p.texture = Strength::from_id(v).unwrap_or_default(),
                 "pixel" => p.pixel = pixel::Settings::from_line(v),
+                "night" => p.night = pro::NightMode::from_name(v).unwrap_or_default(),
+                "hdr" => p.hdr = pro::HdrMode::from_name(v).unwrap_or_default(),
                 _ => p.kit.read(k, v),
             }
         }
@@ -1197,7 +1431,7 @@ impl Prefs {
 
     fn save(&self) {
         let text = format!(
-            "pro={}\nlook={}\nhue={:.0}\nraw={}\nzebras={}\ntexture={}\npixel={}\n{}",
+            "pro={}\nlook={}\nhue={:.0}\nraw={}\nzebras={}\ntexture={}\npixel={}\nnight={}\nhdr={}\n{}",
             self.pro.to_line().replace(' ', ","),
             self.look.id(),
             self.hue,
@@ -1205,6 +1439,8 @@ impl Prefs {
             u8::from(self.zebras),
             self.texture.name(),
             self.pixel.line(),
+            self.night.name(),
+            self.hdr.name(),
             self.kit.lines()
         );
         crate::sys::write_atomic(&Self::file(), text.as_bytes()).ok();
@@ -1267,7 +1503,26 @@ pub struct Camera {
     timer: u32,
     /// When the timer's photo is taken (kept by the clock, not the frames).
     countdown: Option<Instant>,
-    night: bool,
+    /// Night (1.3.1): its setting, the dark as sensed from each frame, how
+    /// still the handheld is (the motion sensor held while Night is in
+    /// play), the light meter's scale, and whether Night was last told on.
+    night_mode: pro::NightMode,
+    night_sense: pro::NightSense,
+    steadiness: crate::imu::Steadiness,
+    night_imu: Option<crate::imu::Hold>,
+    lux_scale: pro::LuxScale,
+    night_told: bool,
+    /// HDR, the highlights' guard and the exposure lock (1.3.1), and the
+    /// newest frame's tones.
+    hdr_mode: pro::HdrMode,
+    hdr_sense: pro::HdrSense,
+    guard: pro::HighlightGuard,
+    lock: pro::Lock,
+    tones: pro::Tones,
+    /// When the last frame was taken in (the automatic exposure's clock).
+    auto_at: Option<Instant>,
+    /// A Night or HDR photo being taken: its countdown ring.
+    stacking: Option<Stacking>,
     /// The kit (camkit.rs): grids, level, aspect, bracketing, the readout,
     /// presets, the intervalometer, and the photo under way, timed.
     kit: Kit,
@@ -1449,7 +1704,19 @@ impl Camera {
             trouble: None,
             timer: 0,
             countdown: None,
-            night: false,
+            night_mode: prefs.night,
+            night_sense: pro::NightSense::default(),
+            steadiness: crate::imu::Steadiness::default(),
+            night_imu: None,
+            lux_scale: pro::LuxScale::default(),
+            night_told: false,
+            hdr_mode: prefs.hdr,
+            hdr_sense: pro::HdrSense::default(),
+            guard: pro::HighlightGuard::default(),
+            lock: pro::Lock::Off,
+            tones: pro::Tones::default(),
+            auto_at: None,
+            stacking: None,
             kit: prefs.kit,
             flash: Animated::new(0.0, role::smooth()).with_rest(0.01),
             press: Animated::new(0.0, role::layer()).with_rest(0.01),
@@ -1526,7 +1793,7 @@ impl Camera {
             interval: self.kit.interval,
             ..Kit::default()
         };
-        Prefs { pro: self.pro, look: self.look, hue: self.hue, raw: self.raw, zebras: self.zebras, kit, texture: self.texture, pixel: self.pixel }
+        Prefs { pro: self.pro, look: self.look, hue: self.hue, raw: self.raw, zebras: self.zebras, kit, texture: self.texture, pixel: self.pixel, night: self.night_mode, hdr: self.hdr_mode }
     }
 
     /// How the camera's thread is to develop frames now: the look (and a
@@ -1549,12 +1816,104 @@ impl Camera {
     }
 
     /// The preview's exposure and white balance for the mode and dials,
-    /// told to the camera when they change.
+    /// told to the camera when they change; and Night, on or off.
     fn tell_pro(&mut self) {
-        let controls = pro::preview((self.mode == Mode::Pro).then_some(&self.pro), self.night);
+        let controls = self.preview_controls();
         if self.told != Some(controls) && self.control.send(Order::Pro(controls)) {
             self.told = Some(controls);
         }
+        let night = self.night_on();
+        if night != self.night_told && self.control.send(Order::Night(night)) {
+            self.night_told = night;
+        }
+    }
+
+    /// The preview's controls: pro's dials where any is set by hand; else
+    /// the lock's; Night's own bright preview in the dark; else the camera's
+    /// own exposure, the highlights' guard on it in photo mode.
+    fn preview_controls(&self) -> pro::PreviewControls {
+        if self.mode == Mode::Pro && !self.pro_auto() {
+            return pro::preview(Some(&self.pro), self.night_on());
+        }
+        if let Some(c) = self.lock.controls().filter(|_| self.mode == Mode::Photo) {
+            return c;
+        }
+        if self.night_on() && self.night_sense.dark {
+            if let Some(m) = &self.metered {
+                let mut c = pro::night_preview(pro::needed_us(m, self.lux_scale.k, false));
+                // Pro's white balance, as its dial has it.
+                if self.mode == Mode::Pro {
+                    let p = pro::preview(Some(&self.pro), false);
+                    (c.ct, c.gains) = (p.ct, p.gains);
+                }
+                return c;
+            }
+        }
+        if self.mode == Mode::Pro {
+            return pro::preview(Some(&self.pro), false);
+        }
+        let ev = if self.mode == Mode::Photo { self.guard.ev } else { 0.0 };
+        pro::PreviewControls::auto(ev, pro::PREVIEW_CAP_US)
+    }
+
+    /// Pro mode with no dial set by hand (its program P): Night and the
+    /// camera's own exposure still apply.
+    fn pro_auto(&self) -> bool {
+        self.pro.shutter.is_none() && self.pro.iso.is_none()
+    }
+
+    /// Whether Night is in play now: its setting, and the dark (auto), in
+    /// photo mode, pro's P and pixel mode's preview; never while the
+    /// exposure is locked (the lock is the exposure asked for).
+    fn night_on(&self) -> bool {
+        let mode_has_it = matches!(self.mode, Mode::Photo | Mode::Pixel) || (self.mode == Mode::Pro && self.pro_auto());
+        mode_has_it
+            && self.lens == Lens::Main
+            && !(self.mode == Mode::Photo && self.lock.on())
+            && match self.night_mode {
+                pro::NightMode::Off => false,
+                pro::NightMode::Fixed(_) => true,
+                pro::NightMode::Auto => self.night_sense.dark,
+            }
+    }
+
+    /// Whether a photo taken now is a night stack (the preview's Night in
+    /// pixel mode makes no stack: its picture is the preview's).
+    fn night_shot(&self) -> bool {
+        self.night_on() && self.mode != Mode::Pixel && self.focus.is_none()
+    }
+
+    /// Whether a photo taken now is an HDR stack: photo mode, HDR on auto
+    /// and the scene backlit or contrasty, and not Night's or the lock's.
+    fn hdr_shot(&self) -> bool {
+        self.mode == Mode::Photo && self.lens == Lens::Main && self.hdr_mode == pro::HdrMode::Auto && self.hdr_sense.on && !self.night_shot() && !self.lock.on() && self.focus.is_none()
+    }
+
+    /// How the handheld is held, by the motion sensor (in the hand without one).
+    fn steady(&self) -> pro::Steady {
+        if self.night_imu.is_some() && crate::imu::has_motion() && self.steadiness.braced() {
+            pro::Steady::Braced
+        } else {
+            pro::Steady::Hand
+        }
+    }
+
+    /// The stack a photo taken now would be: Night's or HDR's, and its plan.
+    fn stack_now(&self) -> Option<(camkit::Exposing, pro::NightPlan)> {
+        if self.night_shot() {
+            return self.night_plan().map(|p| (camkit::Exposing::Night, p));
+        }
+        if self.hdr_shot() {
+            return self.metered.map(|m| (camkit::Exposing::Hdr, pro::hdr_plan(&m, &self.tones, self.guard.ev)));
+        }
+        None
+    }
+
+    /// Night's photo as it would be taken now.
+    fn night_plan(&self) -> Option<pro::NightPlan> {
+        let m = self.metered.as_ref()?;
+        let auto = self.told.is_some_and(|c| c.exposure_us.is_none() && c.gain.is_none());
+        Some(pro::night_plan(pro::needed_us(m, self.lux_scale.k, auto), self.night_mode, self.steady()))
     }
 
     fn keep_prefs(&self) {
@@ -1627,10 +1986,15 @@ impl Camera {
             let waiting = finding.doc.borrow().pages.len();
             self.say(if waiting > 0 { format!("{waiting} page{} waiting · ↓ to see", if waiting == 1 { "" } else { "s" }) } else { "point it at a page".to_owned() });
         }
+        // The lock and the highlights' guard are photo mode's: let go.
+        if mode != Mode::Photo {
+            self.lock = pro::Lock::Off;
+            self.guard = pro::HighlightGuard::default();
+        }
         if (was == Mode::Pro) != (mode == Mode::Pro) {
             self.tell_develop();
-            self.tell_pro();
         }
+        self.tell_pro();
         if mode == Mode::Pro {
             self.say("keys s i e w: the dials");
         }
@@ -1716,7 +2080,7 @@ impl Camera {
         let pro = in_pro.then_some(&self.pro);
         let mut words = Vec::new();
         let mut set = Vec::new();
-        let still = self.metered.map(|m| pro::still(pro, &m, self.night));
+        let still = self.metered.map(|m| pro::still(pro, &m, false));
         if let Some(s) = &still {
             words = s.words();
             if in_pro {
@@ -1756,10 +2120,38 @@ impl Camera {
                 words.push(format!("orig={}", crate::filters::original_of(path).display()));
             }
         }
+        // Night and HDR (1.3.1): a stack of frames at the plan's exposure,
+        // merged as they come, in place of the photo's one (and of detail's
+        // burst and a RAW: the stack needs the memory). Else in photo mode,
+        // the highlights' guard: the mid-tones given back as it is finished.
+        if let Some((what, plan)) = self.stack_now().filter(|_| set.is_empty()) {
+            words.retain(|w| !w.starts_with("exp=") && !w.starts_with("gain=") && !w.starts_with("sharp=") && !w.starts_with("nr=") && !w.starts_with("raw="));
+            let (sharp, nr) = pro::processing(plan.gain);
+            let night = what == camkit::Exposing::Night;
+            words.extend([
+                format!("exp={}", plan.frame_us),
+                format!("gain={:.3}", plan.gain),
+                format!("sharp={sharp:.2}"),
+                format!("nr={}", nr.word()),
+                format!("stack={}", plan.frames),
+                format!("stackfor={}", if night { "night" } else { "hdr" }),
+                format!("lift={:.2}", plan.lift),
+                format!("toe={}", if night { "0.20" } else { "0.30" }),
+            ]);
+            // Night's lamps: their orange or green pulled half way to neutral.
+            if night {
+                words.push("neutral=0.50".into());
+            }
+            return (words, None, set);
+        }
         if raw && set.is_empty() {
             words.push(format!("raw={}", path.with_extension("dng").display()));
             // A RAW needs the camera's memory a burst would.
             burst = None;
+        }
+        if self.mode == Mode::Photo && self.guard.ev < -0.01 {
+            words.push(format!("lift={:.2}", self.guard.lift()));
+            words.push(format!("bias={}", (self.guard.ev * 3.0).round() as i32));
         }
         (words, burst, set)
     }
@@ -1800,6 +2192,7 @@ impl Camera {
             std::fs::create_dir_all(dir).ok();
         }
         let (words, burst, set) = self.still_words(&path, detail);
+        let stack = words.iter().any(|w| w.starts_with("stack=")).then(|| self.stack_now()).flatten();
         let order = match burst {
             None => Order::Still(path.clone(), words),
             Some(auto) => Order::Detail(path.clone(), auto, words),
@@ -1812,6 +2205,15 @@ impl Camera {
         }
         timeline.mark(Mark::Request, Instant::now());
         self.kit.shot = Some(timeline);
+        // Night and HDR: the countdown ring over the picture, held as it is
+        // (the first frame takes its place), the hand watched for a jolt;
+        // no flash (the ring says it is being taken).
+        let calm = if let Some((what, plan)) = stack {
+            self.begin_stacking(what, &plan);
+            true
+        } else {
+            calm
+        };
         self.instant_shot(&path, calm);
         // A film look's grain and halation, laid on each once it is saved.
         let texture = self.look.texture().at(self.texture);
@@ -1847,7 +2249,7 @@ impl Camera {
         }
         let path = crate::docscan::Finding::shot_path();
         let corners = finding.corners();
-        let mut words = self.metered.map(|m| pro::still(None, &m, self.night).words()).unwrap_or_default();
+        let mut words = self.metered.map(|m| pro::still(None, &m, false).words()).unwrap_or_default();
         words.push("doc=1".into());
         if !self.control.send(Order::Still(path.clone(), words)) {
             self.say("the camera is not ready yet");
@@ -2176,6 +2578,11 @@ impl Screen for Camera {
         if self.kit.shot.as_ref().is_some_and(|t| t.hold_still(now).is_some()) {
             want(Duration::from_millis(100));
         }
+        // Night's motion sensor, read for how still the hand is (as the
+        // level reads it: 20 a second follows a hand being set down).
+        if self.night_imu.is_some() {
+            want(Duration::from_millis(50));
+        }
         if self.saving.is_some() {
             want(Duration::from_millis(333));
         }
@@ -2230,6 +2637,14 @@ impl Screen for Camera {
             return Nav::Stay;
         }
         let main = self.lens == Lens::Main && self.mode.shoots();
+        // A Night or HDR photo being taken: Esc cancels it, and nothing else
+        // changes what it is taking.
+        if self.stacking.as_ref().is_some_and(|s| s.live) {
+            if matches!(key, Key::Back | Key::Leave) {
+                self.cancel_stacking();
+            }
+            return Nav::Stay;
+        }
         // The intervalometer running: Enter or Esc stops it, and nothing
         // else is taken (a stray key must not change what it is taking).
         if self.kit.run.is_some() {
@@ -2428,12 +2843,12 @@ impl Screen for Camera {
                     self.say(format!("c{} is empty", i + 1));
                 }
             }
-            Key::Char('n') => {
-                self.night = !self.night;
-                self.control.send(Order::Night(self.night));
-                self.tell_pro();
-                self.say(if self.night { "night: longer exposures in low light" } else { "night off" });
-            }
+            // Night: auto, off, 1 s, 2 s, 4 s (remembered).
+            Key::Char('n') => self.set_night(self.night_mode.next()),
+            // Photo mode's own: HDR (auto, off) and the exposure lock (pro
+            // mode has its dials on these keys).
+            Key::Char('b') if self.mode == Mode::Photo && main => self.set_hdr(self.hdr_mode.next()),
+            Key::Char('e') if self.mode == Mode::Photo && main && !self.quick => self.toggle_lock(),
             _ => {}
         }
         Nav::Stay
@@ -2506,6 +2921,7 @@ impl Screen for Camera {
         let mut changed = self.mode_at.tick(dt) | self.flash.tick(dt) | self.press.tick(dt) | self.last_pop.tick(dt) | self.found_rise.tick(dt) | self.lens_at.tick(dt) | self.lens_fade.tick(dt);
         changed |= self.dial_at.tick(dt) | self.dial_fade.tick(dt) | self.strip_at.tick(dt) | self.strip_fade.tick(dt) | self.focus_fade.tick(dt);
         changed |= self.bar.tick(dt) | self.pixel_flash.tick(dt);
+        changed |= self.tick_stacking(dt);
         if let Some(f) = &mut self.doc {
             changed |= f.tick(dt);
         }
@@ -2561,6 +2977,7 @@ impl Screen for Camera {
                 }
             }
         }
+        let frames_before = self.seen;
         let events = {
             let Ok(mut l) = self.live.lock() else { return changed };
             if l.frames != self.seen {
@@ -2644,8 +3061,16 @@ impl Screen for Camera {
         if self.told.is_none() && self.preview.is_some() {
             self.tell_pro();
         }
+        // The automatic exposure's own decisions, from each frame (Night,
+        // the highlights' guard, HDR, the lock: camera/night.rs), and the
+        // hand, while Night is in play.
+        if self.seen != frames_before {
+            changed |= self.tick_auto();
+        }
+        changed |= self.tick_steady(dt);
         // A photo's exposure slower than a hand holds, said once as it gets so.
-        let shaky = self.mode.shoots() && self.shutter_now().is_some_and(pro::shaky);
+        // (Night's photo is short frames, never one slow one.)
+        let shaky = self.mode.shoots() && !self.night_shot() && self.shutter_now().is_some_and(pro::shaky);
         if shaky && !self.shaky_said {
             self.say("slow shutter: hold steady");
         }
@@ -2687,7 +3112,9 @@ impl Screen for Camera {
                     if let Some(t) = &mut self.kit.shot {
                         t.mark(Mark::Exposed, Instant::now());
                     }
+                    self.end_stacking();
                 }
+                Event::Stack(line) => self.stack_news(&line),
                 Event::Captured(marks) => {
                     self.captured = true;
                     // Timed on to its writing, out of the way of the next.
@@ -2697,7 +3124,7 @@ impl Screen for Camera {
                         self.kit.writing.push(t);
                     }
                 }
-                Event::Saved { path, size, detail, raw_skipped } => {
+                Event::Saved { path, size, detail, raw_skipped, stacked } => {
                     self.pending = self.pending.saturating_sub(1);
                     self.pending_paths.retain(|p| *p != path);
                     if self.pending == 0 {
@@ -2729,12 +3156,33 @@ impl Screen for Camera {
                     } else if self.texture_due.iter().any(|(p, _)| *p == path) {
                         // A film look's grain: laid on now, the badge meanwhile.
                         self.lay_texture(&path);
+                    } else if let Some(stack) = stacked {
+                        // Night or HDR: what was merged, and its size where
+                        // memory made it the binned one.
+                        self.say(night::saved_words(stack, size));
                     } else if size.0.max(size.1) < 2000 && !pixel_picture {
                         self.say(format!("saved · {} × {} (memory was short)", size.0, size.1));
                     }
                     self.load_last(Some(path));
                 }
+                Event::Failed(why) if why == "cancelled" => {
+                    self.pending = self.pending.saturating_sub(1);
+                    if self.pending == 0 {
+                        self.saving = None;
+                        self.pending_paths.clear();
+                    }
+                    if self.instant.take().is_some() {
+                        self.load_last(None);
+                    }
+                    if let Some(t) = self.kit.shot.take() {
+                        eprintln!("{} · cancelled", t.log_line());
+                    }
+                    self.captured = true;
+                    self.end_stacking();
+                    self.say("cancelled: no photo");
+                }
                 Event::Failed(why) => {
+                    self.end_stacking();
                     self.pending = self.pending.saturating_sub(1);
                     if self.pending == 0 {
                         self.saving = None;
@@ -2896,6 +3344,10 @@ impl Screen for Camera {
             let half = g.measure(&words, big) * 0.5;
             g.text_alpha(vf.cx() - half, vf.cy(), &words, big, white, 1.0 - 0.25 * pulse);
         }
+        // Night or HDR being taken: the countdown ring over the picture
+        // (camera/night.rs); and the exposure lock's word, while it is on.
+        self.draw_stacking(g, vf);
+        self.draw_lock(g, vf);
         // Pro mode's histogram and dials, the looks' strip, the focus
         // check's chrome, and what the photo will wear (all on the main lens).
         let main = 1.0 - ka;
@@ -2959,7 +3411,9 @@ impl Screen for Camera {
         let dots = ".".repeat(self.dots_drawn.max(1));
         let mut said = true;
         let room = vf.w - 14.0 - 16.0 - (h - 2.0);
-        if let Some((words, left)) = self.kit.shot.as_ref().and_then(|t| t.hold_still(now)) {
+        if self.stacking.as_ref().is_some_and(|s| s.live) {
+            // The ring says it all.
+        } else if let Some((words, left)) = self.kit.shot.as_ref().and_then(|t| t.hold_still(now)) {
             // The longest form that fits at this text size (its width kept
             // as the seconds count down).
             let forms = [(format!("{words} · {left:.1} s"), format!("{words} · 88.8 s")), (format!("hold still · {left:.1} s"), "hold still · 88.8 s".to_owned()), (format!("{left:.1} s"), "88.8 s".to_owned())];
@@ -2969,7 +3423,7 @@ impl Screen for Camera {
             pill(g, None, &format!("taking it{dots}"), "taking it...");
         } else if self.saving.is_some() && (self.captured || self.kit.shot.is_none()) {
             pill(g, None, &format!("saving{dots}"), "saving...");
-        } else if let (Some(us), true) = (self.shutter_now(), self.mode == Mode::Photo && main > 0.5 && !self.strip && self.saving.is_none()) {
+        } else if let (Some(us), true) = (self.shutter_now(), self.mode == Mode::Photo && main > 0.5 && !self.strip && self.saving.is_none() && !self.night_shot()) {
             // Photo mode's own exposure, when it gets too slow to hold.
             said = pro::shaky(us);
             if said {
@@ -3060,7 +3514,7 @@ impl Camera {
             bracket: self.kit.bracket,
             timer: self.timer,
             level: self.kit.level,
-            night: self.night,
+            night: self.night_mode,
         }
     }
 
@@ -3082,10 +3536,7 @@ impl Camera {
             self.kit.imu = s.level.then(|| crate::imu::hold(crate::imu::Use::Motion));
             self.kit.horizon = None;
         }
-        if self.night != s.night {
-            self.night = s.night;
-            self.control.send(Order::Night(self.night));
-        }
+        self.night_mode = s.night;
         self.strip_at.set(LOOKS.iter().position(|l| *l == self.look).unwrap_or(0) as f32);
         self.tell_develop();
         self.pro_changed();
@@ -3175,7 +3626,7 @@ impl Camera {
 
     /// What a photo taken now would be taken with.
     fn still_now(&self) -> Option<pro::StillControls> {
-        self.metered.map(|m| pro::still((self.mode == Mode::Pro).then_some(&self.pro), &m, self.night))
+        self.metered.map(|m| pro::still((self.mode == Mode::Pro).then_some(&self.pro), &m, false))
     }
 
     fn shutter_now(&self) -> Option<u32> {
@@ -3237,6 +3688,10 @@ impl Camera {
             }
             let limit = if hist { vf.right() - 6.0 - pro::BINS as f32 - 8.0 - 4.0 } else { vf.right() - m };
             let mut chips: Vec<(Option<&str>, String, Color)> = Vec::new();
+            // The exposure held (1.3.1), as a phone's "AE lock".
+            if self.mode == Mode::Photo && matches!(self.lock, pro::Lock::Held { .. }) {
+                chips.push((Some("lock"), "ae lock".to_owned(), t.ice));
+            }
             if let Some(run) = &self.kit.run {
                 chips.push((Some("timer"), run.words(Instant::now()), t.signal));
             }
@@ -3911,12 +4366,21 @@ impl Camera {
             let words = if g.measure(&full, cap) <= rail.w - 8.0 { full } else { format!("{fps:.0} fps") };
             g.text_at(rail.cx(), PAD + cap.size * 2.0 + 10.0, Align::Center, &words, cap, t.faint);
         }
-        // Night, with its key: on in ink, off faint. (The timer, the grid
-        // and detail are the bar's chips, 1.1.)
+        // Night, with its key: in play in ink and filled, on auto in the
+        // light dim, off faint (also its chip in the bar, 1.3.1, which goes
+        // down while photos are taken; this stays). The timer, the grid and
+        // detail are the bar's chips (1.1).
         let right = rail.right() - 9.0;
-        let color = if self.night { t.ink } else { t.faint };
+        let on = self.night_on();
+        let color = if on {
+            t.ink
+        } else if self.night_mode == pro::NightMode::Off {
+            t.faint
+        } else {
+            t.dim
+        };
         let y = thumb.y - 2.0 - cap.size * 0.5;
-        g.icon("bedtime", self.night, right - 18.0, y, 11.0, color);
+        g.icon("bedtime", on, right - 18.0, y, 11.0, color);
         g.text_at(right - 6.0, y, Align::Center, "n", cap, color);
     }
 }
@@ -4549,7 +5013,7 @@ pub fn pro_shots(dir: &std::path::Path) {
                 c.preview = Some(pic.clone());
                 // Dim enough that photo mode's own exposure gets to 1/15.
                 c.metered = Some(metered(66_667, 10.0, 0.0));
-                c.night = true;
+                c.night_mode = pro::NightMode::Off;
                 c.note = None;
                 snap(c);
             })
@@ -5020,6 +5484,10 @@ mod tests {
                 }
                 Event::Exposed => {
                     said.push("exposed");
+                    None
+                }
+                Event::Stack(_) => {
+                    said.push("stack?");
                     None
                 }
                 Event::Captured(marks) => {
