@@ -147,7 +147,7 @@ impl Camera {
     pub(super) fn burst_words_now(&self) -> String {
         let asked = format!("1/{}", self.burst_shutter);
         match self.burst_plan() {
-            Some((us, _)) if us as f32 > 1.1e6 / self.burst_shutter as f32 => format!("{} in this light · {asked} asked", pro::shutter_words(us)),
+            Some((us, _)) if us as f32 > 1.1e6 / self.burst_shutter as f32 => format!("{} in this light", pro::shutter_words(us)),
             Some((us, gain)) => format!("{} · {}", pro::shutter_words(us), pro::iso_words((gain * 100.0).round() as u32).to_lowercase()),
             None => asked,
         }

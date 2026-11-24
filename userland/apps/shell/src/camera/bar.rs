@@ -1025,6 +1025,10 @@ impl Camera {
                     Chip::Lens => format!("lens · {}", if self.lens == Lens::Main { "1×" } else { "AI" }),
                     // A film look's grain said only where there is room.
                     Chip::Look => format!("look · {}", self.look.name().to_lowercase()),
+                    // Burst, trails and the time-lapse: the setting alone.
+                    Chip::Shutter => format!("shutter · {}", self.burst_plan().map_or_else(|| format!("1/{}", self.burst_shutter), |(us, _)| pro::shutter_words(us))),
+                    Chip::Length => format!("length · {}", trails::length_words(self.trails_s)),
+                    Chip::Every => format!("every {}", camkit::duration_words(self.lapse_every)),
                     _ => full.clone(),
                 };
                 let (room, key_w) = (vf.w - 28.0, g.measure("enter", cap) + 14.0);
