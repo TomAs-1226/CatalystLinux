@@ -10,6 +10,24 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 1.3.0
+
+A pixel camera, film looks, and a laptop that sets itself up for Claude on
+the handheld.
+
+### Camera
+- Pixel mode, between pro and doc: the picture made small, in few colours and dithered, live, like a toy camera. Size s (56, 75, 112), palette k (six), dither d (Bayer, Floyd–Steinberg, Atkinson, none), brightness ↑ ↓, contrast - =. Each is in the bar and shown on the picture as you choose. The album is on a.
+- A pixel picture is kept at its true size and as a sharp copy about 450 px wide for sharing; Photos shows its pixels sharp, zoomed or not.
+- Film looks, a group of their own: Sunlit Slide, Soft Negative, Faded Slide, Tungsten, Pushed Mono, Pearl Mono and Cine, each with a film's tone and colour.
+- Film grain and glow, off, light or strong (↑ ↓ in the looks), laid on the photo just after it is saved.
+- Photos editor: the film looks too, their grain on ← →.
+
+### Claude on the handheld
+- Catalyst Companion sets the laptop up by itself: one Set up installs Claude Code and Tailscale if needed, turns on Funnel, starts the bridge with Windows and keeps the laptop awake when plugged in. You only sign in, and approve in the browser where Tailscale asks.
+- Each step shows done, working, waiting for you, or what to do if it failed. Running it again only does what is missing.
+- Keeping awake changes mains power only (sleep and hibernate Never, lid Does nothing); battery is untouched, and Restore my power settings puts the old values back.
+- Each time the bridge starts it checks everything again: it fixes what changed (Funnel off after an update, for one) and says in the tray what needs you, such as signing in again.
+
 ## 1.2.0
 
 Your laptop's Claude Code sessions, from the handheld, anywhere you have
