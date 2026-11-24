@@ -108,6 +108,9 @@
 //                                          sensor's whole (a time-lapse's
 //                                          frames, 1.10): one frame, nothing
 //                                          merged, no RAW
+//                       quality=<q>        its JPEG's quality, 50 to 95
+//                                          (95 unless asked: a time-lapse's
+//                                          frames are a video's, 85)
 //   detail auto|on <path>[\t<word>…]
 //                     detail mode: the photo as above, then up to five more
 //                     full-size frames with its exposure and white balance
@@ -1224,6 +1227,8 @@ struct Asked {
 	int trails_s = 0;
 	int best = 0;
 	unsigned size_w = 0, size_h = 0;
+	// The JPEG's quality (a time-lapse's frames are a video's, 85).
+	int quality = 95;
 };
 
 Asked asked_of(const std::string &words)
@@ -1278,6 +1283,8 @@ Asked asked_of(const std::string &words)
 			a.trails_s = std::clamp(std::atoi(value.c_str()), 0, compose::TRAILS_LONGEST_S);
 		else if (key == "best")
 			a.best = std::clamp(std::atoi(value.c_str()), 0, compose::BEST_MOST);
+		else if (key == "quality")
+			a.quality = std::clamp(std::atoi(value.c_str()), 50, 95);
 		else if (key == "size") {
 			// Even both ways (4:2:0), and no larger than the sensor.
 			unsigned w = 0, h = 0;
@@ -1540,10 +1547,10 @@ const unsigned int PHOTO_THREADS = 3;
 // `app1` (its Exif), made on three cores, straight from its planes (no
 // conversion to RGB and back, its chroma as it is). Written beside its path,
 // flushed to the card and renamed into place.
-bool write_jpeg(const std::string &path, const uint8_t *yuv, unsigned int w, unsigned int h, const std::vector<uint8_t> &app1, std::string &why)
+bool write_jpeg(const std::string &path, const uint8_t *yuv, unsigned int w, unsigned int h, const std::vector<uint8_t> &app1, std::string &why, int quality = 95)
 {
 	std::vector<uint8_t> jpeg;
-	if (!photo::encode(yuv, w, h, 95, app1, PHOTO_THREADS, jpeg, why))
+	if (!photo::encode(yuv, w, h, quality, app1, PHOTO_THREADS, jpeg, why))
 		return false;
 	std::string part = path + ".part";
 	int fd = open(part.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
@@ -2458,11 +2465,11 @@ void write_shot(Shot &shot)
 	std::vector<uint8_t> app1 = exif(shot);
 	bool ok;
 	if (lut.empty()) {
-		ok = write_jpeg(shot.path, shot.yuv.data(), shot.w, shot.h, app1, why);
+		ok = write_jpeg(shot.path, shot.yuv.data(), shot.w, shot.h, app1, why, shot.with.quality);
 	} else {
 		std::vector<uint8_t> looked(shot.yuv.size());
 		photo::apply_lut(lut, shot.yuv.data(), looked.data(), shot.w, shot.h, PHOTO_THREADS);
-		ok = write_jpeg(shot.path, looked.data(), shot.w, shot.h, app1, why);
+		ok = write_jpeg(shot.path, looked.data(), shot.w, shot.h, app1, why, shot.with.quality);
 	}
 	if (!ok) {
 		for (int f : shot.burst)
