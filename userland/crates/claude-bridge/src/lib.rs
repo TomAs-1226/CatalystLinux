@@ -25,9 +25,11 @@ pub mod approve;
 pub mod http;
 pub mod runner;
 pub mod sessions;
+pub mod setup;
 pub mod store;
 pub mod stream;
 pub mod summary;
+pub mod system;
 pub mod tailscale;
 
 use std::collections::{HashMap, VecDeque};
@@ -702,7 +704,9 @@ fn start_turn(s: &Arc<Shared>, session: &str, cwd: &str, resume: bool, mode: Mod
     let config = runner::mcp_config(&s.config.approver.0, &s.config.approver.1, s.config.approver_port, &ticket);
     std::fs::write(&mcp_file, config.to_string()).map_err(|_| "the bridge could not write its permission tool's settings".to_owned())?;
     store::restrict(&mcp_file);
-    let launch = Launch { claude: s.config.claude.clone(), cwd: PathBuf::from(cwd), session: session.to_owned(), resume, mode, mcp_config: mcp_file.clone() };
+    // Installed after the bridge started (Set up installs it): found now.
+    let claude = if s.config.claude.is_file() { s.config.claude.clone() } else { runner::find_claude().unwrap_or_else(|| s.config.claude.clone()) };
+    let launch = Launch { claude, cwd: PathBuf::from(cwd), session: session.to_owned(), resume, mode, mcp_config: mcp_file.clone() };
     lock(&s.turns).push(TurnState { id: turn.clone(), session: session.to_owned(), cwd: cwd.to_owned(), ticket, running: None, stopping: false, mcp_file: mcp_file.clone() });
     let you = format!("you-{turn}");
     s.push(json!({"ev": "row", "session": session, "row": sessions::row(&you, "you", &summary::cut(text, summary::DETAIL_MOST))}));

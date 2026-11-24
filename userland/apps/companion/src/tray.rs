@@ -11,7 +11,7 @@ use std::sync::mpsc::Sender;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{CreateBitmap, DeleteObject};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::UI::Shell::{Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW};
+use windows_sys::Win32::UI::Shell::{Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 /// What the tray asks of the bridge.
@@ -27,6 +27,8 @@ const CALLBACK: u32 = WM_APP + 1;
 pub const SHOW: u32 = WM_APP + 2;
 /// Posted by the bridge: the tooltip changed.
 const TIP: u32 = WM_APP + 3;
+/// Posted by the bridge: a balloon to show.
+const NOTE: u32 = WM_APP + 4;
 const MENU_SHOW: usize = 1;
 const MENU_QUIT: usize = 2;
 
@@ -36,6 +38,13 @@ fn wide(s: &str) -> Vec<u16> {
 
 static SENDER: std::sync::Mutex<Option<Sender<Ask>>> = std::sync::Mutex::new(None);
 static TIP_TEXT: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static NOTE_TEXT: std::sync::Mutex<(String, String)> = std::sync::Mutex::new((String::new(), String::new()));
+
+fn copy_into(to: &mut [u16], s: &str) {
+    let w: Vec<u16> = s.encode_utf16().take(to.len() - 1).collect();
+    to.fill(0);
+    to[..w.len()].copy_from_slice(&w);
+}
 
 fn send(a: Ask) {
     if let Some(s) = SENDER.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
@@ -131,6 +140,16 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             send(Ask::Show);
             0
         }
+        NOTE => {
+            let mut d = data(hwnd);
+            d.uFlags = NIF_INFO;
+            d.dwInfoFlags = NIIF_INFO;
+            let (title, text) = NOTE_TEXT.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            copy_into(&mut d.szInfoTitle, &title);
+            copy_into(&mut d.szInfo, &text);
+            Shell_NotifyIconW(NIM_MODIFY, &d);
+            0
+        }
         TIP => {
             let mut d = data(hwnd);
             d.uFlags = NIF_TIP;
@@ -151,6 +170,13 @@ impl Tray {
         *TIP_TEXT.lock().unwrap_or_else(|e| e.into_inner()) = tip.to_owned();
         // SAFETY: posting to our own window, which lives while the tray does.
         unsafe { PostMessageW(self.0 as HWND, TIP, 0, 0) };
+    }
+
+    /// A balloon from the tray: what the bridge repaired or needs.
+    pub fn notify(&self, title: &str, text: &str) {
+        *NOTE_TEXT.lock().unwrap_or_else(|e| e.into_inner()) = (title.to_owned(), text.to_owned());
+        // SAFETY: posting to our own window, which lives while the tray does.
+        unsafe { PostMessageW(self.0 as HWND, NOTE, 0, 0) };
     }
 
     pub fn quit(&self) {
