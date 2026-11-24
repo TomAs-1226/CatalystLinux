@@ -1,4 +1,4 @@
-//! Night, HDR and the exposure lock (1.3.1): the Camera's automatic
+//! Night, HDR and the exposure lock (1.4.0): the Camera's automatic
 //! exposure deciding from each frame, and the countdown ring while a stack
 //! is taken. The decisions themselves are pro.rs's (each checked on its
 //! own); this is where the screen takes them in and shows them.

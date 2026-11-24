@@ -10,6 +10,37 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 1.4.0
+
+Night photos, HDR, sharper pixel pictures, and photos that document
+themselves: captions by Claude, the places they were taken, and a build
+log.
+
+### Camera
+- Night: in the dark the Camera takes a night photo by itself, short frames merged into one: about a second in the hand, up to four set down. n steps auto, off, 1, 2, 4 s; its chip shows how long. A ring counts down; Esc cancels.
+- Night's preview is brighter, so you can frame in the dark.
+- HDR: backlit and high-contrast scenes are merged from four short frames, keeping the sky and lifting the shadows. b: auto or off.
+- Bright skies and windows are no longer blown when the rest of the picture can spare it.
+- e locks the exposure on the middle of the picture; e again lets it go.
+- Pixel pictures are made from the camera's full-size still, so they're sharper and cleaner; if the still doesn't come, the viewfinder's picture is kept.
+- Pixel mode's colours are truer (hue counts more than brightness when picking a colour), edges are crisper with no halo, and darker skin and green fields no longer go too dark.
+- Pixel mode has an auto palette of eight colours taken from the scene, and a two-ink print palette.
+- g in pixel mode records a two-second loop, saved as an animated GIF that Photos plays; y adds a date stamp in a pixel font (off by default).
+
+### Photos
+- Captions by Claude if you turn them on (Settings › Photos). New photos are sent shrunk to Anthropic in the background and come back with a sentence or two for the build log, about 0.4¢ a photo, never past your monthly limit ($3 to start).
+- ↓ on a photo shows its caption, place and match under it; t writes or edits the caption, a asks Claude now.
+- n names where a photo was taken (Shop, Pit, Home). Photos there before and after take the name, from the Wi-Fi around them, kept on the handheld.
+- Photos at an event say which and when, such as "Finger Lakes Regional · during Q31".
+- Find the town online (off unless turned on) sends the nearby Wi-Fi to BeaconDB and names the town on the handheld.
+- The build log, l in the album: days, then places, each photo with its caption. e exports a day, the event, a week or everything as Markdown with its photos into photos/Build log; s twice sends the day to Team.
+- Loops play and are marked in the album; a pixel picture's details fit at every text size.
+
+### Fixed
+- Camera: night photos were never longer than 1/15 s, whatever n said.
+- Camera: turning Night on or off no longer blacks out the picture.
+- Camera: a photo taken just after opening the Camera, or right after the scene changed, is exposed where the camera was heading.
+
 ## 1.3.1
 
 ### Fixed

@@ -1382,7 +1382,7 @@ struct Prefs {
     kit: Kit,
     texture: Strength,
     pixel: pixel::Settings,
-    /// Night and HDR (1.3.1).
+    /// Night and HDR (1.4.0).
     night: pro::NightMode,
     hdr: pro::HdrMode,
 }
@@ -1503,7 +1503,7 @@ pub struct Camera {
     timer: u32,
     /// When the timer's photo is taken (kept by the clock, not the frames).
     countdown: Option<Instant>,
-    /// Night (1.3.1): its setting, the dark as sensed from each frame, how
+    /// Night (1.4.0): its setting, the dark as sensed from each frame, how
     /// still the handheld is (the motion sensor held while Night is in
     /// play), the light meter's scale, and whether Night was last told on.
     night_mode: pro::NightMode,
@@ -1512,7 +1512,7 @@ pub struct Camera {
     night_imu: Option<crate::imu::Hold>,
     lux_scale: pro::LuxScale,
     night_told: bool,
-    /// HDR, the highlights' guard and the exposure lock (1.3.1), and the
+    /// HDR, the highlights' guard and the exposure lock (1.4.0), and the
     /// newest frame's tones.
     hdr_mode: pro::HdrMode,
     hdr_sense: pro::HdrSense,
@@ -2124,7 +2124,7 @@ impl Camera {
                 words.push(format!("orig={}", crate::filters::original_of(path).display()));
             }
         }
-        // Night and HDR (1.3.1): a stack of frames at the plan's exposure,
+        // Night and HDR (1.4.0): a stack of frames at the plan's exposure,
         // merged as they come, in place of the photo's one (and of detail's
         // burst and a RAW: the stack needs the memory). Else in photo mode,
         // the highlights' guard: the mid-tones given back as it is finished.
@@ -3708,7 +3708,7 @@ impl Camera {
             }
             let limit = if hist { vf.right() - 6.0 - pro::BINS as f32 - 8.0 - 4.0 } else { vf.right() - m };
             let mut chips: Vec<(Option<&str>, String, Color)> = Vec::new();
-            // The exposure held (1.3.1), as a phone's "AE lock".
+            // The exposure held (1.4.0), as a phone's "AE lock".
             if self.mode == Mode::Photo && matches!(self.lock, pro::Lock::Held { .. }) {
                 chips.push((Some("lock"), "ae lock".to_owned(), t.ice));
             }
@@ -4391,7 +4391,7 @@ impl Camera {
             g.text_at(rail.cx(), PAD + cap.size * 2.0 + 10.0, Align::Center, &words, cap, t.faint);
         }
         // Night, with its key: in play in ink and filled, on auto in the
-        // light dim, off faint (also its chip in the bar, 1.3.1, which goes
+        // light dim, off faint (also its chip in the bar, 1.4.0, which goes
         // down while photos are taken; this stays). The timer, the grid and
         // detail are the bar's chips (1.1).
         let right = rail.right() - 9.0;

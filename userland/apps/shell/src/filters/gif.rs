@@ -1,4 +1,4 @@
-//! Animated GIFs for pixel mode's loops (1.3.1): written from pixel
+//! Animated GIFs for pixel mode's loops (1.4.0): written from pixel
 //! pictures (their few colours are a GIF's colour table as they are), and
 //! read back for Photos to play. Our own small writer and reader, so no
 //! library is added: LZW as the GIF89a specification has it, a frame's

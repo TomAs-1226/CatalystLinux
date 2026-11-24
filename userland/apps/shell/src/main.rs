@@ -762,7 +762,7 @@ fn main() {
     if let Some(dir) = value("--camera-film-shots") {
         return camera::film_shots(std::path::Path::new(&dir));
     }
-    // Night, HDR and the exposure lock (1.3.1).
+    // Night, HDR and the exposure lock (1.4.0).
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--camera-night-shots") {
         return camera::night_shots(std::path::Path::new(&dir));

@@ -545,7 +545,7 @@ pub fn still(pro: Option<&Pro>, m: &Metered, night: bool) -> StillControls {
         Some((None, Some(g))) => ((total / g).round().clamp(100.0, 250_000.0) as u32, g),
         // Photo mode before the camera's exposure has settled (just opened,
         // or the scene just changed): where it is going, by its light
-        // meter, not where it has got to (1.3.1: a photo taken then was off
+        // meter, not where it has got to (1.4.0: a photo taken then was off
         // by as much as the exposure had still to move).
         None if !m.settled && m.lux > 0.05 => split(settling_total(m), longest),
         _ => split(total, longest),
@@ -580,7 +580,7 @@ pub fn low_light(m: &Metered, s: &StillControls) -> bool {
 
 // ------------------------------------------------------------------ night ---
 //
-// Night (1.3.1): in the dark a photo is a stack of short frames merged as
+// Night (1.4.0): in the dark a photo is a stack of short frames merged as
 // they come (catalyst-camera's stack.h), not one long frame. It goes on by
 // itself where the camera's own exposure has no room left (all of its gain
 // at its longest shutter) or the light is low; its length comes from how
@@ -591,7 +591,7 @@ pub fn low_light(m: &Metered, s: &StillControls) -> bool {
 // 1/15 s and a gain of 10 (rpi.agc's exposure_modes: libcamera's AGC never
 // goes past a profile's last shutter, whatever the frame allows), so from
 // about 35 lux down the preview, and every photo taken from it, simply got
-// darker. Night's 1/5 s cap before 1.3.1 changed only the frame's limit,
+// darker. Night's 1/5 s cap before 1.4.0 changed only the frame's limit,
 // which the AGC never reached: a photo was 1/15 s at a gain of 10 with
 // night on or off.
 
@@ -901,7 +901,7 @@ pub const GUARD_MOST_FACE: f32 = 0.5;
 /// spare the exposure; darker, the highlights are HDR's to keep.
 pub const GUARD_MEDIAN_FLOOR: u8 = 64;
 
-/// Highlight protection (1.3.1): the photo's exposure compensation (0 or
+/// Highlight protection (1.4.0): the photo's exposure compensation (0 or
 /// under) eased down while part of the picture is blown and the rest can
 /// spare it, and back up once nothing is; the photo gives the mid-tones
 /// back as it is finished, the highlights rolled into white on a shoulder.
@@ -1024,7 +1024,7 @@ pub fn hdr_plan(m: &Metered, t: &Tones, guard_ev: f32) -> NightPlan {
 
 // ------------------------------------------------------------------- lock ---
 
-/// The exposure lock (`e`, 1.3.1): read on the middle of the picture alone,
+/// The exposure lock (`e`, 1.4.0): read on the middle of the picture alone,
 /// then held there until it is let go. The lens is fixed-focus, so there is
 /// no focus distance to hold with it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

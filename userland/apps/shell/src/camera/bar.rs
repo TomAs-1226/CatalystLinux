@@ -39,7 +39,7 @@ pub enum Chip {
     Detail,
     Pro,
     Lens,
-    /// The automatic exposure's (1.3.1): Night, HDR and the lock.
+    /// The automatic exposure's (1.4.0): Night, HDR and the lock.
     Night,
     Hdr,
     Lock,
@@ -184,7 +184,7 @@ pub struct Bar {
     /// Pro's row, slid along to keep the item in hand in sight.
     pub(super) scroll: Animated,
     /// The chips, slid along the same way where they are more than fit
-    /// (1.3.1: Night, HDR and the lock joined them).
+    /// (1.4.0: Night, HDR and the lock joined them).
     pub(super) slide: Animated,
     placed: bool,
 }
@@ -228,7 +228,7 @@ impl Camera {
             return vec![Chip::Night, Chip::Timer, Chip::Grid, Chip::Detail];
         }
         let mut chips = vec![Chip::Mode];
-        // The automatic exposure's first, by the mode (1.3.1): Night for
+        // The automatic exposure's first, by the mode (1.4.0): Night for
         // photo and pro, HDR and the lock for photo mode alone.
         if self.lens == Lens::Main && self.mode == Mode::Photo {
             chips.extend([Chip::Night, Chip::Hdr, Chip::Lock]);
@@ -852,7 +852,7 @@ impl Camera {
         let mut widths: Vec<f32> = (0..chips.len()).map(|i| natural(g, i, true)).collect();
         // Too many for the room: the mode's arrows go first (the rail shows
         // the modes); then the row slides along under its glass, every chip
-        // keeping its key (1.3.1: with Night, HDR and the lock there are
+        // keeping its key (1.4.0: with Night, HDR and the lock there are
         // nine; until then every key went).
         if widths.iter().sum::<f32>() > room {
             if let Some(i) = chips.iter().position(|c| *c == Chip::Mode) {
@@ -1173,7 +1173,7 @@ impl Camera {
             groups.push(keys("the bar's keys", &[("n", "Night: auto, off, 1, 2, 4 s"), ("t", "Self-timer"), ("g", "Grid"), ("d", "Detail"), ("h", "Level")]));
             return groups;
         }
-        // The automatic exposure's (1.3.1): Night in photo and pro modes,
+        // The automatic exposure's (1.4.0): Night in photo and pro modes,
         // HDR and the lock in photo mode (pro's dials have b and e).
         if self.mode == Mode::Photo {
             groups.push(keys(

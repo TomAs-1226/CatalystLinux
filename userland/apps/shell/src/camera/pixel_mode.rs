@@ -11,7 +11,7 @@
 //!   the tone (↑ ↓ the brightness at any time, `-` `=` or its picker the
 //!   contrast). All of it is remembered. `a` opens the album, since ↓ is
 //!   the tone's here.
-//! - **The shutter** (1.3.1) asks the camera for its own full-size still,
+//! - **The shutter** (1.4.0) asks the camera for its own full-size still,
 //!   as photo mode does, and makes the picture from that (decoded at a
 //!   quarter, shrunk in linear light), not from the noisy preview: an
 //!   indexed PNG at its true size, kept as the original, and one blown up
@@ -24,7 +24,7 @@
 //!   slow effects spring (`m3-slow-effects`: stiffness 800, critically
 //!   damped, settled in a third of a second); the shutter's disc is drawn
 //!   in pixels too, and presses in a step. The timer works as in photo mode.
-//! - **A loop** (`g`, 1.3.1): two seconds of the viewfinder at eight frames
+//! - **A loop** (`g`, 1.4.0): two seconds of the viewfinder at eight frames
 //!   a second, kept as an animated GIF at its true size and four times it
 //!   (filters/gif.rs), which Photos plays. The auto palette is held while it
 //!   records; the shutter's ring fills as it goes; `g` again ends it sooner.
@@ -1225,13 +1225,13 @@ mod tests {
         out
     }
 
-    /// Pixel mode's before and after (1.3.1), into `shots/1.3-pixel-quality`:
+    /// Pixel mode's before and after (1.4.0), into `shots/1.3-pixel-quality`:
     /// photographs (`PIXEL_PHOTOS`, a folder of PNGs; the Kodak suite's
     /// were used, released by Kodak for unrestricted use) and the simulated
     /// sensor's own scene through the camera's still path; 1.3.0's pictures
     /// of the same previews in `PIXEL_BEFORE` (made by 1.3.0's own code
     /// before it was replaced). Each: the photo, 1.3.0 from the preview,
-    /// 1.3.1's viewfinder from the same preview, and 1.3.1 from the still.
+    /// 1.4.0's viewfinder from the same preview, and 1.4.0 from the still.
     /// `cargo test --profile sim -p catalyst-shell -- --ignored quality_shots`
     #[test]
     #[ignore]
@@ -1326,12 +1326,12 @@ mod tests {
                 let now = Pixel::new(settings).develop_still(still).picture();
                 let photo = still.cover(w * scale, h * scale);
                 let title = format!("{name} · {} · {} · {} × {}", palette.name(), dither.name(), w, h);
-                let panels = vec![("the photo".to_owned(), photo, 1), ("1.3.0, from the preview".to_owned(), old, scale), ("1.3.1 viewfinder".to_owned(), viewfinder, scale), ("1.3.1 from the still".to_owned(), now, scale)];
+                let panels = vec![("the photo".to_owned(), photo, 1), ("1.3.0, from the preview".to_owned(), old, scale), ("1.4.0 viewfinder".to_owned(), viewfinder, scale), ("1.4.0 from the still".to_owned(), now, scale)];
                 rows.push((title, panels));
             }
             write(&format!("sheet-{name}.png"), &rows);
         }
-        // The auto palette, new in 1.3.1: each source's colours and pictures.
+        // The auto palette, new in 1.4.0: each source's colours and pictures.
         let mut rows = Vec::new();
         for (name, still, preview) in &sources {
             let settings = Settings { palette: Palette::Auto, dither: Dither::Floyd, size: Size::Fine, ..Settings::default() };
@@ -1479,7 +1479,7 @@ pub fn shots(dir: &std::path::Path) {
     ));
     scenes.push(camera_scene("12-keys".into(), base, Box::new(|_| {}), vec![Key::Char('?')]));
     scenes.push(camera_scene("13-keys-more".into(), base, Box::new(|_| {}), vec![Key::Char('?'), Key::PageDown]));
-    // 1.3.1: a loop part recorded (the ring part filled), the date stamp,
+    // 1.4.0: a loop part recorded (the ring part filled), the date stamp,
     // and the auto palette's picker with the scene's colours.
     scenes.push(camera_scene(
         "18-loop-recording".into(),
@@ -1553,7 +1553,7 @@ pub fn shots(dir: &std::path::Path) {
             }),
         ));
     }
-    // A loop kept (1.3.1): two seconds of the drifting scene, in Photos
+    // A loop kept (1.4.0): two seconds of the drifting scene, in Photos
     // playing (a few frames in), with its details, and in the album.
     let looped = photos::dir().join("PIX_20261123_101600.gif");
     {

@@ -1,5 +1,5 @@
 //! Pixel mode's pictures (the Camera's pixel mode, 1.2; its quality, auto
-//! palette, loop and date stamp 1.3.1): a picture made small, its colours
+//! palette, loop and date stamp 1.4.0): a picture made small, its colours
 //! few and dithered, as a toy camera's are. The look is our own: three
 //! sizes that land on whole panel pixels in the viewfinder (×4, ×3, ×2),
 //! seven palettes of our own and one taken from the scene, four ways to
@@ -115,11 +115,11 @@ pub enum Palette {
     #[default]
     Ember,
     Tide,
-    /// Two inks and their overprint on paper (1.3.1).
+    /// Two inks and their overprint on paper (1.4.0).
     Print,
     Poster,
     Crayon,
-    /// Eight colours found in the scene (1.3.1).
+    /// Eight colours found in the scene (1.4.0).
     Auto,
 }
 

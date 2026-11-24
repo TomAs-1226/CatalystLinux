@@ -36,7 +36,7 @@ windows that grow out of tiles whenever it is there.
 | `shots/motion/` | Each kind of motion as a strip of frames 50 ms apart and an animated PNG, and the Home settings (`--motion`). |
 | `shots/vm/` | The same shell as the ARM build on the image's own kernel, in the emulator. |
 | `shots/1.2-pixel/`, `shots/1.2-film/` | The Camera's pixel mode (each palette, dither and size, its pickers, the flash, its keys, a picture in Photos) and the film looks (each look, the grain's choice, the glow, the editor), dark and light at each text size (`--camera-pixel-shots`, `--camera-film-shots`). |
-| `shots/1.3-pixel/`, `shots/1.3-pixel-quality/` | Pixel mode's 1.3.1 additions (the auto and print palettes, a loop recording, the date stamp, a loop in Photos and the album, every palette and dither), dark and light at each text size; and its before and after on photographs (`--camera-pixel-shots`, the ignored test `quality_shots`). |
+| `shots/1.3-pixel/`, `shots/1.3-pixel-quality/` | Pixel mode's 1.4.0 additions (the auto and print palettes, a loop recording, the date stamp, a loop in Photos and the album, every palette and dither), dark and light at each text size; and its before and after on photographs (`--camera-pixel-shots`, the ignored test `quality_shots`). |
 | `tools/bake3d/` | The Robot app's robot in 3D: Numbers' bake, the packer, and a team's own from its CAD (see *The robot in three dimensions*). |
 | `shots/3d-preview/` | The robot in 3D to look at before it ships: `index.html`. |
 
@@ -2431,7 +2431,7 @@ an album, and QR codes read. The AprilTag reader is still there beside it.
   saved and its thumbnail drops into the corner. `t` sets a timer (3 s, then
   10 s, then off), counted down over the picture; Esc stops it. `g` lays a
   rule-of-thirds grid over the picture. `n` is Night (below).
-- **Night** (1.3.1; `n` steps auto, off, 1 s, 2 s, 4 s, remembered; a chip
+- **Night** (1.4.0; `n` steps auto, off, 1 s, 2 s, 4 s, remembered; a chip
   in the bar, with its length while it is in play: "☾ 1s n"). On auto it goes
   on by itself once the dark has lasted 0.6 s: the camera's own exposure out
   of room (its tuning stops at 1/15 s and a gain of 10), or under 35 lux by
@@ -2514,7 +2514,7 @@ an album, and QR codes read. The AprilTag reader is still there beside it.
   thumbnail wears a "refining" badge with the seconds left until the merged
   photo takes its place (it keeps the first frame's Exif). Auto takes the
   burst only in real low light (under 25 lux with all of the gain at 1/20 s
-  or slower); with Night in play (1.3.1), Night's stack takes its place.
+  or slower); with Night in play (1.4.0), Night's stack takes its place.
 - **Where they go:** `/data/photos`, named for when they were taken
   (`IMG_20261121_140312.jpg`, with `_2` added if two land in the same
   second). Files opens a photo in the viewer too.
@@ -2526,9 +2526,9 @@ an album, and QR codes read. The AprilTag reader is still there beside it.
     four, three or two panel pixels each in the viewfinder (224 or 225 ×
     168), so no pixel is wider than another.
   - **Palette** (`k`, its swatches in the picker): ink (1-bit), graphite
-    (4 greys), ember (a warm 4), tide (a cool 4), print (1.3.1: paper, a
+    (4 greys), ember (a warm 4), tide (a cool 4), print (1.4.0: paper, a
     coral and a teal ink, and where both print), poster (8 colours), crayon
-    (16), all our own colours, and auto (1.3.1: eight found in the scene).
+    (16), all our own colours, and auto (1.4.0: eight found in the scene).
     The four ramps map by OKLab lightness, the colour ones to the nearest
     colour in OKLab with hue weighted 1.9 times over lightness (the dither
     makes lightness up; a wrong hue shows), through a 32³ table made once
@@ -2538,7 +2538,7 @@ an album, and QR codes read. The AprilTag reader is still there beside it.
     frame); a small patch of its own colour no centre serves (a red
     bumper, a strip of sky) takes one from the two most alike. They are
     held while a loop records and at the shutter.
-  - **Made ready** (1.3.1): the frame shrunk in linear light (every
+  - **Made ready** (1.4.0): the frame shrunk in linear light (every
     pixel's light averaged, so a fine pattern keeps its brightness),
     stretched from its darkest to its lightest hundredth, given the tone's
     curve and the palette's own contrast and vibrance, then sharpened
@@ -2554,7 +2554,7 @@ an album, and QR codes read. The AprilTag reader is still there beside it.
   - Each is a chip in the bar with its key; their pickers show each choice
     on the picture while it is in hand (Enter keeps it, Esc goes back), and
     all of it is remembered. `a` opens the album, ↓ being the tone's here.
-  - **The shutter** (1.3.1) asks the camera for its full-size still and
+  - **The shutter** (1.4.0) asks the camera for its full-size still and
     makes the picture from that (decoded at a quarter, area-averaged), the
     auto palette held at the colours in sight; the thumbnail and flash come
     at once. Should the still fail or not come in 20 s, the viewfinder's
@@ -2565,7 +2565,7 @@ an album, and QR codes read. The AprilTag reader is still there beside it.
     picture's own pixels, taken away in the Bayer matrix's order on
     Material 3's slow effects spring; the shutter's disc is drawn in pixels
     and presses in a step. The timer works as in photo mode.
-  - **A loop** (`g`, 1.3.1): two seconds of the viewfinder at eight frames
+  - **A loop** (`g`, 1.4.0): two seconds of the viewfinder at eight frames
     a second, the shutter's ring filling as it records (`g` again ends it
     sooner, Esc drops it), kept as an animated GIF at its true size and ×4
     (`PIX_….gif`); Photos plays it, its album tile marked "loop".
@@ -2578,7 +2578,7 @@ an album, and QR codes read. The AprilTag reader is still there beside it.
     6 ms on the A53 at the shell's reckoning of fifteen times slower. At
     rest nothing keeps the frame beat.
   - **Before and after:** `shots/1.3-pixel-quality/` sets 1.3.0 beside
-    1.3.1 (viewfinder and still) on photographs from the Kodak test suite
+    1.4.0 (viewfinder and still) on photographs from the Kodak test suite
     (released by Kodak for unrestricted use) and the simulated sensor's
     still, with the auto palette's colours for each.
 - **Film looks** (1.2): seven of their own, a group after the digital

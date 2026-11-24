@@ -68,7 +68,7 @@ pub enum Exposing {
     Still,
     Detail,
     Bracket,
-    /// Night's and HDR's stacks (1.3.1): merged as they come.
+    /// Night's and HDR's stacks (1.4.0): merged as they come.
     Night,
     Hdr,
 }
@@ -892,7 +892,7 @@ impl Setup {
                 "aeb" => s.bracket = Bracket::from_id(v),
                 "timer" => s.timer = v.parse().ok().filter(|t| TIMERS.contains(t)).unwrap_or(0),
                 "level" => s.level = v == "1",
-                // Before 1.3.1 on or off (off the usual): both are auto now.
+                // Before 1.4.0 on or off (off the usual): both are auto now.
                 "night" => s.night = pro::NightMode::from_name(v).unwrap_or_default(),
                 _ => {}
             }
