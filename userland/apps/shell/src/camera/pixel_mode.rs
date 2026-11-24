@@ -11,21 +11,100 @@
 //!   the tone (↑ ↓ the brightness at any time, `-` `=` or its picker the
 //!   contrast). All of it is remembered. `a` opens the album, since ↓ is
 //!   the tone's here.
-//! - **The shutter** keeps the picture in sight (no photo is asked of the
-//!   camera, so it is at once): an indexed PNG at its true size, kept as the
-//!   original, and one blown up with whole pixels for sharing (×8, ×6 or ×4,
-//!   about 450 across), the album's own, `PIX_…png`. The flash is the
-//!   palette's lightest colour laid over the picture's own pixels and taken
-//!   away in the Bayer matrix's order, on Material 3's slow effects spring
-//!   (`m3-slow-effects`: stiffness 800, critically damped, settled in a third of a second); the
-//!   shutter's disc is drawn in pixels too, and presses in a step. The
-//!   timer works as in photo mode.
+//! - **The shutter** (1.3.1) asks the camera for its own full-size still,
+//!   as photo mode does, and makes the picture from that (decoded at a
+//!   quarter, shrunk in linear light), not from the noisy preview: an
+//!   indexed PNG at its true size, kept as the original, and one blown up
+//!   with whole pixels for sharing (×8, ×6 or ×4, about 450 across), the
+//!   album's own, `PIX_…png`. The auto palette is held at what was in sight
+//!   when the shutter was pressed. Should the still not come, the
+//!   preview's picture of that moment is kept instead, so none is lost.
+//!   The flash is the palette's lightest colour laid over the picture's own
+//!   pixels and taken away in the Bayer matrix's order, on Material 3's
+//!   slow effects spring (`m3-slow-effects`: stiffness 800, critically
+//!   damped, settled in a third of a second); the shutter's disc is drawn
+//!   in pixels too, and presses in a step. The timer works as in photo mode.
+//! - **A loop** (`g`, 1.3.1): two seconds of the viewfinder at eight frames
+//!   a second, kept as an animated GIF at its true size and four times it
+//!   (filters/gif.rs), which Photos plays. The auto palette is held while it
+//!   records; the shutter's ring fills as it goes; `g` again ends it sooner.
+//! - **A date stamp** (`y`, off at first) in the corner, in a pixel font.
 //! - At rest nothing here keeps the frame beat: frames are drawn as they
 //!   arrive, as in every mode.
 
 use super::bar::{Chip, Picker};
 use super::*;
 use crate::filters::pixel::{Contrast, Settings, BRIGHT_STEPS, CONTRASTS, DITHERS, PALETTES, SIZES};
+
+/// A loop's frames: two seconds at eight a second.
+const LOOP_FRAMES: usize = 16;
+const LOOP_EVERY: Duration = Duration::from_millis(125);
+/// A loop's copy for sharing: each pixel four square.
+const LOOP_SCALE: usize = 4;
+/// A still the camera never sent is given up on (its preview's picture
+/// kept) after this.
+const STILL_FOR: Duration = Duration::from_secs(20);
+
+/// What pixel mode keeps between frames beyond its choices.
+#[derive(Default)]
+pub(super) struct State {
+    /// Stills asked of the camera, each to become a pixel picture.
+    stills: Vec<Still>,
+    /// A loop being recorded.
+    pub(super) recording: Option<Loop>,
+    /// The auto palette's colours as last seen (for its swatches).
+    auto: Vec<[u8; 3]>,
+}
+
+/// A still asked of the camera for a pixel picture.
+struct Still {
+    /// Where the camera writes it (out of the album), and the picture's path.
+    still: PathBuf,
+    path: PathBuf,
+    settings: Settings,
+    /// The colours in sight when the shutter was pressed (the auto palette
+    /// held at them), and the preview's picture of that moment, kept should
+    /// the still not come.
+    colours: Vec<[u8; 3]>,
+    fallback: pixel::Frame,
+    asked: Instant,
+}
+
+/// A loop being recorded.
+pub(super) struct Loop {
+    frames: Vec<pixel::Frame>,
+    last: Option<Instant>,
+    /// The auto palette held while it records.
+    colours: Vec<[u8; 3]>,
+}
+
+/// A pixel picture written (its true size kept as its original, then the
+/// copy to share, each whole or not at all), said to the camera as saved.
+fn write_picture(live: &Mutex<Live>, path: PathBuf, frame: &pixel::Frame, look: &str, scale: usize) {
+    let write = || -> Result<(), String> {
+        let original = crate::filters::original_of(&path);
+        if let Some(dir) = original.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("the picture cannot be kept: {e}"))?;
+        }
+        crate::sys::write_atomic(&original, &frame.png(1, look)?).map_err(|e| format!("the picture cannot be kept: {e}"))?;
+        crate::sys::write_atomic(&path, &frame.png(scale, look)?).map_err(|e| format!("the picture cannot be kept: {e}"))
+    };
+    let event = match write() {
+        Ok(()) => Event::Saved { path, size: ((frame.w * scale) as u32, (frame.h * scale) as u32), detail: false, raw_skipped: false },
+        Err(why) => Event::Failed(why),
+    };
+    live.lock().map(|mut l| l.events.push(event)).ok();
+    crate::platform::wake();
+}
+
+/// The camera's still made a pixel picture: decoded at a quarter (8 MP is
+/// 820 × 616 so, every pixel of the picture still the mean of dozens),
+/// worked as the preview is, the auto palette held as it was in sight.
+pub(super) fn still_picture(still: &std::path::Path, settings: Settings, colours: &[[u8; 3]]) -> Result<pixel::Frame, String> {
+    let pic = photos::decode(still, 820, 616)?;
+    let engine = if settings.palette == pixel::Palette::Auto && !colours.is_empty() { Pixel::locked(settings, colours.to_vec()) } else { Pixel::new(settings) };
+    Ok(engine.develop_still(&pic))
+}
 
 /// The shutter's flash: Material 3's slow effects spring (`m3-slow-effects`,
 /// stiffness 800, damping ratio 1), an opacity that never bounces.
@@ -67,13 +146,14 @@ fn view_rect(vf: Rect, pic: &Picture) -> (Rect, f32) {
 /// palette's lightest colour on the picture's own pixels (two or three
 /// together where they are small), each going as the flash falls past its
 /// place in the Bayer matrix.
-pub(super) fn draw_view(g: &mut Gfx, vf: Rect, pic: &Picture, alpha: f32, flash: f32, palette: pixel::Palette) {
+pub(super) fn draw_view(g: &mut Gfx, vf: Rect, pic: &Picture, alpha: f32, flash: f32, _palette: pixel::Palette) {
     let (dest, s) = view_rect(vf, pic);
     draw_picture_crisp(g, dest, pic, whole(pic), 0.0, alpha);
     if flash <= 0.01 {
         return;
     }
-    let light = palette.colours().iter().copied().max_by_key(|c| 77 * u32::from(c[0]) + 150 * u32::from(c[1]) + 29 * u32::from(c[2])).unwrap_or([255; 3]);
+    // The lightest colour in the picture (its palette's, or the scene's).
+    let light = pic.rgb.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).max_by_key(|c| 77 * u32::from(c[0]) + 150 * u32::from(c[1]) + 29 * u32::from(c[2])).unwrap_or([255; 3]);
     let colour = Color(light[0], light[1], light[2]);
     let cell = s * (4.0 / s).ceil().max(1.0);
     let (nx, ny) = ((dest.w / cell).ceil() as usize, (dest.h / cell).ceil() as usize);
@@ -155,14 +235,186 @@ fn swatches_w(n: usize, rows: usize, q: f32) -> f32 {
 impl Camera {
     /// The engine for pixel mode's choices, made again only when they change.
     pub(super) fn pixel_engine(&mut self) -> Arc<Pixel> {
+        // The auto palette held while a loop records.
+        let held = self.pixel_state.recording.as_ref().filter(|_| self.pixel.palette == pixel::Palette::Auto).map(|l| l.colours.clone()).filter(|c| !c.is_empty());
         match &self.pixel_made {
-            Some(p) if p.settings == self.pixel => p.clone(),
+            Some(p) if p.settings == self.pixel && p.held() == held.as_deref() => p.clone(),
             _ => {
-                let p = Arc::new(Pixel::new(self.pixel));
+                let p = Arc::new(match held {
+                    Some(c) => Pixel::locked(self.pixel, c),
+                    None => Pixel::new(self.pixel),
+                });
                 self.pixel_made = Some(p.clone());
                 p
             }
         }
+    }
+
+    /// The auto palette's colours as last seen (a quiet ramp before any).
+    fn auto_colours(&self) -> Vec<[u8; 3]> {
+        match &self.pixel_frame {
+            Some(f) if f.palette == pixel::Palette::Auto => f.colours.clone(),
+            _ if !self.pixel_state.auto.is_empty() => self.pixel_state.auto.clone(),
+            _ => (0..pixel::AUTO_COLOURS).map(|i| [(20 + i * 32) as u8; 3]).collect(),
+        }
+    }
+
+    /// A palette's colours to show: its own, or for auto the scene's.
+    fn shown_colours(&self, palette: pixel::Palette) -> Vec<[u8; 3]> {
+        if palette == pixel::Palette::Auto {
+            self.auto_colours()
+        } else {
+            palette.colours().to_vec()
+        }
+    }
+
+    /// A pixel picture arrived from the camera's thread: a loop's next
+    /// frame, the auto palette's colours noted, a still long overdue given up.
+    pub(super) fn pixel_frame_arrived(&mut self) {
+        let Some(frame) = &self.pixel_frame else { return };
+        if frame.palette == pixel::Palette::Auto {
+            self.pixel_state.auto.clone_from(&frame.colours);
+        }
+        let now = Instant::now();
+        let mut done = false;
+        if let Some(l) = &mut self.pixel_state.recording {
+            if l.last.is_none_or(|t| now.duration_since(t) >= LOOP_EVERY - Duration::from_millis(10)) {
+                l.frames.push(frame.clone());
+                l.last = Some(now);
+                done = l.frames.len() >= LOOP_FRAMES;
+            }
+        }
+        if done {
+            self.finish_loop();
+        }
+        if let Some(at) = self.pixel_state.stills.iter().position(|s| now.duration_since(s.asked) > STILL_FOR) {
+            let s = self.pixel_state.stills.remove(at);
+            std::fs::remove_file(&s.still).ok();
+            self.say("the camera's still never came: kept the viewfinder's");
+            write_picture(&self.live, s.path, &s.fallback, &s.settings.look_words(), s.settings.size.share_scale());
+        }
+    }
+
+    /// The camera's still for a pixel picture is in: made into it behind
+    /// (it arrives as the picture saved). False if it is not one of ours.
+    pub(super) fn pixel_still_saved(&mut self, path: &std::path::Path) -> bool {
+        let Some(at) = self.pixel_state.stills.iter().position(|s| s.still == path) else {
+            // A still given up on, come late: let go of, never in the album.
+            let ours = path.parent() == Some(photos::dir().join(".pixel").as_path());
+            if ours {
+                std::fs::remove_file(path).ok();
+            }
+            return ours;
+        };
+        let s = self.pixel_state.stills.remove(at);
+        let live = self.live.clone();
+        std::thread::Builder::new()
+            .name("pixel-still".into())
+            .spawn(move || {
+                let began = Instant::now();
+                let frame = match still_picture(&s.still, s.settings, &s.colours) {
+                    Ok(f) => f,
+                    Err(why) => {
+                        eprintln!("camera: pixel still: {why}; the viewfinder's kept");
+                        s.fallback.clone()
+                    }
+                };
+                std::fs::remove_file(&s.still).ok();
+                eprintln!("camera: pixel picture from the still in {} ms", began.elapsed().as_millis());
+                write_picture(&live, s.path, &frame, &s.settings.look_words(), s.settings.size.share_scale());
+            })
+            .ok();
+        true
+    }
+
+    /// The camera could not take a still: the oldest pixel picture asked
+    /// for is kept from the viewfinder instead. False if none was asked.
+    pub(super) fn pixel_still_failed(&mut self, why: &str) -> bool {
+        if self.pixel_state.stills.is_empty() {
+            return false;
+        }
+        let s = self.pixel_state.stills.remove(0);
+        eprintln!("camera: pixel still: {why}; the viewfinder's kept");
+        self.captured = true;
+        write_picture(&self.live, s.path, &s.fallback, &s.settings.look_words(), s.settings.size.share_scale());
+        true
+    }
+
+    /// `g`: a loop started, or ended sooner.
+    fn toggle_loop(&mut self) {
+        if self.pixel_state.recording.is_some() {
+            return self.finish_loop();
+        }
+        let Some(frame) = &self.pixel_frame else {
+            self.say("the camera is not ready yet");
+            return;
+        };
+        self.pixel_state.recording = Some(Loop { frames: Vec::new(), last: None, colours: frame.colours.clone() });
+        self.tell_develop();
+        self.say("a loop · two seconds · g: end it sooner");
+    }
+
+    /// How far a loop being recorded has come (0 to 1).
+    pub(super) fn loop_progress(&self) -> Option<f32> {
+        self.pixel_state.recording.as_ref().map(|l| l.frames.len() as f32 / LOOP_FRAMES as f32)
+    }
+
+    /// The loop recorded kept: its frames (those of its first's size and
+    /// colours) as GIFs, at true size as the original and four times it.
+    fn finish_loop(&mut self) {
+        let Some(l) = self.pixel_state.recording.take() else { return };
+        self.tell_develop();
+        let Some(first) = l.frames.first() else {
+            self.say("loop: no frames");
+            return;
+        };
+        let frames: Vec<pixel::Frame> = l.frames.iter().filter(|f| (f.w, f.h) == (first.w, first.h) && f.colours.len() == first.colours.len()).cloned().collect();
+        if frames.len() < 2 {
+            self.say("loop: too short to keep");
+            return;
+        }
+        let mut path = photos::new_pixel_path(chrono::Local::now().naive_local()).with_extension("gif");
+        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut n = 2;
+        while self.pending_paths.contains(&path) || path.exists() {
+            path = path.with_file_name(format!("{stem}_{n}.gif"));
+            n += 1;
+        }
+        let pic = frames[0].picture();
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.last = Some((Photo { path: path.clone(), name, taken: chrono::Local::now().naive_local(), bytes: 0 }, pic.cover_nearest(photos::THUMB_W, photos::THUMB_H)));
+        self.instant = Some(path.clone());
+        self.last_pop.jump(0.6);
+        self.last_pop.set(1.0);
+        self.saving = Some(Instant::now());
+        self.pending += 1;
+        self.pending_paths.push(path.clone());
+        // Each frame shown for whole hundredths (a GIF's), and its length
+        // said as Photos will play it.
+        let delay = (LOOP_EVERY.as_millis() / 10) as u16;
+        let secs = frames.len() as f32 * f32::from(delay) / 100.0;
+        self.say(format!("loop kept · {} frames, {secs:.1} s", frames.len()));
+        let (live, look) = (self.live.clone(), format!("Pixel loop · {} · {}", self.pixel.palette.name(), self.pixel.dither.name()));
+        std::thread::Builder::new()
+            .name("pixel-loop".into())
+            .spawn(move || {
+                let write = || -> Result<(), String> {
+                    let original = crate::filters::original_of(&path);
+                    if let Some(dir) = original.parent() {
+                        std::fs::create_dir_all(dir).map_err(|e| format!("the loop cannot be kept: {e}"))?;
+                    }
+                    crate::sys::write_atomic(&original, &crate::filters::gif::encode(&frames, 1, delay, &look)).map_err(|e| format!("the loop cannot be kept: {e}"))?;
+                    crate::sys::write_atomic(&path, &crate::filters::gif::encode(&frames, LOOP_SCALE, delay, &look)).map_err(|e| format!("the loop cannot be kept: {e}"))
+                };
+                let (w, h) = (frames[0].w * LOOP_SCALE, frames[0].h * LOOP_SCALE);
+                let event = match write() {
+                    Ok(()) => Event::Saved { path, size: (w as u32, h as u32), detail: false, raw_skipped: false },
+                    Err(why) => Event::Failed(why),
+                };
+                live.lock().map(|mut l| l.events.push(event)).ok();
+                crate::platform::wake();
+            })
+            .ok();
     }
 
     /// Pixel mode's choices changed: on the picture from the next frame,
@@ -181,7 +433,28 @@ impl Camera {
     /// Pixel mode's own keys, after the bar's: `Some` if it took the key.
     pub(super) fn pixel_key(&mut self, key: Key) -> Option<Nav> {
         let mut s = self.pixel;
+        // A loop records as it was set: its choices wait until it is done.
+        if self.pixel_state.recording.is_some() && matches!(key, Key::Up | Key::Down | Key::Char('-' | '_' | '=' | '+' | 's' | 'd' | 'k' | 'y')) {
+            self.say("recording a loop · g: end it");
+            return Some(Nav::Stay);
+        }
         match key {
+            Key::Char('g') if !self.quick => self.toggle_loop(),
+            Key::Back if self.pixel_state.recording.is_some() => {
+                self.pixel_state.recording = None;
+                self.tell_develop();
+                self.say("loop left untaken");
+            }
+            Key::Char('y') => {
+                s.stamp = !s.stamp;
+                self.set_pixel(s, true, Some((if s.stamp { "date stamp on" } else { "date stamp off" }).to_owned()));
+                // The stamp sits in the bottom corner, under the bar: the bar
+                // steps aside to show it (any other key brings it back).
+                if s.stamp && self.bar.picker.is_none() {
+                    self.bar.focus = None;
+                    self.bar.hidden = true;
+                }
+            }
             Key::Up | Key::Down => {
                 let by = if key == Key::Up { 1 } else { -1 };
                 s.bright = (s.bright + by).clamp(-BRIGHT_STEPS, BRIGHT_STEPS);
@@ -324,7 +597,14 @@ impl Camera {
                 glyph(g, &rows, left + (face - n as f32 * q) * 0.5, cy, q, ink, alpha);
             }
             Chip::Palette => {
-                let colours = self.pixel.palette.badge();
+                let all = self.shown_colours(self.pixel.palette);
+                // Four of them: the ramps whole, the larger palettes spread.
+                let colours: Vec<[u8; 3]> = match self.pixel.palette {
+                    pixel::Palette::Poster => vec![all[2], all[6], all[1], all[3]],
+                    pixel::Palette::Crayon => vec![all[6], all[8], all[14], all[12]],
+                    pixel::Palette::Auto => (0..4).map(|i| all[(i * 2 + 1).min(all.len() - 1)]).collect(),
+                    _ => all,
+                };
                 let rows = if colours.len() > 2 { 2 } else { 1 };
                 let q = ((face - 3.0) / 2.0).floor().max(2.0);
                 let w = swatches_w(colours.len(), rows, q);
@@ -405,7 +685,7 @@ impl Camera {
         let sample = (16usize, 4usize);
         let picture_w = |i: usize| match chip {
             Chip::Palette => {
-                let n = PALETTES[i].colours().len();
+                let n = if PALETTES[i] == pixel::Palette::Auto { pixel::AUTO_COLOURS } else { PALETTES[i].colours().len() };
                 swatches_w(n, if n > 8 { 2 } else { 1 }, if n > 8 { q } else { (cap.size * 0.62).round() })
             }
             _ => sample.0 as f32 * 2.0,
@@ -467,10 +747,10 @@ impl Camera {
             let px = x + (w - pw) * 0.5;
             match chip {
                 Chip::Palette => {
-                    let colours = PALETTES[i].colours();
+                    let colours = self.shown_colours(PALETTES[i]);
                     let rows = if colours.len() > 8 { 2 } else { 1 };
                     let side = if rows == 2 { q } else { (cap.size * 0.62).round() };
-                    swatches(g, colours, rows, px, pic_cy, side, mix(t.faint, t.on_ice, on * 0.4), shown);
+                    swatches(g, &colours, rows, px, pic_cy, side, mix(t.faint, t.on_ice, on * 0.4), shown);
                 }
                 _ => {
                     // A ramp from dark to light in the dither's own pattern.
@@ -516,8 +796,14 @@ impl Camera {
         if s.contrast != Contrast::Normal {
             words.push(s.contrast.name().to_owned());
         }
+        let mut x = vf.x + 6.0;
+        // A loop recording: its seconds left, in the signal colour.
+        if let Some(p) = self.loop_progress() {
+            let left = (1.0 - p) * LOOP_FRAMES as f32 * LOOP_EVERY.as_secs_f32();
+            x += Self::chip(g, x, vf.y + 6.0, Some("animation"), &format!("loop · {left:.1} s"), t.signal, alpha) + 4.0;
+        }
         if !words.is_empty() {
-            Self::chip(g, vf.x + 6.0, vf.y + 6.0, Some("sunny"), &words.join(" · "), t.ice, alpha);
+            Self::chip(g, x, vf.y + 6.0, Some("sunny"), &words.join(" · "), t.ice, alpha);
         }
     }
 
@@ -525,18 +811,24 @@ impl Camera {
     pub(super) fn pixel_keys(&self) -> Vec<crate::help::KeyGroup> {
         use crate::help::keys;
         vec![
-            keys("pixel", &[("space · enter", "Take the picture"), ("↑ ↓", "Brightness"), ("- =", "Contrast"), ("a", "The album")]),
-            keys("its choices", &[("s", "Size: 56, 75, 112"), ("k", "Palette"), ("d", "Dither"), ("tab", "All of them, in the bar")]),
+            keys("pixel", &[("space · enter", "Take the picture"), ("g", "A two-second loop"), ("↑ ↓", "Brightness"), ("- =", "Contrast"), ("a", "The album")]),
+            keys("its choices", &[("s", "Size: 56, 75, 112"), ("k", "Palette"), ("d", "Dither"), ("y", "Date stamp"), ("tab", "All of them, in the bar")]),
         ]
     }
 
-    /// The shutter in pixel mode: the picture in sight kept, at once.
+    /// The shutter in pixel mode: the camera's own still asked for, to be
+    /// made the picture; what is in sight shown as taken at once.
     pub(super) fn shoot_pixel(&mut self, calm: bool) {
+        // One still at a time: the next once the camera has the last one's picture.
+        if self.saving.is_some() && !self.captured {
+            return;
+        }
         let Some(frame) = self.pixel_frame.clone() else {
             self.say("the camera is not ready yet");
             return;
         };
-        let size = SIZES.iter().copied().find(|s| s.dims() == (frame.w, frame.h)).unwrap_or(self.pixel.size);
+        let settings = self.pixel;
+        let size = SIZES.iter().copied().find(|s| s.dims() == (frame.w, frame.h)).unwrap_or(settings.size);
         let mut path = photos::new_pixel_path(chrono::Local::now().naive_local());
         let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         let mut n = 2;
@@ -566,31 +858,22 @@ impl Camera {
         self.press.jump(1.0);
         self.press.set(0.0);
         self.saving = Some(Instant::now());
-        self.captured = true;
         self.pending += 1;
         self.pending_paths.push(path.clone());
-        // Written behind: the true size kept as its original, then the copy
-        // to share (the album's), each whole or not at all.
-        let (live, look, scale) = (self.live.clone(), self.pixel.look_words(), size.share_scale());
-        std::thread::Builder::new()
-            .name("pixel-write".into())
-            .spawn(move || {
-                let write = || -> Result<(), String> {
-                    let original = crate::filters::original_of(&path);
-                    if let Some(dir) = original.parent() {
-                        std::fs::create_dir_all(dir).map_err(|e| format!("the picture cannot be kept: {e}"))?;
-                    }
-                    crate::sys::write_atomic(&original, &frame.png(1, &look)?).map_err(|e| format!("the picture cannot be kept: {e}"))?;
-                    crate::sys::write_atomic(&path, &frame.png(scale, &look)?).map_err(|e| format!("the picture cannot be kept: {e}"))
-                };
-                let event = match write() {
-                    Ok(()) => Event::Saved { path, size: ((frame.w * scale) as u32, (frame.h * scale) as u32), detail: false, raw_skipped: false },
-                    Err(why) => Event::Failed(why),
-                };
-                live.lock().map(|mut l| l.events.push(event)).ok();
-                crate::platform::wake();
-            })
-            .ok();
+        // The camera's own still, as photo mode's is taken (its exposure as
+        // the preview settled it; no look, crop or burst), out of the album.
+        let still = photos::dir().join(".pixel").join(format!("{}.jpg", path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()));
+        std::fs::create_dir_all(photos::dir().join(".pixel")).ok();
+        let words = self.metered.map(|m| pro::still(None, &m, self.night).words()).unwrap_or_default();
+        let settings = Settings { size, ..settings };
+        if self.control.send(Order::Still(still.clone(), words)) {
+            self.captured = false;
+            self.pixel_state.stills.push(Still { still, path, settings, colours: frame.colours.clone(), fallback: frame, asked: Instant::now() });
+        } else {
+            // No camera to ask: the viewfinder's picture, as it was.
+            self.captured = true;
+            write_picture(&self.live, path, &frame, &settings.look_words(), size.share_scale());
+        }
     }
 }
 
@@ -703,7 +986,7 @@ mod tests {
         press(&mut camera, Key::Right);
         press(&mut camera, Key::Right);
         press(&mut camera, Key::Enter);
-        assert_eq!((camera.pixel.palette, camera.bar.picker), (pixel::Palette::Poster, None));
+        assert_eq!((camera.pixel.palette, camera.bar.picker), (pixel::Palette::Print, None));
         // The tone's picker: ← → contrast, ↑ ↓ brightness, Enter keeps.
         camera.bar.focus = Some(Chip::Tone);
         press(&mut camera, Key::Enter);
@@ -714,14 +997,14 @@ mod tests {
         assert_eq!((camera.pixel.contrast, camera.pixel.bright), (Contrast::Normal, BRIGHT_STEPS - 2));
         // The picture follows: its size and palette now.
         let started = Instant::now();
-        while camera.pixel_frame.as_ref().is_none_or(|f| (f.w, f.h) != pixel::Size::Fine.dims() || f.palette != pixel::Palette::Poster) && started.elapsed() < Duration::from_secs(5) {
+        while camera.pixel_frame.as_ref().is_none_or(|f| (f.w, f.h) != pixel::Size::Fine.dims() || f.palette != pixel::Palette::Print) && started.elapsed() < Duration::from_secs(5) {
             run(&mut camera, 30);
         }
         let f = camera.pixel_frame.clone().unwrap();
-        assert_eq!(((f.w, f.h), f.palette), (pixel::Size::Fine.dims(), pixel::Palette::Poster));
+        assert_eq!(((f.w, f.h), f.palette), (pixel::Size::Fine.dims(), pixel::Palette::Print));
         // All of it kept for the next visit.
         let kept = Prefs::load().pixel;
-        assert_eq!(kept, Settings { size: pixel::Size::Fine, palette: pixel::Palette::Poster, dither: pixel::Dither::Floyd, bright: BRIGHT_STEPS - 2, contrast: Contrast::Normal });
+        assert_eq!(kept, Settings { size: pixel::Size::Fine, palette: pixel::Palette::Print, dither: pixel::Dither::Floyd, bright: BRIGHT_STEPS - 2, contrast: Contrast::Normal, stamp: false });
         drop(camera);
         let again = Camera::new();
         assert_eq!(again.pixel, kept);
@@ -729,49 +1012,145 @@ mod tests {
     }
 
     #[test]
-    fn the_shutter_keeps_the_picture_in_sight_as_two_pngs_in_the_album() {
+    fn the_shutter_makes_the_picture_from_the_cameras_still_as_two_pngs_in_the_album() {
         let _port = crate::smartcam::sim::exclusive(false);
         let mut camera = in_pixel_mode();
         let frame = camera.pixel_frame.clone().unwrap();
-        camera.pixel_frame = Some(frame.clone());
         assert!(matches!(press(&mut camera, Key::Enter), Nav::Stay));
-        let path = camera.instant.clone().expect("taken at once");
+        let path = camera.instant.clone().expect("shown as taken at once");
         assert!(photos::is_pixel(&path.file_name().unwrap().to_string_lossy()));
         assert!(camera.flying.is_some() && camera.fly_crisp, "it flies in, whole pixels");
         assert!(camera.pixel_flash.value() > 0.9, "the dithered flash");
+        // The camera's own still asked for, out of the album.
+        assert_eq!(camera.pixel_state.stills.len(), 1);
+        assert!(!camera.captured, "the camera is taking it");
+        let still = camera.pixel_state.stills[0].still.clone();
+        assert!(still.starts_with(photos::dir().join(".pixel")));
         let started = Instant::now();
-        while camera.pending > 0 && started.elapsed() < Duration::from_secs(10) {
+        while camera.pending > 0 && started.elapsed() < Duration::from_secs(40) {
             run(&mut camera, 20);
         }
         assert_eq!(camera.pending, 0, "saved");
+        assert!(camera.pixel_state.stills.is_empty() && !still.exists(), "the still made the picture and went");
         // The true size, kept as its original; the copy to share, the album's.
         let (w, h) = (frame.w, frame.h);
         let scale = camera.pixel.size.share_scale();
         let original = crate::filters::original_of(&path);
         assert_eq!(photos::dimensions(&original), Some((w, h)));
         assert_eq!(photos::dimensions(&path), Some((w * scale, h * scale)));
-        // Each is the picture that was in sight, pixel for pixel.
         let small = photos::decode(&original, w, h).unwrap();
-        assert_eq!(small, frame.picture());
         let big = photos::decode(&path, w, h).unwrap();
         for (y, x) in [(0, 0), (h * scale - 1, w * scale - 1), (h * scale / 2, w * scale / 3)] {
             assert_eq!(&big.rgb[(y * w * scale + x) * 3..][..3], &small.rgb[((y / scale) * w + x / scale) * 3..][..3]);
         }
+        let colours = camera.pixel.palette.colours();
+        assert!(small.rgb.chunks_exact(3).all(|p| colours.iter().any(|c| c == p)), "only the palette's colours");
         assert_eq!(crate::filters::look_of(&path).as_deref(), Some(camera.pixel.look_words().as_str()));
-        // In the album, newest first, and its thumbnail made of whole pixels.
+        // In the album, its thumbnail made of whole pixels.
         let photo = photos::list().into_iter().find(|p| p.path == path).expect("in the album");
         let thumb = photos::thumbnail(&photo).unwrap();
-        let colours = camera.pixel.palette.colours();
         assert!(thumb.rgb.chunks_exact(3).all(|p| colours.iter().any(|c| c == p)), "sampled, never averaged");
+        photos::delete(&photo).unwrap();
+        assert!(!original.exists());
+        // Should the still not come, the viewfinder's picture of the moment is kept.
+        let frame = camera.pixel_frame.clone().unwrap();
+        press(&mut camera, Key::Enter);
+        let path = camera.instant.clone().unwrap();
+        assert!(camera.pixel_still_failed("no frame came"));
+        let started = Instant::now();
+        while camera.pending > 0 && started.elapsed() < Duration::from_secs(40) {
+            run(&mut camera, 20);
+        }
+        assert_eq!(photos::decode(&crate::filters::original_of(&path), frame.w, frame.h).unwrap(), frame.picture());
+        // The late still, when it comes, is let go of, not put in the album.
+        run(&mut camera, 3000);
+        assert!(photos::list().iter().all(|p| !p.path.starts_with(photos::dir().join(".pixel"))));
+        assert_eq!(camera.pending, 0);
+        if let Some(photo) = photos::list().into_iter().find(|p| p.path == path) {
+            photos::delete(&photo).ok();
+        }
         // The timer works here too.
         camera.timer = 2;
         press(&mut camera, Key::Enter);
         assert!(camera.countdown.is_some() && camera.pending == 0);
         camera.countdown = None;
+    }
+
+    #[test]
+    fn the_auto_palette_is_held_at_the_shutter_and_a_still_is_made_with_it() {
+        let _port = crate::smartcam::sim::exclusive(false);
+        let mut camera = in_pixel_mode();
+        let s = Settings { palette: pixel::Palette::Auto, ..Settings::default() };
+        camera.set_pixel(s, false, None);
+        let started = Instant::now();
+        while camera.pixel_frame.as_ref().is_none_or(|f| f.palette != pixel::Palette::Auto) && started.elapsed() < Duration::from_secs(5) {
+            run(&mut camera, 30);
+        }
+        let colours = camera.pixel_frame.as_ref().unwrap().colours.clone();
+        assert_eq!(colours.len(), pixel::AUTO_COLOURS);
+        // A still of another scene, made with the colours held.
+        let still = photos::dir().join(".pixel").join("test.jpg");
+        std::fs::create_dir_all(still.parent().unwrap()).unwrap();
+        crate::camera::save_jpeg(&still, &crate::camera::scene(1640, 1232, 40.0, false)).unwrap();
+        let f = still_picture(&still, s, &colours).unwrap();
+        assert_eq!(f.colours, colours, "held at what was in sight");
+        assert_eq!((f.w, f.h), s.size.dims());
+        std::fs::remove_file(&still).ok();
+        Prefs::default().save();
+    }
+
+    #[test]
+    fn a_loop_records_two_seconds_and_plays_in_photos() {
+        let _port = crate::smartcam::sim::exclusive(false);
+        let mut camera = in_pixel_mode();
+        press(&mut camera, Key::Char('g'));
+        assert!(camera.pixel_state.recording.is_some());
+        // Its choices wait while it records.
+        press(&mut camera, Key::Char('s'));
+        assert_eq!(camera.pixel.size, Settings::default().size);
+        let started = Instant::now();
+        while camera.pixel_state.recording.is_some() && started.elapsed() < Duration::from_secs(10) {
+            run(&mut camera, 20);
+        }
+        assert!(camera.pixel_state.recording.is_none(), "done by itself");
+        while camera.pending > 0 && started.elapsed() < Duration::from_secs(20) {
+            run(&mut camera, 20);
+        }
+        let path = camera.instant.clone().expect("a loop");
+        assert_eq!(path.extension().and_then(|e| e.to_str()), Some("gif"));
+        let (w, h) = Settings::default().size.dims();
+        assert_eq!(photos::dimensions(&path), Some((w * LOOP_SCALE, h * LOOP_SCALE)));
+        let original = crate::filters::original_of(&path);
+        let frames = photos::loop_frames(&original).unwrap();
+        assert!(frames.len() >= LOOP_FRAMES - 1 && frames.iter().all(|(p, d)| (p.w, p.h) == (w, h) && *d == 120), "{}", frames.len());
+        // Photos plays it at its own pace, off the frame beat.
+        let photo = photos::list().into_iter().find(|p| p.path == path).expect("in the album");
+        let mut viewer = photos::Viewer::single(path.clone());
+        let wait = viewer.ambient().expect("it plays");
+        assert!(wait <= Duration::from_millis(130));
+        assert!(!viewer.busy());
+        assert!(viewer.ambient_tick(0.13, &Robot::none()), "the next frame");
         photos::delete(&photo).unwrap();
         assert!(!original.exists());
     }
 
+    #[test]
+    fn the_date_stamp_is_a_key_away_and_kept() {
+        let _port = crate::smartcam::sim::exclusive(false);
+        let mut camera = in_pixel_mode();
+        assert!(!camera.pixel.stamp, "off at first");
+        press(&mut camera, Key::Char('y'));
+        assert!(camera.pixel.stamp && Prefs::load().pixel.stamp);
+        assert!(camera.bar.hidden, "the bar steps aside from the stamp's corner");
+        // The next pictures wear it: their corner differs from a plain one's.
+        let started = Instant::now();
+        while camera.pixel_frame.is_none() && started.elapsed() < Duration::from_secs(5) {
+            run(&mut camera, 30);
+        }
+        press(&mut camera, Key::Char('y'));
+        assert!(!camera.pixel.stamp);
+        Prefs::default().save();
+    }
     #[test]
     fn its_keys_fit_their_sheet_and_its_bar_and_pickers_fit_at_every_text_size() {
         let _port = crate::smartcam::sim::exclusive(false);
@@ -805,7 +1184,12 @@ mod tests {
     fn the_flash_falls_through_the_bayer_order_and_the_disc_is_whole_blocks() {
         let mut g = Gfx::new(bezel::Tokens::dark());
         let vf = Camera::viewfinder();
-        let pic = Picture::new(56, 42);
+        // A picture in ember's darkest, its lightest in one corner: the
+        // flash is the lightest colour in it.
+        let mut pic = Picture::new(56, 42);
+        for (i, p) in pic.rgb.chunks_exact_mut(3).enumerate() {
+            p.copy_from_slice(if i == 0 { &[0xf8, 0xe2, 0xb8] } else { &[0x2b, 0x14, 0x18] });
+        }
         // Ember's cream over black, at the flash's opacity: bright red.
         let lit = |g: &mut Gfx| g.canvas.px.iter().filter(|p| (**p >> 16) & 0xff > 200).count();
         draw_view(&mut g, vf, &pic, 1.0, 1.0, pixel::Palette::Ember);
@@ -823,6 +1207,147 @@ mod tests {
         let (top, bottom) = (on.iter().map(|p| p.1).min().unwrap(), on.iter().map(|p| p.1).max().unwrap());
         assert_eq!((bottom - top + 1) % 3, 0, "whole blocks tall");
         assert!((bottom - top + 1 - 30).abs() <= 3, "{}", bottom - top + 1);
+    }
+
+    /// A small sensor's noise over a picture, by a seed: `per` the lower,
+    /// the more (the preview, binned, has half a full-size pixel's).
+    fn noisy(pic: &Picture, seed: u32, per: i32) -> Picture {
+        let mut seed = seed;
+        let mut out = pic.clone();
+        for v in out.rgb.iter_mut() {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let n = ((seed >> 24) as i32 + ((seed >> 16) & 0xff) as i32 - 255) / per;
+            *v = (i32::from(*v) + n).clamp(0, 255) as u8;
+        }
+        out
+    }
+
+    /// Pixel mode's before and after (1.3.1), into `shots/1.3-pixel-quality`:
+    /// photographs (`PIXEL_PHOTOS`, a folder of PNGs; the Kodak suite's
+    /// were used, released by Kodak for unrestricted use) and the simulated
+    /// sensor's own scene through the camera's still path; 1.3.0's pictures
+    /// of the same previews in `PIXEL_BEFORE` (made by 1.3.0's own code
+    /// before it was replaced). Each: the photo, 1.3.0 from the preview,
+    /// 1.3.1's viewfinder from the same preview, and 1.3.1 from the still.
+    /// `cargo test --profile sim -p catalyst-shell -- --ignored quality_shots`
+    #[test]
+    #[ignore]
+    fn quality_shots() {
+        use crate::filters::pixel::{Dither, Palette, Size};
+        let src = PathBuf::from(std::env::var("PIXEL_PHOTOS").expect("PIXEL_PHOTOS"));
+        let before = PathBuf::from(std::env::var("PIXEL_BEFORE").expect("PIXEL_BEFORE"));
+        let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../shots/1.3-pixel-quality");
+        std::fs::create_dir_all(&out).unwrap();
+        crate::shell::tests::sandbox();
+        // (name, the still, the preview the camera would show of it)
+        let mut sources: Vec<(String, Picture, Picture)> = Vec::new();
+        let mut names: Vec<std::fs::DirEntry> = std::fs::read_dir(&src).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".png")).collect();
+        names.sort_by_key(|e| e.file_name());
+        for e in names {
+            let name = e.file_name().to_string_lossy().trim_end_matches(".png").to_owned();
+            let pic = photos::decode(&e.path(), 4096, 4096).unwrap();
+            let preview = noisy(&pic.cover(320, 240), 0x2545_F491 ^ name.len() as u32, 40);
+            sources.push((name, pic, preview));
+        }
+        // The simulated sensor: its full 3280 × 2464 with a full-size pixel's
+        // noise, written and read back as the camera's still is.
+        {
+            let full = noisy(&scene(3280, 2464, 3.1, false), 0x51ED_2701, 20);
+            let jpeg = photos::dir().join(".pixel").join("sensor.jpg");
+            std::fs::create_dir_all(jpeg.parent().unwrap()).unwrap();
+            save_jpeg(&jpeg, &full).unwrap();
+            let still = photos::decode(&jpeg, 820, 616).unwrap();
+            let preview = noisy(&scene(1640, 1232, 3.1, false).cover(320, 240), 0x2545_F491 ^ 6, 40);
+            sources.push(("sensor".to_owned(), still, preview));
+            std::fs::remove_file(&jpeg).ok();
+        }
+        let combos = [
+            (Palette::Ember, Dither::Bayer, Size::Small),
+            (Palette::Graphite, Dither::Atkinson, Size::Fine),
+            (Palette::Crayon, Dither::Floyd, Size::Fine),
+            (Palette::Poster, Dither::Bayer, Size::Small),
+            (Palette::Tide, Dither::Floyd, Size::Small),
+            (Palette::Ink, Dither::Atkinson, Size::Fine),
+        ];
+        let mut shell = crate::shell::Shell::new(Robot::demo());
+        shell.apply_settings();
+        let label_h = 22;
+        let gap = 8;
+        let to_canvas = |sheet: &mut bezel::Canvas, pic: &Picture, ox: usize, oy: usize, scale: usize| {
+            for y in 0..pic.h * scale {
+                for x in 0..pic.w * scale {
+                    let c = &pic.rgb[((y / scale) * pic.w + x / scale) * 3..][..3];
+                    let at = (oy + y) * sheet.w as usize + ox + x;
+                    if at < sheet.px.len() {
+                        sheet.px[at] = (u32::from(c[0]) << 16) | (u32::from(c[1]) << 8) | u32::from(c[2]);
+                    }
+                }
+            }
+        };
+        let mut write = |file: &str, rows: &[(String, Vec<(String, Picture, usize)>)]| {
+            let width = rows.iter().map(|(_, panels)| panels.iter().map(|(_, p, s)| p.w * s + gap).sum::<usize>() + gap).max().unwrap_or(0);
+            let height: usize = rows.iter().map(|(_, panels)| label_h * 2 + panels.iter().map(|(_, p, s)| p.h * s).max().unwrap_or(0) + gap).sum::<usize>() + gap;
+            let mut sheet = bezel::Canvas::new(width as i32, height as i32);
+            sheet.px.fill(0x0010_1214);
+            let mut y = gap;
+            for (title, panels) in rows {
+                let g = &mut shell.gfx;
+                std::mem::swap(&mut g.canvas, &mut sheet);
+                let ty = g.ty;
+                g.text_at(gap as f32, (y + label_h / 2) as f32, Align::Left, title, ty.caption, Color(236, 238, 242));
+                std::mem::swap(&mut g.canvas, &mut sheet);
+                y += label_h;
+                let mut x = gap;
+                for (label, pic, scale) in panels {
+                    let g = &mut shell.gfx;
+                    std::mem::swap(&mut g.canvas, &mut sheet);
+                    let ty = g.ty;
+                    g.text_at(x as f32, (y + label_h / 2) as f32, Align::Left, label, ty.caption, Color(170, 174, 182));
+                    std::mem::swap(&mut g.canvas, &mut sheet);
+                    to_canvas(&mut sheet, pic, x, y + label_h, *scale);
+                    x += pic.w * scale + gap;
+                }
+                y += label_h + panels.iter().map(|(_, p, s)| p.h * s).max().unwrap_or(0) + gap;
+            }
+            crate::platform::sim::save_png(&sheet, &out.join(file), 1);
+        };
+        for (name, still, preview) in &sources {
+            let yuv = rgb_to_yuv420(preview);
+            let mut rows = Vec::new();
+            for (palette, dither, size) in combos {
+                let settings = Settings { palette, dither, size, ..Settings::default() };
+                let scale = if size == Size::Fine { 3 } else { 4 };
+                let (w, h) = size.dims();
+                let old = photos::decode(&before.join(format!("{name}-{}-{}-{}.png", palette.name(), dither.name(), size.id())), w, h).unwrap();
+                let viewfinder = Pixel::new(settings).develop(&yuv, 320, 240).picture();
+                let now = Pixel::new(settings).develop_still(still).picture();
+                let photo = still.cover(w * scale, h * scale);
+                let title = format!("{name} · {} · {} · {} × {}", palette.name(), dither.name(), w, h);
+                let panels = vec![("the photo".to_owned(), photo, 1), ("1.3.0, from the preview".to_owned(), old, scale), ("1.3.1 viewfinder".to_owned(), viewfinder, scale), ("1.3.1 from the still".to_owned(), now, scale)];
+                rows.push((title, panels));
+            }
+            write(&format!("sheet-{name}.png"), &rows);
+        }
+        // The auto palette, new in 1.3.1: each source's colours and pictures.
+        let mut rows = Vec::new();
+        for (name, still, preview) in &sources {
+            let settings = Settings { palette: Palette::Auto, dither: Dither::Floyd, size: Size::Fine, ..Settings::default() };
+            let yuv = rgb_to_yuv420(preview);
+            let viewfinder = Pixel::new(settings).develop(&yuv, 320, 240);
+            let now = Pixel::new(settings).develop_still(still);
+            let mut swatch = Picture::new(now.colours.len() * 14, 14);
+            for (i, p) in swatch.rgb.chunks_exact_mut(3).enumerate() {
+                p.copy_from_slice(&now.colours[(i % swatch.w) / 14]);
+            }
+            rows.push((
+                format!("{name} · auto · floyd · 112 × 84"),
+                vec![("the photo".to_owned(), still.cover(336, 252), 1), ("viewfinder".to_owned(), viewfinder.picture(), 3), ("from the still".to_owned(), now.picture(), 3), ("its colours".to_owned(), swatch, 2)],
+            ));
+        }
+        write("auto-palette.png", &rows);
+        println!("pixel quality shots in {}", out.display());
     }
 }
 
@@ -953,6 +1478,31 @@ pub fn shots(dir: &std::path::Path) {
     ));
     scenes.push(camera_scene("12-keys".into(), base, Box::new(|_| {}), vec![Key::Char('?')]));
     scenes.push(camera_scene("13-keys-more".into(), base, Box::new(|_| {}), vec![Key::Char('?'), Key::PageDown]));
+    // 1.3.1: a loop part recorded (the ring part filled), the date stamp,
+    // and the auto palette's picker with the scene's colours.
+    scenes.push(camera_scene(
+        "18-loop-recording".into(),
+        Settings { palette: pixel::Palette::Auto, ..base },
+        Box::new(|c| {
+            if let Some(f) = c.pixel_frame.clone() {
+                c.pixel_state.auto.clone_from(&f.colours);
+                c.pixel_state.recording = Some(Loop { frames: vec![f.clone(); LOOP_FRAMES * 5 / 8], last: None, colours: f.colours });
+            }
+        }),
+        Vec::new(),
+    ));
+    scenes.push(camera_scene("19-date-stamp".into(), Settings { stamp: true, palette: pixel::Palette::Crayon, ..base }, Box::new(|c| c.bar.hidden = true), Vec::new()));
+    scenes.push(camera_scene(
+        "20-picker-palette-auto".into(),
+        Settings { palette: pixel::Palette::Auto, ..base },
+        Box::new(|c| {
+            if let Some(f) = &c.pixel_frame {
+                c.pixel_state.auto.clone_from(&f.colours);
+            }
+            c.open_pixel_picker(Chip::Palette);
+        }),
+        Vec::new(),
+    ));
     // In Photos: a picture taken, in the album (among photos) and the viewer.
     photos::seed_demo();
     let (pic, frame) = with(Settings { palette: pixel::Palette::Ember, ..base });
@@ -1002,7 +1552,54 @@ pub fn shots(dir: &std::path::Path) {
             }),
         ));
     }
+    // A loop kept (1.3.1): two seconds of the drifting scene, in Photos
+    // playing (a few frames in), with its details, and in the album.
+    let looped = photos::dir().join("PIX_20261123_101600.gif");
+    {
+        let engine = Pixel::new(Settings { palette: pixel::Palette::Tide, ..base });
+        let frames: Vec<pixel::Frame> = (0..LOOP_FRAMES).map(|i| engine.develop(&rgb_to_yuv420(&scene(PREVIEW_W, PREVIEW_H, 3.1 + i as f32 * 0.125, false)), PREVIEW_W, PREVIEW_H)).collect();
+        let look = "Pixel loop · tide · bayer";
+        let delay = (LOOP_EVERY.as_millis() / 10) as u16;
+        crate::sys::write_atomic(&crate::filters::original_of(&looped), &crate::filters::gif::encode(&frames, 1, delay, look)).ok();
+        crate::sys::write_atomic(&looped, &crate::filters::gif::encode(&frames, LOOP_SCALE, delay, look)).ok();
+        photos::changed();
+        if let Some(photo) = photos::list().into_iter().find(|p| p.path == looped) {
+            photos::thumbnail(&photo);
+        }
+    }
+    let player = |details: bool| -> Box<dyn Fn(&mut Shell)> {
+        let looped = looped.clone();
+        Box::new(move |shell: &mut Shell| {
+            shell.show(Box::new(photos::Viewer::single(looped.clone())));
+            for _ in 0..40 {
+                shell.tick(1.0 / 60.0);
+                shell.draw();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if details {
+                shell.key(Key::Char('i'));
+            }
+        })
+    };
+    scenes.push(("21-photos-loop".into(), player(false)));
+    scenes.push(("22-photos-loop-details".into(), player(true)));
+    {
+        let looped = looped.clone();
+        scenes.push((
+            "23-photos-album-loop".into(),
+            Box::new(move |shell: &mut Shell| {
+                shell.show(Box::new(photos::Album::at(&looped)));
+                for _ in 0..40 {
+                    shell.tick(1.0 / 60.0);
+                    shell.draw();
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }),
+        ));
+    }
     render(dir, &scenes);
+    std::fs::remove_file(crate::filters::original_of(&looped)).ok();
+    std::fs::remove_file(&looped).ok();
     // Every palette under each dither on the sample scene, at the middle size,
     // the panel's own pixels three to one.
     let (cw, ch) = (pixel::Size::Small.dims().0 * 3, pixel::Size::Small.dims().1 * 3);

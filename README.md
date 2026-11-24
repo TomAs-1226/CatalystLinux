@@ -36,6 +36,7 @@ windows that grow out of tiles whenever it is there.
 | `shots/motion/` | Each kind of motion as a strip of frames 50 ms apart and an animated PNG, and the Home settings (`--motion`). |
 | `shots/vm/` | The same shell as the ARM build on the image's own kernel, in the emulator. |
 | `shots/1.2-pixel/`, `shots/1.2-film/` | The Camera's pixel mode (each palette, dither and size, its pickers, the flash, its keys, a picture in Photos) and the film looks (each look, the grain's choice, the glow, the editor), dark and light at each text size (`--camera-pixel-shots`, `--camera-film-shots`). |
+| `shots/1.3-pixel/`, `shots/1.3-pixel-quality/` | Pixel mode's 1.3.1 additions (the auto and print palettes, a loop recording, the date stamp, a loop in Photos and the album, every palette and dither), dark and light at each text size; and its before and after on photographs (`--camera-pixel-shots`, the ignored test `quality_shots`). |
 | `tools/bake3d/` | The Robot app's robot in 3D: Numbers' bake, the packer, and a team's own from its CAD (see *The robot in three dimensions*). |
 | `shots/3d-preview/` | The robot in 3D to look at before it ships: `index.html`. |
 
@@ -2485,9 +2486,25 @@ an album, and QR codes read. The AprilTag reader is still there beside it.
     four, three or two panel pixels each in the viewfinder (224 or 225 ×
     168), so no pixel is wider than another.
   - **Palette** (`k`, its swatches in the picker): ink (1-bit), graphite
-    (4 greys), ember (a warm 4), tide (a cool 4), poster (8 colours) and
-    crayon (16), all our own colours. The four ramps map by brightness, the
-    colour ones to the nearest colour (a 32³ table made once for each).
+    (4 greys), ember (a warm 4), tide (a cool 4), print (1.3.1: paper, a
+    coral and a teal ink, and where both print), poster (8 colours), crayon
+    (16), all our own colours, and auto (1.3.1: eight found in the scene).
+    The four ramps map by OKLab lightness, the colour ones to the nearest
+    colour in OKLab with hue weighted 1.9 times over lightness (the dither
+    makes lightness up; a wrong hue shows), through a 32³ table made once
+    for each.
+  - **Auto** finds the scene's eight colours by k-means in that same space
+    over every third pixel (two rounds on from the last every third
+    frame); a small patch of its own colour no centre serves (a red
+    bumper, a strip of sky) takes one from the two most alike. They are
+    held while a loop records and at the shutter.
+  - **Made ready** (1.3.1): the frame shrunk in linear light (every
+    pixel's light averaged, so a fine pattern keeps its brightness),
+    stretched from its darkest to its lightest hundredth, given the tone's
+    curve and the palette's own contrast and vibrance, then sharpened
+    within each pixel's neighbours (an unsharp mask that cannot overshoot,
+    so edges land on pixel boundaries with no halo). Diffusion works in
+    linear light, a ramp's in lightness.
   - **Dither** (`d` steps it, each picker cell a sample of its pattern):
     none, Bayer (ordered, 4 × 4), Floyd–Steinberg (along the rows each way
     in turn) or Atkinson (three quarters of the error passed on: clean
@@ -2497,19 +2514,33 @@ an album, and QR codes read. The AprilTag reader is still there beside it.
   - Each is a chip in the bar with its key; their pickers show each choice
     on the picture while it is in hand (Enter keeps it, Esc goes back), and
     all of it is remembered. `a` opens the album, ↓ being the tone's here.
-  - **The shutter** keeps the picture in sight, at once (no photo is asked
-    of the camera): an indexed PNG at its true size, kept as its original,
-    and one blown up with whole pixels for sharing (×8, ×6 or ×4: about 450
-    across), `PIX_20261123_101500.png` in the album. Its flash is the
-    palette's lightest colour over the picture's own pixels, taken away in
-    the Bayer matrix's order on Material 3's slow effects spring; the
-    shutter's disc is drawn in pixels and presses in a step. The timer
-    works as in photo mode.
-  - **Its cost:** a frame shrunk, mapped and dithered takes 0.21 ms at
-    worst on the development PC (112 × 84, crayon, Atkinson), against
-    0.16 ms for the plain colour conversion it replaces; about 3 ms on the
-    A53 at the shell's reckoning of fifteen times slower. At rest nothing
-    keeps the frame beat.
+  - **The shutter** (1.3.1) asks the camera for its full-size still and
+    makes the picture from that (decoded at a quarter, area-averaged), the
+    auto palette held at the colours in sight; the thumbnail and flash come
+    at once. Should the still fail or not come in 20 s, the viewfinder's
+    picture of that moment is kept instead. It is an indexed PNG at its
+    true size, kept as its original, and one blown up with whole pixels
+    for sharing (×8, ×6 or ×4: about 450 across), `PIX_20261123_101500.png`
+    in the album. Its flash is the palette's lightest colour over the
+    picture's own pixels, taken away in the Bayer matrix's order on
+    Material 3's slow effects spring; the shutter's disc is drawn in pixels
+    and presses in a step. The timer works as in photo mode.
+  - **A loop** (`g`, 1.3.1): two seconds of the viewfinder at eight frames
+    a second, the shutter's ring filling as it records (`g` again ends it
+    sooner, Esc drops it), kept as an animated GIF at its true size and ×4
+    (`PIX_….gif`); Photos plays it, its album tile marked "loop".
+  - **A date stamp** (`y`, off at first): the date in a 3 × 5 pixel font in
+    the bottom corner, in the palette's colour nearest a warm orange; the
+    bar steps aside to show it.
+  - **Its cost:** a frame shrunk, made ready, mapped and dithered takes
+    0.39 ms at worst on the development PC (112 × 84, auto, Atkinson),
+    against 0.13 ms for the plain colour conversion it replaces; about
+    6 ms on the A53 at the shell's reckoning of fifteen times slower. At
+    rest nothing keeps the frame beat.
+  - **Before and after:** `shots/1.3-pixel-quality/` sets 1.3.0 beside
+    1.3.1 (viewfinder and still) on photographs from the Kodak test suite
+    (released by Kodak for unrestricted use) and the simulated sensor's
+    still, with the auto palette's colours for each.
 - **Film looks** (1.2): seven of their own, a group after the digital
   looks in the strip (and in the photo editor's looks): Sunlit Slide (a
   daylight slide: punchy, deep blacks), Soft Negative (a portrait negative:

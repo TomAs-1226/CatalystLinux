@@ -1342,6 +1342,8 @@ pub struct Camera {
     pixel_flash: Animated,
     /// The shot flying into the corner is a pixel picture: drawn whole.
     fly_crisp: bool,
+    /// Pixel mode's stills asked for and loop being recorded.
+    pixel_state: pixel_mode::State,
 }
 
 /// Settings › Camera › Smart camera: how it stands, and how fast its link
@@ -1498,6 +1500,7 @@ impl Camera {
             pixel_frame: None,
             pixel_flash: Animated::new(0.0, pixel_mode::flash_spring()).with_rest(0.01),
             fly_crisp: false,
+            pixel_state: pixel_mode::State::default(),
         };
         camera.hold_smart();
         // The level, if it was on when the Camera was last left.
@@ -1615,6 +1618,7 @@ impl Camera {
         if (was == Mode::Pixel) != (mode == Mode::Pixel) {
             self.pixel_frame = None;
             self.pixel_from = None;
+            self.pixel_state.recording = None;
             self.tell_develop();
         }
         if mode == Mode::Pixel {
@@ -2561,6 +2565,7 @@ impl Screen for Camera {
                 }
             }
         }
+        let mut pixel_arrived = false;
         let events = {
             let Ok(mut l) = self.live.lock() else { return changed };
             if l.frames != self.seen {
@@ -2572,6 +2577,7 @@ impl Screen for Camera {
                     // Only while pixel mode is still asking for them.
                     if self.mode == Mode::Pixel {
                         self.pixel_frame = Some(p);
+                        pixel_arrived = true;
                     }
                 }
                 if l.meta.is_some() {
@@ -2660,7 +2666,21 @@ impl Screen for Camera {
         if take_page && !self.frozen {
             self.shoot_doc();
         }
+        // Pixel mode's next frame: a loop's, a still overdue (pixel_mode.rs).
+        if pixel_arrived {
+            self.pixel_frame_arrived();
+        }
         for event in events {
+            // Pixel mode's stills become its pictures (pixel_mode.rs).
+            let pixel_still = match &event {
+                Event::Saved { path, .. } => self.pixel_still_saved(path),
+                Event::Failed(why) => self.pixel_still_failed(why),
+                _ => false,
+            };
+            if pixel_still {
+                changed = true;
+                continue;
+            }
             // Doc mode's photo: its page goes to the document, not the album.
             if let Event::Saved { path, .. } = &event {
                 if self.doc.as_mut().is_some_and(|f| f.took(path)) {
@@ -3833,6 +3853,10 @@ impl Camera {
             Mode::Pixel => {
                 let a = if self.saving.is_some() && !self.captured { 0.45 } else { 1.0 };
                 pixel_mode::draw_pixel_disc(g, sx, sy, inner, t.ink, a);
+                // A loop recording: the ring fills as it goes.
+                if let Some(p) = self.loop_progress().filter(|p| *p > 0.0) {
+                    g.canvas.arc(sx + g.ox, sy, ring - 1.25, 2.5, -std::f32::consts::FRAC_PI_2, p * std::f32::consts::TAU, t.signal, 1.0);
+                }
                 if self.timer > 0 && self.countdown.is_none() {
                     g.text_at(sx, sy, Align::Center, &format!("{}s", self.timer), ty.caption, t.ground);
                 }

@@ -228,12 +228,24 @@ fn thumbs_dir() -> PathBuf {
 /// Whether a file is one the album shows.
 pub fn is_photo(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    !lower.starts_with('.') && (lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png"))
+    !lower.starts_with('.') && (lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png") || lower.ends_with(".gif"))
 }
 
-/// A pixel picture (the Camera's pixel mode): drawn with whole pixels.
+/// A pixel picture or loop (the Camera's pixel mode): drawn with whole pixels.
 pub fn is_pixel(name: &str) -> bool {
-    name.starts_with("PIX_") && name.to_ascii_lowercase().ends_with(".png")
+    let lower = name.to_ascii_lowercase();
+    name.starts_with("PIX_") && (lower.ends_with(".png") || lower.ends_with(".gif"))
+}
+
+/// A loop (an animated GIF), played in the viewer.
+pub fn is_loop(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with(".gif")
+}
+
+/// A loop's frames, each with how long it shows (ms), at most 64.
+pub fn loop_frames(path: &Path) -> Result<Vec<(Picture, u32)>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot open the loop: {e}"))?;
+    crate::filters::gif::decode(&bytes, 64)
 }
 
 /// A pixel picture's file at its true size: its original, kept beside it
@@ -324,6 +336,12 @@ pub fn new_pixel_path(now: NaiveDateTime) -> PathBuf {
 
 /// A photo's size in pixels, from its header alone.
 pub fn dimensions(path: &Path) -> Option<(usize, usize)> {
+    if is_loop(&path.to_string_lossy()) {
+        use std::io::Read;
+        let mut head = [0u8; 10];
+        std::fs::File::open(path).ok()?.read_exact(&mut head).ok()?;
+        return crate::filters::gif::dimensions(&head);
+    }
     if is_png(path) {
         let reader = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).ok()?)).read_info().ok()?;
         return Some((reader.info().width as usize, reader.info().height as usize));
@@ -339,6 +357,11 @@ pub fn dimensions(path: &Path) -> Option<(usize, usize)> {
 pub fn decode(path: &Path, want_w: usize, want_h: usize) -> Result<Picture, String> {
     if is_png(path) {
         return decode_png(path);
+    }
+    // A loop: its first frame.
+    if is_loop(&path.to_string_lossy()) {
+        let bytes = std::fs::read(path).map_err(|e| format!("cannot open the loop: {e}"))?;
+        return crate::filters::gif::decode(&bytes, 1)?.into_iter().next().map(|(p, _)| p).ok_or_else(|| "the loop is damaged".to_owned());
     }
     let file = std::fs::File::open(path).map_err(|e| format!("cannot open the photo: {e}"))?;
     let mut decoder = jpeg_decoder::Decoder::new(std::io::BufReader::new(file));
@@ -736,6 +759,16 @@ impl Screen for Album {
                     } else {
                         draw_picture(g, r, &thumb, whole(&thumb), radius, edge);
                     }
+                    // A loop says so in its corner.
+                    if is_loop(&photo.name) {
+                        let cap = g.ty.caption;
+                        let h = cap.size + 4.0;
+                        let w = (h + g.measure("loop", cap) + 4.0).round();
+                        let b = Rect::new(r.x + 3.0, r.bottom() - 3.0 - h, w, h);
+                        g.canvas.rrect(b.offset(g.ox, 0.0), h * 0.5, bezel::Color(0, 0, 0), 0.6 * edge);
+                        g.icon_alpha("animation", false, b.x + h * 0.5 + 1.0, b.cy(), h * 0.7, bezel::Color(255, 255, 255), edge);
+                        g.text_alpha(b.x + h, b.cy(), "loop", cap, bezel::Color(255, 255, 255), edge);
+                    }
                 }
                 None => {
                     g.surface(r, radius, t.surface1);
@@ -794,6 +827,11 @@ pub struct Viewer {
     has_raw: bool,
     /// A pixel picture: its true size shown, with whole pixels.
     pixel: bool,
+    /// A loop's frames (each with its time, ms), the one in sight, and
+    /// how long it has left.
+    frames: Vec<(Picture, u32)>,
+    frame_at: usize,
+    frame_left: f32,
 }
 
 const ZOOMS: [f32; 3] = [1.0, 2.0, 4.0];
@@ -820,6 +858,9 @@ impl Viewer {
             original: false,
             has_raw: false,
             pixel: false,
+            frames: Vec::new(),
+            frame_at: 0,
+            frame_left: 0.0,
         };
         v.arrive();
         v
@@ -859,6 +900,21 @@ impl Viewer {
         self.look = crate::filters::look_of(&photo.path);
         // A pixel picture's original is its true size, which is what shows.
         self.has_original = !self.pixel && crate::filters::original_of(&photo.path).is_file();
+        // A loop: its frames at their true size (small: read at once), played.
+        self.frames.clear();
+        if is_loop(&photo.name) {
+            let path = if self.pixel { pixel_true_size(&photo.path) } else { photo.path.clone() };
+            match loop_frames(&path) {
+                Ok(frames) => {
+                    self.dims = frames.first().map(|(p, _)| (p.w, p.h));
+                    self.shown = frames.first().map(|(p, _)| (self.at, p.clone()));
+                    self.frame_left = frames.first().map_or(0.0, |(_, d)| *d as f32);
+                    self.frames = frames;
+                }
+                Err(why) => self.trouble = Some(why),
+            }
+            self.frame_at = 0;
+        }
         self.has_raw = photo.path.with_extension("dng").is_file();
         self.original = false;
     }
@@ -1065,6 +1121,26 @@ impl Screen for Viewer {
         self.decoding.is_some()
     }
 
+    /// A loop plays at its own pace: looked in on as its next frame is due,
+    /// never on the frame beat.
+    fn ambient(&self) -> Option<Duration> {
+        (self.frames.len() > 1).then(|| Duration::from_secs_f32((self.frame_left / 1000.0).max(0.01)))
+    }
+
+    fn ambient_tick(&mut self, dt: f32, _robot: &Robot) -> bool {
+        if self.frames.len() < 2 {
+            return false;
+        }
+        self.frame_left -= dt * 1000.0;
+        let mut changed = false;
+        while self.frame_left <= 0.0 {
+            self.frame_at = (self.frame_at + 1) % self.frames.len();
+            self.frame_left += self.frames[self.frame_at].1.max(20) as f32;
+            changed = true;
+        }
+        changed
+    }
+
     fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
         let t = g.tokens;
         let ty = g.ty;
@@ -1077,6 +1153,8 @@ impl Screen for Viewer {
         let Some(photo) = self.photos.get(self.at).cloned() else { return };
         // The photo: its decode, else its thumbnail, fitted and zoomed.
         let pic = match (&self.shown, &self.placeholder) {
+            // A loop: the frame it has come to.
+            _ if !self.frames.is_empty() => self.frames.get(self.frame_at).map(|(p, _)| p),
             (Some((at, p)), _) if *at == self.at => Some(p),
             (_, Some((at, p))) if *at == self.at => Some(p),
             _ => None,
@@ -1133,12 +1211,23 @@ impl Screen for Viewer {
             let mp = self.dims.map_or(String::new(), |(w, h)| format!(" · {:.1} mp", (w * h) as f32 / 1e6));
             // A pixel picture: its true size, and its copy's for sharing.
             let size = if self.pixel {
-                let copy = dimensions(&photo.path).filter(|d| Some(*d) != self.dims).map_or(String::new(), |(w, h)| format!(" · shared at {w} × {h}"));
+                // Its copy for sharing, by how many times larger (short
+                // enough for the line at the largest text).
+                let copy = match (dimensions(&photo.path), self.dims) {
+                    (Some((cw, _)), Some((w, _))) if w > 0 && cw > w => format!(" · shared at {}×", cw / w),
+                    _ => String::new(),
+                };
                 format!("{dims} pixels{copy}")
             } else {
                 format!("{dims}{mp}")
             };
-            let mut lines = vec![photo.name.clone(), size, size_words(photo.bytes), photo.taken.format("%A %-d %B %Y, %H:%M:%S").to_string()];
+            // A loop's frames and length, on the line with its bytes.
+            let bytes = if self.frames.len() > 1 {
+                format!("{} frames · {:.1} s · {}", self.frames.len(), self.frames.iter().map(|(_, d)| *d).sum::<u32>() as f32 / 1000.0, size_words(photo.bytes))
+            } else {
+                size_words(photo.bytes)
+            };
+            let mut lines = vec![photo.name.clone(), size, bytes, photo.taken.format("%A %-d %B %Y, %H:%M:%S").to_string()];
             // What it wears and what is kept beside it.
             let edited = !self.pixel && crate::editor::edits::has_edit(&photo.path);
             let kept: Vec<String> = [

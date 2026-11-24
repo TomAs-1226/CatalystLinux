@@ -43,6 +43,7 @@
 //! strength chosen (off, light or strong).
 
 pub mod film;
+pub mod gif;
 pub mod pixel;
 
 /// The looks, in the strip's order.
@@ -891,6 +892,11 @@ pub fn ensure_lut(look: Look, hue: f32) -> Option<std::path::PathBuf> {
 /// it in a text chunk of that name).
 pub fn look_of(path: &std::path::Path) -> Option<String> {
     use std::io::Read;
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("gif")) {
+        let mut head = vec![0u8; 4096];
+        let n = std::fs::File::open(path).ok()?.read(&mut head).ok()?;
+        return gif::look(&head[..n]);
+    }
     if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("png")) {
         let reader = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).ok()?)).read_info().ok()?;
         return reader.info().uncompressed_latin1_text.iter().find(|t| t.keyword == "look").map(|t| t.text.clone());
