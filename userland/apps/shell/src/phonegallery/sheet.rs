@@ -407,7 +407,14 @@ impl Screen for GalleryScreen {
                 rise,
                 "wifi_off",
                 "No network",
-                &["Join Wi-Fi, or your phone's hotspot. Sharing starts here as soon as there is one.", "Join Wi-Fi, or your phone's hotspot.", "Join Wi-Fi or a hotspot."],
+                // The handheld's radio is 2.4 GHz only: an iPhone's hotspot
+                // shows only with Maximize Compatibility on.
+                &[
+                    "Join Wi-Fi, or your phone's hotspot (on an iPhone, turn on Maximize Compatibility). Sharing starts here as soon as there is one.",
+                    "Join Wi-Fi, or your phone's hotspot. Sharing starts here as soon as there is one.",
+                    "Join Wi-Fi, or your phone's hotspot.",
+                    "Join Wi-Fi or a hotspot.",
+                ],
                 "Wi-Fi",
                 &["enter: wi-fi · esc: back", "enter: wi-fi"],
             ),
