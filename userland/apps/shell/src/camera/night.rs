@@ -299,7 +299,10 @@ impl Camera {
             }
             changed = true;
         }
-        // Told only when it changes (Night's gain moves in sixths of a stop).
+        // The smart white balance's gains for the frame (camera/wb.rs).
+        self.feed_smart_wb(dt);
+        // Told only when it changes (Night's gain moves in sixths of a stop,
+        // the white balance only while it glides).
         self.tell_pro();
         changed
     }
