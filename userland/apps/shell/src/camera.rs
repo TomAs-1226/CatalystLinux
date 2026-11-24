@@ -95,7 +95,21 @@
 //! the smart camera on the Grove port (smartcam.rs) its codes are taken too,
 //! read on its own processor.
 //!
-//! Doc mode (1.0, the carousel's fourth) scans documents: the page found
+//! Pixel mode (1.2, between pro and doc; camera/pixel_mode.rs) is a toy
+//! camera's: each preview frame made small (56, 75 or 112 pixels across),
+//! its colours one of six palettes of our own, dithered (Bayer, Floyd–
+//! Steinberg, Atkinson or none), toned (↑ ↓ brightness, contrast in four
+//! steps), and shown with whole pixels; the shutter keeps that very picture,
+//! as PNGs (filters/pixel.rs).
+//!
+//! Film looks (1.2): a group of their own in the looks' strip, each with
+//! its own tone and colour, and grain and halation at the strength chosen
+//! there (↑ ↓: off, light, strong). The camera program lays the look's
+//! colour over the photo as ever; the shell lays the texture on once it is
+//! saved, at idle priority, the thumbnail wearing "refining" meanwhile
+//! (filters/film.rs).
+//!
+//! Doc mode (1.0, the carousel's last) scans documents: the page found
 //! in the preview a few times a second on a thread of its own and outlined,
 //! taken by itself once held still for a second (the shutter's ring
 //! filling meanwhile) or at once with Enter, as the camera's own full-size
@@ -134,20 +148,35 @@ use bezel::{Align, Color, Rect};
 use detent::{role, Animated};
 
 use crate::camkit::{self, Aspect, Grid, HistMode, Kit, Mark, Program, Timeline};
+use crate::filters::film::{self, Strength};
+use crate::filters::pixel::{self, Pixel};
 use crate::filters::{Compiled, Look, LOOKS};
 use crate::gfx::{Gfx, H, PAD, W};
-use crate::photos::{self, draw_picture, whole, Photo, Picture};
+use crate::photos::{self, draw_picture, draw_picture_crisp, whole, Photo, Picture};
 use crate::pro::{self, Metered, Pro};
 use crate::platform::Key;
 use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
 
 mod bar;
+mod pixel_mode;
 
 /// The bar's pictures, for `--keys-shots` (keysheet.rs).
 #[cfg(not(target_arch = "aarch64"))]
 pub fn bar_shots() -> Vec<(String, Vec<bezel::Canvas>)> {
     bar::shots()
+}
+
+/// Pixel mode's pictures (`--camera-pixel-shots DIR`).
+#[cfg(not(target_arch = "aarch64"))]
+pub fn pixel_shots(dir: &std::path::Path) {
+    pixel_mode::shots(dir);
+}
+
+/// The film looks' pictures (`--camera-film-shots DIR`).
+#[cfg(not(target_arch = "aarch64"))]
+pub fn film_shots(dir: &std::path::Path) {
+    pixel_mode::film_shots(dir);
 }
 
 /// The preview's size: the panel's height and a little more, at 4:3.
@@ -292,6 +321,8 @@ struct Live {
     /// The looks' live thumbnails (while the strip is open), in its order.
     thumbs: Vec<Picture>,
     thumbs_made: u64,
+    /// Pixel mode's newest picture, as its palette's indices.
+    pixel: Option<pixel::Frame>,
 }
 
 /// How the camera's thread develops each frame, as the screen last asked.
@@ -306,11 +337,15 @@ struct Develop {
     /// False colour in place of the picture; the RGB histogram counted.
     false_colour: bool,
     rgb: bool,
+    /// A film look's grain and halation, over the picture after its look.
+    texture: film::Texture,
+    /// Pixel mode: the frame made a pixel picture instead (and nothing else).
+    pixel: Option<Arc<Pixel>>,
 }
 
 impl Default for Develop {
     fn default() -> Self {
-        Develop { look: Arc::new(Look::Original.compiled(0.0)), zebras: false, peaking: None, strip: None, false_colour: false, rgb: false }
+        Develop { look: Arc::new(Look::Original.compiled(0.0)), zebras: false, peaking: None, strip: None, false_colour: false, rgb: false, texture: film::Texture::default(), pixel: None }
     }
 }
 
@@ -323,9 +358,31 @@ const THUMB: (usize, usize) = (64, 48);
 /// the strip's thumbnails every third frame while it is open.
 fn develop_frame(live: &Mutex<Live>, develop: &Mutex<Develop>, yuv: &[u8], w: usize, h: usize, pic: &mut Picture, meta: Option<Metered>) {
     let opts = develop.lock().map(|d| d.clone()).unwrap_or_default();
+    // Pixel mode: the frame straight to its pixel picture, and no more.
+    if let Some(px) = &opts.pixel {
+        let frame = px.develop(yuv, w, h);
+        let shown = frame.picture();
+        if let Ok(mut l) = live.lock() {
+            l.preview = Some(shown);
+            l.pixel = Some(frame);
+            l.frames += 1;
+            l.trouble = None;
+            l.yuv.clear();
+            l.yuv.extend_from_slice(yuv);
+            l.yuv_size = (w, h);
+            if meta.is_some() {
+                l.meta = meta;
+            }
+        }
+        return;
+    }
     let frames = live.lock().map(|l| l.frames).unwrap_or(0);
     let zebras = opts.zebras && !opts.false_colour;
-    let clipped = opts.look.develop(yuv, w, h, pic, zebras.then_some(frames as usize % 8));
+    // A film look's grain as each pixel is made (the preview's own, still),
+    // then its halation's glow.
+    let grain = film::Grain::preview(opts.texture, w);
+    let clipped = opts.look.develop_grained(yuv, w, h, pic, zebras.then_some(frames as usize % 8), grain.as_ref());
+    film::halate(pic, opts.texture);
     // False colour: the brightness's bands over the whole picture.
     if opts.false_colour {
         camkit::paint_false_colour(&yuv[..w * h], &mut pic.rgb);
@@ -1057,11 +1114,13 @@ enum Mode {
     Scan,
     Photo,
     Pro,
+    /// A toy camera's pixel pictures (1.2, camera/pixel_mode.rs).
+    Pixel,
     /// The document scanner (docscan/, 1.0).
     Doc,
 }
 
-const MODES: [(Mode, &str); 4] = [(Mode::Scan, "scan"), (Mode::Photo, "photo"), (Mode::Pro, "pro"), (Mode::Doc, "doc")];
+const MODES: [(Mode, &str); 5] = [(Mode::Scan, "scan"), (Mode::Photo, "photo"), (Mode::Pro, "pro"), (Mode::Pixel, "pixel"), (Mode::Doc, "doc")];
 
 impl Mode {
     fn index(self) -> usize {
@@ -1092,8 +1151,9 @@ impl Dial {
 }
 
 /// What the Camera keeps between visits (its own file beside the settings):
-/// the dials, the look, RAW and the zebras, and the kit's settings and
-/// presets (camkit.rs). It always opens in photo mode.
+/// the dials, the look (and a film look's grain), RAW and the zebras, pixel
+/// mode's choices, and the kit's settings and presets (camkit.rs). It
+/// always opens in photo mode.
 struct Prefs {
     pro: Pro,
     look: Look,
@@ -1101,11 +1161,13 @@ struct Prefs {
     raw: bool,
     zebras: bool,
     kit: Kit,
+    texture: Strength,
+    pixel: pixel::Settings,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { pro: Pro::default(), look: Look::Original, hue: 32.0, raw: false, zebras: true, kit: Kit::default() }
+        Prefs { pro: Pro::default(), look: Look::Original, hue: 32.0, raw: false, zebras: true, kit: Kit::default(), texture: Strength::default(), pixel: pixel::Settings::default() }
     }
 }
 
@@ -1124,6 +1186,8 @@ impl Prefs {
                 "hue" => p.hue = v.parse().unwrap_or(p.hue),
                 "raw" => p.raw = v == "1",
                 "zebras" => p.zebras = v != "0",
+                "texture" => p.texture = Strength::from_id(v).unwrap_or_default(),
+                "pixel" => p.pixel = pixel::Settings::from_line(v),
                 _ => p.kit.read(k, v),
             }
         }
@@ -1132,12 +1196,14 @@ impl Prefs {
 
     fn save(&self) {
         let text = format!(
-            "pro={}\nlook={}\nhue={:.0}\nraw={}\nzebras={}\n{}",
+            "pro={}\nlook={}\nhue={:.0}\nraw={}\nzebras={}\ntexture={}\npixel={}\n{}",
             self.pro.to_line().replace(' ', ","),
             self.look.id(),
             self.hue,
             u8::from(self.raw),
             u8::from(self.zebras),
+            self.texture.name(),
+            self.pixel.line(),
             self.kit.lines()
         );
         crate::sys::write_atomic(&Self::file(), text.as_bytes()).ok();
@@ -1165,7 +1231,7 @@ pub struct Camera {
     strip_at: Animated,
     strip_fade: Animated,
     /// The look and colour the strip opened on, for Esc to go back to.
-    strip_from: Option<(Look, f32)>,
+    strip_from: Option<(Look, f32, Strength)>,
     /// The controls along the viewfinder's foot (camera/bar.rs).
     bar: bar::Bar,
     thumbs: Vec<Picture>,
@@ -1259,6 +1325,22 @@ pub struct Camera {
     /// simulated camera told to lay a page on its table.
     doc: Option<crate::docscan::Finding>,
     paging: Arc<AtomicBool>,
+    /// A film look's grain and halation, as strong as chosen in the strip.
+    texture: Strength,
+    /// Photos whose look's texture is laid on once they are saved (and
+    /// any detail merge is done), and which is being laid on now.
+    texture_due: Vec<(PathBuf, film::Texture)>,
+    texturing: Option<PathBuf>,
+    /// Pixel mode (pixel_mode.rs): its choices, those its picker opened on
+    /// (for Esc), the engine made for them, its newest picture, and the
+    /// shutter's dithered flash.
+    pixel: pixel::Settings,
+    pixel_from: Option<pixel::Settings>,
+    pixel_made: Option<Arc<Pixel>>,
+    pixel_frame: Option<pixel::Frame>,
+    pixel_flash: Animated,
+    /// The shot flying into the corner is a pixel picture: drawn whole.
+    fly_crisp: bool,
 }
 
 /// Settings › Camera › Smart camera: how it stands, and how fast its link
@@ -1406,6 +1488,15 @@ impl Camera {
             frozen: false,
             doc: None,
             paging,
+            texture: prefs.texture,
+            texture_due: Vec::new(),
+            texturing: None,
+            pixel: prefs.pixel,
+            pixel_from: None,
+            pixel_made: None,
+            pixel_frame: None,
+            pixel_flash: Animated::new(0.0, pixel_mode::flash_spring()).with_rest(0.01),
+            fly_crisp: false,
         };
         camera.hold_smart();
         // The level, if it was on when the Camera was last left.
@@ -1434,12 +1525,14 @@ impl Camera {
             interval: self.kit.interval,
             ..Kit::default()
         };
-        Prefs { pro: self.pro, look: self.look, hue: self.hue, raw: self.raw, zebras: self.zebras, kit }
+        Prefs { pro: self.pro, look: self.look, hue: self.hue, raw: self.raw, zebras: self.zebras, kit, texture: self.texture, pixel: self.pixel }
     }
 
-    /// How the camera's thread is to develop frames now: the look, the
-    /// zebras (pro mode), peaking (the focus check), the strip's thumbnails.
+    /// How the camera's thread is to develop frames now: the look (and a
+    /// film look's texture), the zebras (pro mode), peaking (the focus
+    /// check), the strip's thumbnails; or pixel mode's picture.
     fn tell_develop(&mut self) {
+        let pixel = (self.mode == Mode::Pixel).then(|| self.pixel_engine());
         let strip = self.strip.then(|| Arc::new(LOOKS.iter().map(|l| l.compiled(self.hue)).collect::<Vec<_>>()));
         let look = Arc::new(self.look.compiled(self.hue));
         let pro = self.mode == Mode::Pro;
@@ -1447,8 +1540,10 @@ impl Camera {
         let peaking = self.focus.map(|_| self.peak);
         let false_colour = pro && self.kit.false_colour && self.focus.is_none();
         let rgb = pro && self.kit.hist == HistMode::Rgb;
+        // The focus check looks at the sensor's own pixels: no grain there.
+        let texture = if self.focus.is_some() { film::Texture::default() } else { self.look.texture().at(self.texture) };
         if let Ok(mut d) = self.develop.lock() {
-            *d = Develop { look, zebras, peaking, strip, false_colour, rgb };
+            *d = Develop { look, zebras, peaking, strip, false_colour, rgb, texture, pixel };
         }
     }
 
@@ -1511,9 +1606,18 @@ impl Camera {
         self.paging.store(mode == Mode::Doc, Ordering::Relaxed);
         self.countdown = None;
         self.set_dial(None);
-        if matches!(mode, Mode::Scan | Mode::Doc) {
+        if matches!(mode, Mode::Scan | Mode::Doc | Mode::Pixel) {
             self.set_strip(false);
             self.set_focus(None);
+        }
+        // Pixel mode: its pictures from the next frame; an old one forgotten.
+        if (was == Mode::Pixel) != (mode == Mode::Pixel) {
+            self.pixel_frame = None;
+            self.pixel_from = None;
+            self.tell_develop();
+        }
+        if mode == Mode::Pixel {
+            self.say("↑ ↓ brightness · a: photos · tab: its choices");
         }
         // Doc mode looks for the page (its finder's thread waits while not
         // given frames); its pages wait in the work folder meanwhile.
@@ -1641,7 +1745,12 @@ impl Camera {
         if self.look != Look::Original {
             if let Some(table) = crate::filters::ensure_lut(self.look, self.hue) {
                 words.push(format!("look={}", table.display()));
-                let name = if self.look == Look::Tint { format!("Tint (hue {:.0})", self.hue.rem_euclid(360.0)) } else { self.look.name().to_owned() };
+                let name = match self.look.texture().words(self.texture) {
+                    _ if self.look == Look::Tint => format!("Tint (hue {:.0})", self.hue.rem_euclid(360.0)),
+                    // A film look says its grain too: "Pushed Mono, strong grain".
+                    Some(t) => format!("{}, {t}", self.look.name()),
+                    None => self.look.name().to_owned(),
+                };
                 words.push(format!("lookname={name}"));
                 words.push(format!("orig={}", crate::filters::original_of(path).display()));
             }
@@ -1672,6 +1781,10 @@ impl Camera {
 
     /// A photo asked for, timed from `key` (the shutter's key going down).
     fn shoot_at(&mut self, calm: bool, detail: crate::burst::DetailMode, key: Instant) {
+        // Pixel mode keeps the picture in sight: no photo is asked of the camera.
+        if self.mode == Mode::Pixel {
+            return self.shoot_pixel(calm);
+        }
         // One photo's picture at a time: the next as soon as the camera has
         // the last one's, while that is still being written.
         if self.saving.is_some() && !self.captured {
@@ -1699,6 +1812,11 @@ impl Camera {
         timeline.mark(Mark::Request, Instant::now());
         self.kit.shot = Some(timeline);
         self.instant_shot(&path, calm);
+        // A film look's grain and halation, laid on each once it is saved.
+        let texture = self.look.texture().at(self.texture);
+        if !texture.is_none() {
+            self.texture_due.extend(std::iter::once(&path).chain(&set).map(|p| (p.clone(), texture)));
+        }
         self.saving = Some(Instant::now());
         self.captured = false;
         self.pending += 1 + set.len();
@@ -1763,10 +1881,12 @@ impl Camera {
         }
         let mut pic = Picture::default();
         self.look.compiled(self.hue).develop(&yuv, w, h, &mut pic, None);
+        film::apply(&mut pic, self.look.texture().at(self.texture), 0);
         let thumb = pic.cover(photos::THUMB_W, photos::THUMB_H);
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         self.last = Some((Photo { path: path.to_path_buf(), name, taken: chrono::Local::now().naive_local(), bytes: 0 }, thumb));
         self.instant = Some(path.to_path_buf());
+        self.fly_crisp = false;
         if calm {
             self.flying = None;
             self.fly.jump(1.0);
@@ -1864,17 +1984,23 @@ impl Camera {
         self.strip_fade.set(if open { 1.0 } else { 0.0 });
         if open {
             self.set_dial(None);
-            self.strip_from = Some((self.look, self.hue));
-            self.say(if self.look == Look::Tint { "← → looks · ↑ ↓ colour · enter: keep" } else { "← → looks · enter: keep · esc: cancel" });
+            self.strip_from = Some((self.look, self.hue, self.texture));
+            self.say(if self.look == Look::Tint {
+                "← → looks · ↑ ↓ colour · enter: keep"
+            } else if !self.look.texture().is_none() {
+                "← → looks · ↑ ↓ grain · enter: keep"
+            } else {
+                "← → looks · enter: keep · esc: cancel"
+            });
         }
         self.tell_develop();
     }
 
     /// The looks put away, going back to the look (and colour) they opened on.
     fn cancel_looks(&mut self) {
-        if let Some((look, hue)) = self.strip_from.take() {
-            if (look, hue) != (self.look, self.hue) {
-                (self.look, self.hue) = (look, hue);
+        if let Some((look, hue, texture)) = self.strip_from.take() {
+            if (look, hue, texture) != (self.look, self.hue, self.texture) {
+                (self.look, self.hue, self.texture) = (look, hue, texture);
                 self.strip_at.set(LOOKS.iter().position(|l| *l == look).unwrap_or(0) as f32);
                 self.keep_prefs();
                 self.say(format!("look left as {}", look.name().to_lowercase()));
@@ -1891,10 +2017,27 @@ impl Camera {
             // At an end: the strip leans a little and comes back.
             self.strip_at.nudge(by as f32 * 3.0);
         }
+        let was_film = self.look.film();
         self.look = LOOKS[to];
         self.strip_at.set(to as f32);
         self.tell_develop();
         self.keep_prefs();
+        // Into the film looks: how their grain is set, once.
+        if self.look.film() && !was_film {
+            self.say("film · ↑ ↓ grain: off, light, strong");
+        }
+    }
+
+    /// A film look's grain and halation a step stronger (`by` 1) or weaker.
+    fn step_texture(&mut self, by: i32) {
+        let to = self.texture.step(by);
+        if to != self.texture {
+            self.texture = to;
+            self.tell_develop();
+            self.keep_prefs();
+        }
+        let what = if self.look.texture().halation > 0.0 { "grain and glow" } else { "grain" };
+        self.say(format!("{what}: {}", to.name()));
     }
 
     /// Tint's colour turned by `by` degrees.
@@ -2112,6 +2255,12 @@ impl Screen for Camera {
         if let Some(nav) = self.bar_key(key, cx) {
             return nav;
         }
+        // Pixel mode's own keys (pixel_mode.rs): the tone on ↑ ↓, its choices.
+        if self.mode == Mode::Pixel && self.lens == Lens::Main && self.countdown.is_none() {
+            if let Some(nav) = self.pixel_key(key) {
+                return nav;
+            }
+        }
         let pro_mode = self.mode == Mode::Pro && main;
         match key {
             Key::Back | Key::Leave if self.countdown.is_some() => {
@@ -2147,6 +2296,8 @@ impl Screen for Camera {
             Key::Right if self.strip => self.choose_look(1),
             Key::Up if self.strip && self.look == Look::Tint => self.turn_hue(15.0),
             Key::Down if self.strip && self.look == Look::Tint => self.turn_hue(-15.0),
+            // A film look's grain and halation: off, light, strong.
+            Key::Up | Key::Down if self.strip && !self.look.texture().is_none() => self.step_texture(if key == Key::Up { 1 } else { -1 }),
             Key::Up | Key::Down if self.strip => {}
             // A dial: ← → turn it, ↑ ↓ to the next.
             Key::Left if self.dial.is_some() => self.turn_dial(-1),
@@ -2351,7 +2502,7 @@ impl Screen for Camera {
         self.clock += dt;
         let mut changed = self.mode_at.tick(dt) | self.flash.tick(dt) | self.press.tick(dt) | self.last_pop.tick(dt) | self.found_rise.tick(dt) | self.lens_at.tick(dt) | self.lens_fade.tick(dt);
         changed |= self.dial_at.tick(dt) | self.dial_fade.tick(dt) | self.strip_at.tick(dt) | self.strip_fade.tick(dt) | self.focus_fade.tick(dt);
-        changed |= self.bar.tick(dt);
+        changed |= self.bar.tick(dt) | self.pixel_flash.tick(dt);
         if let Some(f) = &mut self.doc {
             changed |= f.tick(dt);
         }
@@ -2413,6 +2564,12 @@ impl Screen for Camera {
                 self.seen = l.frames;
                 if let Some(p) = l.preview.take() {
                     self.preview = Some(p);
+                }
+                if let Some(p) = l.pixel.take() {
+                    // Only while pixel mode is still asking for them.
+                    if self.mode == Mode::Pixel {
+                        self.pixel_frame = Some(p);
+                    }
                 }
                 if l.meta.is_some() {
                     self.metered = l.meta;
@@ -2558,6 +2715,7 @@ impl Screen for Camera {
                         crate::capture::photo_taken(path.clone());
                         self.done = true;
                     }
+                    let pixel_picture = photos::is_pixel(&path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
                     if detail {
                         // Refined in the background: its badge until the merged photo is in.
                         let expect = crate::burst::expect_ms(SIM_BURST, size.0 as usize, size.1 as usize);
@@ -2565,7 +2723,10 @@ impl Screen for Camera {
                         self.say(format!("saved · refining, about {} s", marking.left_s(crate::burst::now_ms())));
                         self.refining = Some((path.clone(), marking));
                         self.refine_look = Instant::now();
-                    } else if size.0.max(size.1) < 2000 {
+                    } else if self.texture_due.iter().any(|(p, _)| *p == path) {
+                        // A film look's grain: laid on now, the badge meanwhile.
+                        self.lay_texture(&path);
+                    } else if size.0.max(size.1) < 2000 && !pixel_picture {
                         self.say(format!("saved · {} × {} (memory was short)", size.0, size.1));
                     }
                     self.load_last(Some(path));
@@ -2625,8 +2786,17 @@ impl Screen for Camera {
         }
         let k = self.lens_at.value();
         let ka = self.lens_fade.value().clamp(0.0, 1.0);
+        // Pixel mode: its picture with whole pixels, and the shutter's flash.
+        if g.calm {
+            self.pixel_flash.jump(0.0);
+        }
+        let pixel_flash = (self.mode == Mode::Pixel).then(|| (self.pixel_flash.value(), self.pixel.palette));
         if ka < 0.999 || self.aligning {
             match &self.preview {
+                Some(pic) if pixel_flash.is_some() && k < 0.001 && pixel_mode::fits_whole(vf, pic) => {
+                    let (flash, palette) = pixel_flash.unwrap_or_default();
+                    pixel_mode::draw_view(g, vf, pic, 1.0 - ka, flash, palette);
+                }
                 // The focus check's crop: its middle, one pixel to one.
                 Some(pic) if self.cropped() => {
                     let view = [((pic.w as f32 - vf.w) * 0.5).max(0.0), ((pic.h as f32 - vf.h) * 0.5).max(0.0), vf.w.min(pic.w as f32), vf.h.min(pic.h as f32)];
@@ -2729,10 +2899,13 @@ impl Screen for Camera {
         // The controls along the foot (camera/bar.rs); the rest stands above them.
         let mut bottom = self.draw_bar(g, vf);
         let above = Rect::new(vf.x, vf.y, vf.w, vf.h - bottom);
+        // The top row gives way to a note while it shows.
+        let note = self.note.as_ref().map_or(0.0, |(_, age)| ((NOTE_FOR + 0.4 - age) / 0.4).clamp(0.0, 1.0) * (age / 0.15).clamp(0.0, 1.0));
         if main > 0.01 && self.mode.shoots() {
-            // The top row gives way to a note while it shows.
-            let note = self.note.as_ref().map_or(0.0, |(_, age)| ((NOTE_FOR + 0.4 - age) / 0.4).clamp(0.0, 1.0) * (age / 0.15).clamp(0.0, 1.0));
             bottom += self.draw_overlays(g, above, main, main * (1.0 - note));
+        }
+        if main > 0.01 && self.mode == Mode::Pixel && self.lens == Lens::Main {
+            self.draw_pixel_overlays(g, above, main * (1.0 - note));
         }
         // The shutter's flash.
         let flash = self.flash.value();
@@ -2822,6 +2995,18 @@ impl Screen for Camera {
 }
 
 impl Camera {
+    /// A saved photo's film grain and halation laid on, on a thread at idle
+    /// priority (filters/film.rs), the thumbnail wearing "refining" until
+    /// it is done.
+    fn lay_texture(&mut self, path: &std::path::Path) {
+        let Some(at) = self.texture_due.iter().position(|(p, _)| p == path) else { return };
+        let (path, texture) = self.texture_due.remove(at);
+        let marking = film::lay_on_in_background(path.clone(), texture);
+        self.refining = Some((path.clone(), marking));
+        self.refine_look = Instant::now();
+        self.texturing = Some(path);
+    }
+
     /// The level on (the motion sensor held at its full rate while it is)
     /// or off.
     fn set_level(&mut self, on: bool) {
@@ -3225,8 +3410,20 @@ impl Camera {
         let at = self.strip_at.value();
         g.canvas.set_clip(vf.offset(g.ox, 0.0));
         let chosen = LOOKS.iter().position(|l| *l == self.look).unwrap_or(0);
+        // The film looks a group of their own (1.2): a wider gap before
+        // them, a hairline in it, and the first wearing the group's name.
+        let first_film = LOOKS.iter().position(|l| l.film()).unwrap_or(LOOKS.len());
+        let group_gap = 12.0;
+        let place = |i: f32| i * (tw + gap) + group_gap * (i - (first_film as f32 - 1.0)).clamp(0.0, 1.0);
+        let x_of = |i: usize| vf.cx() + place(i as f32) - place(at);
+        if first_film > 0 && first_film < LOOKS.len() {
+            let line_x = (x_of(first_film - 1) + x_of(first_film)) * 0.5;
+            if line_x > vf.x && line_x < vf.right() {
+                g.canvas.fill_rect(Rect::new(line_x.round() + g.ox, y + 4.0, 1.0, th - 8.0), Color(255, 255, 255), 0.3 * alpha);
+            }
+        }
         for (i, _) in LOOKS.iter().enumerate() {
-            let cx = vf.cx() + (i as f32 - at) * (tw + gap);
+            let cx = x_of(i);
             if cx + tw < vf.x || cx - tw > vf.right() {
                 continue;
             }
@@ -3250,6 +3447,14 @@ impl Camera {
                 }
                 None => g.canvas.rrect(part.offset(g.ox, 0.0), 6.0, t.surface1, alpha),
             }
+            // The film group's name on its first, in its corner.
+            if i == first_film && whole_one {
+                let tag_h = cap.size + 4.0;
+                let tag_w = (g.measure("film", cap) + 10.0).round();
+                let tag = Rect::new(r.x + 3.0, r.y + 3.0, tag_w, tag_h);
+                g.canvas.rrect(tag.offset(g.ox, 0.0), tag_h * 0.5, Color(0, 0, 0), 0.6 * alpha);
+                g.text_alpha(tag.x + 5.0, tag.cy(), "film", cap, Color(255, 255, 255), alpha);
+            }
         }
         // The names: the chosen one whole (with Tint's colour), on the
         // darker pill; the others as much as fits their place, quieter,
@@ -3257,10 +3462,10 @@ impl Camera {
         let chosen_name = self.look.name().to_lowercase();
         let dot = if self.look == Look::Tint { cap.size - 2.0 } else { 0.0 };
         let cw = g.measure(&chosen_name, cap) + 12.0 + if dot > 0.0 { dot + 4.0 } else { 0.0 };
-        let ccx = vf.cx() + (chosen as f32 - at) * (tw + gap);
+        let ccx = x_of(chosen);
         let chosen_pill = Rect::new((ccx - cw * 0.5).round(), (names_cy - name_h * 0.5).round(), cw.round(), name_h);
         for (i, look) in LOOKS.iter().enumerate() {
-            let cx = vf.cx() + (i as f32 - at) * (tw + gap);
+            let cx = x_of(i);
             if i == chosen || cx + tw < vf.x || cx - tw > vf.right() {
                 continue;
             }
@@ -3282,7 +3487,45 @@ impl Camera {
         }
         g.text_alpha(tx, names_cy, &chosen_name, cap, Color(255, 255, 255), alpha);
         g.canvas.clear_clip();
-        th + m + 4.0 + name_h - rise
+        let mut taken = th + m + 4.0 + name_h - rise;
+        // A film look's grain (and glow): off, light, strong, above the
+        // strip, the one chosen on ice (↑ ↓).
+        if !self.look.texture().is_none() {
+            taken += Self::draw_texture_choice(g, vf, y - 6.0, self.texture, self.look.texture().halation > 0.0, alpha);
+        }
+        taken
+    }
+
+    /// The grain's strengths in a capsule over the picture, its foot at
+    /// `bottom`, the one chosen on ice. Gives its height and gap.
+    fn draw_texture_choice(g: &mut Gfx, vf: Rect, bottom: f32, now: Strength, glow: bool, alpha: f32) -> f32 {
+        let t = g.tokens;
+        let cap = g.ty.caption;
+        let h = (cap.size + 10.0).round();
+        let pad = 3.0;
+        let cells: Vec<f32> = film::STRENGTHS.iter().map(|s| g.measure(s.name(), cap) + 16.0).collect();
+        // Its name, as much of it as fits (at the large text, none: the
+        // note says it as it changes).
+        let room = vf.w - 12.0 - cells.iter().sum::<f32>() - pad;
+        let label = [if glow { "grain + glow" } else { "grain" }, "grain", ""].into_iter().find(|l| l.is_empty() || g.measure(l, cap) + 14.0 <= room).unwrap_or("");
+        let label_w = if label.is_empty() { pad } else { g.measure(label, cap) + 14.0 };
+        let w = label_w + cells.iter().sum::<f32>() + pad;
+        let r = Rect::new((vf.cx() - w * 0.5).round(), (bottom - h).round(), w.round(), h);
+        g.canvas.rrect(r.offset(g.ox, 0.0), h * 0.5, Color(0, 0, 0), 0.6 * alpha);
+        g.text_alpha(r.x + 9.0, r.cy(), label, cap, Color(214, 216, 220), alpha);
+        let mut x = r.x + label_w;
+        for (s, cw) in film::STRENGTHS.iter().zip(&cells) {
+            let cell = Rect::new(x, r.y + pad, *cw, h - 2.0 * pad);
+            let on = *s == now;
+            if on {
+                // Concentric with the capsule: its radius less the padding.
+                g.canvas.rrect(cell.offset(g.ox, 0.0), cell.h * 0.5, t.ice, alpha);
+            }
+            let words_w = g.measure(s.name(), cap);
+            g.text_alpha(cell.cx() - words_w * 0.5, r.cy(), s.name(), cap, if on { t.on_ice } else { Color(255, 255, 255) }, alpha);
+            x += cw;
+        }
+        h + 6.0
     }
 
     /// The shot flying from the viewfinder into the rail's corner.
@@ -3292,7 +3535,11 @@ impl Camera {
         let to = Self::thumb_rect(rail);
         let lerp = |a: f32, b: f32| a + (b - a) * k;
         let r = Rect::new(lerp(vf.x, to.x), lerp(vf.y, to.y), lerp(vf.w, to.w), lerp(vf.h, to.h));
-        draw_picture(g, r, pic, whole(pic), lerp(0.0, 5.0), 1.0);
+        if self.fly_crisp {
+            draw_picture_crisp(g, r, pic, whole(pic), lerp(0.0, 5.0), 1.0);
+        } else {
+            draw_picture(g, r, pic, whole(pic), lerp(0.0, 5.0), 1.0);
+        }
     }
 
     /// The smart camera's news: its status, its picture, what it found;
@@ -3503,13 +3750,22 @@ impl Camera {
                 self.refining = Some((path, r));
                 moved || was.left_s(now) != was.left_s(now.saturating_sub(500))
             }
-            // Not written yet (the merge just starting): given a moment.
-            None if now.saturating_sub(was.began_ms) < 3000 => false,
+            // Not written yet (the merge just starting): given a moment. (A
+            // film look's grain writes its marker before it starts.)
+            None if now.saturating_sub(was.began_ms) < 3000 && self.texturing.as_ref() != Some(&path) => false,
             None => {
                 self.refining = None;
                 photos::changed();
-                self.load_last(Some(path));
-                self.say("detail merged into the photo");
+                self.load_last(Some(path.clone()));
+                if self.texturing.as_ref() == Some(&path) {
+                    self.texturing = None;
+                    self.say("grain laid on the photo");
+                } else if self.texture_due.iter().any(|(p, _)| *p == path) {
+                    // Merged: now its film look's grain.
+                    self.lay_texture(&path);
+                } else {
+                    self.say("detail merged into the photo");
+                }
                 true
             }
         }
@@ -3570,6 +3826,14 @@ impl Camera {
                     g.text_at(sx, sy, Align::Center, &format!("{}s", self.timer), ty.caption, t.ground);
                 }
             }
+            // Pixel mode: the disc itself in pixels, pressing in a step.
+            Mode::Pixel => {
+                let a = if self.saving.is_some() && !self.captured { 0.45 } else { 1.0 };
+                pixel_mode::draw_pixel_disc(g, sx, sy, inner, t.ink, a);
+                if self.timer > 0 && self.countdown.is_none() {
+                    g.text_at(sx, sy, Align::Center, &format!("{}s", self.timer), ty.caption, t.ground);
+                }
+            }
             Mode::Scan => g.icon("qr_code_scanner", false, sx, sy, 18.0, t.ink),
             // Doc mode: the page held still fills the ring, and is taken as it closes.
             Mode::Doc => {
@@ -3611,6 +3875,7 @@ impl Camera {
             }
         } else {
             match &self.last {
+                Some((photo, pic)) if self.flying.is_none() && photos::is_pixel(&photo.name) => draw_picture_crisp(g, grown, pic, whole(pic), 5.0, 1.0),
                 Some((_, pic)) if self.flying.is_none() => draw_picture(g, grown, pic, whole(pic), 5.0, 1.0),
                 Some(_) => g.surface(thumb, 5.0, t.surface1),
                 None => {
@@ -3631,7 +3896,9 @@ impl Camera {
                 g.text_at(b.x + bh - 1.0, b.cy(), Align::Left, &s, cap, t.ink);
             }
             None => {
-                g.text_at(thumb.cx(), thumb.y - 2.0 - cap.size * 0.5, Align::Center, "↓", cap, t.faint);
+                // Pixel mode's ↓ is the tone's: the album is on `a` there.
+                let key = if self.mode == Mode::Pixel && self.lens == Lens::Main { "a" } else { "↓" };
+                g.text_at(thumb.cx(), thumb.y - 2.0 - cap.size * 0.5, Align::Center, key, cap, t.faint);
             }
         }
         // In the AI view: the smart camera's pace and the link's rate.

@@ -6,8 +6,9 @@
 //! - adjust: exposure, contrast, highlights, shadows, saturation, warmth,
 //!   tint, vibrance, sharpness and a vignette, each a row with its track
 //!   (← → by five, Fn + Backspace back to nothing);
-//! - looks: the Camera's fifteen, each row showing it over this photo (↑ ↓
-//!   lays it on; ← → turn Tint's colour);
+//! - looks: the Camera's, digital and film, each row showing it over this
+//!   photo (↑ ↓ lays it on; ← → turn Tint's colour, or a film look's grain
+//!   and halation: off, light, strong, laid on the preview and the export);
 //! - crop: the crop's shape (free, 4:3, 3:2, 16:9, 1:1; Enter moves and
 //!   sizes it), quarter turns, straightening by ±15° over a grid, flips;
 //! - markup: arrows, boxes, circles and short labels in the signal colour
@@ -287,6 +288,14 @@ impl Editor {
         }
     }
 
+    /// The looks' panel open with `look` laid on (the Camera's film shots).
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn show_looks_at(&mut self, look: Look) {
+        self.edits.look = look;
+        self.set_panel(Panel::Looks);
+        self.changed();
+    }
+
     fn row(&self) -> usize {
         self.lists[self.panel.index()].focus
     }
@@ -314,6 +323,16 @@ impl Editor {
                 self.edits.set(a, self.edits.get(a) + by * STEP);
             }
             Panel::Looks if self.edits.look == Look::Tint => self.edits.hue = (self.edits.hue + by as f32 * 15.0).rem_euclid(360.0),
+            // A film look's grain and halation.
+            Panel::Looks if !self.edits.look.texture().is_none() => {
+                let to = self.edits.texture.step(by);
+                if to == self.edits.texture {
+                    return;
+                }
+                self.edits.texture = to;
+                let what = if self.edits.look.texture().halation > 0.0 { "grain and glow" } else { "grain" };
+                self.say(format!("{what}: {}", to.name()));
+            }
             Panel::Looks => return,
             Panel::Geometry => match row {
                 0 => {
@@ -696,6 +715,7 @@ impl Screen for Editor {
         let panel = match (self.panel, self.row()) {
             (Panel::Adjust, _) => keys("adjust", &[("↑ ↓", "Pick a setting"), ("← →", "Change it"), ("fn bksp", "Back to nothing")]),
             (Panel::Looks, _) if self.edits.look == Look::Tint => keys("looks", &[("↑ ↓", "Lay a look on"), ("← →", "The tint's colour"), ("fn bksp", "No look")]),
+            (Panel::Looks, _) if !self.edits.look.texture().is_none() => keys("looks", &[("↑ ↓", "Lay a look on"), ("← →", "Grain: off, light, strong"), ("fn bksp", "No look")]),
             (Panel::Looks, _) => keys("looks", &[("↑ ↓", "Lay a look on"), ("fn bksp", "No look")]),
             (Panel::Geometry, 0) => keys("crop", &[("← →", "Its shape"), ("enter", "Move and size it"), ("fn bksp", "The whole photo")]),
             (Panel::Geometry, 1) => keys("rotate", &[("← →", "A quarter turn"), ("fn bksp", "Upright")]),
@@ -1046,7 +1066,14 @@ impl Editor {
                     if g.measure(name, style) > room {
                         style = TextStyle { wdth: 78.0, ..style };
                     }
-                    g.text_fit(thumb.right() + 7.0, r.cy(), name, style, t.ink, room);
+                    // The film look in use: its grain's strength at the row's
+                    // end, where the name stays whole beside it.
+                    let grain = (LOOKS[k] == self.edits.look && !LOOKS[k].texture().is_none()).then(|| self.edits.texture.name()).filter(|w| g.measure(name, style) + g.measure(w, ty.caption) + 8.0 <= room);
+                    let grain_w = grain.map_or(0.0, |w| g.measure(w, ty.caption) + 8.0);
+                    g.text_fit(thumb.right() + 7.0, r.cy(), name, style, t.ink, room - grain_w);
+                    if let Some(w) = grain {
+                        g.text_at(r.right() - 8.0, r.cy(), Align::Right, w, ty.caption, t.dim);
+                    }
                     if k == focus {
                         g.focus_ring(r, radius);
                     }
@@ -1247,7 +1274,9 @@ impl Order {
         let tone = Tone::with_look(&self.edits, self.look);
         // Two cores for a full view; one for a small one.
         let threads = if geo.w * geo.h >= 16_384 { 2 } else { 1 };
-        let shown = develop::develop(geo.clone(), &tone, threads);
+        let mut shown = develop::develop(geo.clone(), &tone, threads);
+        // A film look's grain and halation, sized to the picture (film.rs).
+        crate::filters::film::apply(&mut shown, self.edits.look.texture().at(self.edits.texture), 0);
         Made { key: self.key, geo, shown }
     }
 }

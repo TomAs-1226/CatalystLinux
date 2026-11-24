@@ -33,6 +33,7 @@ windows that grow out of tiles whenever it is there.
 | `shots/flasher/` | Catalyst Flasher's screens (`catalyst-flasher --shot`). |
 | `shots/motion/` | Each kind of motion as a strip of frames 50 ms apart and an animated PNG, and the Home settings (`--motion`). |
 | `shots/vm/` | The same shell as the ARM build on the image's own kernel, in the emulator. |
+| `shots/1.2-pixel/`, `shots/1.2-film/` | The Camera's pixel mode (each palette, dither and size, its pickers, the flash, its keys, a picture in Photos) and the film looks (each look, the grain's choice, the glow, the editor), dark and light at each text size (`--camera-pixel-shots`, `--camera-film-shots`). |
 | `tools/bake3d/` | The Robot app's robot in 3D: Numbers' bake, the packer, and a team's own from its CAD (see *The robot in three dimensions*). |
 | `shots/3d-preview/` | The robot in 3D to look at before it ships: `index.html`. |
 
@@ -2473,6 +2474,69 @@ an album, and QR codes read. The AprilTag reader is still there beside it.
 - **Where they go:** `/data/photos`, named for when they were taken
   (`IMG_20261121_140312.jpg`, with `_2` added if two land in the same
   second). Files opens a photo in the viewer too.
+- **Pixel mode** (1.2; the modes are now scan, photo, pro, pixel, doc) is a
+  toy camera's: each preview frame made small, its colours few and
+  dithered, shown live with whole pixels. Our own look, after no
+  particular camera:
+  - **Size** (`s` steps it): 56 × 42, 75 × 56 or 112 × 84, which land on
+    four, three or two panel pixels each in the viewfinder (224 or 225 ×
+    168), so no pixel is wider than another.
+  - **Palette** (`k`, its swatches in the picker): ink (1-bit), graphite
+    (4 greys), ember (a warm 4), tide (a cool 4), poster (8 colours) and
+    crayon (16), all our own colours. The four ramps map by brightness, the
+    colour ones to the nearest colour (a 32³ table made once for each).
+  - **Dither** (`d` steps it, each picker cell a sample of its pattern):
+    none, Bayer (ordered, 4 × 4), Floyd–Steinberg (along the rows each way
+    in turn) or Atkinson (three quarters of the error passed on: clean
+    lights and darks).
+  - **Tone:** ↑ ↓ the brightness (seven steps), `-` `=` or the tone's
+    picker the contrast (soft, normal, punchy, hard).
+  - Each is a chip in the bar with its key; their pickers show each choice
+    on the picture while it is in hand (Enter keeps it, Esc goes back), and
+    all of it is remembered. `a` opens the album, ↓ being the tone's here.
+  - **The shutter** keeps the picture in sight, at once (no photo is asked
+    of the camera): an indexed PNG at its true size, kept as its original,
+    and one blown up with whole pixels for sharing (×8, ×6 or ×4: about 450
+    across), `PIX_20261123_101500.png` in the album. Its flash is the
+    palette's lightest colour over the picture's own pixels, taken away in
+    the Bayer matrix's order on Material 3's slow effects spring; the
+    shutter's disc is drawn in pixels and presses in a step. The timer
+    works as in photo mode.
+  - **Its cost:** a frame shrunk, mapped and dithered takes 0.21 ms at
+    worst on the development PC (112 × 84, crayon, Atkinson), against
+    0.16 ms for the plain colour conversion it replaces; about 3 ms on the
+    A53 at the shell's reckoning of fifteen times slower. At rest nothing
+    keeps the frame beat.
+- **Film looks** (1.2): seven of their own, a group after the digital
+  looks in the strip (and in the photo editor's looks): Sunlit Slide (a
+  daylight slide: punchy, deep blacks), Soft Negative (a portrait negative:
+  soft, warm skin, low contrast), Faded Slide (muted, hard shadows),
+  Tungsten (a night stock balanced for lamps, its lights glowing), Pushed
+  Mono (gritty, hard), Pearl Mono (soft black and white) and Cine (teal
+  shadows, warm highlights, a gentle roll-off). Our names and our numbers:
+  none claims to match any film.
+  - Each has a film's tone (a toe that deepens the blacks, a shoulder that
+    rolls the highlights into white, lifted blacks where it wants them) and
+    colour response: hue shifts and saturation by range, skin, sky and
+    foliage apart, worked on the frame's chroma (a table of U and V) before
+    the look's matrix, so the preview pays one lookup a 2 × 2 block.
+  - **Grain and halation**, chosen with ↑ ↓ in the strip: off, light or
+    strong (remembered). Grain is the picture's own size (about an 800th of
+    its width: four-pixel specks on the photo, finer than a pixel in the
+    preview, which shows their mean), luminance-weighted and the same on
+    each channel, and fixed by a seed (the photo's name), so a still never
+    shimmers. Halation is a red-orange glow screened round the highlights,
+    gathered at an 80th of the width and blurred about a 70th.
+  - The camera program lays the look's colour over the full-size photo as
+    ever (its 33³ table); the shell lays the grain and glow on once the
+    photo is saved, at idle priority, one photo at a time, the thumbnail
+    wearing its "refining" badge meanwhile (after a detail merge, if there
+    is one). The photo as taken stays clean in `.originals`, and the Exif
+    says the look and its grain ("Pushed Mono, strong grain").
+  - **Its cost:** the worst, Tungsten with strong grain and glow on a dusk
+    with lamps, 0.56 ms here (the colour 0.34 ms, as any look's; the
+    texture 0.2 ms), against 0.18 ms for the plain conversion: about 6 ms
+    on the A53 at the shell's reckoning, the frame's budget.
 - **Scan mode** reads QR codes from the preview's brightness, about four
   times a second, on a thread of its own (rqrr, pure Rust), so the preview
   never waits for it. A code read is outlined and a card rises with what it
@@ -2492,6 +2556,11 @@ an album, and QR codes read. The AprilTag reader is still there beside it.
   - `i` shows the details: name, size in pixels and megapixels, the file's
     size, and when it was taken;
   - `d` asks, and `d` again deletes it (its thumbnail goes too).
+  - **Pixel pictures** are never smoothed: the viewer shows the true size
+    at a whole number of panel pixels each (the largest that fits, then
+    twice and four times that, on whole pixels as it pans), and their
+    thumbnails are sampled, not averaged. Their details say both sizes;
+    they are not edited.
 - **Memory.** A photo is decoded at an eighth, a quarter or half of its size,
   whichever is the smallest that still covers the panel at the zoom asked
   for. Even at 4× a full-size photo is decoded at half its size (6 MB), never

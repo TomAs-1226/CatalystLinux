@@ -50,6 +50,9 @@ pub fn render(src: &Picture, e: &Edits, threads: usize, progress: &dyn Fn(f32)) 
         develop::by_rows(&mut sharp.rgb, ow * 3, threads, |y0, rows| develop::sharpen_rows(&out, tone.sharp, y0..y0 + rows.len() / (ow * 3), rows));
         out = sharp;
     }
+    // A film look's grain and halation, at the photo's own size (film.rs),
+    // the same grain each time this edit is exported.
+    crate::filters::film::apply(&mut out, e.look.texture().at(e.texture), 0x00C0_FFEE);
     progress(0.8);
     super::markup::draw(&mut out, &e.marks);
     progress(1.0);
@@ -131,7 +134,10 @@ fn run(photo: &Path, edits: &Edits, set: &dyn Fn(f32)) -> Result<PathBuf, String
     set(0.25);
     let pic = render(&src, edits, develop::cores(), &|f| set(0.25 + 0.45 * f));
     drop(src);
-    let exif = (edits.look != crate::filters::Look::Original).then(|| crate::filters::exif_with_look(edits.look.name()));
+    let exif = (edits.look != crate::filters::Look::Original).then(|| crate::filters::exif_with_look(&match edits.look.texture().words(edits.texture) {
+        Some(t) => format!("{}, {t}", edits.look.name()),
+        None => edits.look.name().to_owned(),
+    }));
     let path = write(photo, &pic, exif)?;
     crate::photos::changed();
     Ok(path)
