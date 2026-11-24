@@ -2253,6 +2253,10 @@ impl Camera {
             words.retain(|w| !w.starts_with("exp=") && !w.starts_with("gain=") && !w.starts_with("sharp=") && !w.starts_with("nr=") && !w.starts_with("raw="));
             let (sharp, nr) = pro::processing(plan.gain);
             let night = what == camkit::Exposing::Night;
+            // The toe (the finish's extra lift in the shadows) only on a
+            // photo with no look: a look's own curve shapes the tone, and the
+            // two stacked went muddy (1.5.1; HDR's was 0.30 until then).
+            let toe = if self.look != Look::Original { "0" } else { "0.20" };
             words.extend([
                 format!("exp={}", plan.frame_us),
                 format!("gain={:.3}", plan.gain),
@@ -2261,7 +2265,7 @@ impl Camera {
                 format!("stack={}", plan.frames),
                 format!("stackfor={}", if night { "night" } else { "hdr" }),
                 format!("lift={:.2}", plan.lift),
-                format!("toe={}", if night { "0.20" } else { "0.30" }),
+                format!("toe={toe}"),
             ]);
             // Night's lamps: their orange or green pulled half way to neutral.
             if night {
