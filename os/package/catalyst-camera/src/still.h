@@ -115,6 +115,29 @@ inline StackSize stack_size(long available_mb)
 	return StackSize::None;
 }
 
+// ---------------------------------------------------------- every photo ---
+//
+// 1.5.2: every photo from a few frames back to back, held in memory until
+// it is written and merged then (stack.h's merge_frames).
+
+// The most frames a photo takes.
+const int MERGE_MOST = 6;
+
+// How many frames a photo at w x h takes, of `asked`, from what memory the
+// system has free (MB, -1 unknown): each frame is held (12 MB at the full
+// size) beside everything else (96 MB kept for the shell and the system,
+// as a stack keeps) and a photo waiting to be written (12 MB); as many as
+// fit, and one (no merge) where fewer than two do.
+inline int photo_frames(long available_mb, unsigned w, unsigned h, int asked)
+{
+	asked = std::clamp(asked, 1, MERGE_MOST);
+	if (asked < 2 || available_mb < 0)
+		return asked;
+	long frame = long(uint64_t(w) * h * 3 / 2 / (1024 * 1024)) + 1;
+	long fit = (available_mb - 96 - 12) / frame;
+	return fit >= 2 ? int(std::min<long>(asked, fit)) : 1;
+}
+
 // Whether a frame's exposure is the one asked for (a tenth either way, or
 // a fifth of a millisecond: the sensor counts in lines).
 inline bool matches(int64_t took_us, int64_t asked_us)

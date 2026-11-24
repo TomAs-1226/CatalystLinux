@@ -6,14 +6,15 @@
 
 # Raised with each change to the program: a new version is a new build
 # directory, so the next image build compiles it afresh by itself.
-CATALYST_CAMERA_VERSION = 1.10
+CATALYST_CAMERA_VERSION = 1.11
 CATALYST_CAMERA_SITE = $(BR2_EXTERNAL_CATALYST_PATH)/package/catalyst-camera/src
 CATALYST_CAMERA_SITE_METHOD = local
 CATALYST_CAMERA_LICENSE = MIT
 # Photos are written as JPEG through libjpeg (libjpeg-turbo, with NEON), on
 # three cores (src/photo.h; test/photo-test.cpp checks it under qemu). What a
 # photo decides while it is taken is src/still.h (test/still-test.cpp); Night's
-# and HDR's merge, src/stack.h (test/stack-test.cpp); light trails' and the
+# and HDR's merge, and every photo's merge and finish (1.5.2: local tone,
+# sharpening), src/stack.h (test/stack-test.cpp); light trails' and the
 # burst's (1.10), src/compose.h (test/compose-test.cpp).
 CATALYST_CAMERA_DEPENDENCIES = libcamera jpeg host-pkgconf
 

@@ -89,6 +89,23 @@
 //                                          given back, the shadows lifted,
 //                                          near-grey pulled toward neutral
 //                                          (also for a single photo)
+//                       merge=<n>          every photo (1.5.2): n frames back
+//                                          to back at the exposure given,
+//                                          held in memory while the preview
+//                                          runs again and merged into the
+//                                          first as it is written
+//                                          (stack.h's merge_frames); at the
+//                                          full size only, where memory has
+//                                          room (still.h's photo_frames),
+//                                          else one frame; never with a
+//                                          RAW, a stack, a set or a burst
+//                       local=<0..1>       the finish's local tone (1.5.2):
+//                                          the shadows lifted where dark, a
+//                                          lift's highlights held, a face
+//                                          brought to its level
+//                       crisp=<0..1>       the finish's own sharpening on the
+//                                          luma (1.5.2), in place of most of
+//                                          the ISP's (sharp=)
 //                       trails=<s>         light trails (1.10): frames at the
 //                                          exposure given, each laid over the
 //                                          last where brighter (compose.h),
@@ -1222,6 +1239,8 @@ struct Asked {
 	int stack = 0;
 	std::string stack_for;
 	stack::Finish finish;
+	// Every photo's frames (1.5.2): 0 or 1, one frame.
+	int merge = 0;
 	// Light trails' longest (s), a burst's frames, and a smaller photo's
 	// size (a time-lapse's frames), 1.10: 0 for none.
 	int trails_s = 0;
@@ -1279,6 +1298,12 @@ Asked asked_of(const std::string &words)
 			a.finish.toe = std::clamp(std::strtof(value.c_str(), nullptr), 0.0f, 0.5f);
 		else if (key == "neutral")
 			a.finish.neutral = std::clamp(std::strtof(value.c_str(), nullptr), 0.0f, 1.0f);
+		else if (key == "merge")
+			a.merge = std::clamp(std::atoi(value.c_str()), 0, still::MERGE_MOST);
+		else if (key == "local")
+			a.finish.local = std::clamp(std::strtof(value.c_str(), nullptr), 0.0f, 1.0f);
+		else if (key == "crisp")
+			a.finish.crisp = std::clamp(std::strtof(value.c_str(), nullptr), 0.0f, 1.0f);
 		else if (key == "trails")
 			a.trails_s = std::clamp(std::atoi(value.c_str()), 0, compose::TRAILS_LONGEST_S);
 		else if (key == "best")
@@ -1345,6 +1370,14 @@ struct Shot {
 	int trails_frames = 0;
 	long trails_ms = 0;
 	int best_at = 0, best_of = 0;
+	// Every photo (1.5.2): its other frames, held until it is written and
+	// merged into it then, and how many were merged of how many taken.
+	std::vector<std::vector<uint8_t>> more;
+	int merged = 0, merge_taken = 0;
+	// Where its crop lies in the sensor's picture (the face's box is the
+	// whole picture's).
+	still::Crop crop;
+	unsigned int full_w = 0, full_h = 0;
 };
 
 // ------------------------------------------------------------------ exif ---
@@ -1482,6 +1515,8 @@ std::vector<uint8_t> exif(const Shot &s)
 		zero.ascii(0x010e, words);
 	} else if (s.best_of > 1) {
 		zero.ascii(0x010e, "Burst: the sharpest of " + std::to_string(s.best_of) + " frames (frame " + std::to_string(s.best_at) + ")");
+	} else if (s.merged > 1) {
+		zero.ascii(0x010e, "Merged from " + std::to_string(s.merged) + " frames");
 	}
 	zero.shorts(0x0213, 1);
 	zero.longs(0x8769, 0);
@@ -1690,6 +1725,64 @@ void take_burst(Session &s, Request *first, int extra, std::vector<int> &files, 
 		if (camera->queueRequest(request) < 0)
 			break;
 	}
+}
+
+// Every photo's other frames (1.5.2), after its first (`first`, copied out):
+// as many more as `shot.with.merge` asks, each copied into memory of its
+// own as it comes, the exposure and white balance held as the first had
+// them. Each frame is waited for on its own, two of its lengths and a
+// little (the pipeline keeps one raw frame, so they come at every other one
+// the sensor sends); whatever came by then is the photo's. Nothing is
+// merged here: the sensor is done the moment the last is copied out.
+void take_frames(Session &s, Request *first, Shot &shot, still::Crop crop, const Held_as &as)
+{
+	{
+		std::lock_guard<std::mutex> lock(burst_lock);
+		burst_done.clear();
+	}
+	const int want = shot.with.merge - 1;
+	ControlList hold = held_controls(as.exposure_us, as.analogue, as.wb);
+	phase = Phase::Burst;
+	first->reuse(Request::ReuseBuffers);
+	first->controls().merge(hold);
+	if (camera->queueRequest(first) < 0)
+		return;
+	const long each_ms = long(2 * still::frame_us(as.exposure_us) / 1000) + 300;
+	int bad = 0;
+	while (int(shot.more.size()) < want && running) {
+		Request *request = next_done(std::chrono::steady_clock::now() + std::chrono::milliseconds(each_ms));
+		if (!request) {
+			std::fprintf(stderr, "still: the photo's frame %d did not come; %d kept\n", int(shot.more.size()) + 2, int(shot.more.size()) + 1);
+			break;
+		}
+		still::Status status = status_of(request, s.stream);
+		if (status == still::Cancelled)
+			break;
+		if (status == still::Success || status == still::Startup) {
+			auto m = s.planes.find(request->findBuffer(s.stream));
+			if (m != s.planes.end()) {
+				std::vector<uint8_t> frame;
+				try {
+					frame.resize(size_t(crop.w) * crop.h * 3 / 2);
+				} catch (const std::bad_alloc &) {
+					std::fprintf(stderr, "still: no memory for the photo's frame %d\n", int(shot.more.size()) + 2);
+					break;
+				}
+				dma_sync(s.external_fd, true);
+				copy_frame(m->second, s.stride, s.w, s.h, crop, turn_here, frame.data());
+				dma_sync(s.external_fd, false);
+				shot.more.push_back(std::move(frame));
+			}
+		} else if (++bad >= 3) {
+			break;
+		}
+		if (int(shot.more.size()) >= want)
+			break;
+		request->reuse(Request::ReuseBuffers);
+		if (camera->queueRequest(request) < 0)
+			break;
+	}
+	shot.merge_taken = 1 + int(shot.more.size());
 }
 
 // A bracketing set's other frames after its first (`first`, copied out):
@@ -2177,6 +2270,9 @@ bool take_still_at(Size size, Shot &shot, std::string &why, bool want_raw, bool 
 	const bool stacking = a.stack > 1 && cancelled && extra <= 0 && !is_set && !trailing;
 	// A burst (1.10): the sharpest of its frames kept (take_best).
 	const bool picking = a.best > 1 && extra <= 0 && !is_set && !stacking && !trailing;
+	// Every photo (1.5.2): its frames back to back, merged as it is
+	// written (take_frames); never with a RAW (the memory is the RAW's).
+	const bool merging = a.merge > 1 && extra <= 0 && !is_set && !stacking && !trailing && !picking && !want_raw;
 	int64_t longest = fixed;
 	if (is_set)
 		for (const Asked::Also &more : a.also)
@@ -2236,6 +2332,10 @@ bool take_still_at(Size size, Shot &shot, std::string &why, bool want_raw, bool 
 		expect_us = 2 * f0 + int64_t(a.best - 1) * 2 * f0;
 		frames = a.best;
 	}
+	if (merging) {
+		expect_us = 2 * f0 + int64_t(a.merge - 1) * 2 * f0;
+		frames = a.merge;
+	}
 	if (is_set)
 		for (const Asked::Also &more : a.also) {
 			expect_us += 5 * still::frame_us(std::min(more.exposure_us, longest_allowed));
@@ -2279,7 +2379,7 @@ bool take_still_at(Size size, Shot &shot, std::string &why, bool want_raw, bool 
 			if (auto black = said.get(controls::SensorBlackLevels))
 				shot.black = (*black)[0];
 			// A single photo: the sensor is done with it, the hand may move.
-			if (extra <= 0 && !is_set && !stacking && !trailing && !picking)
+			if (extra <= 0 && !is_set && !stacking && !trailing && !picking && !merging)
 				tell(7, 0, shot.marks.line);
 			const still::Crop crop = still::crop_for(s->w, s->h, a.aspect_a, a.aspect_b);
 			if (stacking || trailing) {
@@ -2297,6 +2397,9 @@ bool take_still_at(Size size, Shot &shot, std::string &why, bool want_raw, bool 
 			}
 			shot.w = crop.w;
 			shot.h = crop.h;
+			shot.crop = crop;
+			shot.full_w = s->w;
+			shot.full_h = s->h;
 			shot.yuv.resize(size_t(crop.w) * crop.h * 3 / 2);
 			dma_sync(s->external_fd, true);
 			copy_frame(m->second, s->stride, s->w, s->h, crop, turn_here, shot.yuv.data());
@@ -2316,13 +2419,17 @@ bool take_still_at(Size size, Shot &shot, std::string &why, bool want_raw, bool 
 				shot.raw_skipped = shot.raw_fd < 0;
 			}
 			ok = true;
+			shot.more.clear();
+			shot.merge_taken = 0;
 			if (extra > 0 && files)
 				take_burst(*s, got, extra, *files, crop, as);
 			else if (is_set)
 				take_set(*s, got, shot, crop, as, *set);
 			else if (picking)
 				take_best(*s, got, shot, crop, as);
-			if (extra > 0 || is_set || picking) {
+			else if (merging)
+				take_frames(*s, got, shot, crop, as);
+			if (extra > 0 || is_set || picking || merging) {
 				shot.marks.mark("frames");
 				tell(7, 0, shot.marks.line);
 			}
@@ -2454,11 +2561,41 @@ void write_shot(Shot &shot)
 {
 	auto began = std::chrono::steady_clock::now();
 	std::string why;
-	// Night's and HDR's finish (or a single photo's lift): before the look,
-	// so the photo as taken has it too.
+	// Every photo (1.5.2): its other frames merged into it, then let go.
+	long merge_ms = 0;
+	if (!shot.more.empty()) {
+		std::vector<const uint8_t *> more;
+		for (const std::vector<uint8_t> &f : shot.more)
+			more.push_back(f.data());
+		stack::Merged m = stack::merge_frames(shot.yuv.data(), more, shot.w, shot.h, PHOTO_THREADS);
+		shot.merged = m.frames;
+		shot.more.clear();
+		shot.more.shrink_to_fit();
+		// The noise left, for the sharpening and the tone; the filter only
+		// where it is still more than a little at a high gain (in daylight,
+		// fine texture a hand's fraction of a pixel out reads as noise, and
+		// the filter would smear foliage).
+		shot.with.finish.grain = m.residual;
+		if (m.residual >= 2.5f && shot.gain >= 4.0f)
+			shot.with.finish.noise = m.residual;
+		merge_ms = ms_since(began);
+		std::fprintf(stderr, "merge: %d of %d frames in %ld ms, noise %.1f, left %.1f\n", m.frames, shot.merge_taken, merge_ms, double(m.noise), double(m.residual));
+	}
+	// The face the exposure leaned toward, for the local tone: from the
+	// whole picture's terms into the crop's.
+	if (shot.face && shot.with.finish.local > 0.01f && shot.crop.w > 0 && shot.full_w > 0) {
+		stack::Finish &f = shot.with.finish;
+		for (int i = 0; i < 4; i += 2) {
+			f.face_box[i] = (shot.face_box[i] * float(shot.full_w) - float(shot.crop.x)) / float(shot.crop.w);
+			f.face_box[i + 1] = (shot.face_box[i + 1] * float(shot.full_h) - float(shot.crop.y)) / float(shot.crop.h);
+		}
+		f.face = true;
+	}
+	// The finish (Night's and HDR's, and every photo's since 1.5.2): before
+	// the look, so the photo as taken has it too.
 	if (shot.with.finish.any())
 		stack::finish(shot.yuv.data(), shot.w, shot.h, shot.with.finish, PHOTO_THREADS);
-	long finish_ms = ms_since(began);
+	long finish_ms = ms_since(began) - merge_ms;
 	photo::Lut lut = shot.with.look.empty() ? photo::Lut() : photo::read_lut(shot.with.look);
 	if (lut.empty())
 		shot.with.look.clear();
@@ -2482,6 +2619,11 @@ void write_shot(Shot &shot)
 	std::string news = "\tshot " + std::to_string(shot.shot_ms) + " write " + std::to_string(ms_since(began));
 	if (!shot.burst.empty())
 		news += " detail " + std::to_string(shot.burst.size() + 1);
+	// Every photo's merge: "merge 3 3" (merged, taken), and the times.
+	if (shot.merge_taken > 1)
+		news += " merge " + std::to_string(shot.merged) + " " + std::to_string(shot.merge_taken) + " merging " + std::to_string(merge_ms) + " finish " + std::to_string(finish_ms);
+	else if (shot.stacked <= 0 && shot.with.finish.any())
+		news += " finish " + std::to_string(finish_ms);
 	// A stack: "night 5 8" (merged, asked), and the finish's time.
 	if (shot.stacked > 0)
 		news += " " + (shot.with.stack_for.empty() ? std::string("night") : shot.with.stack_for) + " " + std::to_string(shot.stacked) + " " + std::to_string(shot.stack_planned) + " finish " + std::to_string(finish_ms);
@@ -2719,6 +2861,19 @@ void take_still(const std::string &path, const std::string &words, int detail)
 			break;
 		}
 	}
+	// Every photo (1.5.2): its frames where memory holds them, at the full
+	// size only (a binned try is one frame), never with anything else.
+	if (shot.with.merge > 1) {
+		if (detail > 0 || shot.with.stack > 1 || shot.with.best > 1 || shot.with.trails_s > 0 || shot.with.size_w > 0 || !shot.with.also.empty() || !shot.with.raw.empty()) {
+			shot.with.merge = 0;
+		} else {
+			long mb = available_mb();
+			int frames = still::photo_frames(mb, full.width, full.height, shot.with.merge);
+			if (frames < shot.with.merge)
+				std::fprintf(stderr, "still: %ld MB free: %d of the photo's %d frames\n", mb, frames, shot.with.merge);
+			shot.with.merge = frames > 1 ? frames : 0;
+		}
+	}
 	bool want_raw = !shot.with.raw.empty() && detail <= 1 && shot.with.also.empty();
 	bool suspect = false;
 	bool ok = take_still_at(full, shot, why, want_raw, !held.failed, detail - 1, &shot.burst, &set, suspect, stacking);
@@ -2743,6 +2898,7 @@ void take_still(const std::string &path, const std::string &words, int detail)
 	}
 	if (!ok && running && !cancelled) {
 		std::string again;
+		shot.with.merge = 0;
 		still_patience = 2;
 		ok = take_still_at(last_size, shot, again, false, false, 0, nullptr, &set, suspect, stacking);
 		still_patience = 1;

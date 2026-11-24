@@ -109,6 +109,10 @@ int main()
 	check(stack_size(400) == StackSize::Full && stack_size(96 + 12 + 45) == StackSize::Full, "room for the full size: merged at 3280 x 2464");
 	check(stack_size(96 + 12 + 44) == StackSize::Binned && stack_size(96 + 12 + 12) == StackSize::Binned, "short of it: merged binned, at 1640 x 1232");
 	check(stack_size(96 + 12 + 11) == StackSize::None && stack_size(-1) == StackSize::Full, "too short for either: no stack; not known: full");
+	// Every photo's frames (1.5.2): 12 MB each at full size, held.
+	check(photo_frames(400, 3280, 2464, 3) == 3 && photo_frames(96 + 12 + 36, 3280, 2464, 3) == 3 && photo_frames(-1, 3280, 2464, 3) == 3, "a photo's three frames where 36 MB is free beside the rest (or not known)");
+	check(photo_frames(96 + 12 + 24, 3280, 2464, 3) == 2 && photo_frames(96 + 12 + 23, 3280, 2464, 3) == 1 && photo_frames(50, 3280, 2464, 3) == 1, "short of it: two, then one frame (no merge)");
+	check(photo_frames(400, 3280, 2464, 1) == 1 && photo_frames(4000, 3280, 2464, 99) == MERGE_MOST, "one asked is one; never more than a photo takes");
 
 	struct Case {
 		unsigned W, H, a, b, x, y, w, h;

@@ -15,6 +15,13 @@
 // - The finish: no change asked, none made; a lift brightens the middle and
 //   keeps white white; near-grey colour pulled toward neutral by a share,
 //   six levels at most; the viewfinder's small copy.
+// - Every photo (1.5.2): three noisy frames merged, the noise down by about
+//   the root of three, what moved left as the first frame had it; the local
+//   tone on a backlit scene (the dark subject lifted, the sky kept, no halo
+//   at the hard edge between them, a face in shade brought up); the
+//   sharpening (an edge crisper with no overshoot past 4 levels, flat noise
+//   not made louder, texture on skin left nearly alone); a photo's own
+//   noise measured from it.
 
 #include "stack.h"
 
@@ -226,6 +233,168 @@ int main()
 		std::vector<uint8_t> f0 = frame(0, 0, 0, n);
 		small_copy(f0.data(), W, H, 320, 240, t, small);
 		check(small.size() == 320 * 240 * 3 / 2 && std::abs(int(small[120 * 320 + 160]) - scene_y(320, 240)) < 20, "the viewfinder's copy is the frame made small");
+	}
+
+	// Every photo (1.5.2): three frames, a hand's shift apart, merged into
+	// the first: the noise down by about the root of three; what moved
+	// stands as the first frame had it.
+	{
+		const float s = 6.0f;
+		std::vector<uint8_t> f0 = frame(0, 0, s, n, 100, 200), f1 = frame(3, -2, s, n, 160, 200), f2 = frame(-5, 4, s, n, 220, 200);
+		float one = rms(f0.data(), 90, 190, 200, 60);
+		Merged m = merge_frames(f0.data(), { f1.data(), f2.data() }, W, H, 3);
+		float three = rms(f0.data(), 90, 190, 200, 60);
+		std::printf("     one frame %.2f, three merged %.2f (root of three: %.2f), noise %.2f left %.2f\n", double(one), double(three), double(one / std::sqrt(3.0f)), double(m.noise), double(m.residual));
+		check(m.frames == 3 && three < one / 1.5f, "a photo's three frames merged: the noise down by about the root of three");
+		check(m.residual < m.noise / 1.4f && m.residual > m.noise / 2.0f, "the noise left is known to the finish");
+		double stood = 0;
+		for (int y = 205; y < 235; y++)
+			for (int x = 105; x < 135; x++)
+				stood += f0[size_t(y) * W + x];
+		stood /= 30 * 30;
+		check(stood > 235.0, "what moved stands as the first frame had it (no ghost)");
+		// A frame of another scene: left out, the photo is the first.
+		std::vector<uint8_t> g0 = frame(0, 0, s, n), other(size_t(W) * H * 3 / 2);
+		for (size_t i = 0; i < other.size(); i++)
+			other[i] = uint8_t((i * 2654435761u) >> 24);
+		std::vector<uint8_t> before = g0;
+		Merged none = merge_frames(g0.data(), { other.data() }, W, H, 3);
+		check(none.frames == 1 && g0 == before, "a frame that will not line up is left out; the photo is its first frame");
+	}
+
+	// The local tone on a backlit scene: a dark subject (40, textured) left
+	// of a hard edge, a bright sky (215, textured) right of it.
+	{
+		auto backlit = [&](std::vector<uint8_t> &yuv) {
+			yuv.assign(size_t(W) * H * 3 / 2, 128);
+			for (unsigned y = 0; y < H; y++)
+				for (unsigned x = 0; x < W; x++) {
+					int base = x < W / 2 ? 40 : 215;
+					int tex = int(6.0 * std::sin(x * 0.31) * std::sin(y * 0.23));
+					yuv[size_t(y) * W + x] = uint8_t(base + tex);
+				}
+		};
+		auto mean = [&](const std::vector<uint8_t> &yuv, unsigned x0, unsigned x1) {
+			double sum = 0;
+			for (unsigned y = 40; y < H - 40; y++)
+				for (unsigned x = x0; x < x1; x++)
+					sum += yuv[size_t(y) * W + x];
+			return sum / double((H - 80) * (x1 - x0));
+		};
+		auto spread = [&](const std::vector<uint8_t> &yuv, unsigned x0, unsigned x1) {
+			double m = mean(yuv, x0, x1), sum = 0;
+			for (unsigned y = 40; y < H - 40; y++)
+				for (unsigned x = x0; x < x1; x++)
+					sum += (yuv[size_t(y) * W + x] - m) * (yuv[size_t(y) * W + x] - m);
+			return std::sqrt(sum / double((H - 80) * (x1 - x0)));
+		};
+		std::vector<uint8_t> was, yuv;
+		backlit(was);
+		yuv = was;
+		Finish f;
+		f.local = 1.0f;
+		finish(yuv.data(), W, H, f, 3);
+		const unsigned e = W / 2;
+		double dark = mean(yuv, 40, e - 80), near_dark = mean(yuv, e - 24, e - 2);
+		double sky = mean(yuv, e + 80, W - 40), near_sky = mean(yuv, e + 2, e + 24);
+		std::printf("     subject 40 -> %.1f (by the edge %.1f), sky 215 -> %.1f (by the edge %.1f), texture %.1f -> %.1f\n", dark, near_dark, sky, near_sky, spread(was, 40, e - 80), spread(yuv, 40, e - 80));
+		check(dark > 46.0 && dark < 70.0, "the dark subject lifted (about half a stop), not to the middle");
+		check(std::fabs(sky - mean(was, e + 80, W - 40)) < 2.0, "the bright sky kept as it was");
+		check(std::fabs(near_dark - dark) < 4.0 && std::fabs(near_sky - sky) < 4.0, "no halo: by the hard edge, each side as it is further off (within 4 levels)");
+		check(spread(yuv, 40, e - 80) > spread(was, 40, e - 80) * 1.1, "the subject's texture lifted with it, not flattened");
+		// A lift asked (the frames kept under for the sky): the sky's held.
+		yuv = was;
+		f.lift = 1.0f;
+		finish(yuv.data(), W, H, f, 3);
+		Finish global;
+		global.lift = 1.0f;
+		std::vector<uint8_t> plain = was;
+		finish(plain.data(), W, H, global, 3);
+		std::printf("     with a lift of 1: sky %.1f (the lift alone %.1f), subject %.1f (alone %.1f)\n", mean(yuv, e + 80, W - 40), mean(plain, e + 80, W - 40), mean(yuv, 40, e - 80), mean(plain, 40, e - 80));
+		check(mean(yuv, e + 80, W - 40) < mean(plain, e + 80, W - 40) - 1.0 && mean(yuv, 40, e - 80) >= mean(plain, 40, e - 80), "with a lift, the bright sky held back from it, the subject not");
+		// A face in the shade: brought toward a face's level.
+		yuv = was;
+		Finish fa;
+		fa.local = 1.0f;
+		fa.face = true;
+		fa.face_box[0] = 0.15f, fa.face_box[1] = 0.3f, fa.face_box[2] = 0.35f, fa.face_box[3] = 0.7f;
+		finish(yuv.data(), W, H, fa, 3);
+		double face = 0;
+		for (unsigned y = unsigned(0.4f * H); y < unsigned(0.6f * H); y++)
+			for (unsigned x = unsigned(0.2f * W); x < unsigned(0.3f * W); x++)
+				face += yuv[size_t(y) * W + x];
+		face /= double(unsigned(0.2f * H) * unsigned(0.1f * W));
+		std::printf("     a face in the shade: %.1f (without it %.1f)\n", face, dark);
+		check(face > dark + 8.0 && face < 120.0, "a face in the shade brought toward a face's level, not past it");
+		check(std::fabs(mean(yuv, e + 80, W - 40) - mean(was, e + 80, W - 40)) < 2.0, "the sky behind it kept");
+	}
+
+	// Sharpening: a soft edge (top third), a flat noisy grey (middle third),
+	// and a fine texture (bottom third), grey on its left half and in a skin
+	// tone (Cb 103, Cr 157) on its right.
+	{
+		std::vector<uint8_t> yuv(size_t(W) * H * 3 / 2, 128);
+		uint8_t *u = yuv.data() + size_t(W) * H, *v = u + size_t(W / 2) * (H / 2);
+		for (unsigned y = 0; y < H / 3; y++)
+			for (unsigned x = 0; x < W; x++) {
+				double t = 0.5 * (1.0 + std::erf((double(x) - 320.0) / (1.2 * std::sqrt(2.0))));
+				yuv[size_t(y) * W + x] = uint8_t(std::lround(60.0 + 120.0 * t));
+			}
+		for (unsigned y = H / 3; y < 2 * H / 3; y++)
+			for (unsigned x = 0; x < W; x++)
+				yuv[size_t(y) * W + x] = uint8_t(std::clamp(std::lround(128.0f + 3.0f * n.normal()), 0L, 255L));
+		for (unsigned y = 2 * H / 3; y < H; y++)
+			for (unsigned x = 0; x < W; x++)
+				yuv[size_t(y) * W + x] = uint8_t(150 + int(20.0 * std::sin(x * 1.1) * std::sin(y * 0.9)));
+		for (unsigned cy = H / 3; cy < H / 2; cy++)
+			for (unsigned cx = W / 4; cx < W / 2; cx++) {
+				u[size_t(cy) * (W / 2) + cx] = 103;
+				v[size_t(cy) * (W / 2) + cx] = 157;
+			}
+		const std::vector<uint8_t> was = yuv;
+		sharpen(yuv.data(), W, H, 1.0f, 3.0f, 3);
+		auto steepest = [&](const std::vector<uint8_t> &p) {
+			int most = 0;
+			for (unsigned x = 300; x < 340; x++)
+				most = std::max(most, int(p[size_t(80) * W + x + 1]) - int(p[size_t(80) * W + x]));
+			return most;
+		};
+		int lo = 255, hi = 0;
+		for (unsigned y = 10; y < H / 3 - 10; y++)
+			for (unsigned x = 280; x < 360; x++) {
+				lo = std::min(lo, int(yuv[size_t(y) * W + x]));
+				hi = std::max(hi, int(yuv[size_t(y) * W + x]));
+			}
+		std::printf("     the edge's steepest step %d -> %d, its range %d to %d (was 60 to 180)\n", steepest(was), steepest(yuv), lo, hi);
+		check(steepest(yuv) >= steepest(was) * 6 / 5, "the edge crisper: its steepest step up by a fifth or more");
+		check(lo >= 60 - 4 && hi <= 180 + 4, "no halo: the edge never goes past its two sides by more than 4 levels");
+		auto rough = [&](const std::vector<uint8_t> &p, unsigned x0, unsigned x1, unsigned y0, unsigned y1) {
+			double sum = 0, sq = 0, k = 0;
+			for (unsigned y = y0; y < y1; y++)
+				for (unsigned x = x0; x < x1; x++) {
+					double d = p[size_t(y) * W + x];
+					sum += d;
+					sq += d * d;
+					k++;
+				}
+			return std::sqrt(sq / k - (sum / k) * (sum / k));
+		};
+		double flat0 = rough(was, 8, W - 8, H / 3 + 4, 2 * H / 3 - 4), flat1 = rough(yuv, 8, W - 8, H / 3 + 4, 2 * H / 3 - 4);
+		std::printf("     flat noise %.2f -> %.2f\n", flat0, flat1);
+		check(flat1 <= flat0 * 1.05, "the flat area's noise not made louder");
+		double grey0 = rough(was, 8, W / 2 - 8, 2 * H / 3 + 4, H - 4), grey1 = rough(yuv, 8, W / 2 - 8, 2 * H / 3 + 4, H - 4);
+		double skin0 = rough(was, W / 2 + 8, W - 8, 2 * H / 3 + 4, H - 4), skin1 = rough(yuv, W / 2 + 8, W - 8, 2 * H / 3 + 4, H - 4);
+		std::printf("     texture in grey %.2f -> %.2f, the same in skin %.2f -> %.2f\n", grey0, grey1, skin0, skin1);
+		check(grey1 > grey0 * 1.08, "texture in grey sharpened");
+		check(skin1 - skin0 < (grey1 - grey0) / 3.0, "the same texture on skin left nearly alone (under a third as much)");
+	}
+
+	// Noise measured from a photo alone (no merge to measure it).
+	{
+		std::vector<uint8_t> f = frame(0, 0, 4.0f, n);
+		float est = estimate_noise(f.data(), W, H);
+		std::printf("     a photo's own noise: %.2f (sigma 4)\n", double(est));
+		check(est > 2.5f && est < 5.5f, "a photo's own noise measured from it, near enough");
 	}
 
 	std::printf("%s\n", failed ? "FAILED" : "all passed");
