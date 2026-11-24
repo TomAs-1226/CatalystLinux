@@ -319,15 +319,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "catalyst-claude-bridge"
+version = "0.1.0"
+dependencies = [
+ "catalyst-companion-proto",
+ "serde_json",
+ "windows-sys 0.61.2",
+ "zeroize",
+]
+
+[[package]]
 name = "catalyst-companion"
 version = "0.1.0"
 dependencies = [
  "bezel",
+ "catalyst-claude-bridge",
  "catalyst-companion-proto",
  "detent",
  "getrandom 0.4.3",
  "minifb",
  "png",
+ "qrcodegen",
  "rustls",
  "serde_json",
  "tao",
@@ -340,9 +352,13 @@ dependencies = [
 name = "catalyst-companion-proto"
 version = "0.1.0"
 dependencies = [
+ "chacha20poly1305",
+ "getrandom 0.4.3",
  "hmac",
+ "serde_json",
  "sha2",
  "spake2",
+ "zeroize",
 ]
 
 [[package]]

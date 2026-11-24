@@ -243,6 +243,14 @@ pub struct App {
     born: Instant,
 }
 
+/// The Claude bridge's window: the bridge started in the tray if it is not
+/// running, else the running one asked to show it.
+fn open_claude_bridge() {
+    if let Ok(exe) = std::env::current_exe() {
+        crate::win::command(&exe.to_string_lossy()).args(["--claude-bridge", "--show"]).spawn().ok();
+    }
+}
+
 fn when(modified: i64) -> String {
     let days = modified.div_euclid(86_400);
     let (y, m, d) = civil(days);
@@ -777,6 +785,16 @@ impl App {
                 self.go(*page);
             }
         }
+        // Claude on the handheld: the bridge's own window (it runs in the tray).
+        let claude = Rect::new(12.0, H as f32 - 92.0, RAIL - 24.0, 40.0);
+        if ui.over(claude) {
+            ui.canvas.rrect(claude, 20.0, t.ink, 0.05);
+        }
+        ui.icon("terminal", claude.x + 26.0, claude.cy(), 20.0, t.dim);
+        ui.put_fit(claude.x + 48.0, claude.cy(), "Claude on the handheld", TextStyle::sans(15.0, 500.0), t.dim, claude.w - 56.0);
+        if ui.hit(claude) {
+            open_claude_bridge();
+        }
         let version = format!("Catalyst Companion {}", include_str!("../../../../os/VERSION").trim());
         ui.put(24.0, H as f32 - 28.0, &version, TextStyle::label(11.0), t.faint, Align::Left);
         for k in ui.keys.clone() {
@@ -857,6 +875,11 @@ impl App {
             if ui.button(Rect::new(x, H as f32 - 70.0, 200.0, 36.0), &format!("Back to {}", s.name), Kind::Secondary, true) {
                 self.phase = Phase::Main;
             }
+        }
+        // Claude on the handheld needs no handheld here: its own window.
+        let bw = ui.button_w("Claude on the handheld…");
+        if ui.button(Rect::new(x + w - bw, H as f32 - 70.0, bw, 36.0), "Claude on the handheld…", Kind::Quiet, true) {
+            open_claude_bridge();
         }
     }
 

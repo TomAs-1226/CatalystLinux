@@ -77,7 +77,7 @@ struct App {
     open: fn(&Robot) -> Box<dyn Screen>,
 }
 
-const APPS: [App; 45] = [
+const APPS: [App; 46] = [
     App { icon: "smart_toy", name: "Robot", open: |_| Box::new(RobotScreen::default()) },
     App { icon: "monitor_heart", name: "Health", open: |_| Box::new(Health::default()) },
     App { icon: "description", name: "Logs", open: |_| Box::new(LogsScreen::default()) },
@@ -129,6 +129,8 @@ const APPS: [App; 45] = [
     App { icon: "api", name: "HTTP", open: |_| Box::new(crate::http::Http::new()) },
     App { icon: "qr_code_2", name: "Share", open: |robot| Box::new(crate::share::Share::new(robot)) },
     App { icon: "auto_awesome", name: "Assistant", open: |_| Box::new(crate::ai::Assistant::new()) },
+    // Claude Code's sessions on the laptop, through its bridge (claude/).
+    App { icon: "code_blocks", name: "Claude", open: |_| Box::new(crate::claude::ClaudeApp::new()) },
     // Pages as text: lynx in a terminal, on a start page of searches and FRC sites.
     App {
         icon: "language",
@@ -575,6 +577,7 @@ impl Home {
             "Batteries" => crate::batteries::tile(),
             "Scout" => ("matches · picks".into(), None),
             "Team" => crate::team::tile(),
+            "Claude" => crate::claude::tile(),
             "Console" => ("robot log".into(), None),
             "Terminal" => ("shell".into(), None),
             "Files" => ("storage".into(), None),
@@ -4625,7 +4628,7 @@ mod tests {
         pretend(Some(Found::Nothing));
         let shown = builtin(&Home::new());
         assert!(!shown.iter().any(|n| n == "Level" || n == "Compass"), "{shown:?}");
-        assert_eq!(shown.len(), 43, "the forty-three the emulator's run counts on (all but Level and Compass are on every unit)");
+        assert_eq!(shown.len(), 44, "the forty-four the emulator's run counts on (all but Level and Compass are on every unit)");
         assert_eq!(shown.last().map(String::as_str), Some("Settings"), "Settings stays last");
         assert_eq!(builtin_apps().position(|(_, _, n)| n == "Terminal"), Some(8), "Terminal where it was");
         assert!(!builtin_apps().any(|(_, _, n)| n == "Level"), "nor in search");

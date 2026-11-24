@@ -1,0 +1,28 @@
+[package]
+name = "catalyst-claude-bridge"
+description = "Claude from the handheld, the computer's side: Claude Code's sessions listed, continued and started headless through the claude CLI, its permission prompts sent to the handheld, everything sealed end to end. Catalyst Companion runs it (catalyst-companion --claude-bridge)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# A stand-in for the claude CLI that plays recorded stream-json, for the
+# tests: no real Claude, nothing billed. Never shipped.
+[[bin]]
+name = "fake-claude"
+path = "src/bin/fake-claude.rs"
+test = false
+doc = false
+
+[dependencies]
+catalyst-companion-proto = { workspace = true }
+serde_json = "1"
+zeroize = "1"
+
+# Each turn's claude in a job object, so stopping it stops what it started
+# too; the pairing key kept encrypted to the Windows account (DPAPI); no
+# console window for the programs it runs.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_JobObjects", "Win32_System_Threading"] }

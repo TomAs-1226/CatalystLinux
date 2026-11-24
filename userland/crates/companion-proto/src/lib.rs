@@ -17,8 +17,15 @@
 //!   only its SHA-256.
 //! - **Backups** ([`tar`]) travel as a tar stream: the handheld writes and
 //!   reads it with nothing more than this crate; the app keeps it as a zip.
+//! - **The seal** ([`seal`]): XChaCha20-Poly1305 under derived keys, as
+//!   Catalyst Team seals its packets.
+//! - **Claude from the handheld** ([`claude`]): the handheld's Claude app
+//!   and the bridge Companion runs on the computer, pairing by QR code or
+//!   code and every message sealed end to end.
 
+pub mod claude;
 pub mod pair;
+pub mod seal;
 pub mod tar;
 
 /// HTTPS: the API.

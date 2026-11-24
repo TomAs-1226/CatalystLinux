@@ -328,7 +328,7 @@ def main():
 
 
 # Home's built-in apps, and Terminal's place among them (screens.rs, APPS).
-BUILT_IN = 43
+BUILT_IN = 44
 
 
 def open_by_name(vm, name, enter=True):
