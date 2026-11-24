@@ -20,6 +20,11 @@
 //! whole pixels, never smoothed: the viewer shows the true size at a whole
 //! number of panel pixels each (the largest that fits, then twice and four
 //! times that), and their thumbnails are sampled, not averaged.
+//!
+//! Time-lapses (the Camera's lapse mode, 1.5.0) are Motion JPEG AVIs named
+//! `LAPSE_…avi` (lapse.rs says why that format): their thumbnail is their
+//! first frame, with a "lapse" badge, and the viewer plays them round and
+//! round, a frame decoded at a time just ahead.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -224,7 +229,7 @@ pub fn dir() -> PathBuf {
 /// Whether a file is one the album shows.
 pub fn is_photo(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    !lower.starts_with('.') && (lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png") || lower.ends_with(".gif"))
+    !lower.starts_with('.') && (lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png") || lower.ends_with(".gif") || crate::lapse::is_lapse(name))
 }
 
 /// A pixel picture or loop (the Camera's pixel mode): drawn with whole pixels.
@@ -272,7 +277,7 @@ pub struct Photo {
 /// else from when the file was last written.
 fn taken_of(name: &str, modified: Option<std::time::SystemTime>) -> NaiveDateTime {
     let stem = name.split('.').next().unwrap_or(name);
-    let digits: String = stem.trim_start_matches("IMG_").trim_start_matches("PIX_").chars().take(15).collect();
+    let digits: String = stem.trim_start_matches("IMG_").trim_start_matches("PIX_").trim_start_matches("LAPSE_").chars().take(15).collect();
     if let Ok(at) = NaiveDateTime::parse_from_str(&digits, "%Y%m%d_%H%M%S") {
         return at;
     }
@@ -338,6 +343,9 @@ pub fn new_pixel_path(now: NaiveDateTime) -> PathBuf {
 
 /// A photo's size in pixels, from its header alone.
 pub fn dimensions(path: &Path) -> Option<(usize, usize)> {
+    if crate::lapse::is_lapse(&path.to_string_lossy()) {
+        return crate::lapse::Avi::open(path).ok().map(|a| (a.w as usize, a.h as usize));
+    }
     if is_loop(&path.to_string_lossy()) {
         use std::io::Read;
         let mut head = [0u8; 10];
@@ -359,6 +367,10 @@ pub fn dimensions(path: &Path) -> Option<(usize, usize)> {
 pub fn decode(path: &Path, want_w: usize, want_h: usize) -> Result<Picture, String> {
     if is_png(path) {
         return decode_png(path);
+    }
+    // A time-lapse: its first frame.
+    if crate::lapse::is_lapse(&path.to_string_lossy()) {
+        return crate::lapse::first_frame(path, want_w, want_h);
     }
     // A loop: its first frame.
     if is_loop(&path.to_string_lossy()) {
@@ -777,15 +789,20 @@ impl Screen for Album {
                     } else {
                         draw_picture(g, r, &thumb, whole(&thumb), radius, edge);
                     }
-                    // A loop says so in its corner.
-                    if is_loop(&photo.name) {
+                    // A loop (or a time-lapse) says so in its corner.
+                    let badge = if crate::lapse::is_lapse(&photo.name) {
+                        Some(("timelapse", "lapse"))
+                    } else {
+                        is_loop(&photo.name).then_some(("animation", "loop"))
+                    };
+                    if let Some((icon, words)) = badge {
                         let cap = g.ty.caption;
                         let h = cap.size + 4.0;
-                        let w = (h + g.measure("loop", cap) + 4.0).round();
+                        let w = (h + g.measure(words, cap) + 4.0).round();
                         let b = Rect::new(r.x + 3.0, r.bottom() - 3.0 - h, w, h);
                         g.canvas.rrect(b.offset(g.ox, 0.0), h * 0.5, bezel::Color(0, 0, 0), 0.6 * edge);
-                        g.icon_alpha("animation", false, b.x + h * 0.5 + 1.0, b.cy(), h * 0.7, bezel::Color(255, 255, 255), edge);
-                        g.text_alpha(b.x + h, b.cy(), "loop", cap, bezel::Color(255, 255, 255), edge);
+                        g.icon_alpha(icon, false, b.x + h * 0.5 + 1.0, b.cy(), h * 0.7, bezel::Color(255, 255, 255), edge);
+                        g.text_alpha(b.x + h, b.cy(), words, cap, bezel::Color(255, 255, 255), edge);
                     }
                 }
                 None => {
@@ -852,6 +869,8 @@ pub struct Viewer {
     frames: Vec<(Picture, u32)>,
     frame_at: usize,
     frame_left: f32,
+    /// A time-lapse playing (lapse.rs): its frames decoded just ahead.
+    lapse: Option<crate::lapse::Player>,
     /// Under the photo: its caption and place (photolog/).
     about: crate::photolog::Under,
 }
@@ -883,6 +902,7 @@ impl Viewer {
             frames: Vec::new(),
             frame_at: 0,
             frame_left: 0.0,
+            lapse: None,
             about: crate::photolog::Under::new(),
         };
         v.arrive();
@@ -925,7 +945,18 @@ impl Viewer {
         self.has_original = !self.pixel && crate::filters::original_of(&photo.path).is_file();
         // A loop: its frames at their true size (small: read at once), played.
         self.frames.clear();
-        if is_loop(&photo.name) {
+        self.lapse = None;
+        // A time-lapse: played as it is decoded, at the panel's size (its
+        // thumbnail meanwhile).
+        if crate::lapse::is_lapse(&photo.name) {
+            match crate::lapse::Player::open(&photo.path, W as usize, H as usize) {
+                Ok(player) => {
+                    self.dims = Some((player.size.0 as usize, player.size.1 as usize));
+                    self.lapse = Some(player);
+                }
+                Err(why) => self.trouble = Some(why),
+            }
+        } else if is_loop(&photo.name) {
             let path = if self.pixel { pixel_true_size(&photo.path) } else { photo.path.clone() };
             match loop_frames(&path) {
                 Ok(frames) => {
@@ -1048,6 +1079,7 @@ impl Screen for Viewer {
             Key::Char('o') => *cx.say = Some("no look: this is the original".into()),
             // A pixel picture keeps its pixels: nothing to straighten or tone.
             Key::Char('e') if self.pixel => *cx.say = Some("a pixel picture keeps its pixels as taken".into()),
+            Key::Char('e') if self.lapse.is_some() => *cx.say = Some("a time-lapse plays as it was taken".into()),
             // The editor (1.0): its edits kept beside the photo, never in it.
             Key::Char('e') => {
                 if let Some(photo) = self.photos.get(self.at) {
@@ -1100,6 +1132,10 @@ impl Screen for Viewer {
             v.push(keys("this picture", &[("i", "Details"), ("d twice", "Delete it")]));
             return v;
         }
+        if self.lapse.is_some() {
+            v.push(keys("this time-lapse", &[("i", "Details: frames, length"), ("d twice", "Delete it")]));
+            return v;
+        }
         v.push(keys("this photo", &[("e", "Edit it"), ("i", "Details"), ("d twice", "Delete it")]));
         if self.has_original {
             v.push(keys("its look", &[("o", "As taken, or the look")]));
@@ -1126,6 +1162,10 @@ impl Screen for Viewer {
                 }
                 changed = true;
             }
+        }
+        // A time-lapse is its player's: nothing decoded besides.
+        if self.lapse.is_some() {
+            return changed;
         }
         // The photo in sight, decoded as large as the zoom needs.
         let (ww, wh) = self.wanted();
@@ -1157,10 +1197,20 @@ impl Screen for Viewer {
     /// A loop plays at its own pace: looked in on as its next frame is due,
     /// never on the frame beat.
     fn ambient(&self) -> Option<Duration> {
+        if let Some(p) = &self.lapse {
+            return Some(Duration::from_secs_f32(p.due_ms() / 1000.0));
+        }
         (self.frames.len() > 1).then(|| Duration::from_secs_f32((self.frame_left / 1000.0).max(0.01)))
     }
 
     fn ambient_tick(&mut self, dt: f32, _robot: &Robot) -> bool {
+        if let Some(p) = &mut self.lapse {
+            let changed = p.tick(dt.min(0.25));
+            if let Some(why) = p.trouble.take() {
+                self.trouble = Some(why);
+            }
+            return changed;
+        }
         if self.frames.len() < 2 {
             return false;
         }
@@ -1186,6 +1236,8 @@ impl Screen for Viewer {
         let Some(photo) = self.photos.get(self.at).cloned() else { return };
         // The photo: its decode, else its thumbnail, fitted and zoomed.
         let pic = match (&self.shown, &self.placeholder) {
+            // A time-lapse: the frame it has come to (its thumbnail until the first).
+            _ if self.lapse.as_ref().is_some_and(|p| p.shown.is_some()) => self.lapse.as_ref().and_then(|p| p.shown.as_ref()).map(|(_, p)| p),
             // A loop: the frame it has come to.
             _ if !self.frames.is_empty() => self.frames.get(self.frame_at).map(|(p, _)| p),
             (Some((at, p)), _) if *at == self.at => Some(p),
@@ -1266,8 +1318,10 @@ impl Screen for Viewer {
             } else {
                 format!("{dims}{mp}")
             };
-            // A loop's frames and length, on the line with its bytes.
-            let bytes = if self.frames.len() > 1 {
+            // A loop's (or a time-lapse's) frames and length, on the line with its bytes.
+            let bytes = if let Some(p) = &self.lapse {
+                format!("{} frames · {:.1} s · {}", p.frames, p.seconds(), size_words(photo.bytes))
+            } else if self.frames.len() > 1 {
                 format!("{} frames · {:.1} s · {}", self.frames.len(), self.frames.iter().map(|(_, d)| *d).sum::<u32>() as f32 / 1000.0, size_words(photo.bytes))
             } else {
                 size_words(photo.bytes)
@@ -1279,7 +1333,7 @@ impl Screen for Viewer {
                 self.look.as_ref().map(|l| format!("look: {}", l.to_lowercase())),
                 self.has_original.then(|| "o: the original".to_owned()),
                 self.has_raw.then(|| "raw kept (.dng)".to_owned()),
-                (!self.pixel).then(|| if edited { "e: its edit" } else { "e: edit" }.to_owned()),
+                (!self.pixel && self.lapse.is_none()).then(|| if edited { "e: its edit" } else { "e: edit" }.to_owned()),
             ]
             .into_iter()
             .flatten()

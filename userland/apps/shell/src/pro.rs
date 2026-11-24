@@ -519,14 +519,14 @@ pub fn split(total: f32, longest_us: u32) -> (u32, f32) {
     (e as u32, g)
 }
 
-/// A photo's noise filter and sharpening for the gain it takes: little gain,
-/// little noise, so no filter to smear the detail and a firmer sharpening;
-/// more gain, the filter and the usual sharpening.
+/// A photo's noise filter and sharpening for the gain it takes: the
+/// camera's own tuned sharpening (1.0) at every gain, and a light noise
+/// filter where there is little noise, the thorough one above. (Until
+/// 1.5.1 daylight had 1.5 and no filter at all: crunchy edges and grit
+/// under any look laid on after.)
 pub fn processing(gain: f32) -> (f32, Denoise) {
     match gain {
-        g if g < 1.6 => (1.5, Denoise::Off),
-        g if g < 3.0 => (1.3, Denoise::Fast),
-        g if g < 6.0 => (1.1, Denoise::HighQuality),
+        g if g < 3.0 => (1.0, Denoise::Fast),
         _ => (1.0, Denoise::HighQuality),
     }
 }
@@ -885,17 +885,20 @@ impl Tones {
     }
 }
 
-/// Over this share clipped, the exposure eases down to keep the highlights.
-pub const GUARD_CLIPPED: f32 = 0.015;
+/// Over this share clipped, the exposure eases down to keep the highlights:
+/// a real blown patch (a window, the sky's glare), not a sky's bright edge
+/// (1.5% until 1.5.1 had it at work in nearly every daylight photo).
+pub const GUARD_CLIPPED: f32 = 0.04;
 /// Under this (and little bright), it comes back up.
 pub const GUARD_CLEAR: f32 = 0.003;
 /// A sixth of a stop at a time, a quarter of a second apart: the camera's
 /// exposure follows in a few frames, so it never hunts (my own tuning).
 pub const GUARD_STEP: f32 = 1.0 / 6.0;
 pub const GUARD_EVERY_S: f32 = 0.25;
-/// Down a stop and a half at the most; half a stop with a face in the
-/// picture (the face's own exposure comes first).
-pub const GUARD_MOST: f32 = 1.5;
+/// Down a stop at the most (a stop and a half until 1.5.1: lifted back on
+/// the photo's 8 bits it went flat and grey); half a stop with a face in
+/// the picture (the face's own exposure comes first).
+pub const GUARD_MOST: f32 = 1.0;
 pub const GUARD_MOST_FACE: f32 = 0.5;
 /// While the middle of the picture is brighter than this, the rest can
 /// spare the exposure; darker, the highlights are HDR's to keep.
@@ -937,9 +940,10 @@ impl HighlightGuard {
     }
 
     /// The mid-tones a guarded photo gets back as it is finished (stops):
-    /// most of what was taken, the shoulder keeping the highlights.
+    /// half of what was taken (at most half a stop), the shoulder keeping
+    /// the highlights.
     pub fn lift(&self) -> f32 {
-        (-self.ev * 0.6).max(0.0)
+        (-self.ev * 0.5).max(0.0)
     }
 }
 
@@ -973,8 +977,9 @@ impl HdrMode {
 }
 
 /// Deep shadow over this share, with the highlights blown (or kept only by
-/// pulling the exposure down), is a scene for HDR.
-pub const HDR_DEEP: f32 = 0.08;
+/// pulling the exposure down), is a scene for HDR: really backlit, not an
+/// ordinary daylight scene with a shadow in it (8% until 1.5.1).
+pub const HDR_DEEP: f32 = 0.15;
 
 /// Whether the scene wants HDR: highlights clipped, or kept only by the
 /// guard's pulling the exposure down half a stop or more, and deep shadow
@@ -1296,7 +1301,7 @@ mod tests {
         assert_eq!(s.exposure_us, 16_667, "shorter than the preview's 1/33");
         assert!(s.words().iter().any(|w| w == "gains=1.9200,1.5100"));
         // Little gain: no noise filter and firmer sharpening; much: the filter.
-        assert_eq!(processing(1.0), (1.5, Denoise::Off));
+        assert_eq!(processing(1.0), (1.0, Denoise::Fast));
         assert_eq!(processing(8.0).1, Denoise::HighQuality);
         // Detail's auto only in real low light.
         assert!(!low_light(&m, &s));
@@ -1509,15 +1514,21 @@ mod tests {
         let t = Tones::of(&h);
         assert!((t.bright - 0.05).abs() < 1e-6 && (t.deep - 0.15).abs() < 1e-6 && t.median > 100, "{t:?}");
         // A sky blown over a bright picture: down a sixth at a time, a
-        // quarter second apart, a stop and a half at most.
+        // quarter second apart, a stop at most.
         let mut guard = HighlightGuard::default();
         let sky = tones(0.06, 0.1, 0.0, 120);
         let mut steps = 0;
         for _ in 0..200 {
             steps += usize::from(guard.feed(&sky, false, 1.0 / 30.0));
         }
-        assert_eq!((guard.ev, steps), (-GUARD_MOST, 9));
-        assert!((guard.lift() - 0.9).abs() < 1e-3);
+        assert_eq!((guard.ev, steps), (-GUARD_MOST, 6));
+        // A sky's bright edge alone (2% clipped) leaves the exposure be.
+        let mut calm = HighlightGuard::default();
+        for _ in 0..200 {
+            calm.feed(&tones(0.02, 0.1, 0.0, 120), false, 1.0 / 30.0);
+        }
+        assert_eq!(calm.ev, 0.0);
+        assert!((guard.lift() - 0.5).abs() < 1e-3);
         // With a face, half a stop at most.
         let mut face = HighlightGuard::default();
         for _ in 0..200 {

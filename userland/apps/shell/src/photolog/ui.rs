@@ -813,6 +813,7 @@ impl BuildLog {
             Some(Job::Sent(_)) => "claude is writing its caption",
             Some(Job::Skipped(_)) | Some(Job::Failed(_)) => "no caption · t on the photo writes one",
             _ if crate::photos::is_pixel(name) => "a pixel picture",
+            _ if crate::lapse::is_lapse(name) => "a time-lapse",
             _ => "no caption · t on the photo writes one",
         }
     }

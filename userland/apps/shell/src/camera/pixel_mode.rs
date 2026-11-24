@@ -922,6 +922,11 @@ mod tests {
         let mut camera = Camera::new();
         press(&mut camera, Key::Right);
         assert_eq!(camera.mode, Mode::Pro);
+        // Burst, light trails and the time-lapse (1.5.0) between.
+        for mode in [Mode::Burst, Mode::Trails, Mode::Lapse] {
+            press(&mut camera, Key::Right);
+            assert_eq!(camera.mode, mode);
+        }
         press(&mut camera, Key::Right);
         assert_eq!(camera.mode, Mode::Pixel);
         press(&mut camera, Key::Right);
