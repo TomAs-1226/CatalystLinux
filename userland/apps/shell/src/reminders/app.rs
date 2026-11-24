@@ -999,6 +999,7 @@ mod tests {
     #[test]
     fn quick_add_adds_what_was_typed_and_the_app_shows_it() {
         let (mut robot, mut settings, mut say) = cx_parts();
+        super::super::at_midday();
         with(|s| s.book = super::super::Book::memory());
         let mut compose = Compose::new();
         let navs = press(&mut compose, &typed("swap battery in 10 min"), &mut robot, &mut settings, &mut say);
@@ -1019,6 +1020,7 @@ mod tests {
     #[test]
     fn s_snoozes_and_again_puts_it_off_longer() {
         let (mut robot, mut settings, mut say) = cx_parts();
+        super::super::at_midday();
         with(|s| {
             s.book = super::super::Book::memory();
             let n = Now { at: now(), zone: &Here, view: None };

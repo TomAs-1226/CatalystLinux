@@ -792,6 +792,16 @@ pub fn later(seconds: i64) {
     SKEW.with(|s| s.set(s.get() + seconds.max(0)));
 }
 
+/// For the tests: the clock moved on to the next midday, so that "in 10 min"
+/// and a snooze stay on today's list whenever the tests run (near midnight
+/// they landed tomorrow, and two tests failed only then).
+#[cfg(test)]
+pub fn at_midday() {
+    use chrono::Timelike;
+    let since_midnight = i64::from(chrono::Local::now().num_seconds_from_midnight());
+    later((12 * 3600 - since_midnight).rem_euclid(86_400));
+}
+
 /// For the tests: a reminder typed, on this thread's book.
 #[cfg(test)]
 pub fn remind(typed: &str) {
