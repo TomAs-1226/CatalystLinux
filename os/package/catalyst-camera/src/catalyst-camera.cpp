@@ -19,8 +19,10 @@
 //           (width × height, then a quarter of that twice); the number is
 //           width << 16 | height
 //   kind 2  a photo was saved: its path, then a tab and how long it took
-//           (milliseconds: "shot 812 write 640"); the number is
-//           width << 16 | height
+//           (milliseconds: "shot 812 write 640"), and what it was made of
+//           ("night 5 8": merged, asked; 1.10: "trails 186 12400": frames
+//           and milliseconds; "best 4 10": the frame kept, of how many);
+//           the number is width << 16 | height
 //   kind 3  a photo could not be taken: why, in a line
 //   kind 4  a photo's picture is in (the preview runs again while it is
 //           written); the number is width << 16 | height, the line its path,
@@ -28,11 +30,15 @@
 //           "room 0 stop 28 config 81 start 199 frame 377 copy 405")
 //   kind 6  the sensor is exposing the photo now: "<ms> <frames> <what>",
 //           how long that should take at most, how many frames, and
-//           "still", "detail" or "bracket" (the shell's "hold still")
+//           "still", "detail", "bracket", "night", "hdr", "trails" or
+//           "burst" (the shell's "hold still")
 //   kind 7  the sensor is done with the photo (or its burst or set): it
 //           may move now; the line is the timing marks so far
 //   kind 8  a stack's frames so far (Night and HDR, 1.9): "<taken>
-//           <planned> <merged> <ms left>", after each frame
+//           <planned> <merged> <ms left>", after each frame; light trails'
+//           (1.10) the same, every frame merged and `planned` as many as
+//           its length holds; a burst's (1.10) with the frame kept so far
+//           in `merged`'s place
 //   kind 5  what the camera said of the frame that follows, a line:
 //           "exp=16000 ag=2.000 dg=1.000 r=1.9000 b=1.6000 ct=4800
 //           lux=210.0 ae=1 fom=1234 zoom=0.00" (exposure µs, analogue and
@@ -83,6 +89,25 @@
 //                                          given back, the shadows lifted,
 //                                          near-grey pulled toward neutral
 //                                          (also for a single photo)
+//                       trails=<s>         light trails (1.10): frames at the
+//                                          exposure given, each laid over the
+//                                          last where brighter (compose.h),
+//                                          for up to <s> seconds or until
+//                                          "stack end"; at the binned
+//                                          1640 x 1232 with four frames in
+//                                          flight, so no frame is let go and
+//                                          a moving light is a line, not
+//                                          dashes; the trails so far are the
+//                                          preview's picture meanwhile
+//                       best=<n>           burst (1.10): n frames at the
+//                                          exposure given, each scored for
+//                                          sharpness as it comes and only the
+//                                          sharpest kept (compose.h); "stack
+//                                          end" stops it, keeping that
+//                       size=<w>x<h>       the photo at this size, not the
+//                                          sensor's whole (a time-lapse's
+//                                          frames, 1.10): one frame, nothing
+//                                          merged, no RAW
 //   detail auto|on <path>[\t<word>…]
 //                     detail mode: the photo as above, then up to five more
 //                     full-size frames with its exposure and white balance
@@ -95,7 +120,8 @@
 //   face none         (from the smart camera on the Grove port): the
 //                     exposure leans toward it
 //   stack end         a stack ends as soon as enough of it is merged (the
-//                     hand moved: still.h's enough), and is kept
+//                     hand moved: still.h's enough), and is kept; light
+//                     trails and a burst end at once, keeping what they have
 //   stack cancel      a stack ends at once with no photo (kind 3 "cancelled")
 //                     (both read as they come, not after the photo)
 //   night on|off      longer exposures allowed (down to 5 frames a second,
@@ -183,6 +209,7 @@
 
 #include <libcamera/libcamera.h>
 
+#include "compose.h"
 #include "photo.h"
 #include "stack.h"
 #include "still.h"
@@ -751,8 +778,18 @@ still::Status status_of(Request *request, Stream *stream)
 void judge_still(Request *request, Session *session)
 {
 	std::lock_guard<std::mutex> hold(still_lock);
-	if (still_request || !still_failed.empty())
+	if (still_request || !still_failed.empty()) {
+		// A session with frames of its own in flight (light trails): those
+		// that come after the one kept wait for it, in order, not lost.
+		if (still_request) {
+			{
+				std::lock_guard<std::mutex> frames(burst_lock);
+				burst_done.push_back(request);
+			}
+			burst_ready.notify_one();
+		}
 		return;
+	}
 	still::Status status = status_of(request, session->stream);
 	bool matches = false, converged = false;
 	if (status != still::Cancelled) {
@@ -1182,6 +1219,11 @@ struct Asked {
 	int stack = 0;
 	std::string stack_for;
 	stack::Finish finish;
+	// Light trails' longest (s), a burst's frames, and a smaller photo's
+	// size (a time-lapse's frames), 1.10: 0 for none.
+	int trails_s = 0;
+	int best = 0;
+	unsigned size_w = 0, size_h = 0;
 };
 
 Asked asked_of(const std::string &words)
@@ -1232,6 +1274,18 @@ Asked asked_of(const std::string &words)
 			a.finish.toe = std::clamp(std::strtof(value.c_str(), nullptr), 0.0f, 0.5f);
 		else if (key == "neutral")
 			a.finish.neutral = std::clamp(std::strtof(value.c_str(), nullptr), 0.0f, 1.0f);
+		else if (key == "trails")
+			a.trails_s = std::clamp(std::atoi(value.c_str()), 0, compose::TRAILS_LONGEST_S);
+		else if (key == "best")
+			a.best = std::clamp(std::atoi(value.c_str()), 0, compose::BEST_MOST);
+		else if (key == "size") {
+			// Even both ways (4:2:0), and no larger than the sensor.
+			unsigned w = 0, h = 0;
+			if (std::sscanf(value.c_str(), "%ux%u", &w, &h) == 2 && w >= 64 && h >= 48 && w <= 3280 && h <= 2464) {
+				a.size_w = w & ~1u;
+				a.size_h = h & ~1u;
+			}
+		}
 		else if (key == "also") {
 			Asked::Also more;
 			int used = 0;
@@ -1279,6 +1333,11 @@ struct Shot {
 	// (`exposure_us` is then all of them together, as its Exif says).
 	int stacked = 0, stack_planned = 0;
 	int64_t frame_us = 0;
+	// Light trails: its frames and how long they took; a burst: the frame
+	// kept (from 1) and how many were taken (1.10).
+	int trails_frames = 0;
+	long trails_ms = 0;
+	int best_at = 0, best_of = 0;
 };
 
 // ------------------------------------------------------------------ exif ---
@@ -1408,6 +1467,14 @@ std::vector<uint8_t> exif(const Shot &s)
 		};
 		std::string words = (s.with.stack_for == "hdr" ? "HDR: " : "Night: ") + std::to_string(s.stacked) + " frames of " + seconds(s.frame_us) + " s merged, " + seconds(s.exposure_us) + " s in all";
 		zero.ascii(0x010e, words);
+	}
+	// Light trails and a burst (1.10): what it was made of.
+	if (s.trails_frames > 0) {
+		char words[96];
+		std::snprintf(words, sizeof words, "Light trails: %d frames over %.1f s, the brightest of each kept", s.trails_frames, double(s.trails_ms) / 1000.0);
+		zero.ascii(0x010e, words);
+	} else if (s.best_of > 1) {
+		zero.ascii(0x010e, "Burst: the sharpest of " + std::to_string(s.best_of) + " frames (frame " + std::to_string(s.best_at) + ")");
 	}
 	zero.shorts(0x0213, 1);
 	zero.longs(0x8769, 0);
@@ -1819,6 +1886,206 @@ bool take_stack(Session &s, Request *first, Shot &shot, still::Crop crop, const 
 	return true;
 }
 
+// The preview's picture while light trails or a burst is taken: a frame of
+// the preview's size, in the shell's place for one.
+void show_instead(std::vector<uint8_t> &small)
+{
+	{
+		std::lock_guard<std::mutex> hold_frames(lock);
+		newest.swap(small);
+		newest_said.clear();
+		made++;
+	}
+	fresh.notify_one();
+}
+
+// Light trails (1.10): the rest of the trails after its first frame
+// (`first`, not yet copied out), each frame laid over the trails so far
+// where it is brighter (compose.h's lighten) as soon as it is copied out,
+// the request straight back to the sensor first: the session has four
+// frames in flight, so none is let go and a light that moves draws a line.
+// The exposure and white balance held as the first had them. The trails so
+// far, made small keeping their brightest, are the viewfinder's picture
+// every other frame. Runs for the length asked, or until "stack end" (kept)
+// or "stack cancel" (nothing: false, `cancelled`). Memory: the trails and
+// one frame copied out (compose.h).
+bool take_trails(Session &s, Request *first, Shot &shot, still::Crop crop, const Held_as &as, bool &cancelled)
+{
+	cancelled = false;
+	auto m = s.planes.find(first->findBuffer(s.stream));
+	if (m == s.planes.end())
+		return false;
+	const size_t bytes = size_t(crop.w) * crop.h * 3 / 2;
+	std::vector<uint8_t> trails(bytes), frame(bytes);
+	dma_sync(s.external_fd, true);
+	copy_frame(m->second, s.stride, s.w, s.h, crop, turn_here, trails.data());
+	dma_sync(s.external_fd, false);
+	ControlList hold = held_controls(as.exposure_us, as.analogue, as.wb);
+	phase = Phase::Burst;
+	first->reuse(Request::ReuseBuffers);
+	first->controls().merge(hold);
+	bool queued = camera->queueRequest(first) >= 0;
+	const auto began = std::chrono::steady_clock::now();
+	const long length_ms = long(shot.with.trails_s) * 1000;
+	const auto until_all = began + std::chrono::milliseconds(length_ms);
+	// As many frames as its length holds, at the frame's length (the
+	// sensor's 30 a second at the most in this mode).
+	const int64_t each_us = std::max<int64_t>(33333, as.exposure_us + 1000);
+	const int planned = int(std::max<int64_t>(1, int64_t(length_ms) * 1000 / each_us));
+	const int margin = compose::lighten_margin(as.analogue);
+	int taken = 1;
+	std::vector<uint8_t> small;
+	auto show = [&] {
+		if (!colour)
+			return;
+		compose::small_brightest(trails.data(), crop.w, crop.h, width, height, small);
+		show_instead(small);
+	};
+	auto progress = [&] {
+		long left = std::max(0L, length_ms - ms_since(began));
+		char line[64];
+		std::snprintf(line, sizeof line, "%d %d %d %ld", taken, std::max(planned, taken), taken, left);
+		tell(8, 0, line);
+	};
+	show();
+	progress();
+	int bad = 0;
+	while (queued && running) {
+		int order = stack_order.load();
+		if (order == 2) {
+			cancelled = true;
+			break;
+		}
+		if (order == 1)
+			break;
+		auto now = std::chrono::steady_clock::now();
+		if (now >= until_all)
+			break;
+		auto until = std::min(until_all, now + std::chrono::milliseconds(still::stack_frame_ms(as.exposure_us)));
+		Request *request = next_done(until);
+		if (!request) {
+			// Woken by an order, or its length reached: looked at again.
+			if (std::chrono::steady_clock::now() < until && running)
+				continue;
+			if (std::chrono::steady_clock::now() >= until_all)
+				break;
+			std::fprintf(stderr, "trails: the wait for frame %d ran out (%d taken)\n", taken + 1, taken);
+			break;
+		}
+		still::Status status = status_of(request, s.stream);
+		if (status == still::Cancelled)
+			break;
+		bool copied = false;
+		if (status == still::Success || status == still::Startup) {
+			auto p = s.planes.find(request->findBuffer(s.stream));
+			if (p != s.planes.end()) {
+				dma_sync(s.external_fd, true);
+				copy_frame(p->second, s.stride, s.w, s.h, crop, turn_here, frame.data());
+				dma_sync(s.external_fd, false);
+				copied = true;
+			}
+		} else if (++bad >= 3) {
+			break;
+		}
+		// Straight back to the sensor, then laid over the trails.
+		request->reuse(Request::ReuseBuffers);
+		if (camera->queueRequest(request) < 0)
+			queued = false;
+		if (!copied)
+			continue;
+		taken++;
+		compose::lighten(trails.data(), frame.data(), crop.w, crop.h, margin, PHOTO_THREADS);
+		if (taken % 2 == 0)
+			show();
+		progress();
+	}
+	if (cancelled || !running)
+		return false;
+	shot.trails_frames = taken;
+	shot.trails_ms = ms_since(began) + long(as.exposure_us / 1000);
+	shot.frame_us = as.exposure_us;
+	// Its Exif's exposure: all of the time it took.
+	shot.exposure_us = int64_t(shot.trails_ms) * 1000;
+	shot.w = crop.w;
+	shot.h = crop.h;
+	shot.yuv.swap(trails);
+	std::fprintf(stderr, "trails: %d frames in %ld ms, margin %d\n", taken, shot.trails_ms, margin);
+	return true;
+}
+
+// Burst (1.10): the rest of a burst after its first frame (`first`, already
+// copied into `shot`), with the first's exposure and white balance held:
+// each frame copied out beside the sharpest so far, scored (compose.h's
+// sharpness) and swapped in when sharper, so two frames are all it ever
+// holds. "stack end" (or cancel) stops it, keeping the sharpest so far;
+// the frames' own time bounds it otherwise.
+void take_best(Session &s, Request *first, Shot &shot, still::Crop crop, const Held_as &as)
+{
+	const int planned = std::clamp(shot.with.best, 2, compose::BEST_MOST);
+	const int floor = compose::noise_floor(as.analogue);
+	compose::Best best;
+	best.offer(1, compose::sharpness(shot.yuv.data(), crop.w, crop.h, floor, PHOTO_THREADS));
+	{
+		std::lock_guard<std::mutex> lock_frames(burst_lock);
+		burst_done.clear();
+	}
+	ControlList hold = held_controls(as.exposure_us, as.analogue, as.wb);
+	phase = Phase::Burst;
+	first->reuse(Request::ReuseBuffers);
+	first->controls().merge(hold);
+	if (camera->queueRequest(first) < 0)
+		return;
+	std::vector<uint8_t> frame(shot.yuv.size());
+	const auto began = std::chrono::steady_clock::now();
+	const auto until = began + std::chrono::milliseconds(still::deadline_ms(as.exposure_us, planned - 1));
+	int taken = 1, bad = 0;
+	auto progress = [&] {
+		long per = taken > 1 ? ms_since(began) / (taken - 1) : long(2 * still::frame_us(as.exposure_us) / 1000);
+		char line[64];
+		std::snprintf(line, sizeof line, "%d %d %d %ld", taken, planned, best.at, long(planned - taken) * per);
+		tell(8, 0, line);
+	};
+	progress();
+	while (taken < planned && running) {
+		if (stack_order.load() != 0)
+			break;
+		Request *request = next_done(until);
+		if (!request) {
+			if (std::chrono::steady_clock::now() < until && running)
+				continue;
+			std::fprintf(stderr, "burst: the wait ran out after %d of %d frames\n", taken, planned);
+			break;
+		}
+		still::Status status = status_of(request, s.stream);
+		if (status == still::Cancelled)
+			break;
+		bool copied = false;
+		if (status == still::Success || status == still::Startup) {
+			auto p = s.planes.find(request->findBuffer(s.stream));
+			if (p != s.planes.end()) {
+				dma_sync(s.external_fd, true);
+				copy_frame(p->second, s.stride, s.w, s.h, crop, turn_here, frame.data());
+				dma_sync(s.external_fd, false);
+				copied = true;
+			}
+		} else if (++bad >= 3) {
+			break;
+		}
+		request->reuse(Request::ReuseBuffers);
+		if (camera->queueRequest(request) < 0)
+			break;
+		if (!copied)
+			continue;
+		taken++;
+		if (best.offer(taken, compose::sharpness(frame.data(), crop.w, crop.h, floor, PHOTO_THREADS)))
+			shot.yuv.swap(frame);
+		progress();
+	}
+	shot.best_at = best.at;
+	shot.best_of = taken;
+	std::fprintf(stderr, "burst: frame %d of %d kept (sharpness %.0f) in %ld ms\n", best.at, taken, best.score, ms_since(began));
+}
+
 // Bytes in a memory file of their own, for a helper to read: -1 if there is
 // no room for them.
 int bytes_file(const char *name, const uint8_t *data, size_t size)
@@ -1860,10 +2127,17 @@ bool take_still_at(Size size, Shot &shot, std::string &why, bool want_raw, bool 
 {
 	held_suspect = false;
 	last_try_held = false;
+	const Asked &a = shot.with;
+	// Light trails (1.10): the binned mode with four frames in flight (as
+	// the preview has), so the sensor never waits for one and no frame is
+	// let go; a photo, one frame (the held one where it can be had).
+	const bool trailing = a.trails_s > 0 && cancelled && extra <= 0 && a.also.empty();
 	Opening how;
-	how.raw = how.map_raw = want_raw;
-	how.use_held = use_held;
-	std::unique_ptr<Session> s = open_session(StreamRole::StillCapture, size, 1, how, why);
+	how.raw = how.map_raw = want_raw && !trailing;
+	how.use_held = use_held && !trailing;
+	if (trailing)
+		how.sensor = Sensor::Binned;
+	std::unique_ptr<Session> s = trailing ? open_session(StreamRole::VideoRecording, size, 4, how, why) : open_session(StreamRole::StillCapture, size, 1, how, why);
 	shot.marks.mark("config");
 	if (!s)
 		return false;
@@ -1875,7 +2149,11 @@ bool take_still_at(Size size, Shot &shot, std::string &why, bool want_raw, bool 
 		still_request = nullptr;
 		still_failed.clear();
 	}
-	const Asked &a = shot.with;
+	// Nothing of a session gone is waited on (its requests went with it).
+	{
+		std::lock_guard<std::mutex> hold(burst_lock);
+		burst_done.clear();
+	}
 	// The longest exposure this mode allows, as the pipeline says (the
 	// driver's 11.77 s at the full sensor).
 	int64_t longest_allowed = still::LONGEST_US;
@@ -1889,12 +2167,17 @@ bool take_still_at(Size size, Shot &shot, std::string &why, bool want_raw, bool 
 	const bool is_set = set && !a.also.empty() && extra <= 0;
 	// Night or HDR: frames merged as they come (take_stack), never with a
 	// burst or a set.
-	const bool stacking = a.stack > 1 && cancelled && extra <= 0 && !is_set;
+	const bool stacking = a.stack > 1 && cancelled && extra <= 0 && !is_set && !trailing;
+	// A burst (1.10): the sharpest of its frames kept (take_best).
+	const bool picking = a.best > 1 && extra <= 0 && !is_set && !stacking && !trailing;
 	int64_t longest = fixed;
 	if (is_set)
 		for (const Asked::Also &more : a.also)
 			longest = std::max(longest, std::min(more.exposure_us, longest_allowed));
-	ControlList controls = limits(15, std::max<int64_t>(night ? 200000 : 66666, longest + 1000));
+	// Light trails' frames as fast as their exposure allows (30 a second in
+	// the binned mode): the shorter the gap between them, the more of a
+	// line a light draws.
+	ControlList controls = limits(trailing ? 30 : 15, std::max<int64_t>(night ? 200000 : 66666, longest + 1000));
 	if (fixed > 0) {
 		controls.set(controls::ExposureTimeMode, controls::ExposureTimeModeManual);
 		controls.set(controls::ExposureTime, int32_t(fixed));
@@ -1935,13 +2218,24 @@ bool take_still_at(Size size, Shot &shot, std::string &why, bool want_raw, bool 
 		expect_us = int64_t(still::stack_expect_ms(fixed > 0 ? fixed : 66667, a.stack)) * 1000;
 		frames = a.stack;
 	}
+	if (trailing) {
+		const int64_t each = std::max<int64_t>(33333, (fixed > 0 ? fixed : 33333) + 1000);
+		expect_us = 2 * f0 + int64_t(a.trails_s) * 1000000;
+		frames = int(std::max<int64_t>(1, int64_t(a.trails_s) * 1000000 / each));
+	}
+	// A burst's frames come at every other one the sensor sends (as a
+	// detail burst's).
+	if (picking) {
+		expect_us = 2 * f0 + int64_t(a.best - 1) * 2 * f0;
+		frames = a.best;
+	}
 	if (is_set)
 		for (const Asked::Also &more : a.also) {
 			expect_us += 5 * still::frame_us(std::min(more.exposure_us, longest_allowed));
 			frames++;
 		}
 	char exposing[64];
-	std::snprintf(exposing, sizeof exposing, "%lld %d %s", (long long)(expect_us / 1000), frames, is_set ? "bracket" : extra > 0 ? "detail" : stacking ? a.stack_for.c_str() : "still");
+	std::snprintf(exposing, sizeof exposing, "%lld %d %s", (long long)(expect_us / 1000), frames, is_set ? "bracket" : extra > 0 ? "detail" : stacking ? a.stack_for.c_str() : trailing ? "trails" : picking ? "burst" : "still");
 	tell(6, 0, exposing);
 	const long wait = still::deadline_ms(fixed, still::Judge::most(fixed > 0, fixed > 1000000) + 1, still_patience);
 	Request *got = nullptr;
@@ -1978,17 +2272,17 @@ bool take_still_at(Size size, Shot &shot, std::string &why, bool want_raw, bool 
 			if (auto black = said.get(controls::SensorBlackLevels))
 				shot.black = (*black)[0];
 			// A single photo: the sensor is done with it, the hand may move.
-			if (extra <= 0 && !is_set && !stacking)
+			if (extra <= 0 && !is_set && !stacking && !trailing && !picking)
 				tell(7, 0, shot.marks.line);
 			const still::Crop crop = still::crop_for(s->w, s->h, a.aspect_a, a.aspect_b);
-			if (stacking) {
+			if (stacking || trailing) {
 				bool stopped = false;
-				ok = take_stack(*s, got, shot, crop, as, stopped);
+				ok = stacking ? take_stack(*s, got, shot, crop, as, stopped) : take_trails(*s, got, shot, crop, as, stopped);
 				*cancelled = stopped;
 				shot.marks.mark("frames");
 				tell(7, 0, shot.marks.line);
 				if (!ok)
-					why = stopped ? "cancelled" : "the stack's frames did not come";
+					why = stopped ? "cancelled" : stacking ? "the stack's frames did not come" : "the trails' frames did not come";
 				stop_camera();
 				s->close();
 				still_fixed_us = 0;
@@ -2019,7 +2313,9 @@ bool take_still_at(Size size, Shot &shot, std::string &why, bool want_raw, bool 
 				take_burst(*s, got, extra, *files, crop, as);
 			else if (is_set)
 				take_set(*s, got, shot, crop, as, *set);
-			if (extra > 0 || is_set) {
+			else if (picking)
+				take_best(*s, got, shot, crop, as);
+			if (extra > 0 || is_set || picking) {
 				shot.marks.mark("frames");
 				tell(7, 0, shot.marks.line);
 			}
@@ -2182,6 +2478,12 @@ void write_shot(Shot &shot)
 	// A stack: "night 5 8" (merged, asked), and the finish's time.
 	if (shot.stacked > 0)
 		news += " " + (shot.with.stack_for.empty() ? std::string("night") : shot.with.stack_for) + " " + std::to_string(shot.stacked) + " " + std::to_string(shot.stack_planned) + " finish " + std::to_string(finish_ms);
+	// Light trails: "trails 186 12400" (frames, ms); a burst: "best 4 10"
+	// (the frame kept, of how many).
+	if (shot.trails_frames > 0)
+		news += " trails " + std::to_string(shot.trails_frames) + " " + std::to_string(shot.trails_ms);
+	if (shot.best_of > 1)
+		news += " best " + std::to_string(shot.best_at) + " " + std::to_string(shot.best_of);
 	if (shot.raw_fd >= 0) {
 		start_dng(shot);
 		news += " raw";
@@ -2342,6 +2644,53 @@ void take_still(const std::string &path, const std::string &words, int detail)
 	// with a burst, a set or a RAW.
 	bool cancelled = false;
 	bool *stacking = nullptr;
+	// The last try's size: the binned half each way (a smaller photo asked
+	// for keeps its own).
+	Size last_size(1640, 1232);
+	// Light trails (1.10): its own binned session (take_still_at), never
+	// with a stack, a burst, a set or a RAW.
+	if (shot.with.trails_s > 0) {
+		stack_order = 0;
+		detail = 0;
+		shot.with.stack = 0;
+		shot.with.best = 0;
+		shot.with.also.clear();
+		shot.with.raw.clear();
+		stacking = &cancelled;
+		full = Size(1640, 1232);
+	}
+	// A burst (1.10): the sharpest frame and the next in memory, at the
+	// full size where two fit (compose.h's burst_size), else binned, else
+	// one frame.
+	if (shot.with.best > 1) {
+		detail = 0;
+		shot.with.stack = 0;
+		shot.with.also.clear();
+		shot.with.raw.clear();
+		long mb = available_mb();
+		switch (compose::burst_size(mb)) {
+		case still::StackSize::Full:
+			break;
+		case still::StackSize::Binned:
+			full = Size(1640, 1232);
+			std::fprintf(stderr, "burst: %ld MB free: binned, at 1640 x 1232\n", mb);
+			break;
+		case still::StackSize::None:
+			shot.with.best = 0;
+			std::fprintf(stderr, "burst: %ld MB free: no room for a burst; one frame\n", mb);
+			break;
+		}
+	}
+	// A smaller photo (a time-lapse's frame, 1.10): that size, one frame.
+	if (shot.with.size_w > 0 && shot.with.trails_s <= 0) {
+		detail = 0;
+		shot.with.stack = 0;
+		shot.with.best = 0;
+		shot.with.also.clear();
+		shot.with.raw.clear();
+		full = Size(shot.with.size_w, shot.with.size_h);
+		last_size = full;
+	}
 	if (shot.with.stack > 1) {
 		stack_order = 0;
 		detail = 0;
@@ -2388,7 +2737,7 @@ void take_still(const std::string &path, const std::string &words, int detail)
 	if (!ok && running && !cancelled) {
 		std::string again;
 		still_patience = 2;
-		ok = take_still_at(Size(1640, 1232), shot, again, false, false, 0, nullptr, &set, suspect, stacking);
+		ok = take_still_at(last_size, shot, again, false, false, 0, nullptr, &set, suspect, stacking);
 		still_patience = 1;
 	}
 	stack_order = 0;
