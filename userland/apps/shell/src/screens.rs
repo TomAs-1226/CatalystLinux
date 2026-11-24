@@ -3095,6 +3095,9 @@ enum Item {
     BluetoothSection,
     /// Settings › Music: what Music keeps on the card (music/settings.rs).
     MusicSection,
+    /// Settings › Photos: captions by Claude, named places, the town
+    /// (photolog/ui.rs).
+    PhotosSection,
     /// Settings › Camera: detail mode, the Grove port, the smart camera.
     CameraSection,
     DetailModeRow,
@@ -3258,7 +3261,7 @@ fn nearest_hue(accent: bezel::Accent) -> u8 {
 
 /// Where everything in Settings is, for search: what it is called, the
 /// section it is in, and its place there (none: the section itself).
-const SETTING_PLACES: [(&str, Item, Option<usize>); 94] = [
+const SETTING_PLACES: [(&str, Item, Option<usize>); 99] = [
     ("Robot settings", Item::RobotSection, None),
     ("Open Robot on link", Item::RobotSection, Some(0)),
     ("Match report after a match", Item::RobotSection, Some(1)),
@@ -3321,6 +3324,11 @@ const SETTING_PLACES: [(&str, Item, Option<usize>); 94] = [
     ("Clear played songs", Item::MusicSection, Some(2)),
     ("Music downloads", Item::MusicSection, Some(3)),
     ("Lyrics on the island", Item::MusicSection, Some(6)),
+    ("Photos", Item::PhotosSection, None),
+    ("Caption photos with Claude", Item::PhotosSection, Some(0)),
+    ("Monthly limit for captions", Item::PhotosSection, Some(2)),
+    ("Named places", Item::PhotosSection, Some(5)),
+    ("Find the town online", Item::PhotosSection, Some(7)),
     ("Camera", Item::CameraSection, None),
     ("Detail mode", Item::CameraSection, Some(0)),
     ("Grove port", Item::CameraSection, Some(1)),
@@ -3421,6 +3429,9 @@ pub fn open_setting(index: usize) -> Box<dyn Screen> {
     if section == Item::MusicSection {
         return Box::new(crate::music::MusicSettings::new().at(place.unwrap_or(0)));
     }
+    if section == Item::PhotosSection {
+        return Box::new(crate::photolog::PhotoSettings::new().at(place.unwrap_or(0)));
+    }
     if section == Item::WidgetsPage {
         return Box::new(crate::widgets::WidgetsPage::new());
     }
@@ -3447,7 +3458,7 @@ impl SettingsApp {
         use Item::*;
         Self::page(
             "Settings",
-            vec![RobotSection, Appearance, TextSection, HomeSection, Display, LockSection, StandBySection, BatterySection, Network, SoundSection, BluetoothSection, MusicSection, CameraSection, NameSection, UsbSection, CompanionSection, KeysSection, OnDeviceModel, OfflineDictation, VoiceCommands, Access, UpdateSection, Help, About, FromComputer],
+            vec![RobotSection, Appearance, TextSection, HomeSection, Display, LockSection, StandBySection, BatterySection, Network, SoundSection, BluetoothSection, MusicSection, PhotosSection, CameraSection, NameSection, UsbSection, CompanionSection, KeysSection, OnDeviceModel, OfflineDictation, VoiceCommands, Access, UpdateSection, Help, About, FromComputer],
         )
     }
 
@@ -3628,6 +3639,7 @@ impl SettingsApp {
             SoundSection => section("Sound", crate::sound::summary()),
             BluetoothSection => section("Bluetooth", crate::bluetooth::summary()),
             MusicSection => section("Music", crate::music::summary()),
+            PhotosSection => section("Photos", crate::photolog::summary()),
             CameraSection => section("Camera", format!("detail {}", g.detail.name())),
             DetailModeRow => ("Detail mode".into(), g.detail.words().into(), g.detail != crate::burst::DetailMode::Off),
             GrovePort => ("Grove port".into(), grove_words(), crate::smartcam::chosen()),
@@ -3988,6 +4000,7 @@ impl Screen for SettingsApp {
             Key::Enter | Key::Right if item == Item::SoundSection => return Nav::Push(Box::new(crate::sound::SoundScreen::new())),
             Key::Enter | Key::Right if item == Item::BluetoothSection => return Nav::Push(Box::new(crate::bluetooth::BluetoothScreen::new())),
             Key::Enter | Key::Right if item == Item::MusicSection => return Nav::Push(Box::new(crate::music::MusicSettings::new())),
+            Key::Enter | Key::Right if item == Item::PhotosSection => return Nav::Push(Box::new(crate::photolog::PhotoSettings::new())),
             Key::Enter | Key::Right if item == Item::CompanionSection => return Nav::Push(Box::new(crate::companion::CompanionScreen::new())),
             // Lower voltage, switched on: what it does, and a restart to try it.
             Key::Enter | Key::Right if item == Item::Undervolt && crate::power::undervolt().asks_to_try() => return Nav::Push(Box::new(crate::power::TryUndervolt::new())),

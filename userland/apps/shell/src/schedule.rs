@@ -33,6 +33,8 @@ pub struct Event {
     /// `YYYY-MM-DD`.
     pub start: String,
     pub end: String,
+    /// Where it is held, as The Blue Alliance has it: "Rochester, NY".
+    pub city: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -121,10 +123,22 @@ pub fn pick_event(events: &Value, today: &str) -> Option<Event> {
     let mut all: Vec<Event> = events
         .as_array()?
         .iter()
-        .filter_map(|e| Some(Event { key: e["key"].as_str()?.into(), name: e["name"].as_str()?.into(), start: e["start_date"].as_str()?.into(), end: e["end_date"].as_str()?.into() }))
+        .filter_map(|e| Some(Event { key: e["key"].as_str()?.into(), name: e["name"].as_str()?.into(), start: e["start_date"].as_str()?.into(), end: e["end_date"].as_str()?.into(), city: city_of(e) }))
         .collect();
     all.sort_by(|a, b| a.start.cmp(&b.start));
     all.iter().find(|e| e.start.as_str() <= today && today <= e.end.as_str()).or_else(|| all.iter().find(|e| e.start.as_str() > today)).or_else(|| all.last()).cloned()
+}
+
+/// Where an event is, from its simple model's `city`, `state_prov` and
+/// `country`: "Rochester, NY", "Mississauga, ON", "Istanbul, Türkiye".
+fn city_of(e: &Value) -> String {
+    let field = |k: &str| e[k].as_str().map(str::trim).filter(|s| !s.is_empty());
+    match (field("city"), field("state_prov"), field("country")) {
+        (Some(city), Some(region), _) => format!("{city}, {region}"),
+        (Some(city), None, Some(country)) => format!("{city}, {country}"),
+        (Some(city), None, None) => city.to_owned(),
+        _ => String::new(),
+    }
 }
 
 /// A team's matches at an event, in the order they are played.
@@ -232,6 +246,20 @@ impl Drop for Schedule {
     }
 }
 
+/// The newest view any schedule has had, for work done away from the
+/// screens: a photo taken is tagged with the event and the match it was
+/// taken at (photolog/). Kept when the robot goes, as what was last known.
+static LATEST: Mutex<Option<View>> = Mutex::new(None);
+
+fn note_latest(view: &View) {
+    *LATEST.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(view.clone());
+}
+
+/// The schedule as last known, whichever robot it was for.
+pub fn latest() -> Option<View> {
+    LATEST.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+}
+
 fn now() -> i64 {
     // The reminders' clock: the same as the system's, but a test can move it.
     crate::reminders::now()
@@ -262,7 +290,7 @@ impl Schedule {
         };
         let view = View {
             team: 5805,
-            event: Some(Event { key: "2026nyro".into(), name: "Finger Lakes Regional".into(), start: "2026-03-12".into(), end: "2026-03-15".into() }),
+            event: Some(Event { key: "2026nyro".into(), name: "Finger Lakes Regional".into(), start: "2026-03-12".into(), end: "2026-03-15".into(), city: "Rochester, NY".into() }),
             matches: vec![
                 m("Q9", [5805, 254, 1678], [118, 2056, 971], -9400, Some((112, 87)), None),
                 m("Q14", [340, 3015, 191], [5805, 1114, 4613], -5200, Some((95, 101)), None),
@@ -275,6 +303,7 @@ impl Schedule {
             problem: None,
         };
         let shared = Arc::new(Shared::default());
+        note_latest(&view);
         *shared.view.lock().unwrap() = Some(view);
         Schedule { shared }
     }
@@ -287,6 +316,7 @@ impl Schedule {
         // What was fetched before, for straight away and for offline.
         if let Some(view) = std::fs::read_to_string(cache_file()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| from_cache(&v)) {
             if view.team == team {
+                note_latest(&view);
                 *shared.view.lock().unwrap() = Some(view);
             }
         }
@@ -318,6 +348,7 @@ fn run(shared: &Shared, team: u32) {
         let keys = crate::keys::Keys::load();
         let t = now();
         let publish = |view: View| {
+            note_latest(&view);
             *shared.view.lock().unwrap() = Some(view);
             shared.generation.fetch_add(1, Ordering::Relaxed);
         };
@@ -414,7 +445,7 @@ fn to_cache(view: &View) -> Value {
         .collect();
     serde_json::json!({
         "team": view.team,
-        "event": view.event.as_ref().map(|e| serde_json::json!({"key": e.key, "name": e.name, "start": e.start, "end": e.end})),
+        "event": view.event.as_ref().map(|e| serde_json::json!({"key": e.key, "name": e.name, "start": e.start, "end": e.end, "city": e.city})),
         "matches": matches,
         "fetched": view.fetched,
     })
@@ -425,7 +456,13 @@ fn from_cache(v: &Value) -> Option<View> {
     let e = &v["event"];
     Some(View {
         team: v["team"].as_u64()? as u32,
-        event: e["key"].as_str().map(|key| Event { key: key.into(), name: e["name"].as_str().unwrap_or("").into(), start: e["start"].as_str().unwrap_or("").into(), end: e["end"].as_str().unwrap_or("").into() }),
+        event: e["key"].as_str().map(|key| Event {
+            key: key.into(),
+            name: e["name"].as_str().unwrap_or("").into(),
+            start: e["start"].as_str().unwrap_or("").into(),
+            end: e["end"].as_str().unwrap_or("").into(),
+            city: e["city"].as_str().unwrap_or("").into(),
+        }),
         matches: v["matches"]
             .as_array()?
             .iter()

@@ -295,7 +295,10 @@ fn list_in(dir: &Path) -> Vec<Photo> {
 /// Where the next photo goes: named for `now`, and never over one already
 /// there (two in the same second become `_2`, `_3`).
 pub fn new_path(now: NaiveDateTime) -> PathBuf {
-    new_path_in(&dir(), now)
+    let path = new_path_in(&dir(), now);
+    // Its moment noted for the build log: the Wi-Fi, the event (photolog/).
+    crate::photolog::taken(&path, now);
+    path
 }
 
 fn new_path_in(dir: &Path, now: NaiveDateTime) -> PathBuf {
@@ -319,6 +322,7 @@ pub fn new_pixel_path(now: NaiveDateTime) -> PathBuf {
         path = dir.join(format!("{stem}_{n}.png"));
         n += 1;
     }
+    crate::photolog::taken(&path, now);
     path
 }
 
@@ -443,6 +447,8 @@ pub fn delete(photo: &Photo) -> std::io::Result<()> {
     std::fs::remove_file(crate::filters::original_of(&photo.path)).ok();
     std::fs::remove_file(photo.path.with_extension("dng")).ok();
     std::fs::remove_file(crate::editor::edits::sidecar(&photo.path)).ok();
+    // Its caption and place (photolog/).
+    crate::photolog::forget(&photo.path);
     TILE_COUNT.store(u64::MAX, Ordering::Relaxed);
     Ok(())
 }
@@ -643,6 +649,8 @@ impl Screen for Album {
             // Esc keeps a photo it was asked about rather than leaving.
             Key::Back if armed.is_some() => {}
             Key::Back | Key::Leave => return Nav::Pop,
+            // The build log: days, places, captions (photolog/).
+            Key::Char('l') => return Nav::Push(Box::new(crate::photolog::BuildLog::new())),
             _ if n == 0 => {}
             Key::Left => self.focus = self.focus.saturating_sub(1),
             Key::Right => self.focus = (self.focus + 1).min(n - 1),
@@ -677,7 +685,7 @@ impl Screen for Album {
         if self.deleting.is_some_and(|d| d == self.focus) {
             return vec![keys("deleting", &[("d", "Delete it"), ("esc", "Keep it")])];
         }
-        vec![keys("photos", &[("enter", "Open it"), ("d twice", "Delete it"), ("fn k · fn n", "First, last")])]
+        vec![keys("photos", &[("enter", "Open it"), ("l", "The build log"), ("d twice", "Delete it"), ("fn k · fn n", "First, last")])]
     }
 
     fn tick(&mut self, dt: f32) -> bool {
@@ -794,6 +802,8 @@ pub struct Viewer {
     has_raw: bool,
     /// A pixel picture: its true size shown, with whole pixels.
     pixel: bool,
+    /// Under the photo: its caption and place (photolog/).
+    about: crate::photolog::Under,
 }
 
 const ZOOMS: [f32; 3] = [1.0, 2.0, 4.0];
@@ -820,6 +830,7 @@ impl Viewer {
             original: false,
             has_raw: false,
             pixel: false,
+            about: crate::photolog::Under::new(),
         };
         v.arrive();
         v
@@ -861,6 +872,7 @@ impl Viewer {
         self.has_original = !self.pixel && crate::filters::original_of(&photo.path).is_file();
         self.has_raw = photo.path.with_extension("dng").is_file();
         self.original = false;
+        self.about.arrive(&photo.path);
     }
 
     /// How large a decode the zoom asks for: the panel's size at that zoom.
@@ -931,6 +943,12 @@ impl Screen for Viewer {
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
         let zoomed = self.zoom.target() > 1.01;
         let deleting = std::mem::take(&mut self.deleting);
+        // Its caption and place, under it (↓, t, n, a).
+        if !zoomed && !deleting && !self.details {
+            if let Some(nav) = self.about.key(key, cx) {
+                return nav;
+            }
+        }
         match key {
             // Esc keeps a photo it was asked about, puts the details away,
             // and comes back out to the whole photo, before it leaves.
@@ -1007,6 +1025,9 @@ impl Screen for Viewer {
             v.push(keys("photo", &[("← →", "Last, next photo")]));
         }
         v.push(keys("zoom", &[("enter · +", "Closer"), ("-", "Further out")]));
+        if self.zoom.target() <= 1.01 {
+            v.extend(self.about.key_groups());
+        }
         if self.pixel {
             v.push(keys("this picture", &[("i", "Details"), ("d twice", "Delete it")]));
             return v;
@@ -1019,7 +1040,7 @@ impl Screen for Viewer {
     }
 
     fn tick(&mut self, dt: f32) -> bool {
-        let mut changed = self.zoom.tick(dt) | self.pan_x.tick(dt) | self.pan_y.tick(dt) | self.slide.tick(dt);
+        let mut changed = self.zoom.tick(dt) | self.pan_x.tick(dt) | self.pan_y.tick(dt) | self.slide.tick(dt) | self.about.tick(dt);
         if self.chrome > 0.0 && !self.details && !self.deleting {
             self.chrome -= dt;
             changed |= true;
@@ -1062,7 +1083,7 @@ impl Screen for Viewer {
     }
 
     fn busy(&self) -> bool {
-        self.decoding.is_some()
+        self.decoding.is_some() || self.about.busy()
     }
 
     fn draw(&mut self, g: &mut Gfx, _robot: &Robot) {
@@ -1082,18 +1103,22 @@ impl Screen for Viewer {
             _ => None,
         };
         let offset = self.slide.value() * W;
+        // Shrunk into the room above the sheet under it, when that is up
+        // (photolog/): by `k`, about the panel's top middle, `down` from it.
+        let (k, down) = if self.zoom.target() > 1.01 || self.details { (1.0, 0.0) } else { self.about.room(g) };
+        let fit = |r: Rect| Rect::new(W * 0.5 + (r.x - W * 0.5) * k, down + r.y * k, r.w * k, r.h * k);
         // Where the photo is on the panel: the chips go in its corners.
         let mut frame = Rect::new(0.0, 0.0, W, H);
         if let Some(pic) = pic {
             let (pw, ph) = self.dims.unwrap_or((pic.w, pic.h));
             let (dest, view) = zoomed_of(pw, ph, pic, self.zoom.value(), self.pan_x.value(), self.pan_y.value(), self.pixel);
-            let at = Rect::new(dest.x + offset, dest.y, dest.w, dest.h);
+            let at = fit(Rect::new(dest.x + offset, dest.y, dest.w, dest.h));
             if self.pixel {
                 draw_picture_crisp(g, at, pic, view, 0.0, 1.0);
             } else {
                 draw_picture(g, at, pic, view, 0.0, 1.0);
             }
-            frame = dest;
+            frame = fit(dest);
         } else if let Some(why) = &self.trouble {
             let why = g.text.fit(why, &ty.caption, W - 40.0);
             g.icon("broken_image", false, W * 0.5 + offset, H * 0.5 - 14.0, 20.0, t.faint);
@@ -1104,6 +1129,10 @@ impl Screen for Viewer {
 
         // The date and where it is in the album, for a moment after a change.
         let shade = self.chrome.clamp(0.0, 1.0).max(if self.details || self.deleting { 1.0 } else { 0.0 });
+        // The chips give way as the photo shrinks for the sheet under it.
+        let shade = shade * ((k - 0.8) / 0.2).clamp(0.0, 1.0);
+        // Where the chips along the photo's foot end, on the left.
+        let mut left_end = frame.x;
         if shade > 0.0 {
             let words = when(photo.taken, g.clock.0);
             let count = format!("{} / {}", self.at + 1, self.photos.len());
@@ -1125,8 +1154,12 @@ impl Screen for Viewer {
                 };
                 if let Some(words) = words {
                     chip(g, left, frame.bottom() - inset - h, &words, Align::Left, shade);
+                    left_end = left + g.measure(&words, g.ty.caption) + 14.0;
                 }
             }
+        }
+        if self.zoom.target() <= 1.01 && !self.details && !self.deleting {
+            self.about.draw(g, frame, shade, left_end);
         }
         if self.details {
             let dims = self.dims.map_or("–".into(), |(w, h)| format!("{w} × {h}"));
