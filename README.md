@@ -37,6 +37,7 @@ windows that grow out of tiles whenever it is there.
 | `shots/vm/` | The same shell as the ARM build on the image's own kernel, in the emulator. |
 | `shots/1.2-pixel/`, `shots/1.2-film/` | The Camera's pixel mode (each palette, dither and size, its pickers, the flash, its keys, a picture in Photos) and the film looks (each look, the grain's choice, the glow, the editor), dark and light at each text size (`--camera-pixel-shots`, `--camera-film-shots`). |
 | `shots/1.3-pixel/`, `shots/1.3-pixel-quality/` | Pixel mode's 1.4.0 additions (the auto and print palettes, a loop recording, the date stamp, a loop in Photos and the album, every palette and dither), dark and light at each text size; and its before and after on photographs (`--camera-pixel-shots`, the ignored test `quality_shots`). |
+| `shots/1.5-phone-gallery/` | The phone gallery's sheet on the handheld (sharing, phones connected, its keys, no network, stopped, the Bezel theme) and the album's hint and Share's row that lead to it, dark and light at each text size (`--gallery-shots`, which also writes the page a phone gets as files to open in a browser). |
 | `tools/bake3d/` | The Robot app's robot in 3D: Numbers' bake, the packer, and a team's own from its CAD (see *The robot in three dimensions*). |
 | `shots/3d-preview/` | The robot in 3D to look at before it ships: `index.html`. |
 

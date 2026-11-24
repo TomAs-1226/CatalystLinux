@@ -29,6 +29,12 @@ use crate::lines;
 static SANS: &[u8] = include_bytes!("../../../assets/fonts/GoogleSansFlex.ttf");
 static CODE: &[u8] = include_bytes!("../../../assets/fonts/GoogleSansCode.ttf");
 
+/// The two type voices' font files as carried (Google Sans Flex, Google
+/// Sans Code): for a page the handheld serves to look as its panel does.
+pub fn font_files() -> (&'static [u8], &'static [u8]) {
+    (SANS, CODE)
+}
+
 /// The CJK font's file name, and where the image installs it.
 pub const CJK_FILE: &str = "NotoSansCJK-Catalyst.otf";
 pub const CJK_DIR: &str = "/usr/share/fonts/catalyst";
