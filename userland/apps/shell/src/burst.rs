@@ -39,10 +39,13 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-/// Settings › Camera › Detail mode.
+/// Settings › Camera › Detail mode. Since 1.5.2 how many frames every
+/// photo merges in the camera program (camera/finish.rs): auto three, on
+/// six, off one. The background burst below is no longer asked for by the
+/// Camera; `--merge-burst` still merges one handed to it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DetailMode {
-    /// On in dim light (catalyst-camera judges by the preview's light).
+    /// Three frames a photo.
     Auto,
     On,
     Off,
@@ -71,9 +74,9 @@ impl DetailMode {
     /// As Settings says it.
     pub fn words(self) -> &'static str {
         match self {
-            DetailMode::Auto => "Auto (in dim light)",
-            DetailMode::On => "On",
-            DetailMode::Off => "Off",
+            DetailMode::Auto => "Auto (3 frames)",
+            DetailMode::On => "On (6 frames)",
+            DetailMode::Off => "Off (1 frame)",
         }
     }
 }

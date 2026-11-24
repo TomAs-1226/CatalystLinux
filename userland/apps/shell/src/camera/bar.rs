@@ -547,8 +547,8 @@ impl Camera {
         cx.settings.detail = detail;
         crate::save_settings(cx.settings);
         self.say(match detail {
-            DetailMode::Auto => "detail: auto · frames merged in dim light",
-            DetailMode::On => "detail: on · every photo merged from several frames",
+            DetailMode::Auto => "detail: auto · every photo from 3 frames",
+            DetailMode::On => "detail: on · every photo from 6 frames",
             DetailMode::Off => "detail: off · one frame a photo",
         });
     }

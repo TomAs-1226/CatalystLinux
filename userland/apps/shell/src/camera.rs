@@ -169,6 +169,7 @@ use crate::shell::{Cx, Nav, Screen};
 
 mod bar;
 mod burst_mode;
+mod finish;
 mod lapse_mode;
 #[cfg(not(target_arch = "aarch64"))]
 mod modes_shots;
@@ -2271,11 +2272,25 @@ impl Camera {
             if night {
                 words.push("neutral=0.50".into());
             }
+            // The new finish (1.5.2): local tone and the finish's own
+            // sharpening on the merged stack (its own frames, no merge=).
+            finish::add_words(&mut words, 1, finish::local(self.look != Look::Original));
             return (words, None, set);
         }
         if raw && set.is_empty() {
             words.push(format!("raw={}", path.with_extension("dng").display()));
             // A RAW needs the camera's memory a burst would.
+            burst = None;
+        }
+        // Every photo (1.5.2): photo and Pro mode merge a few frames in the
+        // camera program (finish.rs), in place of detail's background burst;
+        // a RAW, a set or a long Pro exposure stays one frame. Pro keeps its
+        // exposure as dialled: no local tone.
+        if matches!(self.mode, Mode::Photo | Mode::Pro) {
+            let long = still.as_ref().is_some_and(|s| s.exposure_us > finish::MERGE_LONGEST_US);
+            let frames = if raw || !set.is_empty() || (in_pro && long) { 1 } else { finish::frames(detail) };
+            let local = if in_pro { 0.0 } else { finish::local(self.look != Look::Original) };
+            finish::add_words(&mut words, frames, local);
             burst = None;
         }
         if self.mode == Mode::Photo && self.guard.ev < -0.01 {
@@ -5817,6 +5832,36 @@ mod tests {
         }
         assert!(camera.metered.is_some(), "metered frames");
         camera
+    }
+
+    #[test]
+    fn every_photo_merges_its_frames_with_the_new_finish() {
+        crate::shell::tests::sandbox();
+        let _port = crate::smartcam::sim::exclusive(false);
+        let mut camera = ready();
+        let path = std::path::Path::new("/p/IMG_1.jpg");
+        let has = |words: &[String], w: &str| words.iter().any(|x| x == w);
+        // Photo mode: three frames, the local tone in full, the finish's
+        // sharpening with the ISP's turned down; no background burst.
+        let (words, burst, _) = camera.still_words(path, crate::burst::DetailMode::Auto);
+        assert_eq!(burst, None, "the merge takes detail's burst's place");
+        for w in ["merge=3", "local=1.00", "crisp=0.60", "sharp=0.25"] {
+            assert!(has(&words, w), "{w} in {words:?}");
+        }
+        assert!(!has(&words, "sharp=1.00"), "{words:?}");
+        // Detail on: six; off: one frame (no merge), the finish still.
+        let (words, _, _) = camera.still_words(path, crate::burst::DetailMode::On);
+        assert!(has(&words, "merge=6"), "{words:?}");
+        let (words, _, _) = camera.still_words(path, crate::burst::DetailMode::Off);
+        assert!(!words.iter().any(|w| w.starts_with("merge=")) && has(&words, "crisp=0.60"), "{words:?}");
+        // Pro with a RAW: one frame, no local tone (the dials decide).
+        camera.set_mode(Mode::Pro);
+        camera.raw = true;
+        let (words, _, _) = camera.still_words(path, crate::burst::DetailMode::Auto);
+        assert!(!words.iter().any(|w| w.starts_with("merge=") || w.starts_with("local=")) && words.iter().any(|w| w.starts_with("raw=")), "{words:?}");
+        camera.raw = false;
+        let (words, _, _) = camera.still_words(path, crate::burst::DetailMode::Auto);
+        assert!(has(&words, "merge=3") && !words.iter().any(|w| w.starts_with("local=")), "{words:?}");
     }
 
     #[test]
