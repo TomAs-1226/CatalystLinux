@@ -10,6 +10,17 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 1.5.2
+
+Truer colour, and every photo made from several frames.
+
+### Camera
+- Colour photos no longer come out yellow under lamps or tinted in other light. A smart white balance checks each viewfinder frame for a leftover cast and corrects it, keeping just a little warmth under lamps; photos match the viewfinder.
+- Every photo is made from three quick frames merged together: cleaner detail and colour, no grain. Saving takes about a second longer; the shutter stays instant.
+- Shadows and faces in shade are lifted gently, without the flat HDR look, and sharpening crisps edges while leaving sky and skin smooth. Night and HDR get the same finish.
+- Detail now sets how many frames each photo uses: auto (3), on (6) or off (1, the quickest).
+- Pro mode's own white balance and black-and-white looks are left as they were.
+
 ## 1.5.1
 
 Three new camera modes, and photos that look like photos again.
