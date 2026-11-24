@@ -10,6 +10,11 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 1.3.1
+
+### Fixed
+- Photos: taken at last, for real this time. 1.1.1 gave the camera's sensor two frames but let its pipeline keep none of them, and still no photo came; it keeps at least one now, and a full 8 MP photo takes under a second.
+
 ## 1.3.0
 
 A pixel camera, film looks, and a laptop that sets itself up for Claude on

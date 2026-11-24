@@ -7,21 +7,25 @@
 # and ours does not fit in the 64 MB the camera shares with the GPU, so
 # every photo came out binned at 1640 x 1232 (until 1.3). The preview and a
 # RAW photo hand the pipeline raw frames of their own in each request, so
-# it never waits for one and keeps none of its own (min_unicam_buffers 0,
-# 1.4); a JPEG photo and the focus check bring none, and the pipeline keeps
-# two. With only one (until 1.1.0) the sensor had nowhere to put a frame
-# while the ISP held the other, and no photo's frame ever came, at either
-# size, with nothing said by libcamera: two took a full 3280 x 2464 photo in
-# under a second (found on a handheld, 23 November 2026). A RAW photo brings
-# one and the pipeline adds one. Two raw frames, the ISP's and ours are about
-# 45 MB at the full size, in the 128 MB pool (cmdline.txt's cma=).
+# it never waits for one; a JPEG photo and the focus check bring none, and
+# the pipeline keeps two.
+#
+# Both numbers matter, and both were wrong until 1.3.1: with
+# min_unicam_buffers 0 (which libcamera's own example says must be above 0)
+# no photo's frame ever came, at either size, with nothing said by libcamera,
+# and min_total_unicam_buffers 1 did the same. 1 and 2 take a full
+# 3280 x 2464 photo in under a second; tried on a handheld, 23 November 2026,
+# with the shell's own order and with a bare one. The preview keeps one raw
+# frame of the pipeline's (2.5 MB binned) beside its own. Two raw frames, the
+# ISP's and ours are about 45 MB at the full size, in the 128 MB pool
+# (cmdline.txt's cma=).
 {
         "version": 1.0,
         "target": "bcm2835",
 
         "pipeline_handler":
         {
-                "min_unicam_buffers": 0,
+                "min_unicam_buffers": 1,
                 "min_total_unicam_buffers": 2
         }
 }
