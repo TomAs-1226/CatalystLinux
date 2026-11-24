@@ -20,6 +20,13 @@
 //! next key that is not the shutter. Its glass comes and goes by its
 //! refraction, its words with it; at rest nothing in it moves.
 //!
+//! Burst, light trails and the time-lapse (1.5.0) have one chip each for
+//! their setting, on `s`: burst's shutter, the trails' length, the
+//! time-lapse's interval, each with its value on its face ("1/500", "30s",
+//! "5s"), then the timer (not the time-lapse's) and the grid. With eight
+//! modes the mode's choices are more than the bar holds at their own
+//! widths: they slide along under its glass, the one in hand in sight.
+//!
 //! Pixel mode (1.2, camera/pixel_mode.rs) has chips of its own: the size
 //! (`s`), the palette (`k`, its colours on the chip and in its picker), the
 //! dither (`d`, its pattern on the chip) and the tone (↑ ↓ the brightness,
@@ -48,6 +55,10 @@ pub enum Chip {
     Palette,
     Dither,
     Tone,
+    /// Burst's shutter, light trails' length, the time-lapse's interval (1.5.0).
+    Shutter,
+    Length,
+    Every,
 }
 
 impl Chip {
@@ -67,6 +78,9 @@ impl Chip {
             Chip::Palette => "palette",
             Chip::Dither => "dither",
             Chip::Tone => "tone",
+            Chip::Shutter => "shutter",
+            Chip::Length => "length",
+            Chip::Every => "every",
         }
     }
 
@@ -87,6 +101,7 @@ impl Chip {
             Chip::Palette => "k",
             Chip::Dither => "d",
             Chip::Tone => "↑↓",
+            Chip::Shutter | Chip::Length | Chip::Every => "s",
         }
     }
 
@@ -181,8 +196,11 @@ pub struct Bar {
     /// The capsule of ice: where it is along the cells, and how far in.
     pub(super) at: Animated,
     pub(super) on: Animated,
-    /// Pro's row, slid along to keep the item in hand in sight.
+    /// Pro's row (or a chip's choices, when more than fit: the modes), slid
+    /// along to keep the one in hand in sight; and whose choices it last
+    /// slid for (another's start where they are, not sliding in).
     pub(super) scroll: Animated,
+    slid_for: Option<Chip>,
     /// The chips, slid along the same way where they are more than fit
     /// (1.4.0: Night, HDR and the lock joined them).
     pub(super) slide: Animated,
@@ -202,6 +220,7 @@ impl Bar {
             at: Animated::new(0.0, role::release()).with_rest(0.002),
             on: Animated::new(0.0, role::effect()).with_rest(0.002),
             scroll: Animated::new(0.0, role::release()).with_rest(0.05),
+            slid_for: None,
             slide: Animated::new(0.0, role::release()).with_rest(0.05),
             placed: false,
         }
@@ -241,6 +260,16 @@ impl Camera {
         }
         if self.lens == Lens::Main && self.mode == Mode::Pixel {
             chips.extend([Chip::Size, Chip::Palette, Chip::Dither, Chip::Tone, Chip::Timer]);
+        }
+        // Burst, trails and the time-lapse (1.5.0): their setting, the
+        // timer (a time-lapse starts when asked), the grid.
+        if self.lens == Lens::Main {
+            match self.mode {
+                Mode::Burst => chips.extend([Chip::Shutter, Chip::Timer, Chip::Grid]),
+                Mode::Trails => chips.extend([Chip::Length, Chip::Timer, Chip::Grid]),
+                Mode::Lapse => chips.extend([Chip::Every, Chip::Grid]),
+                _ => {}
+            }
         }
         if self.smart.is_some() {
             chips.push(Chip::Lens);
@@ -445,6 +474,9 @@ impl Camera {
             Chip::Palette => pixel::PALETTES.iter().map(|p| p.name().to_owned()).collect(),
             Chip::Dither => pixel::DITHERS.iter().map(|d| d.name().to_owned()).collect(),
             Chip::Tone => pixel::CONTRASTS.iter().map(|c| c.name().to_owned()).collect(),
+            Chip::Shutter => burst_mode::SHUTTERS.iter().map(|s| format!("1/{s}")).collect(),
+            Chip::Length => trails::LENGTHS.iter().map(|s| trails::length_words(*s)).collect(),
+            Chip::Every => crate::lapse::EVERY.iter().map(|s| camkit::duration_words(*s)).collect(),
             _ => Vec::new(),
         }
     }
@@ -470,6 +502,9 @@ impl Camera {
             Chip::Tone => pixel::CONTRASTS.iter().position(|c| *c == self.pixel.contrast).unwrap_or(0),
             Chip::Night => pro::NIGHT_MODES.iter().position(|m| *m == self.night_mode).unwrap_or(0),
             Chip::Hdr => usize::from(self.hdr_mode == pro::HdrMode::Off),
+            Chip::Shutter => burst_mode::SHUTTERS.iter().position(|s| *s == self.burst_shutter).unwrap_or(1),
+            Chip::Length => trails::LENGTHS.iter().position(|s| *s == self.trails_s).unwrap_or(2),
+            Chip::Every => crate::lapse::EVERY.iter().position(|s| *s == self.lapse_every).unwrap_or(1),
             _ => 0,
         }
     }
@@ -482,6 +517,9 @@ impl Camera {
             Chip::Detail => self.set_detail([DetailMode::Auto, DetailMode::On, DetailMode::Off][at.min(2)], cx),
             Chip::Night => self.set_night(pro::NIGHT_MODES[at.min(pro::NIGHT_MODES.len() - 1)]),
             Chip::Hdr => self.set_hdr(if at == 0 { pro::HdrMode::Auto } else { pro::HdrMode::Off }),
+            Chip::Shutter => self.set_burst_shutter(burst_mode::SHUTTERS[at.min(burst_mode::SHUTTERS.len() - 1)]),
+            Chip::Length => self.set_trails_length(trails::LENGTHS[at.min(trails::LENGTHS.len() - 1)]),
+            Chip::Every => self.set_lapse_every(crate::lapse::EVERY[at.min(crate::lapse::EVERY.len() - 1)]),
             _ => {}
         }
         // The keys stay on the chip, which may have gone with the mode.
@@ -509,8 +547,8 @@ impl Camera {
         cx.settings.detail = detail;
         crate::save_settings(cx.settings);
         self.say(match detail {
-            DetailMode::Auto => "detail: auto · merged from a burst in dim light",
-            DetailMode::On => "detail: on · every photo merged from a burst",
+            DetailMode::Auto => "detail: auto · frames merged in dim light",
+            DetailMode::On => "detail: on · every photo merged from several frames",
             DetailMode::Off => "detail: off · one frame a photo",
         });
     }
@@ -672,6 +710,9 @@ impl Camera {
                 pro::Lock::Held { .. } => "held · e: let go",
             }
             .to_owned(),
+            Chip::Shutter => self.burst_words_now(),
+            Chip::Length => self.trails_words_now(),
+            Chip::Every => self.lapse_words_now(),
             _ => self.choices(chip).get(self.chosen(chip, detail)).cloned().unwrap_or_default(),
         }
     }
@@ -690,7 +731,7 @@ impl Camera {
     /// Whether a chip's setting is on (its icon filled, in ink).
     fn chip_on(&self, chip: Chip, detail: DetailMode) -> bool {
         match chip {
-            Chip::Mode | Chip::Lens => true,
+            Chip::Mode | Chip::Lens | Chip::Shutter | Chip::Length | Chip::Every => true,
             Chip::Night => self.night_mode != pro::NightMode::Off,
             Chip::Hdr => self.hdr_mode == pro::HdrMode::Auto,
             Chip::Lock => self.lock.on(),
@@ -710,6 +751,9 @@ impl Camera {
                 Mode::Scan => "qr_code_scanner",
                 Mode::Doc => "document_scanner",
                 Mode::Photo | Mode::Pro => "photo_camera",
+                Mode::Burst => "burst_mode",
+                Mode::Trails => "gesture",
+                Mode::Lapse => "timelapse",
                 // Drawn in pixels of its own (pixel_mode.rs).
                 Mode::Pixel => "",
             },
@@ -721,6 +765,9 @@ impl Camera {
             Chip::Detail => "auto_awesome",
             Chip::Pro => "tune",
             Chip::Lens => "",
+            Chip::Shutter => "shutter_speed",
+            Chip::Length => "hourglass_top",
+            Chip::Every => "timelapse",
             Chip::Night => "bedtime",
             // Drawn in letters (draw_chips).
             Chip::Hdr => "",
@@ -739,6 +786,9 @@ impl Camera {
     fn chip_face_words(&self, chip: Chip) -> Option<String> {
         match chip {
             Chip::Night => self.night_length().map(|l| l.replace(' ', "")),
+            Chip::Shutter => Some(format!("1/{}", self.burst_shutter)),
+            Chip::Length => Some(trails::length_words(self.trails_s).replace(' ', "")),
+            Chip::Every => Some(camkit::duration_words(self.lapse_every).replace(' ', "")),
             _ => None,
         }
     }
@@ -748,7 +798,7 @@ impl Camera {
     pub(super) fn draw_bar(&mut self, g: &mut Gfx, vf: Rect) -> f32 {
         // Out of the way while the looks' strip, the intervalometer, the
         // timer, a code found or the alignment have the foot.
-        let away = self.strip || self.kit.panel.is_some() || self.kit.run.is_some() || self.countdown.is_some() || self.aligning || self.offered().is_some();
+        let away = self.strip || self.kit.panel.is_some() || self.kit.run.is_some() || self.countdown.is_some() || self.aligning || self.offered().is_some() || self.lapse.is_some() || self.trails_running();
         let want = if self.bar.hidden || away { 0.0 } else { 1.0 };
         if self.bar.shown.target() != want {
             self.bar.shown.set(want);
@@ -998,16 +1048,71 @@ impl Camera {
         let bh = (cap.size + 12.0).round();
         let r = Self::track(g, vf, bh, shown);
         let pad = 3.0;
-        let cell = (r.w - 2.0 * pad) / words.len().max(1) as f32;
+        let n = words.len().max(1);
+        let room = r.w - 2.0 * pad;
+        // Even cells where every choice fits one; else each its own width
+        // (1.5.0: the eight modes), sliding along when more than fit.
+        let natural: Vec<f32> = words.iter().map(|w| g.measure(w, cap) + 14.0).collect();
+        let even = room / n as f32;
+        let crowded = natural.iter().any(|w| *w > even);
+        let total: f32 = if crowded { natural.iter().sum() } else { room };
+        let sliding = total > room;
+        let extra = if crowded && !sliding { (room - total) / n as f32 } else { 0.0 };
+        let widths: Vec<f32> = if crowded { natural.iter().map(|w| w + extra).collect() } else { vec![even; n] };
+        let mut xs = Vec::with_capacity(n);
+        let mut run = 0.0;
+        for w in &widths {
+            xs.push(run);
+            run += w;
+        }
+        let edge = if sliding { 9.0 } else { 0.0 };
+        let view = room - 2.0 * edge;
+        let at_i = at.min(n - 1);
+        let want = if sliding { self.bar.scroll.target().min(xs[at_i]).max(xs[at_i] + widths[at_i] - view).clamp(0.0, (run - view).max(0.0)) } else { 0.0 };
+        if g.calm || self.frozen || self.bar.slid_for != Some(chip) {
+            self.bar.scroll.jump(want);
+            self.bar.slid_for = Some(chip);
+        } else if self.bar.scroll.target() != want {
+            self.bar.scroll.set(want);
+            g.started_moving();
+        }
+        let scroll = if sliding { self.bar.scroll.value() } else { 0.0 };
+        let start = r.x + pad + edge - scroll;
+        let (inner_l, inner_r) = (r.x + pad + edge, r.right() - pad - edge);
         let slide = self.glide(g, at as f32);
-        g.canvas.rrect(Rect::new(r.x + pad + cell * slide + g.ox, r.y + pad, cell, bh - 2.0 * pad), (bh - 2.0 * pad) * 0.5, t.ice, shown);
+        // The capsule, between the cells it glides across.
+        let i0 = (slide.floor().max(0.0) as usize).min(n - 1);
+        let i1 = (i0 + 1).min(n - 1);
+        let k = (slide - i0 as f32).clamp(0.0, 1.0);
+        let (cx, cw) = (xs[i0] + (xs[i1] - xs[i0]) * k, widths[i0] + (widths[i1] - widths[i0]) * k);
+        if sliding {
+            g.canvas.set_clip(Rect::new(inner_l - 2.0, r.y, inner_r - inner_l + 4.0, r.h).offset(g.ox, 0.0));
+        }
+        g.canvas.rrect(Rect::new(start + cx + g.ox, r.y + pad, cw, bh - 2.0 * pad), (bh - 2.0 * pad) * 0.5, t.ice, shown);
         let now = self.chosen(chip, g.detail);
         for (i, w) in words.iter().enumerate() {
+            let x = start + xs[i];
+            // Half out of sight past an end: fading as it goes under the chevron.
+            let seen = ((x + widths[i]).min(inner_r) - x.max(inner_l)) / widths[i].max(1.0);
+            if sliding && seen <= 0.0 {
+                continue;
+            }
+            let fade = if sliding && seen < 1.0 { (seen * seen).clamp(0.0, 1.0) * 0.6 } else { 1.0 };
             let on = (1.0 - (slide - i as f32).abs()).clamp(0.0, 1.0);
             let rest = if i == now { t.ink } else { t.dim };
-            let w = g.text.fit(w, &cap, cell - 6.0);
+            let w = g.text.fit(w, &cap, widths[i] - 6.0);
             let half = g.measure(&w, cap) * 0.5;
-            g.text_alpha(r.x + pad + cell * (i as f32 + 0.5) - half, r.cy(), &w, cap, mix(rest, t.on_ice, on), shown);
+            g.text_alpha(x + widths[i] * 0.5 - half, r.cy(), &w, cap, mix(rest, t.on_ice, on), shown * fade);
+        }
+        if sliding {
+            g.canvas.clear_clip();
+            let far = (run - view).max(0.0);
+            for (more, x, chevron) in [(scroll > 0.5, r.x + pad + 4.0, "‹"), (scroll < far - 0.5, r.right() - pad - 4.0, "›")] {
+                if more {
+                    let half = g.measure(chevron, cap) * 0.5;
+                    g.text_alpha(x - half, r.cy(), chevron, cap, t.dim, shown);
+                }
+            }
         }
         let name = chip.name();
         let forms = [format!("{name} · enter: set · esc: as it was"), format!("{name} · enter: set"), name.to_owned()];
@@ -1120,8 +1225,15 @@ impl Camera {
         if self.kit.run.is_some() {
             return vec![keys("intervalometer", &[("enter · esc", "Stop it")])];
         }
-        if self.stacking.as_ref().is_some_and(|s| s.live) {
-            return vec![keys("taking it", &[("hold still", "Until the ring is full"), ("esc", "Cancel: no photo")])];
+        if let Some(s) = self.stacking.as_ref().filter(|s| s.live) {
+            return match s.what {
+                camkit::Exposing::Burst => vec![keys("burst", &[("esc", "Stop: keep the sharpest so far")])],
+                camkit::Exposing::Trails => vec![keys("light trails", &[("enter · esc", "Finish: keep the trails")])],
+                _ => vec![keys("taking it", &[("hold still", "Until the ring is full"), ("esc", "Cancel: no photo")])],
+            };
+        }
+        if self.lapse.is_some() {
+            return vec![keys("time-lapse", &[("enter · esc", "Stop: keep every frame")])];
         }
         if self.kit.panel.is_some() {
             return vec![keys("intervalometer", &[("← →", "Change the value"), ("↑ ↓", "How often, how many"), ("enter", "Start"), ("esc · v", "Put it away")])];
@@ -1154,8 +1266,23 @@ impl Camera {
             Mode::Doc => groups.push(keys("doc", &[("enter · space", "Take the page now"), ("↓", "The pages taken")])),
             Mode::Photo | Mode::Pro => groups.push(keys("taking photos", &[("space · enter", "Take the photo"), ("esc", "Stop a night or HDR photo"), ("↓", "The album")])),
             Mode::Pixel => groups.extend(self.pixel_keys()),
+            Mode::Burst => groups.push(keys("burst", &[("space · enter", "Take a burst of ten"), ("s", "Shutter: 1/1000, 1/500, 1/250"), ("esc", "Stop it, keeping the sharpest"), ("↓", "The album")])),
+            Mode::Trails => groups.push(keys("light trails", &[("space · enter", "Start; again to finish"), ("s", "Length: 10 s to 2 min"), ("esc", "Finish, keeping the trails"), ("↓", "The album")])),
+            Mode::Lapse => groups.push(keys("time-lapse", &[("space · enter", "Start; again to stop"), ("s", "A frame every 2 s to 1 min"), ("esc", "Stop, keeping every frame"), ("↓", "The album")])),
         }
-        groups.push(keys("the camera", &[("← →", "Scan, photo, pro, pixel, doc"), ("tab", "The controls bar")]));
+        groups.push(keys("the camera", &[("← →", "The modes, scan to doc"), ("tab", "The controls bar")]));
+        // Burst, trails and the time-lapse: framed as photos are.
+        if matches!(self.mode, Mode::Burst | Mode::Trails | Mode::Lapse) && !self.quick {
+            if self.smart.is_some() {
+                groups.push(keys("lens", &[("↑ · l", "1× or the AI view")]));
+            }
+            if self.mode == Mode::Lapse {
+                groups.push(keys("more", &[("g", "Grid"), ("h", "Level")]));
+            } else {
+                groups.push(keys("more", &[("t", "Self-timer: 2, 10 s"), ("g", "Grid"), ("h", "Level")]));
+            }
+            return groups;
+        }
         if self.mode == Mode::Pixel && !self.quick {
             if self.smart.is_some() {
                 groups.push(keys("lens", &[("l", "1× or the AI view")]));

@@ -111,6 +111,7 @@ mod intro;
 mod ir;
 mod irremote;
 mod keys;
+mod lapse;
 mod lights;
 mod liveactivity;
 mod livemusic;
@@ -766,6 +767,11 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--camera-night-shots") {
         return camera::night_shots(std::path::Path::new(&dir));
+    }
+    // Burst, light trails and the time-lapse (1.5.0).
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--camera-modes-shots") {
+        return camera::modes_shots(std::path::Path::new(&dir));
     }
     // The photo editor and the document scanner (1.0).
     #[cfg(not(target_arch = "aarch64"))]

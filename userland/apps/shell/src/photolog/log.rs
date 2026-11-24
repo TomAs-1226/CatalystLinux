@@ -168,7 +168,12 @@ pub fn markdown(days: &[&Day], heading: &str, h24: bool) -> String {
             for e in &g.entries {
                 let clock = if h24 { e.at.format("%H:%M").to_string() } else { e.at.format("%-I:%M %P").to_string() };
                 let alt = if e.about.caption.is_empty() { e.name.clone() } else { e.about.caption.clone() };
-                out.push_str(&format!("\n![{}](images/{})\n\n", md(&alt), e.name.replace(' ', "%20")));
+                // A time-lapse is a video: linked, as no Markdown viewer shows one inline.
+                if crate::lapse::is_lapse(&e.name) {
+                    out.push_str(&format!("\n[Time-lapse: {}](images/{})\n\n", md(&alt), e.name.replace(' ', "%20")));
+                } else {
+                    out.push_str(&format!("\n![{}](images/{})\n\n", md(&alt), e.name.replace(' ', "%20")));
+                }
                 let mut line = format!("**{clock}**");
                 if !e.about.caption.is_empty() {
                     line.push_str(&format!(" · {}", md(&e.about.caption)));

@@ -102,6 +102,15 @@
 //! steps), and shown with whole pixels; the shutter keeps that very picture,
 //! as PNGs (filters/pixel.rs).
 //!
+//! Burst, light trails and the time-lapse (1.5.0, between pro and pixel;
+//! camera/burst_mode.rs, trails.rs, lapse_mode.rs): about ten frames at a
+//! fast shutter with only the sharpest kept, for a robot crossing the
+//! field; frames laid over each other with the brightest of each kept, the
+//! trails built live in the viewfinder as they are taken; a frame every few
+//! seconds kept as a video Photos plays round and round (lapse.rs). Each
+//! has one setting on `s` and its chip, and the grid, level and timer;
+//! Esc ends a run of them keeping what it has.
+//!
 //! Film looks (1.2): a group of their own in the looks' strip, each with
 //! its own tone and colour, and grain and halation at the strength chosen
 //! there (↑ ↓: off, light, strong). The camera program lays the look's
@@ -159,8 +168,13 @@ use crate::robot::Robot;
 use crate::shell::{Cx, Nav, Screen};
 
 mod bar;
+mod burst_mode;
+mod lapse_mode;
+#[cfg(not(target_arch = "aarch64"))]
+mod modes_shots;
 mod night;
 mod pixel_mode;
+mod trails;
 
 use night::Stacking;
 
@@ -186,6 +200,12 @@ pub fn film_shots(dir: &std::path::Path) {
 #[cfg(not(target_arch = "aarch64"))]
 pub fn night_shots(dir: &std::path::Path) {
     night::shots(dir);
+}
+
+/// Burst, light trails and the time-lapse (`--camera-modes-shots DIR`).
+#[cfg(not(target_arch = "aarch64"))]
+pub fn modes_shots(dir: &std::path::Path) {
+    modes_shots::shots(dir);
 }
 
 /// The preview's size: the panel's height and a little more, at 4:3.
@@ -303,6 +323,8 @@ enum Event {
     /// A stack's frames so far (kind 8).
     Stack(String),
     Failed(String),
+    /// A time-lapse's frames made into its video (lapse_mode.rs).
+    LapseMade(Result<crate::lapse::Made, String>),
 }
 
 /// A saved photo's line from the camera program: its path, then after a tab
@@ -826,6 +848,20 @@ fn run_simulated(live: &Arc<Mutex<Live>>, stop: &AtomicBool, orders: &Receiver<O
                     sim_stack(live, develop, orders, path, t, &words, &mut later);
                     pending.extend(later);
                 }
+                // Light trails and a burst (1.5.0): their frames, their
+                // orders taken as they go.
+                Order::Still(path, words) if still_word(&words, "trails").is_some() => {
+                    let mut later: Vec<Order> = pending.drain(..).collect();
+                    trails::sim_trails(live, develop, orders, path, t, &words, &mut later);
+                    pending.extend(later);
+                }
+                Order::Still(path, words) if still_word(&words, "best").is_some() => {
+                    let mut later: Vec<Order> = pending.drain(..).collect();
+                    burst_mode::sim_best(live, orders, path, t, &words, &mut later);
+                    pending.extend(later);
+                }
+                // A time-lapse's frame, at its own size.
+                Order::Still(path, words) if still_word(&words, "size").is_some() => lapse_mode::sim_small(live, path, t, &words),
                 Order::Still(path, words) => sim_photo(live, path, t, scan, 0, None, &words),
                 // "Dim light" in the simulator: night on.
                 Order::Detail(path, auto, words) => sim_photo(live, path, t, scan, if auto && !night { 0 } else { SIM_BURST }, face, &words),
@@ -1333,13 +1369,28 @@ enum Mode {
     Scan,
     Photo,
     Pro,
+    /// About ten frames, the sharpest kept (1.5.0, camera/burst_mode.rs).
+    Burst,
+    /// Light trails, built live (1.5.0, camera/trails.rs).
+    Trails,
+    /// A frame every few seconds, kept as a video (1.5.0, camera/lapse_mode.rs).
+    Lapse,
     /// A toy camera's pixel pictures (1.2, camera/pixel_mode.rs).
     Pixel,
     /// The document scanner (docscan/, 1.0).
     Doc,
 }
 
-const MODES: [(Mode, &str); 5] = [(Mode::Scan, "scan"), (Mode::Photo, "photo"), (Mode::Pro, "pro"), (Mode::Pixel, "pixel"), (Mode::Doc, "doc")];
+const MODES: [(Mode, &str); 8] = [
+    (Mode::Scan, "scan"),
+    (Mode::Photo, "photo"),
+    (Mode::Pro, "pro"),
+    (Mode::Burst, "burst"),
+    (Mode::Trails, "trails"),
+    (Mode::Lapse, "time-lapse"),
+    (Mode::Pixel, "pixel"),
+    (Mode::Doc, "doc"),
+];
 
 impl Mode {
     fn index(self) -> usize {
@@ -1349,6 +1400,12 @@ impl Mode {
     /// A photo is taken in it (doc mode takes pages, with none of its kit).
     fn shoots(self) -> bool {
         matches!(self, Mode::Photo | Mode::Pro)
+    }
+
+    /// Framed as a photo is: the grid and the level over its picture (the
+    /// photo modes, and burst, trails and the time-lapse).
+    fn framed(self) -> bool {
+        matches!(self, Mode::Photo | Mode::Pro | Mode::Burst | Mode::Trails | Mode::Lapse)
     }
 }
 
@@ -1385,6 +1442,11 @@ struct Prefs {
     /// Night and HDR (1.4.0).
     night: pro::NightMode,
     hdr: pro::HdrMode,
+    /// Burst's shutter (1/N s), light trails' length and the time-lapse's
+    /// interval (s), 1.5.0.
+    burst: u32,
+    trails: u32,
+    lapse: u32,
 }
 
 impl Default for Prefs {
@@ -1400,6 +1462,9 @@ impl Default for Prefs {
             pixel: pixel::Settings::default(),
             night: pro::NightMode::Auto,
             hdr: pro::HdrMode::Auto,
+            burst: burst_mode::SHUTTER_DEFAULT,
+            trails: trails::LENGTH_DEFAULT,
+            lapse: crate::lapse::EVERY_DEFAULT,
         }
     }
 }
@@ -1423,6 +1488,9 @@ impl Prefs {
                 "pixel" => p.pixel = pixel::Settings::from_line(v),
                 "night" => p.night = pro::NightMode::from_name(v).unwrap_or_default(),
                 "hdr" => p.hdr = pro::HdrMode::from_name(v).unwrap_or_default(),
+                "burst" => p.burst = v.parse().ok().filter(|s| burst_mode::SHUTTERS.contains(s)).unwrap_or(p.burst),
+                "trails" => p.trails = v.parse().ok().filter(|s| trails::LENGTHS.contains(s)).unwrap_or(p.trails),
+                "lapse" => p.lapse = v.parse().ok().filter(|s| crate::lapse::EVERY.contains(s)).unwrap_or(p.lapse),
                 _ => p.kit.read(k, v),
             }
         }
@@ -1431,7 +1499,7 @@ impl Prefs {
 
     fn save(&self) {
         let text = format!(
-            "pro={}\nlook={}\nhue={:.0}\nraw={}\nzebras={}\ntexture={}\npixel={}\nnight={}\nhdr={}\n{}",
+            "pro={}\nlook={}\nhue={:.0}\nraw={}\nzebras={}\ntexture={}\npixel={}\nnight={}\nhdr={}\nburst={}\ntrails={}\nlapse={}\n{}",
             self.pro.to_line().replace(' ', ","),
             self.look.id(),
             self.hue,
@@ -1441,6 +1509,9 @@ impl Prefs {
             self.pixel.line(),
             self.night.name(),
             self.hdr.name(),
+            self.burst,
+            self.trails,
+            self.lapse,
             self.kit.lines()
         );
         crate::sys::write_atomic(&Self::file(), text.as_bytes()).ok();
@@ -1599,6 +1670,12 @@ pub struct Camera {
     fly_crisp: bool,
     /// Pixel mode's stills asked for and loop being recorded.
     pixel_state: pixel_mode::State,
+    /// Burst's shutter (1/N s), light trails' length and the time-lapse's
+    /// interval (s), kept; and a time-lapse being taken (1.5.0).
+    burst_shutter: u32,
+    trails_s: u32,
+    lapse_every: u32,
+    lapse: Option<lapse_mode::Taking>,
 }
 
 /// Settings › Camera › Smart camera: how it stands, and how fast its link
@@ -1768,7 +1845,24 @@ impl Camera {
             pixel_flash: Animated::new(0.0, pixel_mode::flash_spring()).with_rest(0.01),
             fly_crisp: false,
             pixel_state: pixel_mode::State::default(),
+            burst_shutter: prefs.burst,
+            trails_s: prefs.trails,
+            lapse_every: prefs.lapse,
+            lapse: None,
         };
+        // A time-lapse left as frames (the Camera closed while one ran, the
+        // battery): made into its video now, behind everything.
+        if crate::lapse::work_root().is_dir() {
+            std::thread::Builder::new()
+                .name("lapse-recover".into())
+                .spawn(|| {
+                    crate::sched::enter(crate::sched::Class::Background);
+                    if !crate::lapse::recover(None).is_empty() {
+                        photos::changed();
+                    }
+                })
+                .ok();
+        }
         camera.hold_smart();
         // The level, if it was on when the Camera was last left.
         if camera.kit.level {
@@ -1796,7 +1890,21 @@ impl Camera {
             interval: self.kit.interval,
             ..Kit::default()
         };
-        Prefs { pro: self.pro, look: self.look, hue: self.hue, raw: self.raw, zebras: self.zebras, kit, texture: self.texture, pixel: self.pixel, night: self.night_mode, hdr: self.hdr_mode }
+        Prefs {
+            pro: self.pro,
+            look: self.look,
+            hue: self.hue,
+            raw: self.raw,
+            zebras: self.zebras,
+            kit,
+            texture: self.texture,
+            pixel: self.pixel,
+            night: self.night_mode,
+            hdr: self.hdr_mode,
+            burst: self.burst_shutter,
+            trails: self.trails_s,
+            lapse: self.lapse_every,
+        }
     }
 
     /// How the camera's thread is to develop frames now: the look (and a
@@ -2002,6 +2110,13 @@ impl Camera {
         if mode == Mode::Pro {
             self.say("keys s i e w: the dials");
         }
+        // Burst, trails and the time-lapse: what the shutter takes.
+        match mode {
+            Mode::Burst => self.say(format!("burst · {} frames, the sharpest kept · s: shutter", burst_mode::FRAMES)),
+            Mode::Trails => self.say("light trails · enter: start, again to finish"),
+            Mode::Lapse => self.say(format!("time-lapse · every {} · enter: start", camkit::duration_words(self.lapse_every))),
+            _ => {}
+        }
         // Whatever was read before is forgotten: scanning starts afresh.
         self.found = None;
         self.found_at = None;
@@ -2080,6 +2195,12 @@ impl Camera {
     /// balance, the look's table and where the photo as taken goes, the RAW;
     /// and whether detail mode merges a burst for it.
     fn still_words(&self, path: &std::path::Path, detail: crate::burst::DetailMode) -> (Vec<String>, Option<bool>, Vec<PathBuf>) {
+        // Burst and light trails (1.5.0): their own exposure and frames.
+        match self.mode {
+            Mode::Burst => return (self.burst_words(), None, Vec::new()),
+            Mode::Trails => return (self.trails_words(), None, Vec::new()),
+            _ => {}
+        }
         let in_pro = self.mode == Mode::Pro;
         let pro = in_pro.then_some(&self.pro);
         let mut words = Vec::new();
@@ -2182,6 +2303,10 @@ impl Camera {
         if self.mode == Mode::Pixel {
             return self.shoot_pixel(calm);
         }
+        // The time-lapse: started (or stopped), its frames on their beat.
+        if self.mode == Mode::Lapse {
+            return self.toggle_lapse(calm);
+        }
         // One photo's picture at a time: the next as soon as the camera has
         // the last one's, while that is still being written.
         if self.saving.is_some() && !self.captured {
@@ -2196,7 +2321,13 @@ impl Camera {
             std::fs::create_dir_all(dir).ok();
         }
         let (words, burst, set) = self.still_words(&path, detail);
-        let stack = words.iter().any(|w| w.starts_with("stack=")).then(|| self.stack_now()).flatten();
+        let stack = if words.iter().any(|w| w.starts_with("best=")) {
+            Some((camkit::Exposing::Burst, self.burst_ring()))
+        } else if words.iter().any(|w| w.starts_with("trails=")) {
+            Some((camkit::Exposing::Trails, self.trails_ring()))
+        } else {
+            words.iter().any(|w| w.starts_with("stack=")).then(|| self.stack_now()).flatten()
+        };
         let order = match burst {
             None => Order::Still(path.clone(), words),
             Some(auto) => Order::Detail(path.clone(), auto, words),
@@ -2520,6 +2651,10 @@ impl Camera {
 
 impl Drop for Camera {
     fn drop(&mut self) {
+        // A time-lapse running: its frames so far made into it all the same.
+        if self.lapse.is_some() {
+            self.make_lapse();
+        }
         self.stop.store(true, Ordering::Relaxed);
         // Closing the program's input ends it (it reads its orders until then).
         if let Control::Program(slot) = &self.control {
@@ -2593,6 +2728,14 @@ impl Screen for Camera {
         if let Some(run) = &self.kit.run {
             want(run.next.saturating_duration_since(now).min(Duration::from_secs(1)).max(Duration::from_millis(50)));
         }
+        // The time-lapse: its next frame, and its seconds and dot (1.5.0);
+        // light trails: their seconds and meter.
+        if let Some(t) = &self.lapse {
+            want(t.next.saturating_duration_since(now).clamp(Duration::from_millis(50), Duration::from_millis(250)));
+        }
+        if self.trails_running() {
+            want(Duration::from_millis(50));
+        }
         if self.kit.level && self.kit.imu.is_some() {
             // My own tuning: 15 a second follows a hand turning it.
             want(Duration::from_millis(66));
@@ -2610,7 +2753,7 @@ impl Screen for Camera {
     /// The intervalometer running: the screen dims (and never goes off),
     /// the handheld stays awake.
     fn holds_dim(&self) -> bool {
-        self.kit.run.is_some()
+        self.kit.run.is_some() || self.lapse.is_some()
     }
 
     fn key(&mut self, key: Key, cx: &mut Cx) -> Nav {
@@ -2641,11 +2784,27 @@ impl Screen for Camera {
             return Nav::Stay;
         }
         let main = self.lens == Lens::Main && self.mode.shoots();
+        let framed = self.lens == Lens::Main && self.mode.framed();
         // A Night or HDR photo being taken: Esc cancels it, and nothing else
-        // changes what it is taking.
-        if self.stacking.as_ref().is_some_and(|s| s.live) {
-            if matches!(key, Key::Back | Key::Leave) {
-                self.cancel_stacking();
+        // changes what it is taking. A burst or light trails: Esc ends it,
+        // keeping what it has (Enter too, for the trails: done).
+        if let Some(s) = self.stacking.as_ref().filter(|s| s.live) {
+            let (trails, keeps) = (s.what == camkit::Exposing::Trails, s.keeps());
+            match key {
+                Key::Back | Key::Leave if keeps => self.end_keeping(),
+                Key::Enter | Key::Char(' ') if trails => self.end_keeping(),
+                Key::Back | Key::Leave => self.cancel_stacking(),
+                _ => {}
+            }
+            return Nav::Stay;
+        }
+        // A time-lapse running: Enter or Esc stops it (keeping every frame),
+        // and nothing else changes what it is taking.
+        if self.lapse.is_some() {
+            if matches!(key, Key::Enter | Key::Char(' ') | Key::Back | Key::Leave) {
+                self.stop_lapse();
+            } else if !matches!(key, Key::Char('?')) {
+                self.say("taking a time-lapse · enter: stop");
             }
             return Nav::Stay;
         }
@@ -2789,8 +2948,12 @@ impl Screen for Camera {
                 self.say(if self.kit.readout { "timing readout on" } else { "timing readout off" });
             }
             Key::Char('t') => self.set_timer(camkit::next_timer(self.timer)),
-            Key::Char('g') if main => self.set_grid(self.kit.grid.next()),
-            Key::Char('h') if main => self.set_level(!self.kit.level),
+            Key::Char('g') if framed => self.set_grid(self.kit.grid.next()),
+            Key::Char('h') if framed => self.set_level(!self.kit.level),
+            // Burst's shutter, light trails' length, the time-lapse's interval.
+            Key::Char('s') if self.mode == Mode::Burst => self.step_burst_shutter(),
+            Key::Char('s') if self.mode == Mode::Trails => self.step_trails_length(),
+            Key::Char('s') if self.mode == Mode::Lapse => self.step_lapse_every(),
             Key::Char('o') if main && !self.quick => {
                 self.kit.aspect = self.kit.aspect.next();
                 self.kit.overlay = camkit::Overlay::default();
@@ -2889,6 +3052,8 @@ impl Screen for Camera {
                 }
             }
         }
+        // The time-lapse: its next frame, or made once stopped (1.5.0).
+        self.tick_lapse(now);
         // A photo the camera never finished: given up on at the step it
         // stopped at (each bounded: catalyst-camera's own waits are shorter),
         // said, and logged with its marks.
@@ -3106,6 +3271,16 @@ impl Screen for Camera {
                 changed = true;
                 continue;
             }
+            // A time-lapse's frame: counted, not a photo of the album's.
+            if let Event::Saved { path, .. } = &event {
+                if self.lapse_frame_saved(path) {
+                    changed = true;
+                    continue;
+                }
+            }
+            if matches!(event, Event::Failed(_)) {
+                self.lapse_frame_failed();
+            }
             // Doc mode's photo: its page goes to the document, not the album.
             if let Event::Saved { path, .. } = &event {
                 if self.doc.as_mut().is_some_and(|f| f.took(path)) {
@@ -3201,6 +3376,7 @@ impl Screen for Camera {
                     self.end_stacking();
                     self.say("cancelled: no photo");
                 }
+                Event::LapseMade(made) => self.lapse_made(made),
                 Event::Failed(why) => {
                     self.end_stacking();
                     self.pending = self.pending.saturating_sub(1);
@@ -3307,7 +3483,7 @@ impl Screen for Camera {
         // The aspect's frame (the rest dimmed), its grid and the level: the
         // shapes worked out once for the viewfinder and kept until a setting
         // changes (camkit's Overlay), the level only as it turns.
-        if self.mode.shoots() && whole_view && ka < 0.999 {
+        if self.mode.framed() && whole_view && ka < 0.999 {
             let a = 1.0 - ka;
             self.kit.overlay.update(self.kit.grid, self.kit.aspect, (vf.x, vf.y, vf.w, vf.h));
             for &(x, y, w, h) in &self.kit.overlay.bars {
@@ -3382,6 +3558,14 @@ impl Screen for Camera {
         if main > 0.01 && self.mode == Mode::Pixel && self.lens == Lens::Main {
             self.draw_pixel_overlays(g, above, main * (1.0 - note));
         }
+        // Burst, trails and the time-lapse: what the shutter takes, at rest;
+        // light trails and a time-lapse, as they are taken.
+        if main > 0.01 && matches!(self.mode, Mode::Burst | Mode::Trails | Mode::Lapse) && self.lens == Lens::Main {
+            self.draw_mode_chip(g, above, main * (1.0 - note));
+            let top = if note > 0.01 { 7.0 + ty.caption.size + 12.0 } else { 0.0 };
+            self.draw_trails(g, vf, top);
+            self.draw_lapse(g, vf, top);
+        }
         // The shutter's flash.
         let flash = self.flash.value();
         if flash > 0.01 {
@@ -3431,8 +3615,8 @@ impl Screen for Camera {
         let dots = ".".repeat(self.dots_drawn.max(1));
         let mut said = true;
         let room = vf.w - 14.0 - 16.0 - (h - 2.0);
-        if self.stacking.as_ref().is_some_and(|s| s.live) {
-            // The ring says it all.
+        if self.stacking.as_ref().is_some_and(|s| s.live) || self.lapse.is_some() {
+            // The ring (or the trails', or the time-lapse's own) says it all.
         } else if let Some((words, left)) = self.kit.shot.as_ref().and_then(|t| t.hold_still(now)) {
             // The longest form that fits at this text size (its width kept
             // as the seconds count down).
@@ -4314,6 +4498,37 @@ impl Camera {
                 }
                 if self.timer > 0 && self.countdown.is_none() {
                     g.text_at(sx, sy, Align::Center, &format!("{}s", self.timer), ty.caption, t.ground);
+                }
+            }
+            // Burst, trails, the time-lapse: the disc with the mode's mark
+            // cut from it; while trails or a time-lapse run, a stop in the
+            // signal colour, the ring filling with the length or toward the
+            // next frame.
+            Mode::Burst | Mode::Trails | Mode::Lapse => {
+                let running = self.lapse.is_some() || self.trails_running();
+                if running {
+                    let side = inner * 0.95;
+                    g.canvas.rrect(Rect::new(sx - side * 0.5 + g.ox, sy - side * 0.5, side, side), side * 0.22, t.signal, 1.0);
+                    let toward = match &self.lapse {
+                        Some(l) => l.toward_next(Instant::now()),
+                        None => self.stacking.as_ref().map_or(0.0, night::Stacking::fill),
+                    };
+                    if toward > 0.01 {
+                        g.canvas.arc(sx + g.ox, sy, ring - 1.25, 2.5, -std::f32::consts::FRAC_PI_2, toward.clamp(0.0, 1.0) * std::f32::consts::TAU, t.signal, 1.0);
+                    }
+                } else {
+                    let a = if self.saving.is_some() && !self.captured { 0.45 } else { 1.0 };
+                    g.canvas.rrect(Rect::new(sx - inner + g.ox, sy - inner, inner * 2.0, inner * 2.0), inner, t.ink, a);
+                    if self.timer > 0 && self.countdown.is_none() && self.mode != Mode::Lapse {
+                        g.text_at(sx, sy, Align::Center, &format!("{}s", self.timer), ty.caption, t.ground);
+                    } else {
+                        let icon = match self.mode {
+                            Mode::Burst => "burst_mode",
+                            Mode::Trails => "gesture",
+                            _ => "timelapse",
+                        };
+                        g.icon_alpha(icon, true, sx, sy, inner * 1.05, t.ground, a);
+                    }
                 }
             }
             Mode::Scan => g.icon("qr_code_scanner", false, sx, sy, 18.0, t.ink),
@@ -5520,6 +5735,7 @@ mod tests {
                 }
                 Event::Saved { path, size, detail, .. } => Some((path, size, detail)),
                 Event::Failed(why) => panic!("{why}"),
+                Event::LapseMade(_) => None,
             });
         }
         let (got, size, detail) = saved.expect("the photo is taken");

@@ -71,6 +71,10 @@ pub enum Exposing {
     /// Night's and HDR's stacks (1.4.0): merged as they come.
     Night,
     Hdr,
+    /// Light trails and a burst (1.5.0): the brightest of each frame laid
+    /// over the last, and the sharpest of about ten kept.
+    Trails,
+    Burst,
 }
 
 impl Exposing {
@@ -80,13 +84,16 @@ impl Exposing {
             "bracket" => Exposing::Bracket,
             "night" => Exposing::Night,
             "hdr" => Exposing::Hdr,
+            "trails" => Exposing::Trails,
+            "burst" => Exposing::Burst,
             _ => Exposing::Still,
         }
     }
 
-    /// A stack, whose "hold still" is the countdown ring.
+    /// A run of frames the camera program tells as they come (kind 8),
+    /// whose "hold still" is the Camera's own (the ring, the trails' chip).
     pub fn stack(self) -> bool {
-        matches!(self, Exposing::Night | Exposing::Hdr)
+        matches!(self, Exposing::Night | Exposing::Hdr | Exposing::Trails | Exposing::Burst)
     }
 }
 
@@ -109,13 +116,17 @@ impl StackNews {
 }
 
 /// A saved photo's stack, from catalyst-camera's line ("… night 5 8 …"):
-/// what it was for, the frames merged and asked.
+/// what it was for, the frames merged and asked; light trails' frames and
+/// milliseconds ("trails 186 12400"); a burst's frame kept and of how many
+/// ("best 4 10").
 pub fn read_stacked(took: &str) -> Option<(Exposing, u32, u32)> {
     let words: Vec<&str> = took.split_whitespace().collect();
     words.windows(3).find_map(|w| {
         let what = match w[0] {
             "night" => Exposing::Night,
             "hdr" => Exposing::Hdr,
+            "trails" => Exposing::Trails,
+            "best" => Exposing::Burst,
             _ => return None,
         };
         Some((what, w[1].parse().ok()?, w[2].parse().ok()?))
@@ -229,6 +240,8 @@ impl Timeline {
             Exposing::Bracket => "bracket · hold still",
             Exposing::Night => "night · hold still",
             Exposing::Hdr => "hdr · hold still",
+            Exposing::Trails => "trails · hold still",
+            Exposing::Burst => "burst · hold still",
         };
         Some((words.to_owned(), left))
     }

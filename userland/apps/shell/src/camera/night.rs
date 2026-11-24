@@ -19,6 +19,11 @@
 //! - **The lock** (`e` in photo mode): the exposure read on the middle of the
 //!   picture, then held, until `e` again (or another mode).
 //!
+//! **Burst and light trails** (1.5.0, camera/burst_mode.rs, trails.rs) are
+//! runs of frames told as they come too, and go through [`Stacking`]: a
+//! burst's ring counts its frames, the trails draw a meter of their own over
+//! the trails as they are made; Esc ends either, keeping what is taken.
+//!
 //! **The countdown ring**: over the picture held as it was (then the stack's
 //! own first frame, small, in its place), a ring that fills as the frames
 //! come, the seconds left in it and "hold still" under it; Esc cancels.
@@ -54,7 +59,13 @@ impl Stacking {
         // As catalyst-camera reckons it (still.h's stack_expect_ms): the
         // first frame at two of its lengths, then each its length and a merge.
         let frame = plan.frame_us.max(66_667) as f32 / 1e6;
-        let expect = 2.0 * frame + plan.frames.saturating_sub(1) as f32 * (frame + 0.06);
+        let expect = match what {
+            // Light trails: their length.
+            camkit::Exposing::Trails => plan.frames as f32 * plan.frame_us as f32 / 1e6,
+            // A burst's frames come at every other one the sensor sends.
+            camkit::Exposing::Burst => 2.0 * frame * plan.frames as f32,
+            _ => 2.0 * frame + plan.frames.saturating_sub(1) as f32 * (frame + 0.06),
+        };
         let mut shown = Animated::new(0.0, role::effect()).with_rest(0.002);
         shown.set(1.0);
         Stacking {
@@ -74,6 +85,10 @@ impl Stacking {
     /// How far through it is, 0 to 1: by its frames as told, and between
     /// them by the time a frame takes (never past the next frame's mark).
     pub fn progress(&self, now: Instant) -> f32 {
+        // Light trails: by their length, as the seconds go.
+        if self.what == camkit::Exposing::Trails {
+            return (1.0 - self.left(now) / self.expect.as_secs_f32().max(0.01)).clamp(0.0, 1.0);
+        }
         let per = self.expect.as_secs_f32() / self.planned as f32;
         match self.news {
             Some((n, at)) => {
@@ -82,6 +97,43 @@ impl Stacking {
             }
             None => (now.saturating_duration_since(self.began).as_secs_f32() / self.expect.as_secs_f32().max(0.01) * 0.9).clamp(0.0, 1.0 / self.planned as f32),
         }
+    }
+
+    /// How far in sight it is (0 to 1), and its fill as drawn.
+    pub fn faded(&self) -> f32 {
+        self.shown.value()
+    }
+
+    pub fn fill(&self) -> f32 {
+        self.ring.value()
+    }
+
+    /// Frames taken so far, as the camera program tells them (the first is
+    /// there from the start).
+    pub fn taken(&self) -> u32 {
+        self.news.map_or(1, |(n, _)| n.taken.max(1))
+    }
+
+    /// Seconds it has run: by the camera program's own clock once it says
+    /// (its length less what it has left), else since it was asked for.
+    pub fn elapsed(&self, now: Instant) -> f32 {
+        match self.news {
+            Some(_) => (self.expect.as_secs_f32() - self.left(now)).max(0.0),
+            None => now.saturating_duration_since(self.began).as_secs_f32(),
+        }
+    }
+
+    /// Held where a picture of it wants it (the shots): in sight, filled so far.
+    #[cfg(not(target_arch = "aarch64"))]
+    pub fn hold_for_shot(&mut self, fill: f32) {
+        self.ring.jump(fill);
+        self.shown.jump(1.0);
+    }
+
+    /// A run that keeps what it has when ended (a burst, light trails),
+    /// not a stack Esc cancels.
+    pub fn keeps(&self) -> bool {
+        matches!(self.what, camkit::Exposing::Burst | camkit::Exposing::Trails)
     }
 
     /// The seconds left, by the camera program's own reckoning once it says.
@@ -96,6 +148,12 @@ impl Stacking {
 /// What a saved stack says: its frames ("night · 8 frames merged", or "5 of
 /// 8" where the hand moved), and the binned size where memory made it so.
 pub(super) fn saved_words((what, merged, planned): (camkit::Exposing, u32, u32), size: (u32, u32)) -> String {
+    // A burst's and the trails' own (1.5.0).
+    match what {
+        camkit::Exposing::Burst => return super::burst_mode::saved_words(merged, planned),
+        camkit::Exposing::Trails => return super::trails::saved_words(merged, planned),
+        _ => {}
+    }
     let name = if what == camkit::Exposing::Hdr { "hdr" } else { "night" };
     let frames = if merged < planned { format!("{merged} of {planned} frames") } else { format!("{merged} frames merged") };
     if size.0.max(size.1) < 2000 {
@@ -132,6 +190,19 @@ impl Camera {
             s.live = false;
             s.shown.set(0.0);
         }
+    }
+
+    /// Esc (or Enter, for light trails) while a burst or the trails are
+    /// taken: ended now, keeping what is taken.
+    pub(super) fn end_keeping(&mut self) {
+        let Some(s) = &mut self.stacking else { return };
+        if s.ended || s.cancelled {
+            return;
+        }
+        s.ended = true;
+        let burst = s.what == camkit::Exposing::Burst;
+        self.control.send(Order::StackEnd);
+        self.say(if burst { "stopped: keeping the sharpest so far" } else { "finishing the trails" });
     }
 
     /// Esc while a stack is taken: no photo.
@@ -175,7 +246,8 @@ impl Camera {
         self.steadiness.feed(&r, dt);
         let jolted = self.steadiness.jolted(&r);
         if let Some(s) = &mut self.stacking {
-            if s.live && jolted && !s.ended && !s.cancelled {
+            // (A burst or light trails go on: a light painted is the hand moving.)
+            if s.live && jolted && !s.ended && !s.cancelled && !s.keeps() {
                 s.ended = true;
                 self.control.send(Order::StackEnd);
                 self.say("moved: keeping what is merged");
@@ -219,7 +291,7 @@ impl Camera {
         }
         changed |= self.hdr_sense.feed(&self.tones, self.guard.ev, dt);
         // The motion sensor, while Night is in play or a stack is taken.
-        let want = self.night_on() || self.stacking.is_some();
+        let want = self.night_on() || self.stacking.as_ref().is_some_and(|s| !s.keeps());
         if want != self.night_imu.is_some() {
             self.night_imu = want.then(|| crate::imu::hold(crate::imu::Use::Motion));
             if !want {
@@ -292,6 +364,10 @@ impl Camera {
     /// and "hold still" under it.
     pub(super) fn draw_stacking(&mut self, g: &mut Gfx, vf: Rect) {
         let Some(s) = &mut self.stacking else { return };
+        // Light trails draw their own, over the trails (trails.rs).
+        if s.what == camkit::Exposing::Trails {
+            return;
+        }
         if g.calm {
             s.ring.jump(s.ring.target());
             s.shown.jump(s.shown.target());
@@ -312,16 +388,32 @@ impl Camera {
         let fill = s.ring.value().clamp(0.0, 1.0);
         g.canvas.arc(cx, cy, r, 4.0, 0.0, fill * std::f32::consts::TAU, t.signal, a);
         let left = s.left(now);
-        let words = if s.cancelled { "…".to_owned() } else { format!("{left:.1}") };
+        let burst = s.what == camkit::Exposing::Burst;
+        // A burst counts its frames; a stack, its seconds.
+        let words = if s.cancelled || (burst && s.ended) {
+            "…".to_owned()
+        } else if burst {
+            s.taken().to_string()
+        } else {
+            format!("{left:.1}")
+        };
         let big = ty.display(20.0);
         let half = g.measure(&words, big) * 0.5;
         g.text_alpha(vf.cx() - half, cy - 3.0, &words, big, white, a);
-        let unit = "s";
+        let of = format!("of {}", s.planned);
+        let unit = if burst { of.as_str() } else { "s" };
         let unit_x = vf.cx() - g.measure(unit, ty.caption) * 0.5;
         g.text_alpha(unit_x, cy + 13.0, unit, ty.caption, white, 0.7 * a);
         // Under it: what it is, and how to stop it.
-        let what = if s.what == camkit::Exposing::Hdr { "hdr" } else { "night" };
-        let forms = [format!("{what} · hold still · esc: cancel"), format!("{what} · hold still"), "hold still".to_owned()];
+        let what = match s.what {
+            camkit::Exposing::Hdr => "hdr",
+            _ => "night",
+        };
+        let forms = if burst {
+            ["burst · esc: keep the sharpest so far".to_owned(), "burst · esc: keep the sharpest".to_owned(), "burst".to_owned()]
+        } else {
+            [format!("{what} · hold still · esc: cancel"), format!("{what} · hold still"), "hold still".to_owned()]
+        };
         let cap = ty.caption;
         let label = forms.iter().find(|f| g.measure(f, cap) + 16.0 <= vf.w - 16.0).unwrap_or(&forms[2]).clone();
         let w = g.measure(&label, cap) + 16.0;
