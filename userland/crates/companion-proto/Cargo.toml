@@ -1,6 +1,6 @@
 [package]
 name = "catalyst-companion-proto"
-description = "What the handheld's companion service and the computer's companion app agree on: the ports, pairing (SPAKE2 bound to the TLS certificate) and the backup stream."
+description = "What the handheld's companion service and the computer's companion app agree on: the ports, pairing (SPAKE2 bound to the TLS certificate), the backup stream, the seal Team and Claude share, and Claude's bridge protocol."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,3 +11,10 @@ license.workspace = true
 spake2 = "0.4"
 hmac = "0.12"
 sha2 = "0.10"
+# The seal (seal.rs), as the shell's vault and Team have it: XChaCha20-Poly1305,
+# RustCrypto's pure Rust, nonces from the system's random source.
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"] }
+getrandom = "0.4"
+zeroize = "1"
+# Claude's messages (claude.rs) are JSON inside the seal.
+serde_json = "1"

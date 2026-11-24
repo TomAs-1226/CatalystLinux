@@ -9,37 +9,21 @@
 //!   ("catalyst-team id", 8 bytes in every packet so another team's packets
 //!   are let go without trying them) cannot be worked back to the key or to
 //!   each other.
-//! - **The seal**: XChaCha20-Poly1305, as the Vault's: the A53 runs ChaCha at
+//! - **The seal** (companion-proto's `seal`, which Claude's messages use
+//!   too): XChaCha20-Poly1305, as the Vault's: the A53 runs ChaCha at
 //!   full speed without AES instructions, and its 24-byte nonce is drawn at
 //!   random for every packet, so no counter has to survive a restart and two
 //!   handhelds never need to agree on one (a repeat is a 2^-96 chance after
 //!   2^48 packets). The packet's header is the associated data: a sender, a
 //!   team or a count changed in transit does not open.
 
-use chacha20poly1305::aead::{AeadInOut, KeyInit};
-use chacha20poly1305::{Key, Tag, XChaCha20Poly1305, XNonce};
-use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-pub const KEY_LEN: usize = 32;
-pub const NONCE_LEN: usize = 24;
-pub const TAG_LEN: usize = 16;
-/// What a seal adds to what it seals.
-pub const OVERHEAD: usize = NONCE_LEN + TAG_LEN;
-
-/// SHA-256 of `label`, a zero and `secret`.
-pub fn derive(label: &[u8], secret: &[u8]) -> Zeroizing<[u8; 32]> {
-    let mut h = Sha256::new();
-    h.update(label);
-    h.update([0u8]);
-    h.update(secret);
-    Zeroizing::new(h.finalize().into())
-}
-
-/// Bytes from the kernel's random source.
-pub fn random(buf: &mut [u8]) -> bool {
-    getrandom::fill(buf).is_ok()
-}
+// The seal itself lives in companion-proto, shared with Claude's bridge
+// protocol: one implementation for every sealed message the handheld sends.
+pub use catalyst_companion_proto::seal::{derive, open_with, random, seal_with, KEY_LEN, OVERHEAD};
+#[cfg(test)]
+pub use catalyst_companion_proto::seal::NONCE_LEN;
 
 /// A team's key, with what is derived from it.
 #[derive(Clone)]
@@ -92,38 +76,4 @@ impl TeamKey {
     pub fn open(&self, aad: &[u8], sealed: &[u8]) -> Option<Vec<u8>> {
         open_with(&self.seal, aad, sealed)
     }
-}
-
-fn cipher(key: &[u8; KEY_LEN]) -> XChaCha20Poly1305 {
-    let key: &Key = key[..].try_into().expect("a 32-byte key");
-    XChaCha20Poly1305::new(key)
-}
-
-/// Seal with any 32-byte key (a join's key, from SPAKE2).
-pub fn seal_with(key: &[u8; KEY_LEN], aad: &[u8], plain: &[u8]) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(OVERHEAD + plain.len());
-    out.resize(NONCE_LEN, 0);
-    if !random(&mut out[..NONCE_LEN]) {
-        return None;
-    }
-    out.extend_from_slice(plain);
-    let (nonce, body) = out.split_at_mut(NONCE_LEN);
-    let nonce: &XNonce = (&*nonce).try_into().expect("a 24-byte nonce");
-    let tag: Tag = cipher(key).encrypt_inout_detached(nonce, aad, body.into()).ok()?;
-    out.extend_from_slice(&tag);
-    Some(out)
-}
-
-/// Open what [`seal_with`] sealed.
-pub fn open_with(key: &[u8; KEY_LEN], aad: &[u8], sealed: &[u8]) -> Option<Vec<u8>> {
-    if sealed.len() < OVERHEAD {
-        return None;
-    }
-    let (nonce, rest) = sealed.split_at(NONCE_LEN);
-    let (body, tag) = rest.split_at(rest.len() - TAG_LEN);
-    let nonce: &XNonce = nonce.try_into().ok()?;
-    let tag: &Tag = tag.try_into().ok()?;
-    let mut plain = body.to_vec();
-    cipher(key).decrypt_inout_detached(nonce, aad, (&mut plain[..]).into(), tag).ok()?;
-    Some(plain)
 }

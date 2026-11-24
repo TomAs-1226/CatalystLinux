@@ -4,6 +4,8 @@ members = [
     "crates/detent", "crates/bezel", "crates/nt4", "crates/apriltag", "crates/localmodel", "crates/speech", "apps/shell", "apps/play", "apps/update", "apps/flasher", "apps/ai-cli",
     # The computer companion: the handheld's service, the Windows app, and what they share.
     "crates/companion-proto", "apps/companiond", "apps/companion",
+    # Claude from the handheld: the bridge Companion runs on the computer.
+    "crates/claude-bridge",
     # Music's sound after the decoder (spatial, the equalizer, loudness,
     # crossfades), and the AirPods' own protocol.
     "crates/audiofx", "crates/aap",
@@ -26,6 +28,7 @@ localmodel = { path = "crates/localmodel" }
 catalyst-kit = { path = "crates/kit" }
 catalyst-appkg = { path = "crates/appkg" }
 catalyst-companion-proto = { path = "crates/companion-proto" }
+catalyst-claude-bridge = { path = "crates/claude-bridge" }
 speech = { path = "crates/speech" }
 audiofx = { path = "crates/audiofx" }
 aap = { path = "crates/aap" }

@@ -663,6 +663,8 @@ pub fn hue_of(name: &str, icon: &str) -> u8 {
         "HTTP" => 290,
         "Share" => 185,
         "Assistant" => 265,
+        // Claude's own warm clay.
+        "Claude" => 15,
         "Web" => 220,
         "Music" => 345,
         "Settings" => 205,
@@ -721,6 +723,7 @@ pub fn about(name: &str) -> Option<&'static str> {
         "HTTP" => "requests sent, replies read",
         "Share" => "anything as a QR code",
         "Assistant" => "ask; it uses the robot's tools",
+        "Claude" => "your laptop's Claude Code sessions",
         "Web" => "pages as text, in lynx",
         "Music" => "YouTube Music, playing on behind",
         "Settings" => "how this handheld looks and works",

@@ -74,6 +74,7 @@ mod calc;
 mod capture;
 mod catalogue;
 mod changelog;
+mod claude;
 mod clipboard;
 #[cfg(not(target_arch = "aarch64"))]
 mod cjk_shots;
@@ -717,6 +718,12 @@ fn main() {
     if let Some(dir) = value("--strategy-shots") {
         tour_fixtures();
         return strategy::shots(std::path::Path::new(&dir));
+    }
+    // Claude: the laptop's Claude Code sessions, through its bridge (1.2).
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--claude-shots") {
+        tour_fixtures();
+        return claude::shots::shots(std::path::Path::new(&dir));
     }
     // Team: messages between handhelds at the event (1.0).
     #[cfg(not(target_arch = "aarch64"))]

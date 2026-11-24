@@ -11,6 +11,9 @@
 //!     catalyst-companion --check HOST --code 123456
 //!                                            pairs and tries every request, no window
 //!     catalyst-companion --youtube-sign-in   the sign-in window (the app starts it)
+//!     catalyst-companion --claude-bridge     Claude on the handheld: the bridge, in the tray
+//!     catalyst-companion --claude-approver   its permission tool (Claude Code runs it)
+//!     catalyst-companion --claude-shot DIR   the bridge's window, as PNGs (made-up computer)
 //!
 //! Trying the window where no one sits at it: `CATALYST_COMPANION_SHOTS=DIR`
 //! saves the window on F12 (and on a driven `shot`), and
@@ -22,10 +25,13 @@
 
 mod app;
 mod backup;
+mod claude;
 mod github;
 mod jobs;
 mod net;
 mod store;
+#[cfg(windows)]
+mod tray;
 mod ui;
 mod win;
 mod youtube;
@@ -46,6 +52,17 @@ fn main() {
     let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     if args.iter().any(|a| a == "--youtube-sign-in") {
         youtube::window();
+    }
+    // Claude on the handheld (claude.rs): the bridge, and the permission
+    // tool its turns of Claude Code run.
+    if args.iter().any(|a| a == "--claude-approver") {
+        std::process::exit(claude::approver_main());
+    }
+    if args.iter().any(|a| a == "--claude-bridge") {
+        std::process::exit(claude::bridge_main(args.iter().any(|a| a == "--show")));
+    }
+    if let Some(dir) = value("--claude-shot") {
+        return claude::shots(PathBuf::from(dir));
     }
     if let Some(dir) = value("--shot") {
         return shots(PathBuf::from(dir));
@@ -195,8 +212,13 @@ fn window() {
 fn window() {}
 
 fn save_png(canvas: &Canvas, path: &std::path::Path) {
+    save_png_size(canvas, path, W, H);
+}
+
+/// A canvas `w` × `h` as a PNG.
+pub(crate) fn save_png_size(canvas: &Canvas, path: &std::path::Path, w: usize, h: usize) {
     let file = std::fs::File::create(path).expect("a png");
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), W as u32, H as u32);
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w as u32, h as u32);
     enc.set_color(png::ColorType::Rgb);
     enc.set_depth(png::BitDepth::Eight);
     let mut w = enc.write_header().expect("png");

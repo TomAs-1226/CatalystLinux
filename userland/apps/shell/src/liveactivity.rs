@@ -57,6 +57,9 @@ pub enum Kind {
     Robot,
     /// AirPods connecting: their battery, for a moment (airpods.rs).
     Headphones,
+    /// Claude working in a session on the laptop, or waiting on an answer
+    /// (claude/).
+    Claude,
 }
 
 /// What leads an activity: an icon in its tint, a cover, or a coloured dot.
@@ -522,6 +525,8 @@ impl Task {
 pub fn from_task(t: &Task) -> Activity {
     let (icon, priority) = match t.kind {
         Kind::Assistant => ("auto_awesome", 50),
+        // Above the Assistant: a permission request costs Claude's turn.
+        Kind::Claude => (crate::claude::ICON, 52),
         _ => ("download", 40),
     };
     let id = format!("task {}", t.id);
@@ -538,7 +543,11 @@ pub fn from_task(t: &Task) -> Activity {
                 None if t.kind == Kind::Assistant => format!("{} {elapsed}", if t.title.starts_with("Loading") { "loading" } else { t.detail.split(" · ").next().unwrap_or_default() }),
                 None => t.detail.clone(),
             };
-            let mut a = Activity::new(t.kind, &id, priority, Mark::Icon(icon, Tint::Ice), t.title.clone(), t.detail.clone(), short);
+            // Claude waiting on an answer: in the signal colour, and it needs doing now.
+            let asking = t.kind == Kind::Claude && t.detail.starts_with("approval");
+            let mark = if asking { Mark::Icon("front_hand", Tint::Signal) } else { Mark::Icon(icon, Tint::Ice) };
+            let mut a = Activity::new(t.kind, &id, priority, mark, t.title.clone(), t.detail.clone(), short);
+            a.urgent = asking;
             a.meter = t.progress.map(Meter::Fraction);
             a.value = Some(match t.progress {
                 Some(p) => format!("{:.0}%", p * 100.0),

@@ -15,8 +15,10 @@ windows that grow out of tiles whenever it is there.
 | `userland/crates/bezel` | Bezel on the CPU: tonal surfaces, the two type voices, Material Symbols, and the full glass pass (refraction, frost, edge light, groups, shadow). |
 | `userland/crates/nt4` | A NetworkTables 4.1 client: one thread, read-only, reconnects on its own. |
 | `userland/crates/apriltag` | AprilTag detection: AprilRobotics' C library (3.4.5, BSD 2-Clause, vendored with the 36h11 family FRC uses) behind a small flat shim, with each tag's pose. |
-| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, Camera, Photos, AprilTag, Graphs, Pit, Batteries, Scout, Strategy, Team, Remote, Level, Compass, Weather, Calculator, Clock, Notes, Units, Mech, Gamepad, HTTP, Share, Browse, Rulebook, Assistant, Web, Music, Settings) and the launcher for external ones. |
+| `userland/apps/shell` | `catalyst-shell`: the start animation, first-boot setup, Home, search, the glance page, the control centre, recent apps, the built-in apps (Robot, Health, Logs with its trends, Schedule, Tables, Loop, Motors, Console, Terminal, Files, Git, Catalogue, Monitor, Net tools, Connect, Actions, Camera, Photos, AprilTag, Graphs, Pit, Batteries, Scout, Strategy, Team, Remote, Level, Compass, Weather, Calculator, Clock, Notes, Units, Mech, Gamepad, HTTP, Share, Browse, Rulebook, Assistant, Claude, Web, Music, Settings) and the launcher for external ones. |
 | `userland/apps/update` | `catalyst-update`: system updates on the handheld (A/B, tried once, rolled back if it does not come up), and the release tool that makes and signs them. |
+| `userland/crates/claude-bridge` | Claude from the handheld, the laptop's side: Claude Code's sessions listed, continued and started through the `claude` CLI, its permission prompts sent to the handheld, all sealed end to end. Catalyst Companion runs it (`--claude-bridge`). |
+| `shots/1.2-claude/` | The handheld's Claude app (`--claude-shots`) and the laptop's bridge window (`catalyst-companion --claude-shot`). |
 | `userland/apps/flasher` | Catalyst Flasher: the newest release onto an SD card in one go. |
 | `userland/assets/app-icon` | Catalyst's icon (the FrcCatalyst bolt) at each size Windows uses, built into the simulator; `assets/` holds it for Raspberry Pi Imager's listing. |
 | `os/` | The Buildroot external tree: board config, kernel and BusyBox fragments, M5Stack driver package, OpenRC services, image layout. |
@@ -786,7 +788,8 @@ timers (and the stopwatch while it runs), the team's next match (a countdown
 to queueing, then "queue now", in its alliance's colour), a reminder due in
 the next 15 minutes, downloads (the update, the catalogue's installs, and
 anything else that says it is working), the Assistant thinking or the
-on-device model loading, and the robot while it is enabled. The most
+on-device model loading, Claude working in a laptop session (in the signal
+colour while it waits on an answer), and the robot while it is enabled. The most
 important one fills the island; a second sits beside it in a glass bubble
 of its own. When one changes (a new song, a timer's last minute, "queue
 now", a download done) the island opens to show it for 3.5 s. The lock
@@ -2482,6 +2485,8 @@ an album, and QR codes read. The AprilTag reader is still there beside it.
     has joined;
   - a web address opens in the Web app (lynx). Only `http` and `https` are
     opened, and the address is passed quoted, so a code cannot run a command;
+  - a laptop's Claude pairing code (Catalyst Companion's *Claude on the
+    handheld*) offers to pair with it (see *Claude*);
   - anything else is shown as text, on a page of its own.
 - **Photos** (the album) is a grid of thumbnails, newest first, four across.
   The thumbnails are made on a thread and kept in `/data/photos/.thumbs`, so
@@ -2943,6 +2948,143 @@ place search knows a few cities, so nothing needs the network;
 `CATALYST_WEATHER_LIVE=1` asks Open-Meteo instead. The fetch, the search and
 the kept file are tested against the live services from a PC (an ignored
 test, `live_open_meteo`); not yet from a CardputerZero over its own Wi-Fi.
+
+## Claude: the laptop's Claude Code sessions
+
+The Claude app works in the Claude Code sessions on your Windows laptop
+from the handheld when you are out, over a phone's hotspot: the sessions,
+a conversation as Claude writes it, your messages typed or said, and every
+permission request to allow or deny.
+
+**How it reaches the laptop.** The handheld never talks to claude.ai and
+holds no Claude sign-in. Catalyst Companion on the laptop runs a bridge
+(`catalyst-companion --claude-bridge`, in the tray) that drives the `claude`
+CLI there headless and sends back text only. The bridge listens on
+127.0.0.1:47318 alone; Tailscale Funnel publishes that port at the laptop's
+fixed `https://<laptop>.<tailnet>.ts.net` address, so the handheld needs
+nothing but HTTPS (curl), no VPN and no Tailscale of its own.
+
+- **Paired once.** The laptop shows a QR code (its address, a random
+  256-bit key, its name), read with the Camera in scan mode; or its address
+  and a six-digit code are typed instead (SPAKE2, as Companion pairs: the
+  code never crosses, five tries, five minutes). The handheld keeps the key
+  in `/data/claude/pairing.json` (root's alone); the laptop keeps it in
+  `%APPDATA%\Catalyst Companion\claude\pairing.json`, encrypted to the
+  Windows account (DPAPI). Pairing again revokes the old key at the new
+  one's first request; Unpair (on either side) revokes it at once.
+- **Sealed end to end.** Every request and every event is sealed
+  (XChaCha20-Poly1305, Team's seal, now in companion-proto) under keys
+  derived from the pairing key, one for each direction; the tunnel sees
+  only sizes. A request opens only with the paired key, is taken once and
+  only within five minutes of the laptop's clock (a handheld clock that is
+  off is told the time, sealed, and asks again); its reply is sealed to it,
+  each event to its stream and place. An unknown key is refused unread.
+- **Claude Code, headless.** One `claude -p` a turn, in the session's
+  folder: `--output-format stream-json --verbose --include-partial-messages
+  --permission-mode default|acceptEdits --mcp-config <file>
+  --permission-prompt-tool mcp__catalyst-handheld__approve`, with `--resume
+  <id>` to carry a session on or `--session-id <new uuid>` to begin one;
+  the message goes on its standard input. Nothing secret is on a command
+  line: the MCP config is a file in the bridge's folder holding the turn's
+  one-off ticket, deleted when the turn ends. Each turn runs in a job
+  object, so Stop ends the commands it started too.
+- **Permissions.** Whatever Claude Code would ask a person about (a
+  command, a file outside the project, the web) goes to the handheld
+  through that permission tool, as a sheet: what it wants to do, where,
+  the command or file itself, allow or deny. An answer allows that one call
+  (never a rule); unanswered for five minutes it is denied. A session asks
+  for everything (`default`) or accepts edits in its folder
+  (`acceptEdits`), chosen per session with Tab; the bridge takes no other
+  mode, so `bypassPermissions` or `auto` can never be asked for from the
+  handheld. Your own allow rules in Claude Code's settings still apply.
+- **Sessions** are read from `%USERPROFILE%\.claude\projects\*\*.jsonl`:
+  the title (yours from /rename, else Claude Code's, else the first
+  prompt), the folder (`cwd`) and when it was last written. Only the start
+  and the end of a transcript are read (they reach hundreds of MB). A
+  session written to in the last 30 s by someone at the laptop is not
+  written into from the handheld. A new session begins only in a folder
+  Claude Code has already worked in.
+
+**On the handheld** (`claude/`): Claude on Home.
+
+- **Sessions**, newest first, each with its project and when it was last
+  worked in; an hourglass while Claude works in one, a hand in the signal
+  colour while one waits on an answer. Enter opens one, `n` begins a new
+  one (its folder chosen from those the laptop knows), `r` asks the laptop
+  again; Unpair the laptop is the last row (Enter twice).
+- **A conversation**: your messages on the right, Claude's words as it
+  writes them, each tool call one line ("edited camera.rs +12 −3", "ran
+  cargo test", with how it went at its end). ↑ ↓ go through it (a long
+  answer three lines at a time); Enter on a tool's row opens its detail
+  (the diff, the command and its output) and closes it again.
+- **The composer** along the foot: type, Enter sends; Alt dictates into it
+  (the push-to-talk and offline Whisper of 1.1); Fn-Backspace clears it.
+  Tab switches between asking for everything and accepting edits (the chip
+  on its left says which); Ctrl-X stops Claude. While Claude works a second
+  message waits ("Claude busy").
+- **A permission request** grows out of the island's place as a sheet over
+  the conversation: `y` allows it, `n` or Esc denies it, ← → choose and
+  Enter does what is chosen, Tab shows all of it. Keys are let go for half a
+  second as it comes, so a key meant for the composer never answers it.
+- **Away from it**, a reply finishing ("reply ready" and its first words) or
+  a request waiting ("approval waiting", urgent) is said in the island and
+  kept as a notification that opens Claude; a live activity shows while
+  Claude works, in the signal colour while it waits on you.
+- **How it stands**, said where the content would be: *laptop asleep or
+  unreachable* (curl could not connect, or Funnel answered 502 for a
+  bridge that is not running), *no internet on the handheld*, *the laptop
+  no longer knows this handheld* (Enter pairs again), and *Claude busy*.
+- **Power.** The connection is held only while a Claude page is open, or a
+  reply or a request is still to come: one curl reading the bridge's event
+  stream (a line every 15 s keeps it alive; it stops after 90 s with nothing
+  to say and is opened again if still needed). Then it is stopped and
+  nothing polls. After trouble it tries again in 2, 5, 10, then 30 s, and
+  with no page open gives up after 15 minutes. At rest the pages do not
+  keep the frame beat: while Claude works only its three dots move, looked
+  in on eight times a second; the transcript's layout is kept until a row
+  changes.
+- `?` (Fn 1 where it takes text) lists each page's keys; the most used are
+  along its foot.
+
+**Setting it up, once.**
+
+1. On the laptop, Claude Code installed and signed in: in a terminal,
+   `claude auth login` (the bridge runs the `claude` command, which keeps
+   its own sign-in apart from the desktop app's).
+2. Tailscale for Windows, signed in. In its admin console
+   (login.tailscale.com/admin/dns), MagicDNS and HTTPS certificates on.
+3. In a terminal: `tailscale funnel --bg --https=10000 47318` (or
+   `tailscale funnel --bg 47318` if port 443 is free; 443, 8443 and 10000
+   are Funnel's). The first time it prints a link to allow Funnel for the
+   laptop: open it, allow it, run the command again. `--bg` keeps it across
+   restarts. The bridge only reads `tailscale status` and `tailscale funnel
+   status`; it changes nothing.
+4. Catalyst Companion › *Claude on the handheld* (in its rail, or on its
+   first page). The bridge starts in the tray; its window says what is
+   still missing, with the exact command. Switch on *Start with Windows*
+   there (a value under your own Run key) so it is always there.
+5. *Pair a handheld*: on the handheld, Camera in scan mode at the QR code,
+   Enter; or Claude › Type its address and code.
+6. Keep the laptop awake while you are out: plugged in, Settings › System ›
+   Power & battery › Screen, sleep & hibernate timeouts: *Make my device
+   sleep after* (plugged in) **Never**, and *hibernate* **Never**; Control
+   Panel › Power Options › Choose what closing the lid does: *When I close
+   the lid* (plugged in) **Do nothing**. (The same from an administrator
+   terminal: `powercfg /change standby-timeout-ac 0`, `powercfg /change
+   hibernate-timeout-ac 0`, `powercfg /setacvalueindex SCHEME_CURRENT
+   SUB_BUTTONS LIDACTION 0` then `powercfg /setactive SCHEME_CURRENT`.) The
+   bridge itself needs nothing after a sleep: Tailscale reconnects, and the
+   handheld tries again.
+
+**Tested** with a stand-in `claude` that plays recorded stream-json (no
+real Claude, nothing billed): sessions listed, a session carried on and its
+reply streamed, a new one begun only in a known folder, requests allowed,
+denied and left to time out, a turn stopped, an unpaired or replayed
+request refused, the six-digit code, revoking. One real run against the
+installed CLI (2.1.325) took every flag and the bridge reported its
+answer; that CLI was not signed in, so no turn ran. Not yet tried: a whole
+turn end to end, Funnel carrying the event stream from a phone's hotspot,
+and how far away the handheld's camera reads the laptop's code.
 
 ## Assistant
 
