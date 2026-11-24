@@ -3115,41 +3115,64 @@ nothing but HTTPS (curl), no VPN and no Tailscale of its own.
 - `?` (Fn 1 where it takes text) lists each page's keys; the most used are
   along its foot.
 
-**Setting it up, once.**
+**Setting it up: one button.** Catalyst Companion › *Claude on the
+handheld* (in its rail, or on its first page) starts the bridge in the
+tray and opens its window. **Set up** does every step by itself and stops
+only where you sign in or approve something in the browser; each step
+says *done*, *working*, *waiting for you* or *failed*, with what to do:
 
-1. On the laptop, Claude Code installed and signed in: in a terminal,
-   `claude auth login` (the bridge runs the `claude` command, which keeps
-   its own sign-in apart from the desktop app's).
-2. Tailscale for Windows, signed in. In its admin console
-   (login.tailscale.com/admin/dns), MagicDNS and HTTPS certificates on.
-3. In a terminal: `tailscale funnel --bg --https=10000 47318` (or
-   `tailscale funnel --bg 47318` if port 443 is free; 443, 8443 and 10000
-   are Funnel's). The first time it prints a link to allow Funnel for the
-   laptop: open it, allow it, run the command again. `--bg` keeps it across
-   restarts. The bridge only reads `tailscale status` and `tailscale funnel
-   status`; it changes nothing.
-4. Catalyst Companion › *Claude on the handheld* (in its rail, or on its
-   first page). The bridge starts in the tray; its window says what is
-   still missing, with the exact command. Switch on *Start with Windows*
-   there (a value under your own Run key) so it is always there.
-5. *Pair a handheld*: on the handheld, Camera in scan mode at the QR code,
-   Enter; or Claude › Type its address and code.
-6. Keep the laptop awake while you are out: plugged in, Settings › System ›
-   Power & battery › Screen, sleep & hibernate timeouts: *Make my device
-   sleep after* (plugged in) **Never**, and *hibernate* **Never**; Control
-   Panel › Power Options › Choose what closing the lid does: *When I close
-   the lid* (plugged in) **Do nothing**. (The same from an administrator
-   terminal: `powercfg /change standby-timeout-ac 0`, `powercfg /change
-   hibernate-timeout-ac 0`, `powercfg /setacvalueindex SCHEME_CURRENT
-   SUB_BUTTONS LIDACTION 0` then `powercfg /setactive SCHEME_CURRENT`.) The
-   bridge itself needs nothing after a sleep: Tailscale reconnects, and the
-   handheld tries again.
+1. **Claude Code**: installed if it is missing, with Anthropic's own
+   installer (`irm https://claude.ai/install.ps1 | iex`, the native install
+   from the setup docs; no administrator). If it is not signed in,
+   `claude auth login --claudeai` is started and opens the browser; sign in
+   there (a code the browser shows instead can be pasted in the window).
+   The bridge runs the `claude` command, which keeps its own sign-in apart
+   from the desktop app's.
+2. **Tailscale and Funnel**: installed if missing (`winget install --id
+   tailscale.tailscale -e`; Windows asks to allow it), and its sign-in
+   link opened if it is signed out. MagicDNS is checked, and its admin page
+   opened only if it is off. Then `tailscale funnel --bg` on the first of
+   443, 8443 and 10000 that serves nothing else (here 10000: 443 and 8443
+   serve your port 8080); the first time, Tailscale prints a page to allow
+   Funnel and HTTPS, which is opened, and once allowed it runs again. The
+   port is remembered.
+3. **The bridge**: running, and switched on to start with Windows (a value
+   under your own Run key; the switch is in its row).
+4. **Keep awake**, ticked by default and said plainly before anything
+   changes: on mains power only, sleep and hibernate after *Never* and
+   closing the lid *Does nothing* (`powercfg /setacvalueindex` on the
+   active scheme, then `/setactive`); battery settings are never touched.
+   The values before are kept; *Restore my power settings* (in its row, and
+   offered on Unpair) puts them back. If Windows wants an administrator for
+   it, it asks once.
+5. **Pairing**: the QR code and the six-digit code; on the handheld, Camera
+   in scan mode at the QR code and Enter, or Claude › Type its address and
+   code.
+
+It is safe to stop part way or run again: each step looks first and does
+only what is not done (Funnel twice at most: before and after its
+approval). At each start the bridge looks again by itself: what drifted
+and needs nobody is put right (Funnel turned off by a Tailscale update,
+Start with Windows switched off, the power settings changed back), and
+what needs you (Claude Code or Tailscale signed out, Funnel to allow again)
+is said in a balloon from the tray, in its tooltip and in the window. It
+never raises a sign-in or Windows' permission prompt by itself. The setup
+keeps what it chose in `%APPDATA%\Catalyst Companion\claude\setup.json`
+(the port, your keep-awake choice, the power values before); nothing of
+your accounts. The bridge needs nothing after a sleep: Tailscale
+reconnects, and the handheld tries again.
 
 **Tested** with a stand-in `claude` that plays recorded stream-json (no
 real Claude, nothing billed): sessions listed, a session carried on and its
 reply streamed, a new one begun only in a known folder, requests allowed,
 denied and left to time out, a turn stopped, an unpaired or replayed
-request refused, the six-digit code, revoking. One real run against the
+request refused, the six-digit code, revoking. The setup is tested against
+a made-up computer (every command behind one interface, nothing installed,
+signed in, published or changed for real): a fresh laptop, one half done,
+one done already (run three times, nothing changed), a sign-in that never
+comes, a code pasted, Windows' permission refused and given, keep awake
+unticked, the power settings restored, and the repairs at a later start;
+its read-only looks were also run on this laptop. One real run against the
 installed CLI (2.1.325) took every flag and the bridge reported its
 answer; that CLI was not signed in, so no turn ran. Not yet tried: a whole
 turn end to end, Funnel carrying the event stream from a phone's hotspot,
