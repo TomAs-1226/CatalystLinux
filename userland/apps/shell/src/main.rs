@@ -111,6 +111,7 @@ mod intro;
 mod ir;
 mod irremote;
 mod keys;
+mod lan;
 mod lights;
 mod liveactivity;
 mod livemusic;
@@ -137,6 +138,7 @@ static METERED: offline::meter::Metered = offline::meter::Metered;
 mod pacing;
 mod panel;
 mod passcode;
+mod phonegallery;
 mod photolog;
 mod photos;
 mod pit;
@@ -737,6 +739,11 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--photolog-shots") {
         return photolog::shots::shots(std::path::Path::new(&dir));
+    }
+    // The phone gallery: the sheet on the handheld, and the page a phone gets (1.5.0).
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--gallery-shots") {
+        return phonegallery::shots::shots(std::path::Path::new(&dir));
     }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--camera-shots") {

@@ -30,10 +30,17 @@ pub fn mark(g: &mut Gfx, cx: f32, cy: f32, height: f32, color: Color, alpha: f32
     g.canvas.polygon(&pts, color, alpha);
 }
 
-/// The logo's ground for the whole panel: a diagonal from `#191a20` through
-/// `#101116` to `#08090b`, with a faint pool of light at the top left.
+/// The logo's ground, its diagonal's stops: `#191a20` through `#101116`
+/// to `#08090b` (the phone gallery's page draws its mark on them too).
+pub const GROUND_STOPS: [(f32, Color); 3] = [(0.0, Color::hex(0x191a20)), (0.55, Color::hex(0x101116)), (1.0, Color::hex(0x08090b))];
+
+/// The mark's outline as an SVG path, in the logo's 24-unit box.
+pub const BOLT_PATH: &str = "M13.5 2 5 13h5l-1.5 9L19 10h-5.5z";
+
+/// The logo's ground for the whole panel: the diagonal of [`GROUND_STOPS`],
+/// with a faint pool of light at the top left.
 pub fn ground() -> Vec<u32> {
-    let stops = [(0.0, Color::hex(0x191a20)), (0.55, Color::hex(0x101116)), (1.0, Color::hex(0x08090b))];
+    let stops = GROUND_STOPS;
     let mut px = Vec::with_capacity((W * H) as usize);
     for y in 0..H as i32 {
         for x in 0..W as i32 {

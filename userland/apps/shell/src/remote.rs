@@ -10,8 +10,7 @@
 //! wrong codes and it stops listening. What is sent is never written to a
 //! log, and the cookies for YouTube Music never come back on a page.
 
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -20,7 +19,10 @@ use bezel::{Accent, Color, Rect};
 
 use crate::gfx::{Gfx, TextSize};
 use crate::keys::{Keys, SERVICES};
+use crate::lan::{read_request, respond, Limits, Request};
 use crate::shell::HomeStyle;
+
+pub use crate::lan::parse_form;
 
 /// How long the page is offered.
 const OPEN_FOR: Duration = Duration::from_secs(600);
@@ -41,6 +43,7 @@ const BODY_MOST: usize = 160 * 1024;
 /// More than that is read and passed over up to this much, so the browser
 /// is told why rather than finding the connection gone.
 const PASSED_OVER_MOST: usize = 2 * 1024 * 1024;
+const LIMITS: Limits = Limits { idle: IDLE_FOR, request_in: REQUEST_IN, body_most: BODY_MOST, passed_over_most: PASSED_OVER_MOST };
 
 /// What a computer sent. Anything left empty on the page is `None`: left as
 /// it is on the handheld.
@@ -84,14 +87,14 @@ impl Remote {
     /// Start offering the page. `None` when the handheld has no address on
     /// any network to offer it on.
     pub fn start() -> Option<Self> {
-        let ip = address()?;
+        // The cable first, then the Wi-Fi (lan.rs).
+        let ip = crate::lan::address(&["eth0", "wlan0"])?;
         // Port 80 where it can be had, so the address is just the number.
-        let (listener, port) = TcpListener::bind(("0.0.0.0", 80)).map(|l| (l, 80)).or_else(|_| TcpListener::bind(("0.0.0.0", 8080)).map(|l| (l, 8080))).ok()?;
-        listener.set_nonblocking(true).ok()?;
-        let url = if port == 80 { format!("http://{ip}") } else { format!("http://{ip}:{port}") };
+        let (listener, port) = crate::lan::bind()?;
+        let url = crate::lan::url(&ip, port);
         // Upper case is the QR code's compact alphabet: a smaller code, larger squares.
         let qr = qrcodegen::QrCode::encode_text(&url.to_uppercase(), qrcodegen::QrCodeEcc::Medium).ok()?;
-        let code = one_time_code();
+        let code = crate::lan::one_time_code();
         let shared = Arc::new(Shared::default());
         *shared.status.lock().unwrap() = "waiting for a computer".into();
         let (thread_shared, thread_code) = (shared.clone(), code.clone());
@@ -157,33 +160,6 @@ impl Drop for Remote {
     }
 }
 
-/// The handheld's address on whichever network it is on. Screenshots name
-/// one of their own (`CATALYST_SETUP_ADDRESS`), not the computer's.
-fn address() -> Option<String> {
-    if let Ok(stand_in) = std::env::var("CATALYST_SETUP_ADDRESS") {
-        return Some(stand_in);
-    }
-    for iface in ["eth0", "wlan0"] {
-        if let Some(ip) = crate::sys::address(iface).filter(|a| a.contains('.')) {
-            return Some(ip);
-        }
-    }
-    // Off the handheld: the address this computer would reach others from.
-    // Connecting a UDP socket sends nothing; it only picks the route.
-    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("192.0.2.1:9").ok()?;
-    Some(socket.local_addr().ok()?.ip().to_string())
-}
-
-/// Six digits from the process's random hashing keys, which the system
-/// seeds afresh for every process.
-fn one_time_code() -> String {
-    use std::hash::{BuildHasher, Hasher};
-    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()));
-    format!("{:06}", h.finish() % 1_000_000)
-}
-
 fn set_status(shared: &Shared, text: &str) {
     *shared.status.lock().unwrap() = text.to_owned();
     shared.changed.store(true, Ordering::Relaxed);
@@ -223,7 +199,7 @@ fn serve(listener: TcpListener, shared: Arc<Shared>, code: String) {
 
 /// One connection: its request, and the reply.
 fn answer(stream: TcpStream, shared: &Shared, code: &str) {
-    let Some(request) = read_request(&stream, &shared.stop) else { return };
+    let Some(request) = read_request(&stream, &shared.stop, &LIMITS) else { return };
     respond(stream, reply(&request, shared, code));
 }
 
@@ -273,139 +249,6 @@ fn reply(request: &Request, shared: &Shared, code: &str) -> (&'static str, &'sta
         }
         _ => ("404 Not Found", "text/plain", "not here".to_owned()),
     }
-}
-
-/// A request as it arrived.
-struct Request {
-    method: String,
-    path: String,
-    /// Its Content-Type (a form's: urlencoded, or multipart with a file).
-    kind: String,
-    body: String,
-    /// More than `BODY_MOST` was sent (and passed over).
-    too_large: bool,
-}
-
-/// One request: method, path, and body, read with a size limit. A
-/// connection may wait quietly for a while before its request starts (a
-/// browser's spare one), checking now and then that the page is still
-/// offered; once a request has started it must arrive whole in a few
-/// seconds, so a client sending a byte now and then cannot hold a thread.
-fn read_request(mut stream: &TcpStream, stop: &AtomicBool) -> Option<Request> {
-    stream.set_nonblocking(false).ok();
-    let mut data = Vec::new();
-    let mut buf = [0u8; 4096];
-    // The first byte: up to IDLE_FOR, a second at a time.
-    let idle_until = Instant::now() + IDLE_FOR;
-    stream.set_read_timeout(Some(Duration::from_secs(1))).ok();
-    let first = loop {
-        match stream.read(&mut buf) {
-            Ok(0) => return None,
-            Ok(n) => break n,
-            // Nothing yet: wait on, unless the page has closed (or the form
-            // came on another connection) or it has waited long enough.
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
-                if Instant::now() > idle_until || stop.load(Ordering::Relaxed) {
-                    return None;
-                }
-            }
-            Err(_) => return None,
-        }
-    };
-    data.extend_from_slice(&buf[..first]);
-    let deadline = Instant::now() + REQUEST_IN;
-    let read = |stream: &mut &TcpStream, buf: &mut [u8]| -> Option<usize> {
-        let left = deadline.checked_duration_since(Instant::now())?;
-        stream.set_read_timeout(Some(left.max(Duration::from_millis(1)))).ok();
-        stream.read(buf).ok()
-    };
-    let head_end = loop {
-        if let Some(at) = data.windows(4).position(|w| w == b"\r\n\r\n") {
-            break at + 4;
-        }
-        if data.len() > 16 * 1024 {
-            return None;
-        }
-        let n = read(&mut stream, &mut buf)?;
-        if n == 0 {
-            return None;
-        }
-        data.extend_from_slice(&buf[..n]);
-        if let Some(at) = data.windows(4).position(|w| w == b"\r\n\r\n") {
-            break at + 4;
-        }
-        if data.len() > 16 * 1024 {
-            return None;
-        }
-    };
-    let head = String::from_utf8_lossy(&data[..head_end]).into_owned();
-    let mut first = head.lines().next()?.split_whitespace();
-    let (method, path) = (first.next()?.to_owned(), first.next()?.split('?').next()?.to_owned());
-    let header = |name: &str| head.lines().find_map(|l| l.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case(name)).map(|(_, v)| v.trim().to_owned()));
-    let length = header("content-length").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
-    let kind = header("content-type").unwrap_or_default();
-    if length > PASSED_OVER_MOST {
-        return None;
-    }
-    // Too much: read to its end and let go, to say so.
-    if length > BODY_MOST {
-        let mut have = data.len() - head_end;
-        while have < length {
-            match read(&mut stream, &mut buf) {
-                Some(n) if n > 0 => have += n,
-                _ => break,
-            }
-        }
-        return Some(Request { method, path, kind, body: String::new(), too_large: true });
-    }
-    while data.len() < head_end + length {
-        let n = read(&mut stream, &mut buf)?;
-        if n == 0 {
-            break;
-        }
-        data.extend_from_slice(&buf[..n]);
-    }
-    let body = String::from_utf8_lossy(&data[head_end..(head_end + length).min(data.len())]).into_owned();
-    Some(Request { method, path, kind, body, too_large: false })
-}
-
-fn respond(mut stream: TcpStream, (status, kind, body): (&str, &str, String)) {
-    let head = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {kind}; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    stream.write_all(head.as_bytes()).ok();
-    stream.write_all(body.as_bytes()).ok();
-}
-
-/// `application/x-www-form-urlencoded` into name and value pairs.
-pub fn parse_form(body: &str) -> Vec<(String, String)> {
-    let decode = |s: &str| {
-        let bytes = s.as_bytes();
-        let mut out = Vec::with_capacity(bytes.len());
-        let mut i = 0;
-        while i < bytes.len() {
-            match bytes[i] {
-                b'+' => out.push(b' '),
-                b'%' if i + 2 < bytes.len() => {
-                    match u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("zz"), 16) {
-                        Ok(b) => {
-                            out.push(b);
-                            i += 2;
-                        }
-                        Err(_) => out.push(b'%'),
-                    }
-                }
-                b => out.push(b),
-            }
-            i += 1;
-        }
-        String::from_utf8_lossy(&out).into_owned()
-    };
-    body.split('&').filter(|p| !p.is_empty()).map(|pair| {
-        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        (decode(k), decode(v))
-    }).collect()
 }
 
 /// A form's fields, as either kind of form sends them: urlencoded, or
@@ -739,6 +582,7 @@ button:focus-visible{outline:2px solid var(--ink);outline-offset:3px}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
 
     #[test]
     fn the_form_becomes_answers_and_blank_fields_change_nothing() {
@@ -811,7 +655,7 @@ mod tests {
     }
 
     fn request(kind: &str, body: &str) -> Request {
-        Request { method: "POST".into(), path: "/".into(), kind: kind.into(), body: body.into(), too_large: false }
+        Request { method: "POST".into(), path: "/".into(), kind: kind.into(), body: body.into(), ..Request::default() }
     }
 
     #[test]
@@ -886,14 +730,14 @@ mod tests {
         assert!(body.len() > 32 * 1024, "more than the old limit");
         let sender = send(body.into_bytes());
         let (stream, _) = listener.accept().unwrap();
-        let got = read_request(&stream, &stop).unwrap();
+        let got = read_request(&stream, &stop, &LIMITS).unwrap();
         assert!(!got.too_large);
         assert_eq!(parse_body(&got.kind, &got.body)[0].1, jar);
         drop(sender.join());
         // Far more: passed over, and said so rather than cut off.
         let sender = send(vec![b'x'; BODY_MOST + 1]);
         let (stream, _) = listener.accept().unwrap();
-        let got = read_request(&stream, &stop).unwrap();
+        let got = read_request(&stream, &stop, &LIMITS).unwrap();
         assert!(got.too_large && got.body.is_empty());
         drop(sender.join());
     }

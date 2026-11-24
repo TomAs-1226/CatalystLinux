@@ -221,10 +221,6 @@ pub fn dir() -> PathBuf {
     }
 }
 
-fn thumbs_dir() -> PathBuf {
-    dir().join(".thumbs")
-}
-
 /// Whether a file is one the album shows.
 pub fn is_photo(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
@@ -289,7 +285,9 @@ pub fn list() -> Vec<Photo> {
     list_in(&dir())
 }
 
-fn list_in(dir: &Path) -> Vec<Photo> {
+/// Every photo in an album's folder, newest first: what the album shows,
+/// and all the phone gallery (phonegallery/) ever serves.
+pub fn list_in(dir: &Path) -> Vec<Photo> {
     let mut photos: Vec<Photo> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
@@ -422,7 +420,11 @@ fn decode_png(path: &Path) -> Result<Picture, String> {
 /// A thumbnail on disk: "CTH1", its width and height, the photo's size in
 /// bytes when it was made (so a changed photo gets a new one), its pixels.
 fn thumb_file(photo: &Photo) -> PathBuf {
-    thumbs_dir().join(format!("{}.thumb", photo.name))
+    thumb_file_in(&dir(), photo)
+}
+
+fn thumb_file_in(album: &Path, photo: &Photo) -> PathBuf {
+    album.join(".thumbs").join(format!("{}.thumb", photo.name))
 }
 
 fn read_thumb(path: &Path, bytes: u64) -> Option<Picture> {
@@ -451,7 +453,13 @@ fn write_thumb(path: &Path, bytes: u64, pic: &Picture) {
 
 /// A photo's thumbnail: the one kept, else made now (and kept).
 pub fn thumbnail(photo: &Photo) -> Option<Picture> {
-    let file = thumb_file(photo);
+    thumbnail_in(&dir(), photo)
+}
+
+/// As [`thumbnail`], for a photo in the album kept in `album` (the phone
+/// gallery is given its folder, so its tests can have one of their own).
+pub fn thumbnail_in(album: &Path, photo: &Photo) -> Option<Picture> {
+    let file = thumb_file_in(album, photo);
     if let Some(t) = read_thumb(&file, photo.bytes) {
         return Some(t);
     }
@@ -675,6 +683,8 @@ impl Screen for Album {
             // The build log: days, places, captions (photolog/).
             Key::Char('l') => return Nav::Push(Box::new(crate::photolog::BuildLog::new())),
             _ if n == 0 => {}
+            // On a phone, in its browser (phonegallery/, 1.5.0).
+            Key::Char('p') => return Nav::Push(Box::new(crate::phonegallery::GalleryScreen::new(cx.settings))),
             Key::Left => self.focus = self.focus.saturating_sub(1),
             Key::Right => self.focus = (self.focus + 1).min(n - 1),
             Key::Up => self.focus = self.focus.saturating_sub(COLS),
@@ -708,7 +718,7 @@ impl Screen for Album {
         if self.deleting.is_some_and(|d| d == self.focus) {
             return vec![keys("deleting", &[("d", "Delete it"), ("esc", "Keep it")])];
         }
-        vec![keys("photos", &[("enter", "Open it"), ("l", "The build log"), ("d twice", "Delete it"), ("fn k · fn n", "First, last")])]
+        vec![keys("photos", &[("enter", "Open it"), ("p", "On your phone"), ("l", "The build log"), ("d twice", "Delete it"), ("fn k · fn n", "First, last")])]
     }
 
     fn tick(&mut self, dt: f32) -> bool {
@@ -794,12 +804,14 @@ impl Screen for Album {
             g.focus_ring(r, radius);
         }
         let photo = &self.photos[self.focus];
-        let line = if self.deleting == Some(self.focus) {
-            "d again deletes this photo · esc: keep it".to_owned()
+        if self.deleting == Some(self.focus) {
+            g.hint("d again deletes this photo · esc: keep it");
         } else {
-            format!("{} of {} · {}", self.focus + 1, self.photos.len(), when(photo.taken, g.clock.0))
-        };
-        g.hint(&line);
+            // Where it is, and the way to a phone where that fits too.
+            let at = format!("{} of {} · {}", self.focus + 1, self.photos.len(), when(photo.taken, g.clock.0));
+            let phone = format!("{at} · p: phone");
+            g.hint_any(&[&phone, &at]);
+        }
     }
 }
 

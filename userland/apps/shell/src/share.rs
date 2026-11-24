@@ -1,6 +1,7 @@
 //! Share: something on the handheld as a QR code, for a phone to scan. This
 //! Wi-Fi network (a phone joins it), typed text or a link, SSH to this
-//! handheld, the team's page on The Blue Alliance.
+//! handheld, the team's page on The Blue Alliance, and the photos, browsed
+//! on the phone (phonegallery/).
 //!
 //! The Wi-Fi network's password is read from wpa_supplicant's own file;
 //! one saved only as a derived key (64 hex digits) cannot be shared, and
@@ -92,6 +93,8 @@ enum Item {
     Link,
     Ssh(String),
     Team(u32),
+    /// The album, on a phone's browser.
+    Photos,
 }
 
 pub struct Share {
@@ -106,6 +109,7 @@ impl Share {
         if let Some((ssid, secret)) = current_wifi() {
             items.push(Item::Wifi(ssid, secret));
         }
+        items.push(Item::Photos);
         items.push(Item::Text);
         items.push(Item::Link);
         let address = ["wlan0", "eth0"].iter().find_map(|i| crate::sys::address(i).filter(|a| a.contains('.')));
@@ -178,6 +182,7 @@ impl Screen for Share {
                         None
                     }
                     Some(Item::Ssh(address)) => Code::new("SSH", &format!("ssh://root@{address}"), &format!("ssh root@{address}")),
+                    Some(Item::Photos) => return Nav::Push(Box::new(crate::phonegallery::GalleryScreen::new(cx.settings))),
                     Some(Item::Team(team)) => {
                         let url = format!("https://www.thebluealliance.com/team/{team}");
                         Code::new("The Blue Alliance", &url, &format!("team {team} on The Blue Alliance"))
@@ -209,6 +214,7 @@ impl Screen for Share {
                 Item::Link => ("Link".to_owned(), "type".to_owned()),
                 Item::Ssh(address) => ("SSH to here".to_owned(), address.clone()),
                 Item::Team(team) => ("Team page".to_owned(), format!("frc{team}")),
+                Item::Photos => ("Photos".to_owned(), "on a phone".to_owned()),
             };
             let value = g.text.fit(&value, &g.ty.label, r.w * 0.55);
             g.row(r, &name, &value, t.dim, i == self.list.focus);
@@ -235,15 +241,20 @@ impl Code {
 /// `qr` in `r`, left-aligned and centred down it: dark squares on white
 /// with the quiet margin a reader needs, each square whole pixels.
 pub fn draw_qr(g: &mut Gfx, qr: &qrcodegen::QrCode, r: Rect) -> Rect {
+    draw_qr_faded(g, qr, r, 1.0)
+}
+
+/// As [`draw_qr`], at `alpha` (a code arriving, or going).
+pub fn draw_qr_faded(g: &mut Gfx, qr: &qrcodegen::QrCode, r: Rect, alpha: f32) -> Rect {
     let n = qr.size();
     let cell = (r.w.min(r.h) / (n + 4) as f32).floor().max(1.0);
     let side = cell * (n + 4) as f32;
     let (x0, y0) = ((r.x + g.ox).round(), (r.y + (r.h - side) * 0.5).round());
-    g.canvas.rrect(Rect::new(x0, y0, side, side), cell * 1.5, Color::WHITE, 1.0);
+    g.canvas.rrect(Rect::new(x0, y0, side, side), cell * 1.5, Color::WHITE, alpha);
     for y in 0..n {
         for x in 0..n {
             if qr.get_module(x, y) {
-                g.canvas.fill_rect(Rect::new(x0 + (x + 2) as f32 * cell, y0 + (y + 2) as f32 * cell, cell, cell), Color::hex(0x0d0e12), 1.0);
+                g.canvas.fill_rect(Rect::new(x0 + (x + 2) as f32 * cell, y0 + (y + 2) as f32 * cell, cell, cell), Color::hex(0x0d0e12), alpha);
             }
         }
     }

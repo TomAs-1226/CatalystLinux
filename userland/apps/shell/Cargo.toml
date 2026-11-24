@@ -58,6 +58,8 @@ vte = "0.15"
 qrcodegen = "1.8"
 # Screenshots, on the handheld as on a computer (and the galleries' pictures).
 png = "0.18"
+# The phone gallery's ZIP of photos: each file's CRC-32 (already built for png).
+crc32fast = "1"
 # QR codes read by the camera (pure Rust, no C library to build). Without
 # its `img` feature: it is given the picture's brightness, not an image crate.
 rqrr = { version = "0.11", default-features = false }
