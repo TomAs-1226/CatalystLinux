@@ -2578,6 +2578,117 @@ an album, and QR codes read. The AprilTag reader is still there beside it.
   six of them. The QR reader reads the simulated code at the preview's size
   (tested).
 
+### Photo documentation: captions, places, the build log (1.4)
+
+The album kept as a build log, the engineering notebook an FRC team keeps:
+each photo knows what it shows and where it was taken, and the log reads
+them back by day and by place. The shell's `photolog/` does it all.
+
+- **Captions by Claude**, off until Settings › Photos › *Caption photos with
+  Claude* is turned on (the line under it says photos are sent to
+  Anthropic). Each new photo is shrunk to 1,024 pixels on its long side (a
+  JPEG of about 100 KB; 37 × 28 = 1,036 of Claude's 28-pixel image tokens)
+  and sent with a short instruction for a robotics team (what it shows, the
+  mechanism or task, one or two sentences, never a guessed name) and, as
+  context, when it was taken, its named place, and the event and match. It
+  goes to Claude Opus 5.5 (Messages API `2026-10-21`, effort low: thinking
+  cannot be turned off on Opus 5.5) through the **Message Batches API**,
+  which costs half and suits work that can wait: photos waiting are sent
+  together once the newest is two minutes old, the batch is looked at after
+  a minute and less often after (Anthropic: most within the hour, at most a
+  day), its answers taken by each `custom_id`, and the batch deleted at
+  Anthropic once read (it would otherwise keep it 29 days). `a` on a photo
+  asks at once instead, at full price, with the server's fallback on a
+  refusal (`fallbacks: "default"`), as the Assistant has it.
+  - **When:** captions on, a Claude key, online, not in deep standby or
+    short of memory, and on the charger or over 40%. Offline, photos wait
+    and go later. A failure is tried again after a minute, then two,
+    four… up to six hours, and given up after eight; a refused key waits
+    for the keys to change. The work runs on one background thread only
+    while something waits, and never holds the frame beat.
+  - **What it costs:** from each answer's `usage` at Opus 5.5's prices ($4
+    a million tokens in, $20 out; batches half): about 0.4¢ a photo (1,311
+    tokens in and about 100 out). Settings › Photos shows each photo's
+    average and the month's total, and a **monthly limit** ($3 to start; $1
+    to $50): before a batch goes, the most each photo could cost (its image
+    and the instruction in, all 1,500 allowed tokens out: 1.8¢) is held
+    against the limit, so it is never passed; past it, captions wait for
+    the next month.
+  - **The caption** is kept in an **XMP sidecar** beside the photo
+    (`IMG_20261121_140312.xmp`, as Lightroom, darktable and digiKam keep
+    theirs): `dc:description`, with the place in `Iptc4xmpCore:Location`,
+    the town in `photoshop:City`, the event in `Iptc4xmpExt:Event`, and the
+    match and who wrote the caption in Catalyst's own namespace. The JPEG is
+    never written to, so it stays the camera's to the byte, and a RAW kept
+    beside it (`.dng`) shares the sidecar. A caption written by hand stays
+    yours: Claude never writes over it.
+  - **Not sent:** pixel pictures (a few dozen dithered pixels), edits (an
+    `_edit` takes its photo's caption), and photos taken while captions were
+    off. The key is the Assistant's (Settings › Keys), handed to curl on its
+    input: never logged, never on a command line, never in another file.
+- **In Photos**, ↓ on a photo brings a sheet up beneath it and the photo,
+  whole, shrinks into the room above: the caption, where it was taken and
+  the match (`during q31 · pit · finger lakes regional`), and who wrote the
+  caption and what it cost. `t` writes or edits the caption, `n` names the
+  place, `a` asks Claude now; ↑ or Esc lets the sheet down. With the
+  viewer's chrome, a `↓ caption` chip says it is there.
+- **Named places**, offline and private. As a photo is taken, the strongest
+  12 access points in wpa_supplicant's last scan are noted with their signal
+  (a fresh scan if it saw too little), kept in the handheld's own records
+  (`/data/catalyst/photolog`, root's alone), never in the sidecar.
+  **Name this place** (`n`) names that fingerprint ("Shop", "Pit", "Home",
+  or one named before); every photo there, before and after, takes the name,
+  and Settings › Photos › Named places renames or forgets one (its photos
+  follow). Two fingerprints are alike by the weight of the signal they share
+  (each access point weighs its signal over −100 dBm; the sum of the smaller
+  weights over the sum of the larger), an access point's other radios
+  counted as one; a place matches at 0.42 with two access points in common.
+  Tuned against simulated scans: the same room scores 0.61 and up, another
+  day there with its main router off over 0.42 in 99 of 100, the room next
+  door that hears seven of the same access points 0.32 at most. A robot's
+  radio (its SSID the team number) and phones' hotspots go where the team
+  goes, so they are never noted.
+- **The event and the match**, from the event schedule it already keeps: a
+  photo taken on the event's days, or within twelve hours of one of the
+  team's matches, is tagged with the event, where it is held (The Blue
+  Alliance's city), and `during Q31` (a minute before to five after), `before
+  Q32` (within an hour and a half) or `after Q31` (within the hour).
+- **The town**, separately opt-in (Settings › Photos › *Find the town
+  online*), since it sends the access points' addresses off the handheld:
+  BeaconDB's geolocate API (`POST https://api.beacondb.net/v1/geolocate`,
+  Mozilla Location Service's successor, public domain; its privacy notice
+  says queried addresses and answers are not recorded), with at least two
+  access points (Ichnaea's floor), never a hidden network or one named
+  `…_nomap`, the IP and cell fallbacks turned off, and a User-Agent that
+  says only `CatalystLinux-Photos/1.4`. The position becomes a town on the
+  handheld from GeoNames' towns of 5,000 people or more (70,113 of them,
+  1.7 MB, CC BY 4.0, carried in the shell, so Nominatim is never asked):
+  "West Henrietta, NY", "near …" past 8 km. Only photos with no named
+  place and no event are looked up, and a photo alike enough to one looked
+  up before takes its town without asking.
+- **A photo's place line** is its named place, else the event and its
+  venue, else the town.
+- **The build log** (`l` in the album): days, newest first; in each, the
+  places in the order the day reached them, each photo with its thumbnail,
+  time, match and caption. Enter opens the photo. `e` **exports** the day,
+  its event, its week or everything as Markdown with its photos into
+  `photos/Build log/2026-11-21 Finger Lakes Regional/` (`build-log.md` and
+  `images/`, the photos linked rather than copied where the card allows),
+  where Catalyst Companion's Files and a copy of the card find it; Claude's
+  captions are marked as Claude's. `s` twice **sends the day to Team** as a
+  few short messages (Team carries text, 200 characters a message, no
+  pictures): what the day was, then its first three captions.
+
+In the simulator the photos are said to be in a made-up shop, the event is
+the demo robot's, and Claude and BeaconDB answer from a script in their own
+shapes (`CATALYST_AI_LIVE=1` asks the real ones). The tests use stand-ins for
+both on the computer, answering as their documentation shows; the one real
+caption (`a_real_caption`) runs only when asked for, with
+`ANTHROPIC_API_KEY` set. Pictures: `catalyst-shell --photolog-shots DIR`
+(`shots/1.4-photo-log`). Not yet tried against the live services or on a
+CardputerZero: a real batch's turnaround, BeaconDB's answers for the team's
+own shop, and how the fingerprints of real rooms score.
+
 Not yet checked on a CardputerZero: how long a full-size photo and a detail
 merge take there (estimated: under a second to the picture, about a second
 more to write it; a six-frame merge 5 to 8 s at idle priority), and how far
@@ -3888,7 +3999,10 @@ written by libjpeg-turbo (IJG, BSD-3-Clause and zlib licences) in
 `catalyst-camera`. In the shell, QR codes are read by rqrr ((MIT or Apache
 2.0) and ISC) and photos are decoded by jpeg-decoder (MIT or Apache 2.0). The
 simulator alone writes its photos with jpeg-encoder ((MIT or Apache 2.0) and
-IJG).
+IJG). Photos' towns come from GeoNames' gazetteer (towns of 5,000 people or
+more, CC BY 4.0), cut by `tools/gazetteer/build.py` and carried in the shell
+(`userland/assets/gazetteer`, with its licence); positions for it come from
+BeaconDB at run time, when the town lookup is turned on.
 
 Four of the catalogue's apps are rebuilt from MIT-licensed apps in M5Stack's
 CardputerZero app store, following their rules, levels and algorithms:
