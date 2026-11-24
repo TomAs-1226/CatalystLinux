@@ -19,6 +19,12 @@
 //! The shutter sends the bar down out of the way, and it comes back at the
 //! next key that is not the shutter. Its glass comes and goes by its
 //! refraction, its words with it; at rest nothing in it moves.
+//!
+//! Pixel mode (1.2, camera/pixel_mode.rs) has chips of its own: the size
+//! (`s`), the palette (`k`, its colours on the chip and in its picker), the
+//! dither (`d`, its pattern on the chip) and the tone (↑ ↓ the brightness,
+//! its picker the contrast), then the timer. Their pickers show each choice
+//! on the picture as it is in hand; Enter keeps it, Esc goes back.
 
 use super::*;
 use crate::burst::DetailMode;
@@ -33,10 +39,15 @@ pub enum Chip {
     Detail,
     Pro,
     Lens,
+    /// Pixel mode's (1.2).
+    Size,
+    Palette,
+    Dither,
+    Tone,
 }
 
 impl Chip {
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             Chip::Mode => "mode",
             Chip::Look => "look",
@@ -45,6 +56,10 @@ impl Chip {
             Chip::Detail => "detail",
             Chip::Pro => "pro",
             Chip::Lens => "lens",
+            Chip::Size => "size",
+            Chip::Palette => "palette",
+            Chip::Dither => "dither",
+            Chip::Tone => "tone",
         }
     }
 
@@ -58,7 +73,16 @@ impl Chip {
             Chip::Detail => "d",
             Chip::Pro => "p",
             Chip::Lens => "l",
+            Chip::Size => "s",
+            Chip::Palette => "k",
+            Chip::Dither => "d",
+            Chip::Tone => "↑↓",
         }
+    }
+
+    /// One of pixel mode's chips.
+    pub fn pixel(self) -> bool {
+        matches!(self, Chip::Size | Chip::Palette | Chip::Dither | Chip::Tone)
     }
 }
 
@@ -142,13 +166,13 @@ pub struct Bar {
     /// Sent down while photos are taken.
     pub hidden: bool,
     /// The chip Tab comes back to.
-    last: Chip,
+    pub(super) last: Chip,
     shown: Animated,
     /// The capsule of ice: where it is along the cells, and how far in.
-    at: Animated,
-    on: Animated,
+    pub(super) at: Animated,
+    pub(super) on: Animated,
     /// Pro's row, slid along to keep the item in hand in sight.
-    scroll: Animated,
+    pub(super) scroll: Animated,
     placed: bool,
 }
 
@@ -193,6 +217,9 @@ impl Camera {
         if self.lens == Lens::Main && self.mode.shoots() {
             chips.extend([Chip::Look, Chip::Timer, Chip::Grid, Chip::Detail, Chip::Pro]);
         }
+        if self.lens == Lens::Main && self.mode == Mode::Pixel {
+            chips.extend([Chip::Size, Chip::Palette, Chip::Dither, Chip::Tone, Chip::Timer]);
+        }
         if self.smart.is_some() {
             chips.push(Chip::Lens);
         }
@@ -216,6 +243,11 @@ impl Camera {
         // Any other key brings it back.
         self.bar.hidden = false;
         if let Some(picker) = self.bar.picker {
+            if let Picker::Choice { chip, at } = picker {
+                if chip.pixel() {
+                    return self.pixel_picker_key(chip, at, key);
+                }
+            }
             return self.picker_key(picker, key, cx);
         }
         // The looks' strip, opened from the bar, has the keys.
@@ -266,6 +298,7 @@ impl Camera {
                 // The chips change with the lens: the keys stay on it.
                 self.bar.focus = Some(Chip::Lens);
             }
+            c if c.pixel() => self.open_pixel_picker(c),
             _ => {
                 let at = self.chosen(chip, cx.settings.detail);
                 self.bar.at.jump(at as f32);
@@ -376,18 +409,22 @@ impl Camera {
     }
 
     /// The words of a chip's choices.
-    fn choices(&self, chip: Chip) -> Vec<String> {
+    pub(super) fn choices(&self, chip: Chip) -> Vec<String> {
         match chip {
             Chip::Mode => MODES.iter().map(|(_, name)| (*name).to_owned()).collect(),
             Chip::Timer => camkit::TIMERS.iter().map(|t| if *t == 0 { "off".to_owned() } else { format!("{t} s") }).collect(),
             Chip::Grid => ["off", "thirds", "squares"].map(str::to_owned).to_vec(),
             Chip::Detail => ["auto", "on", "off"].map(str::to_owned).to_vec(),
+            Chip::Size => pixel::SIZES.iter().map(|s| s.words()).collect(),
+            Chip::Palette => pixel::PALETTES.iter().map(|p| p.name().to_owned()).collect(),
+            Chip::Dither => pixel::DITHERS.iter().map(|d| d.name().to_owned()).collect(),
+            Chip::Tone => pixel::CONTRASTS.iter().map(|c| c.name().to_owned()).collect(),
             _ => Vec::new(),
         }
     }
 
     /// Which of a chip's choices is in use.
-    fn chosen(&self, chip: Chip, detail: DetailMode) -> usize {
+    pub(super) fn chosen(&self, chip: Chip, detail: DetailMode) -> usize {
         match chip {
             Chip::Mode => self.mode.index(),
             Chip::Timer => camkit::TIMERS.iter().position(|t| *t == self.timer).unwrap_or(0),
@@ -401,6 +438,10 @@ impl Camera {
                 DetailMode::On => 1,
                 DetailMode::Off => 2,
             },
+            Chip::Size => pixel::SIZES.iter().position(|s| *s == self.pixel.size).unwrap_or(0),
+            Chip::Palette => pixel::PALETTES.iter().position(|p| *p == self.pixel.palette).unwrap_or(0),
+            Chip::Dither => pixel::DITHERS.iter().position(|d| *d == self.pixel.dither).unwrap_or(0),
+            Chip::Tone => pixel::CONTRASTS.iter().position(|c| *c == self.pixel.contrast).unwrap_or(0),
             _ => 0,
         }
     }
@@ -576,9 +617,16 @@ impl Camera {
     }
 
     /// What a chip says it is set to, when it has the keys.
-    fn chip_words(&self, chip: Chip, detail: DetailMode) -> String {
+    pub(super) fn chip_words(&self, chip: Chip, detail: DetailMode) -> String {
         match chip {
-            Chip::Look => self.look.name().to_lowercase(),
+            Chip::Look => match self.look.texture().words(self.texture) {
+                Some(t) => format!("{} · {t}", self.look.name().to_lowercase()),
+                None => self.look.name().to_lowercase(),
+            },
+            Chip::Size => self.pixel.size.words(),
+            Chip::Palette => format!("{} · {}", self.pixel.palette.name(), self.pixel.palette.words()),
+            Chip::Dither => self.pixel.dither.name().to_owned(),
+            Chip::Tone => format!("{} · {}", pixel_mode::bright_words(self.pixel.bright), self.pixel.contrast.name()),
             Chip::Pro => Program::of(&self.pro).words().to_owned(),
             Chip::Lens => (if self.lens == Lens::Main { "this camera" } else { "the smart camera's AI view" }).to_owned(),
             _ => self.choices(chip).get(self.chosen(chip, detail)).cloned().unwrap_or_default(),
@@ -594,6 +642,8 @@ impl Camera {
             Chip::Grid => self.kit.grid != Grid::Off,
             Chip::Detail => detail != DetailMode::Off,
             Chip::Pro => self.mode == Mode::Pro,
+            Chip::Size | Chip::Palette | Chip::Dither => true,
+            Chip::Tone => self.pixel.bright != 0 || self.pixel.contrast != pixel::Contrast::Normal,
         }
     }
 
@@ -603,7 +653,11 @@ impl Camera {
                 Mode::Scan => "qr_code_scanner",
                 Mode::Doc => "document_scanner",
                 Mode::Photo | Mode::Pro => "photo_camera",
+                // Drawn in pixels of its own (pixel_mode.rs).
+                Mode::Pixel => "",
             },
+            Chip::Tone => "sunny",
+            Chip::Size | Chip::Palette | Chip::Dither => "",
             Chip::Look => "photo_filter",
             Chip::Timer => "timer",
             Chip::Grid => "grid_on",
@@ -641,6 +695,7 @@ impl Camera {
         }
         match self.bar.picker {
             Some(Picker::Pro { item, slot }) => self.draw_pro_row(g, vf, shown, item, slot),
+            Some(Picker::Choice { chip, at }) if chip.pixel() => self.draw_pixel_picker(g, vf, shown, chip, at),
             Some(Picker::Choice { chip, at }) => self.draw_choices(g, vf, shown, chip, at),
             None => self.draw_chips(g, vf, shown),
         }
@@ -648,7 +703,7 @@ impl Camera {
 
     /// The bar's glass: across the viewfinder `m` in, `bh` tall, sunk out
     /// of sight as it goes.
-    fn track(g: &mut Gfx, vf: Rect, bh: f32, shown: f32) -> Rect {
+    pub(super) fn track(g: &mut Gfx, vf: Rect, bh: f32, shown: f32) -> Rect {
         let m = 6.0;
         let r = Rect::new(vf.x + m, (vf.bottom() - m - bh + (1.0 - shown) * (bh + m)).round(), vf.w - 2.0 * m, bh);
         // Its own group: it never melts into the dials' glass above it.
@@ -657,7 +712,7 @@ impl Camera {
     }
 
     /// The capsule of ice glides to `target` (a cell's place along the bar).
-    fn glide(&mut self, g: &mut Gfx, target: f32) -> f32 {
+    pub(super) fn glide(&mut self, g: &mut Gfx, target: f32) -> f32 {
         if g.calm || self.frozen || self.bar.on.value() < 0.02 {
             self.bar.at.jump(target);
         } else if self.bar.at.target() != target {
@@ -669,7 +724,7 @@ impl Camera {
 
     /// A note above the bar: what the chip in hand is, or what the keys do.
     /// With `key`, the key that acts on it, on a quiet cap at its end.
-    fn bar_label(g: &mut Gfx, vf: Rect, cx: f32, bottom: f32, words: &str, key: Option<&str>, alpha: f32) -> f32 {
+    pub(super) fn bar_label(g: &mut Gfx, vf: Rect, cx: f32, bottom: f32, words: &str, key: Option<&str>, alpha: f32) -> f32 {
         let cap = g.ty.caption;
         let h = cap.size + 8.0;
         let key_w = key.map_or(0.0, |k| g.measure(k, cap) + 8.0 + 6.0);
@@ -699,10 +754,11 @@ impl Camera {
         // Each chip as wide as it needs; the room left shared out. Where
         // even that is too wide (the large text, seven chips), the mode's
         // arrows go first, then every key.
-        let natural = |g: &mut Gfx, chip: Chip, badge: bool| {
-            let face = if chip == Chip::Lens { g.measure("AI", cap) } else { icon };
-            face + if badge { 3.0 + g.measure(chip.badge(), cap) } else { 0.0 } + 10.0
+        let face_of = |g: &mut Gfx, chip: Chip| match chip {
+            Chip::Lens => g.measure("AI", cap),
+            _ => icon,
         };
+        let natural = |g: &mut Gfx, chip: Chip, badge: bool| face_of(g, chip) + if badge { 3.0 + g.measure(chip.badge(), cap) } else { 0.0 } + 10.0;
         let room = r.w - 2.0 * pad;
         let mut badges: Vec<bool> = vec![true; chips.len()];
         let mut widths: Vec<f32> = chips.iter().zip(&badges).map(|(c, b)| natural(g, *c, *b)).collect();
@@ -745,11 +801,17 @@ impl Camera {
             let set = self.chip_on(*chip, detail);
             let ink = mix(if set { t.ink } else { t.dim }, t.on_ice, lit);
             let badge_ink = mix(t.dim, t.on_ice, lit);
-            let face = if *chip == Chip::Lens { g.measure(if self.lens == Lens::Main { "1×" } else { "AI" }, cap) } else { icon };
+            let face = match chip {
+                Chip::Lens => g.measure(if self.lens == Lens::Main { "1×" } else { "AI" }, cap),
+                _ => face_of(g, *chip),
+            };
             let content = face + if badges[i] { 3.0 + g.measure(chip.badge(), cap) } else { 0.0 };
             let left = c.cx() - content * 0.5;
             if *chip == Chip::Lens {
                 g.text_alpha(left, c.cy(), if self.lens == Lens::Main { "1×" } else { "AI" }, cap, ink, shown);
+            } else if self.chip_icon(*chip).is_empty() {
+                // Pixel mode's faces, drawn in pixels of their own.
+                self.draw_pixel_face(g, *chip, left, c.cy(), face, ink, shown);
             } else {
                 g.icon_alpha(self.chip_icon(*chip), set, left + icon * 0.5, c.cy(), icon, ink, shown);
             }
@@ -768,6 +830,8 @@ impl Camera {
                 let short = match chip {
                     Chip::Pro => format!("pro · {}", self.pro_words(ProItem::Priority, 0).0),
                     Chip::Lens => format!("lens · {}", if self.lens == Lens::Main { "1×" } else { "AI" }),
+                    // A film look's grain said only where there is room.
+                    Chip::Look => format!("look · {}", self.look.name().to_lowercase()),
                     _ => full.clone(),
                 };
                 let (room, key_w) = (vf.w - 28.0, g.measure("enter", cap) + 14.0);
@@ -917,12 +981,17 @@ impl Camera {
             return vec![keys("intervalometer", &[("← →", "Change the value"), ("↑ ↓", "How often, how many"), ("enter", "Start"), ("esc · v", "Put it away")])];
         }
         match self.bar.picker {
+            Some(Picker::Choice { chip: Chip::Tone, .. }) => groups.push(keys("tone", &[("← →", "Contrast"), ("↑ ↓", "Brightness"), ("enter", "Keep it"), ("esc", "Leave it as it was")])),
+            Some(Picker::Choice { chip, .. }) if chip.pixel() => groups.push(keys("choices", &[("← →", "Choose, seen at once"), ("enter", "Keep it"), ("esc", "Leave it as it was")])),
             Some(Picker::Choice { .. }) => groups.push(keys("choices", &[("← →", "Choose"), ("enter", "Set it"), ("esc", "Leave it as it was")])),
             Some(Picker::Pro { .. }) => groups.push(keys("pro's row", &[("← →", "Change it"), ("↑ ↓ · tab", "The next control"), ("a", "Back to auto"), ("enter", "Recall a preset"), ("esc", "Close the row")])),
             None if self.strip => {
                 groups.push(keys("looks", &[("← →", "Choose a look"), ("enter", "Keep it"), ("esc", "Go back to the last")]));
                 if self.look == Look::Tint {
                     groups.push(keys("tint", &[("↑ ↓", "Turn its colour")]));
+                }
+                if self.look.film() && !self.look.texture().is_none() {
+                    groups.push(keys("film", &[("↑ ↓", "Grain: off, light, strong")]));
                 }
             }
             None if self.bar.focus.is_some() => groups.push(keys("the bar", &[("← → · tab", "Along the chips"), ("enter", "Open its choices"), ("esc · ↑", "Back to the camera")])),
@@ -938,8 +1007,16 @@ impl Camera {
             Mode::Scan => groups.push(keys("scan", &[("enter · space", "Open what it read"), ("esc", "Put the card away")])),
             Mode::Doc => groups.push(keys("doc", &[("enter · space", "Take the page now"), ("↓", "The pages taken")])),
             Mode::Photo | Mode::Pro => groups.push(keys("taking photos", &[("space · enter", "Take the photo"), ("↓", "The album")])),
+            Mode::Pixel => groups.extend(self.pixel_keys()),
         }
-        groups.push(keys("the camera", &[("← →", "Scan, photo, pro, doc"), ("tab", "The controls bar")]));
+        groups.push(keys("the camera", &[("← →", "Scan, photo, pro, pixel, doc"), ("tab", "The controls bar")]));
+        if self.mode == Mode::Pixel && !self.quick {
+            if self.smart.is_some() {
+                groups.push(keys("lens", &[("l", "1× or the AI view")]));
+            }
+            groups.push(keys("more", &[("t", "Self-timer: 2, 10 s"), ("n", "Night")]));
+            return groups;
+        }
         if self.smart.is_some() && !self.quick {
             groups.push(keys("lens", &[("↑ · l", "1× or the AI view")]));
             if self.lens == Lens::Ai {

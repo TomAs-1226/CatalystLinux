@@ -746,6 +746,15 @@ fn main() {
     if let Some(dir) = value("--camera-kit-shots") {
         return camera::kit_shots(std::path::Path::new(&dir));
     }
+    // Pixel mode and the film looks (1.2).
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--camera-pixel-shots") {
+        return camera::pixel_shots(std::path::Path::new(&dir));
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--camera-film-shots") {
+        return camera::film_shots(std::path::Path::new(&dir));
+    }
     // The photo editor and the document scanner (1.0).
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--editor-shots") {

@@ -186,6 +186,8 @@ pub struct Edits {
     pub look: Look,
     /// Tint's colour (degrees), as the Camera's.
     pub hue: f32,
+    /// A film look's grain and halation (1.2): off, light or strong.
+    pub texture: crate::filters::film::Strength,
     /// Quarter turns clockwise (0 to 3), then flips, then the straightening
     /// (degrees, ±15, clockwise), then the crop.
     pub turns: u8,
@@ -200,7 +202,7 @@ pub struct Edits {
 
 impl Default for Edits {
     fn default() -> Self {
-        Edits { values: [0; 10], look: Look::Original, hue: 32.0, turns: 0, flip_h: false, flip_v: false, straighten: 0.0, aspect: Aspect::Free, crop: WHOLE, marks: Vec::new() }
+        Edits { values: [0; 10], look: Look::Original, hue: 32.0, texture: crate::filters::film::Strength::default(), turns: 0, flip_h: false, flip_v: false, straighten: 0.0, aspect: Aspect::Free, crop: WHOLE, marks: Vec::new() }
     }
 }
 
@@ -218,9 +220,10 @@ impl Edits {
 
     /// Nothing changed: the photo as it is.
     pub fn is_plain(&self) -> bool {
-        // Tint's colour counts only under Tint, which is not plain anyway.
+        // Tint's colour counts only under Tint, and the grain only under a
+        // film look, which are not plain anyway.
         let plain = Edits::default();
-        Edits { hue: plain.hue, ..self.clone() } == plain
+        Edits { hue: plain.hue, texture: plain.texture, ..self.clone() } == plain
     }
 
     /// The geometry alone (what the working picture is turned and cut by).
@@ -241,6 +244,9 @@ impl Edits {
             out.push_str(&format!("look={}\n", self.look.id()));
             if self.look == Look::Tint {
                 out.push_str(&format!("hue={:.0}\n", self.hue));
+            }
+            if !self.look.texture().is_none() {
+                out.push_str(&format!("texture={}\n", self.texture.name()));
             }
         }
         if self.turns % 4 != 0 {
@@ -281,6 +287,7 @@ impl Edits {
             match k {
                 "look" => e.look = Look::from_id(v.trim()).unwrap_or_default(),
                 "hue" => e.hue = num(v).unwrap_or(e.hue).rem_euclid(360.0),
+                "texture" => e.texture = crate::filters::film::Strength::from_id(v.trim()).unwrap_or_default(),
                 "turns" => e.turns = (num(v).unwrap_or(0.0) as i32).rem_euclid(4) as u8,
                 "flip" => {
                     e.flip_h = v.contains('h');

@@ -30,6 +30,20 @@
 //! A photo's look is written into its Exif (UserComment, "look: Vivid"),
 //! and the photo as the camera took it is kept beside it in `.originals`,
 //! which Photos offers with `o`.
+//!
+//! The film looks (1.2, their own group after the digital ones) are this
+//! file's own too, after kinds of film rather than any stock: no name or
+//! table is anyone's, and none claims to match a real film. Each adds to
+//! the recipe a film's tone (a toe that deepens the blacks, a soft shoulder
+//! that rolls the highlights off) and its colour response: hue shifts and
+//! saturation by range, for skin, sky and foliage apart ([`Hues`]), worked
+//! on the colour alone (the frame's chroma) before the matrix, so the
+//! preview's form gains one table lookup for each 2 × 2 block. Grain and
+//! halation (film.rs) are laid over the picture after the look, at the
+//! strength chosen (off, light or strong).
+
+pub mod film;
+pub mod pixel;
 
 /// The looks, in the strip's order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
@@ -50,9 +64,26 @@ pub enum Look {
     BwNatural,
     BwHighContrast,
     Tint,
+    /// Film (1.2): a daylight slide, punchy, its blacks deep.
+    Sunlit,
+    /// A portrait negative: soft, low in contrast, warm in the skin.
+    Portrait,
+    /// A faded slide: muted colour, hard shadows.
+    Faded,
+    /// A tungsten night stock: cool, a red-orange glow round the lights.
+    Tungsten,
+    /// Black and white pushed: gritty, hard, heavy grain.
+    Pushed,
+    /// Soft black and white, fine grain.
+    Pearl,
+    /// A cine look: teal shadows, warm highlights, a gentle roll-off.
+    Cine,
 }
 
-pub const LOOKS: [Look; 15] = [
+/// The film looks, the strip's second group.
+pub const FILM: [Look; 7] = [Look::Sunlit, Look::Portrait, Look::Faded, Look::Tungsten, Look::Pushed, Look::Pearl, Look::Cine];
+
+pub const LOOKS: [Look; 22] = [
     Look::Original,
     Look::Vivid,
     Look::VividWarm,
@@ -68,6 +99,13 @@ pub const LOOKS: [Look; 15] = [
     Look::BwNatural,
     Look::BwHighContrast,
     Look::Tint,
+    Look::Sunlit,
+    Look::Portrait,
+    Look::Faded,
+    Look::Tungsten,
+    Look::Pushed,
+    Look::Pearl,
+    Look::Cine,
 ];
 
 /// BT.601's brightness weights, as the camera's YUV has them.
@@ -91,7 +129,35 @@ impl Look {
             Look::BwNatural => "BW Natural",
             Look::BwHighContrast => "BW High Contrast",
             Look::Tint => "Tint",
+            Look::Sunlit => "Sunlit Slide",
+            Look::Portrait => "Soft Negative",
+            Look::Faded => "Faded Slide",
+            Look::Tungsten => "Tungsten",
+            Look::Pushed => "Pushed Mono",
+            Look::Pearl => "Pearl Mono",
+            Look::Cine => "Cine",
         }
+    }
+
+    /// One of the film looks (the strip's second group).
+    pub fn film(self) -> bool {
+        FILM.contains(&self)
+    }
+
+    /// Its grain and halation at full strength (film.rs; none for the
+    /// digital looks).
+    pub fn texture(self) -> film::Texture {
+        let (grain, halation) = match self {
+            Look::Sunlit => (0.030, 0.0),
+            Look::Portrait => (0.034, 0.14),
+            Look::Faded => (0.040, 0.0),
+            Look::Tungsten => (0.046, 0.62),
+            Look::Pushed => (0.085, 0.0),
+            Look::Pearl => (0.030, 0.0),
+            Look::Cine => (0.026, 0.30),
+            _ => (0.0, 0.0),
+        };
+        film::Texture { grain, halation }
     }
 
     pub fn id(self) -> &'static str {
@@ -111,6 +177,13 @@ impl Look {
             Look::BwNatural => "bw-natural",
             Look::BwHighContrast => "bw-high-contrast",
             Look::Tint => "tint",
+            Look::Sunlit => "film-sunlit",
+            Look::Portrait => "film-negative",
+            Look::Faded => "film-faded",
+            Look::Tungsten => "film-tungsten",
+            Look::Pushed => "film-pushed",
+            Look::Pearl => "film-pearl",
+            Look::Cine => "film-cine",
         }
     }
 
@@ -121,7 +194,7 @@ impl Look {
     /// Black and white, whatever comes in.
     #[cfg(test)]
     pub fn neutral(self) -> bool {
-        matches!(self, Look::Mono | Look::Silvertone | Look::Noir | Look::BwNatural | Look::BwHighContrast)
+        matches!(self, Look::Mono | Look::Silvertone | Look::Noir | Look::BwNatural | Look::BwHighContrast | Look::Pushed | Look::Pearl)
     }
 
     /// The look's recipe; `hue` is Tint's colour (degrees).
@@ -160,6 +233,73 @@ impl Look {
             // A red filter's black and white: skies darken, faces lighten.
             Look::BwHighContrast => Recipe { mono: Some([0.50, 0.40, 0.10]), contrast: 0.75, black: 0.03, ..plain },
             Look::Tint => Recipe { mono: Some(natural), contrast: 0.15, duotone: Some(tint_colour(hue)), ..plain },
+            // Film (1.2). Bands by hue: skin about 25°, foliage 100°, sky 212°.
+            // A daylight slide: lively and a touch cool, deep blacks, sky
+            // deepened toward blue, greens fresh, skin held back.
+            Look::Sunlit => Recipe {
+                wb: [0.99, 1.0, 1.02],
+                saturation: 1.2,
+                contrast: 0.4,
+                black: 0.012,
+                toe: 0.6,
+                shoulder: 0.3,
+                hues: Some(Hues { bands: [skin(3.0, 0.96), foliage(-5.0, 1.14), sky(7.0, 1.24)], roll: 0.3 }),
+                ..plain
+            },
+            // A portrait negative: soft and warm, lifted blacks, a long
+            // shoulder, skin a little richer, greens and sky quietened.
+            Look::Portrait => Recipe {
+                wb: [1.04, 1.0, 0.95],
+                saturation: 0.92,
+                exposure: 1.03,
+                contrast: 0.06,
+                fade: 0.035,
+                shoulder: 0.7,
+                hues: Some(Hues { bands: [skin(-2.0, 1.07), foliage(-8.0, 0.84), sky(-4.0, 0.86)], roll: 0.45 }),
+                ..plain
+            },
+            // A faded slide: muted, its shadows hard, highlights warm and
+            // shadows teal, greens and sky drained toward cyan.
+            Look::Faded => Recipe {
+                saturation: 0.74,
+                contrast: 0.34,
+                black: 0.03,
+                toe: 0.8,
+                shoulder: 0.5,
+                shadows: [-0.005, 0.01, 0.02],
+                highlights: [0.025, 0.015, -0.01],
+                hues: Some(Hues { bands: [skin(0.0, 0.92), foliage(7.0, 0.76), sky(-9.0, 0.8)], roll: 0.2 }),
+                ..plain
+            },
+            // A tungsten night stock: balanced for lamps, so cool by day,
+            // teal-blue shadows; its glow is the halation (film.rs).
+            Look::Tungsten => Recipe {
+                wb: [0.88, 0.98, 1.12],
+                saturation: 1.04,
+                contrast: 0.24,
+                toe: 0.4,
+                shoulder: 0.55,
+                shadows: [-0.02, 0.0, 0.03],
+                hues: Some(Hues { bands: [skin(0.0, 1.0), foliage(8.0, 0.9), sky(4.0, 1.1)], roll: 0.3 }),
+                ..plain
+            },
+            // Black and white pushed two stops: hard, the shadows crushed.
+            Look::Pushed => Recipe { mono: Some([0.40, 0.47, 0.13]), contrast: 0.95, black: 0.04, toe: 0.5, shoulder: 0.2, ..plain },
+            // Soft black and white: open, low contrast, a long shoulder.
+            Look::Pearl => Recipe { mono: Some([0.30, 0.58, 0.12]), contrast: 0.1, exposure: 1.04, fade: 0.03, shoulder: 0.8, ..plain },
+            // A cine look: teal shadows, warm highlights, a gentle roll-off;
+            // skin kept warm while greens and sky lean teal.
+            Look::Cine => Recipe {
+                wb: [1.02, 1.0, 0.98],
+                saturation: 0.95,
+                contrast: 0.28,
+                toe: 0.3,
+                shoulder: 0.8,
+                shadows: [-0.03, 0.01, 0.035],
+                highlights: [0.035, 0.012, -0.03],
+                hues: Some(Hues { bands: [skin(2.0, 1.04), foliage(12.0, 0.8), sky(-8.0, 0.9)], roll: 0.25 }),
+                ..plain
+            },
         }
     }
 
@@ -227,13 +367,133 @@ pub struct Recipe {
     pub highlights: [f32; 3],
     /// Tint: a duotone through this colour.
     pub duotone: Option<[f32; 3]>,
+    /// Film's tone (0 none, 1 strong): a toe that deepens the shadows
+    /// toward black, and a shoulder that rolls the highlights into white.
+    pub toe: f32,
+    pub shoulder: f32,
+    /// Film's colour response by hue range, on the colour alone.
+    pub hues: Option<Hues>,
 }
 
 impl Default for Recipe {
     fn default() -> Self {
-        Recipe { wb: [1.0; 3], mono: None, saturation: 1.0, exposure: 1.0, contrast: 0.0, black: 0.0, fade: 0.0, shadows: [0.0; 3], highlights: [0.0; 3], duotone: None }
+        Recipe {
+            wb: [1.0; 3],
+            mono: None,
+            saturation: 1.0,
+            exposure: 1.0,
+            contrast: 0.0,
+            black: 0.0,
+            fade: 0.0,
+            shadows: [0.0; 3],
+            highlights: [0.0; 3],
+            duotone: None,
+            toe: 0.0,
+            shoulder: 0.0,
+            hues: None,
+        }
     }
 }
+
+/// A range of hues a film treats apart: centred on `hue` (HSV degrees),
+/// `width` each way in the colour plane, turned `shift` degrees (toward
+/// the next hue round: red toward yellow, green toward cyan, cyan toward
+/// blue) and its saturation times `sat`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Band {
+    pub hue: f32,
+    pub width: f32,
+    pub shift: f32,
+    pub sat: f32,
+}
+
+fn skin(shift: f32, sat: f32) -> Band {
+    Band { hue: 25.0, width: 32.0, shift, sat }
+}
+
+fn foliage(shift: f32, sat: f32) -> Band {
+    Band { hue: 100.0, width: 45.0, shift, sat }
+}
+
+fn sky(shift: f32, sat: f32) -> Band {
+    Band { hue: 212.0, width: 34.0, shift, sat }
+}
+
+/// A film's colour response: its bands, then `roll`, how much the most
+/// colourful are held back (a film's saturation rolls off where a
+/// sensor's clips).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hues {
+    pub bands: [Band; 3],
+    pub roll: f32,
+}
+
+impl Hues {
+    /// A colour's chroma (U and V, 0 to 1, grey at a half) as the film
+    /// turns it.
+    pub fn apply(&self, u: f32, v: f32) -> (f32, f32) {
+        let (cu, cv) = (u - 0.5, v - 0.5);
+        let c = (cu * cu + cv * cv).sqrt();
+        if c < 1e-4 {
+            return (u, v);
+        }
+        let a = cv.atan2(cu).to_degrees();
+        let (mut shift, mut sat) = (0.0, 1.0);
+        for b in &self.bands {
+            let d = (a - band_angle(b.hue) + 540.0).rem_euclid(360.0) - 180.0;
+            if d.abs() < b.width {
+                let w = (std::f32::consts::FRAC_PI_2 * d / b.width).cos().powi(2);
+                shift += w * b.shift;
+                sat += w * (b.sat - 1.0);
+            }
+        }
+        let c = c * sat.max(0.0) / (1.0 + self.roll * (c / 0.25).powi(2)).sqrt();
+        let a = (a + shift).to_radians();
+        ((0.5 + c * a.cos()).clamp(0.0, 1.0), (0.5 + c * a.sin()).clamp(0.0, 1.0))
+    }
+}
+
+/// Where a hue (HSV degrees) lies in the colour (U, V) plane, in degrees.
+fn band_angle(hue: f32) -> f32 {
+    let [_, u, v] = rgb_to_yuv(hsv(hue, 0.6, 0.75));
+    (v - 0.5).atan2(u - 0.5).to_degrees()
+}
+
+/// A film's response as a table from the frame's U and V (a byte each) to
+/// the new ones, made once for each and kept: from a 65 × 65 grid of the
+/// definition, filled between.
+fn hue_table(hues: &Hues) -> std::sync::Arc<Vec<[u8; 2]>> {
+    use std::sync::{Arc, Mutex, OnceLock};
+    static MADE: OnceLock<Mutex<Vec<(Hues, Arc<Vec<[u8; 2]>>)>>> = OnceLock::new();
+    let made = MADE.get_or_init(Mutex::default);
+    if let Some(t) = made.lock().ok().and_then(|m| m.iter().find(|(h, _)| h == hues).map(|(_, t)| t.clone())) {
+        return t;
+    }
+    const G: usize = 64;
+    let grid: Vec<(f32, f32)> = (0..=G).flat_map(|i| (0..=G).map(move |j| (i, j))).map(|(i, j)| hues.apply(i as f32 / G as f32, j as f32 / G as f32)).collect();
+    let mut table = vec![[0u8; 2]; 256 * 256];
+    for u in 0..256usize {
+        let fu = u as f32 / 255.0 * G as f32;
+        let (i, ku) = ((fu as usize).min(G - 1), fu - (fu as usize).min(G - 1) as f32);
+        for v in 0..256usize {
+            let fv = v as f32 / 255.0 * G as f32;
+            let (j, kv) = ((fv as usize).min(G - 1), fv - (fv as usize).min(G - 1) as f32);
+            let at = |a: usize, b: usize| grid[a * (G + 1) + b];
+            let lerp = |p: (f32, f32), q: (f32, f32), k: f32| (p.0 + (q.0 - p.0) * k, p.1 + (q.1 - p.1) * k);
+            let o = lerp(lerp(at(i, j), at(i, j + 1), kv), lerp(at(i + 1, j), at(i + 1, j + 1), kv), ku);
+            table[(u << 8) | v] = [(o.0 * 255.0).round().clamp(0.0, 255.0) as u8, (o.1 * 255.0).round().clamp(0.0, 255.0) as u8];
+        }
+    }
+    let table = Arc::new(table);
+    if let Ok(mut m) = made.lock() {
+        m.push((*hues, table.clone()));
+    }
+    table
+}
+
+/// Where film's toe ends and its shoulder begins, on the curve.
+const TOE_TOP: f32 = 0.4;
+const KNEE: f32 = 0.55;
 
 impl Recipe {
     /// The colour matrix: white balance and brightness, then saturation or
@@ -261,7 +521,19 @@ impl Recipe {
         // An S about mid grey through 0 and 1, steeper in the middle with
         // more contrast (a normalised arctangent: none is a straight line).
         let k = self.contrast * 6.0;
-        let s = if k < 1e-3 { v } else { 0.5 + (k * (v - 0.5)).atan() / (2.0 * (k * 0.5).atan()) };
+        let mut s = if k < 1e-3 { v } else { 0.5 + (k * (v - 0.5)).atan() / (2.0 * (k * 0.5).atan()) };
+        // Film's toe: the shadows' slope eased from 1 - toe at black up to
+        // 1 where it ends (a Hermite, below the line: deeper blacks).
+        if self.toe > 0.0 && s < TOE_TOP {
+            let x = s / TOE_TOP;
+            s = TOE_TOP * (x - self.toe * x * (1.0 - x).powi(2));
+        }
+        // Its shoulder: the slope easing from 1 down to 1 - shoulder at
+        // white, so highlights crowd softly into it rather than clip.
+        if self.shoulder > 0.0 && s > KNEE {
+            let x = (s - KNEE) / (1.0 - KNEE);
+            s = KNEE + (1.0 - KNEE) * (x + self.shoulder * x * x * (1.0 - x));
+        }
         self.fade + s * (1.0 - self.fade)
     }
 
@@ -277,6 +549,15 @@ impl Recipe {
     /// The look on one colour (0 to 1): the definition every fast form
     /// follows.
     pub fn map(&self, rgb: [f32; 3]) -> [f32; 3] {
+        // Film's colour response first, on the colour alone.
+        let rgb = match &self.hues {
+            Some(h) => {
+                let [y, u, v] = rgb_to_yuv(rgb);
+                let (u, v) = h.apply(u, v);
+                yuv_to_rgb(y, u, v)
+            }
+            None => rgb,
+        };
         let m = self.matrix();
         let c = [dot(m[0], rgb), dot(m[1], rgb), dot(m[2], rgb)].map(|v| self.curve(v));
         let l = dot(c, LUMA).clamp(0.0, 1.0);
@@ -317,7 +598,7 @@ impl Recipe {
             }
         };
         let identity = *self == Recipe::default();
-        Compiled { matrix: fixed, curve: Box::new(curve), finish, identity }
+        Compiled { matrix: fixed, curve: Box::new(curve), finish, hues: self.hues.as_ref().map(hue_table), identity }
     }
 }
 
@@ -335,6 +616,8 @@ pub struct Compiled {
     matrix: [[i32; 3]; 3],
     curve: Box<[u16; 1024]>,
     finish: Finish,
+    /// Film's colour response: the new U and V for each, by U then V.
+    hues: Option<std::sync::Arc<Vec<[u8; 2]>>>,
     #[cfg_attr(not(test), allow(dead_code))]
     identity: bool,
 }
@@ -350,6 +633,20 @@ impl Compiled {
     #[inline]
     pub fn pixel(&self, r: u8, g: u8, b: u8) -> [u8; 3] {
         let (r, g, b) = (i32::from(r), i32::from(g), i32::from(b));
+        // Film's colour response: through its table by the colour's own U
+        // and V (in sixteenths of a level and back, so nothing is lost).
+        let (r, g, b) = match &self.hues {
+            Some(t) => {
+                let y = 19_595 * r + 38_470 * g + 7_471 * b;
+                let u = (128 + ((-11_059 * r - 21_709 * g + 32_768 * b + 32_768) >> 16)).clamp(0, 255) as usize;
+                let v = (128 + ((32_768 * r - 27_439 * g - 5_329 * b + 32_768) >> 16)).clamp(0, 255) as usize;
+                let o = t[(u << 8) | v];
+                let (du, dv) = (i32::from(o[0]) - 128, i32::from(o[1]) - 128);
+                let to = |x: i32| ((x + 32_768) >> 16).clamp(0, 255);
+                (to(y + 91_881 * dv), to(y - 22_554 * du - 46_802 * dv), to(y + 116_130 * du))
+            }
+            None => (r, g, b),
+        };
         let m = &self.matrix;
         let c = |row: usize| {
             let v = (m[row][0] * r + m[row][1] * g + m[row][2] * b + 2048) >> 12;
@@ -387,6 +684,12 @@ impl Compiled {
     /// With `zebras` (their phase), pixels clipping before the look (any
     /// channel at [`crate::pro::ZEBRA_AT`]) are striped. Gives how many clip.
     pub fn develop(&self, yuv: &[u8], w: usize, h: usize, out: &mut crate::photos::Picture, zebras: Option<usize>) -> u32 {
+        self.develop_grained(yuv, w, h, out, zebras, None)
+    }
+
+    /// As [`Compiled::develop`], a film look's grain laid on each pixel as
+    /// it is made (film.rs): in the same pass, on the same two cores.
+    pub fn develop_grained(&self, yuv: &[u8], w: usize, h: usize, out: &mut crate::photos::Picture, zebras: Option<usize>, grain: Option<&film::Grain>) -> u32 {
         out.w = w;
         out.h = h;
         out.rgb.resize(w * h * 3, 0);
@@ -398,16 +701,17 @@ impl Compiled {
         if w * h >= 32_768 && half > 0 {
             let (top, bottom) = out.rgb.split_at_mut(half * w * 3);
             std::thread::scope(|s| {
-                let first = s.spawn(|| self.develop_rows(yuv, w, h, 0..half, top, zebras));
-                let second = self.develop_rows(yuv, w, h, half..h, bottom, zebras);
+                let first = s.spawn(|| self.develop_rows(yuv, w, h, 0..half, top, zebras, grain));
+                let second = self.develop_rows(yuv, w, h, half..h, bottom, zebras, grain);
                 first.join().unwrap_or(0) + second
             })
         } else {
-            self.develop_rows(yuv, w, h, 0..h, &mut out.rgb, zebras)
+            self.develop_rows(yuv, w, h, 0..h, &mut out.rgb, zebras, grain)
         }
     }
 
-    fn develop_rows(&self, yuv: &[u8], w: usize, h: usize, rows: std::ops::Range<usize>, out: &mut [u8], zebras: Option<usize>) -> u32 {
+    #[allow(clippy::too_many_arguments)]
+    fn develop_rows(&self, yuv: &[u8], w: usize, h: usize, rows: std::ops::Range<usize>, out: &mut [u8], zebras: Option<usize>, grain: Option<&film::Grain>) -> u32 {
         let cw = w / 2;
         let (ys, uv) = yuv.split_at(w * h);
         let (us, vs) = uv.split_at(cw * (h / 2));
@@ -423,7 +727,15 @@ impl Compiled {
             let (ur, vr) = (&us[(y / 2) * cw..(y / 2 + 1) * cw], &vs[(y / 2) * cw..(y / 2 + 1) * cw]);
             let line = &mut out[(y - first) * w * 3..(y - first + 1) * w * 3];
             for (bx, ((u, v), (pair, px))) in ur.iter().zip(vr).zip(lumas.chunks_exact(2).zip(line.chunks_exact_mut(6))).enumerate() {
-                let (u, v) = (i32::from(*u) - 128, i32::from(*v) - 128);
+                // Film's colour response: the block's colour through its table.
+                let (u, v) = match &self.hues {
+                    Some(t) => {
+                        let o = t[(usize::from(*u) << 8) | usize::from(*v)];
+                        (o[0], o[1])
+                    }
+                    None => (*u, *v),
+                };
+                let (u, v) = (i32::from(u) - 128, i32::from(v) - 128);
                 // The block's colour, as yuv420_to_rgb works it, then through the matrix.
                 let (cr, cg, cb) = ((359 * v) >> 8, -((88 * u + 183 * v) >> 8), (454 * u) >> 8);
                 let k = [m[0][0] * cr + m[0][1] * cg + m[0][2] * cb + 2048, m[1][0] * cr + m[1][1] * cg + m[1][2] * cb + 2048, m[2][0] * cr + m[2][1] * cg + m[2][2] * cb + 2048];
@@ -438,6 +750,9 @@ impl Compiled {
                             o.copy_from_slice(&[to8(r + i32::from(a[0])), to8(g + i32::from(a[1])), to8(b + i32::from(a[2]))]);
                         }
                         Finish::Ramp(ramp) => o.copy_from_slice(&ramp[((306 * r + 600 * g + 118 * b + 2048) >> 12).clamp(0, 255) as usize]),
+                    }
+                    if let Some(grain) = grain {
+                        grain.add(o, 2 * bx + i, y);
                     }
                     if let Some(phase) = zebras {
                         if l + reach >= i32::from(crate::pro::ZEBRA_AT) {
@@ -572,9 +887,14 @@ pub fn ensure_lut(look: Look, hue: f32) -> Option<std::path::PathBuf> {
     Some(path)
 }
 
-/// A photo's look, from its Exif's "look: …".
+/// A photo's look, from its Exif's "look: …" (a pixel picture's PNG says
+/// it in a text chunk of that name).
 pub fn look_of(path: &std::path::Path) -> Option<String> {
     use std::io::Read;
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("png")) {
+        let reader = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).ok()?)).read_info().ok()?;
+        return reader.info().uncompressed_latin1_text.iter().find(|t| t.keyword == "look").map(|t| t.text.clone());
+    }
     let mut head = vec![0u8; 16 * 1024];
     let n = std::fs::File::open(path).ok()?.read(&mut head).ok()?;
     look_in(&head[..n])
@@ -706,7 +1026,8 @@ mod tests {
             assert!((dot(tint_colour(hue), LUMA) - 0.5).abs() < 0.01, "{hue}");
         }
         assert_eq!(Look::from_id("bw-high-contrast"), Some(Look::BwHighContrast));
-        assert_eq!(LOOKS.len(), 15);
+        assert_eq!(LOOKS.len(), 22);
+        assert_eq!(LOOKS.iter().filter(|l| l.film()).count(), FILM.len());
     }
 
     #[test]
@@ -738,7 +1059,10 @@ mod tests {
                     worst.1 = worst.1.max((want[i] - i32::from(got[i])).abs());
                 }
             }
-            assert!(worst.0 <= 2, "{}: the preview's form is {} off", look.name(), worst.0);
+            // A film look's colour response goes through a table of the
+            // chroma (a level each way), then the curve's steeper slope.
+            let allowed = if look.film() { 4 } else { 2 };
+            assert!(worst.0 <= allowed, "{}: the preview's form is {} off", look.name(), worst.0);
             assert!(worst.1 <= 4, "{}: the photo's table is {} off", look.name(), worst.1);
         }
     }
@@ -817,5 +1141,125 @@ mod tests {
         // Against the plain conversion timed alongside, so a machine busy
         // with other work (a whole test suite, builds) slows both alike.
         assert!(worst < (convert * 4.0).max(2.0), "{worst} ms, against {convert} ms converted alone");
+        // A film look, its grain and halation strong, on a dusk with lamps
+        // (the halation's busiest): its colour response, then its texture.
+        let mut dusk = crate::camera::scene(320, 240, 1.0, false);
+        for (i, p) in dusk.rgb.chunks_exact_mut(3).enumerate() {
+            let (x, y) = (i % 320, i / 320);
+            let lamp = (x as i32 - 80).pow(2) + (y as i32 - 60).pow(2) < 49 || (x as i32 - 240).pow(2) + (y as i32 - 90).pow(2) < 25;
+            p.copy_from_slice(&if lamp { [255, 244, 214] } else { [p[0] / 3, p[1] / 3, p[2] / 3] });
+        }
+        let dusk = crate::camera::rgb_to_yuv420(&dusk);
+        let mut film_worst = (0.0f64, "");
+        for look in FILM {
+            let c = look.compiled(0.0);
+            let tex = look.texture().at(film::Strength::Strong);
+            // As the camera's thread does it: the grain in the developing
+            // pass, then the glow.
+            let took = time(&mut || {
+                let grain = film::Grain::preview(tex, 320);
+                c.develop_grained(&dusk, 320, 240, &mut out, None, grain.as_ref());
+                film::halate(&mut out, tex);
+            });
+            // The same as developing, then laying the texture on whole.
+            let mut whole = crate::photos::Picture::default();
+            c.develop(&dusk, 320, 240, &mut whole, None);
+            apply_texture_for_test(&mut whole, tex);
+            assert_eq!(whole, out, "{}", look.name());
+            if took > film_worst.0 {
+                film_worst = (took, look.name());
+            }
+        }
+        let tungsten = Look::Tungsten.compiled(0.0);
+        let colour = time(&mut || {
+            tungsten.develop(&dusk, 320, 240, &mut out, None);
+        });
+        let mut textured = out.clone();
+        let texture = time(&mut || {
+            let tex = Look::Tungsten.texture().at(film::Strength::Strong);
+            let grain = film::Grain::preview(tex, 320);
+            tungsten.develop_grained(&dusk, 320, 240, &mut textured, None, grain.as_ref());
+            film::halate(&mut textured, tex);
+        }) - colour;
+        eprintln!(
+            "a film look with strong grain and halation: {:.3} ms at worst ({}; tungsten's colour {colour:.3} ms, its texture {texture:.3} ms); at the A53's reckoned fifteenth, {:.1} ms",
+            film_worst.0,
+            film_worst.1,
+            film_worst.0 * 15.0
+        );
+        assert!(film_worst.0 < (convert * 4.5).max(2.0), "{} ms ({}), against {convert} ms converted alone", film_worst.0, film_worst.1);
+    }
+
+    fn apply_texture_for_test(pic: &mut crate::photos::Picture, tex: film::Texture) {
+        film::apply(pic, tex, 0);
+    }
+
+    fn chroma(c: [f32; 3]) -> f32 {
+        let [_, u, v] = rgb_to_yuv(c);
+        ((u - 0.5).powi(2) + (v - 0.5).powi(2)).sqrt()
+    }
+
+    #[test]
+    fn film_looks_have_a_films_tone() {
+        // The toe deepens the shadows, black kept; the shoulder rolls the
+        // highlights into white, white kept; both rise all the way.
+        let toe = Recipe { toe: 0.6, ..Recipe::default() };
+        let shoulder = Recipe { shoulder: 0.7, ..Recipe::default() };
+        assert!(toe.curve(0.12) < 0.1 && toe.curve(0.0) == 0.0 && (toe.curve(0.7) - 0.7).abs() < 1e-6);
+        assert!(shoulder.curve(0.85) > 0.88 && (shoulder.curve(1.0) - 1.0).abs() < 1e-6 && (shoulder.curve(0.3) - 0.3).abs() < 1e-6);
+        // Near white the shoulder's slope is gentle: highlights roll off.
+        assert!(shoulder.curve(1.0) - shoulder.curve(0.95) < 0.05 * 0.5);
+        for r in [toe, shoulder, Look::Sunlit.recipe(0.0), Look::Pushed.recipe(0.0), Look::Pearl.recipe(0.0), Look::Cine.recipe(0.0)] {
+            let mut last = -1.0;
+            for i in 0..=200 {
+                let v = r.curve(i as f32 / 200.0);
+                assert!(v >= last - 1e-6, "{r:?} falls at {i}");
+                last = v;
+            }
+        }
+        // The slide's blacks are deep; the portrait's lifted; Pushed is harder than Pearl.
+        assert!(mapped(Look::Sunlit, [30, 30, 30])[1] < 22);
+        assert!(mapped(Look::Portrait, [0, 0, 0])[1] > 6);
+        let spread = |l: Look| i32::from(mapped(l, [200, 200, 200])[0]) - i32::from(mapped(l, [60, 60, 60])[0]);
+        assert!(spread(Look::Pushed) > spread(Look::Pearl) + 40, "{} {}", spread(Look::Pushed), spread(Look::Pearl));
+    }
+
+    #[test]
+    fn film_looks_treat_skin_sky_and_foliage_apart() {
+        let f = |c: [u8; 3]| c.map(|v| f32::from(v) / 255.0);
+        let (skin, sky, leaf) = (f([214, 160, 130]), f([110, 160, 220]), f([90, 140, 60]));
+        let gain = |look: Look, c: [f32; 3]| chroma(look.recipe(0.0).map(c)) / chroma(c);
+        // The slide deepens the sky more than it warms the skin.
+        assert!(gain(Look::Sunlit, sky) > gain(Look::Sunlit, skin) + 0.15, "{} {}", gain(Look::Sunlit, sky), gain(Look::Sunlit, skin));
+        // The portrait keeps skin rich while it quietens foliage and sky.
+        assert!(gain(Look::Portrait, skin) > gain(Look::Portrait, leaf) + 0.1 && gain(Look::Portrait, skin) > gain(Look::Portrait, sky));
+        // The faded slide drains greens most.
+        assert!(gain(Look::Faded, leaf) < gain(Look::Faded, skin));
+        // A band turns only its own hues: grey and a magenta (in none) keep
+        // their hue through the colour response.
+        let h = Look::Cine.recipe(0.0).hues.unwrap();
+        assert_eq!(h.apply(0.5, 0.5), (0.5, 0.5));
+        let [_, u, v] = rgb_to_yuv(f([200, 60, 200]));
+        let (u2, v2) = h.apply(u, v);
+        assert!(((v2 - 0.5).atan2(u2 - 0.5) - (v - 0.5).atan2(u - 0.5)).abs() < 1e-3);
+        // Cine: shadows lean teal, highlights warm. Tungsten: day goes cool.
+        let dark = mapped(Look::Cine, [50, 50, 50]);
+        let light = mapped(Look::Cine, [205, 205, 205]);
+        assert!(dark[2] > dark[0] && light[0] > light[2], "{dark:?} {light:?}");
+        let grey = mapped(Look::Tungsten, [128, 128, 128]);
+        assert!(grey[2] > grey[0] + 10, "{grey:?}");
+        // Texture: the night stock glows, the pushed stock is grainiest,
+        // the digital looks have none.
+        assert!(Look::Tungsten.texture().halation > 0.4);
+        assert!(FILM.iter().all(|l| l.texture().grain <= Look::Pushed.texture().grain && l.texture().grain > 0.0));
+        assert!(LOOKS.iter().filter(|l| !l.film()).all(|l| l.texture().is_none()));
+        // Our own names: no film's.
+        for look in FILM {
+            assert!(look.id().starts_with("film-"));
+            let name = look.name().to_lowercase();
+            for stock in ["velvia", "portra", "chrome", "tri-x", "ektar", "cinestill", "provia", "kodak", "fuji", "ilford", "agfa", "superia", "gold"] {
+                assert!(!name.contains(stock), "{name}");
+            }
+        }
     }
 }

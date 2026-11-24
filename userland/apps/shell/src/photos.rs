@@ -13,6 +13,13 @@
 //! is not zoomed. It decodes only as much as the zoom needs (an eighth, a
 //! quarter, half), on a thread, showing the thumbnail meanwhile; only one
 //! photo is ever held at a time. `e` opens the editor (editor/, 1.0).
+//!
+//! Pixel pictures (the Camera's pixel mode, 1.2) are PNGs named
+//! `PIX_…png`: the album's is the copy blown up for sharing, and the one at
+//! its true size is kept beside it as its original. They are drawn with
+//! whole pixels, never smoothed: the viewer shows the true size at a whole
+//! number of panel pixels each (the largest that fits, then twice and four
+//! times that), and their thumbnails are sampled, not averaged.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -88,12 +95,42 @@ impl Picture {
         }
         out
     }
+
+    /// The picture at `w` × `h`, each pixel the one under its middle (for
+    /// pixel pictures: their pixels kept whole, never averaged into new
+    /// colours), cropped to the new shape as [`Picture::cover`] is.
+    pub fn cover_nearest(&self, w: usize, h: usize) -> Picture {
+        let mut out = Picture::new(w, h);
+        if self.is_empty() || w == 0 || h == 0 {
+            return out;
+        }
+        let (sw, sh) = if self.w * h > self.h * w { (self.h * w / h, self.h) } else { (self.w, self.w * h / w) };
+        let (x0, y0) = ((self.w - sw) / 2, (self.h - sh) / 2);
+        for oy in 0..h {
+            let y = (y0 + (2 * oy + 1) * sh / (2 * h)).min(self.h - 1);
+            for ox in 0..w {
+                let x = (x0 + (2 * ox + 1) * sw / (2 * w)).min(self.w - 1);
+                out.rgb[(oy * w + ox) * 3..][..3].copy_from_slice(&self.rgb[(y * self.w + x) * 3..][..3]);
+            }
+        }
+        out
+    }
 }
 
 /// Draw the part `view` (x, y, w, h in the picture's pixels) of `pic` into
 /// `dest` on the panel, sampled smoothly (bilinear), with its corners
 /// rounded to `radius` and at `alpha` over what is there.
 pub fn draw_picture(g: &mut Gfx, dest: Rect, pic: &Picture, view: [f32; 4], radius: f32, alpha: f32) {
+    draw_sampled(g, dest, pic, view, radius, alpha, false);
+}
+
+/// As [`draw_picture`], each panel pixel the picture's pixel under its
+/// middle: a pixel picture's pixels stay whole and sharp at any size.
+pub fn draw_picture_crisp(g: &mut Gfx, dest: Rect, pic: &Picture, view: [f32; 4], radius: f32, alpha: f32) {
+    draw_sampled(g, dest, pic, view, radius, alpha, true);
+}
+
+fn draw_sampled(g: &mut Gfx, dest: Rect, pic: &Picture, view: [f32; 4], radius: f32, alpha: f32, crisp: bool) {
     if pic.is_empty() || dest.w < 1.0 || dest.h < 1.0 || alpha <= 0.0 {
         return;
     }
@@ -135,6 +172,15 @@ pub fn draw_picture(g: &mut Gfx, dest: Rect, pic: &Picture, view: [f32; 4], radi
             if a <= 0.0 {
                 continue;
             }
+            let at = row + px as usize;
+            if crisp {
+                let u = ((vx + (fx - dx) * sx).floor() as i32).clamp(0, pw - 1);
+                let v = ((vy + (fy - dest.y) * sy).floor() as i32).clamp(0, ph - 1);
+                let p = (v * pw + u) as usize * 3;
+                let new = (u32::from(pic.rgb[p]) << 16) | (u32::from(pic.rgb[p + 1]) << 8) | u32::from(pic.rgb[p + 2]);
+                g.canvas.px[at] = if a >= 0.999 { new } else { blend(g.canvas.px[at], new, a) };
+                continue;
+            }
             let u = (vx + (fx - dx) * sx - 0.5).clamp(0.0, (pw - 1) as f32);
             let (u0, uf) = (u.floor() as i32, u.fract());
             let u1 = (u0 + 1).min(pw - 1);
@@ -147,7 +193,6 @@ pub fn draw_picture(g: &mut Gfx, dest: Rect, pic: &Picture, view: [f32; 4], radi
                 let bottom = u32::from(pic.rgb[a01 + c]) * (256 - wx) + u32::from(pic.rgb[a11 + c]) * wx;
                 *out = (top * (256 - wy) + bottom * wy) >> 16;
             }
-            let at = row + px as usize;
             let new = (rgb[0] << 16) | (rgb[1] << 8) | rgb[2];
             g.canvas.px[at] = if a >= 0.999 { new } else { blend(g.canvas.px[at], new, a) };
         }
@@ -183,7 +228,27 @@ fn thumbs_dir() -> PathBuf {
 /// Whether a file is one the album shows.
 pub fn is_photo(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    !lower.starts_with('.') && (lower.ends_with(".jpg") || lower.ends_with(".jpeg"))
+    !lower.starts_with('.') && (lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png"))
+}
+
+/// A pixel picture (the Camera's pixel mode): drawn with whole pixels.
+pub fn is_pixel(name: &str) -> bool {
+    name.starts_with("PIX_") && name.to_ascii_lowercase().ends_with(".png")
+}
+
+/// A pixel picture's file at its true size: its original, kept beside it
+/// (else the file itself).
+pub fn pixel_true_size(path: &Path) -> PathBuf {
+    let kept = crate::filters::original_of(path);
+    if kept.is_file() {
+        kept
+    } else {
+        path.to_path_buf()
+    }
+}
+
+fn is_png(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("png"))
 }
 
 /// A photo in the album.
@@ -199,7 +264,7 @@ pub struct Photo {
 /// else from when the file was last written.
 fn taken_of(name: &str, modified: Option<std::time::SystemTime>) -> NaiveDateTime {
     let stem = name.split('.').next().unwrap_or(name);
-    let digits: String = stem.trim_start_matches("IMG_").chars().take(15).collect();
+    let digits: String = stem.trim_start_matches("IMG_").trim_start_matches("PIX_").chars().take(15).collect();
     if let Ok(at) = NaiveDateTime::parse_from_str(&digits, "%Y%m%d_%H%M%S") {
         return at;
     }
@@ -244,8 +309,25 @@ fn new_path_in(dir: &Path, now: NaiveDateTime) -> PathBuf {
     path
 }
 
+/// Where the next pixel picture goes: `PIX_…png`, named as photos are.
+pub fn new_pixel_path(now: NaiveDateTime) -> PathBuf {
+    let dir = dir();
+    let stem = format!("PIX_{}", now.format("%Y%m%d_%H%M%S"));
+    let mut path = dir.join(format!("{stem}.png"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{stem}_{n}.png"));
+        n += 1;
+    }
+    path
+}
+
 /// A photo's size in pixels, from its header alone.
 pub fn dimensions(path: &Path) -> Option<(usize, usize)> {
+    if is_png(path) {
+        let reader = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).ok()?)).read_info().ok()?;
+        return Some((reader.info().width as usize, reader.info().height as usize));
+    }
     let file = std::fs::File::open(path).ok()?;
     let mut decoder = jpeg_decoder::Decoder::new(std::io::BufReader::new(file));
     decoder.read_info().ok()?;
@@ -255,6 +337,9 @@ pub fn dimensions(path: &Path) -> Option<(usize, usize)> {
 /// A photo decoded at the smallest of its whole, half, quarter or eighth
 /// sizes that is at least `want_w` × `want_h`.
 pub fn decode(path: &Path, want_w: usize, want_h: usize) -> Result<Picture, String> {
+    if is_png(path) {
+        return decode_png(path);
+    }
     let file = std::fs::File::open(path).map_err(|e| format!("cannot open the photo: {e}"))?;
     let mut decoder = jpeg_decoder::Decoder::new(std::io::BufReader::new(file));
     let (w, h) = decoder.scale(want_w.min(65535) as u16, want_h.min(65535) as u16).map_err(|e| format!("not a photo this reads: {e}"))?;
@@ -276,6 +361,33 @@ pub fn decode(path: &Path, want_w: usize, want_h: usize) -> Result<Picture, Stri
     };
     if rgb.len() < w * h * 3 {
         return Err("the photo is damaged".into());
+    }
+    Ok(Picture { w, h, rgb })
+}
+
+/// A PNG (a pixel picture, small) decoded whole, as RGB.
+fn decode_png(path: &Path) -> Result<Picture, String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("cannot open the picture: {e}"))?;
+    let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+    let mut reader = decoder.read_info().map_err(|e| format!("not a picture this reads: {e}"))?;
+    let (w, h) = (reader.info().width as usize, reader.info().height as usize);
+    // Larger than a pixel picture's copy ever is: not for this album.
+    if w * h > 4096 * 4096 {
+        return Err("too large a picture".into());
+    }
+    let mut buf = vec![0; reader.output_buffer_size().ok_or("too large a picture")?];
+    let out = reader.next_frame(&mut buf).map_err(|e| format!("the picture is damaged: {e}"))?;
+    let data = &buf[..out.buffer_size()];
+    let rgb: Vec<u8> = match out.color_type {
+        png::ColorType::Rgb => data.to_vec(),
+        png::ColorType::Rgba => data.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect(),
+        png::ColorType::Grayscale => data.iter().flat_map(|v| [*v; 3]).collect(),
+        png::ColorType::GrayscaleAlpha => data.chunks_exact(2).flat_map(|p| [p[0]; 3]).collect(),
+        png::ColorType::Indexed => return Err("the picture is damaged".into()),
+    };
+    if rgb.len() < w * h * 3 {
+        return Err("the picture is damaged".into());
     }
     Ok(Picture { w, h, rgb })
 }
@@ -316,7 +428,9 @@ pub fn thumbnail(photo: &Photo) -> Option<Picture> {
     if let Some(t) = read_thumb(&file, photo.bytes) {
         return Some(t);
     }
-    let made = decode(&photo.path, THUMB_W * 2, THUMB_H * 2).ok()?.cover(THUMB_W, THUMB_H);
+    let decoded = decode(&photo.path, THUMB_W * 2, THUMB_H * 2).ok()?;
+    // A pixel picture's pixels sampled, never averaged into new colours.
+    let made = if is_pixel(&photo.name) { decoded.cover_nearest(THUMB_W, THUMB_H) } else { decoded.cover(THUMB_W, THUMB_H) };
     write_thumb(&file, photo.bytes, &made);
     Some(made)
 }
@@ -617,7 +731,11 @@ impl Screen for Album {
                 Some(thumb) => {
                     // Fade out at the top edge rather than cut (at the foot, the band does).
                     let edge = ((r.bottom() - top) / 8.0).clamp(0.0, 1.0);
-                    draw_picture(g, r, &thumb, whole(&thumb), radius, edge);
+                    if is_pixel(&photo.name) {
+                        draw_picture_crisp(g, r, &thumb, whole(&thumb), radius, edge);
+                    } else {
+                        draw_picture(g, r, &thumb, whole(&thumb), radius, edge);
+                    }
                 }
                 None => {
                     g.surface(r, radius, t.surface1);
@@ -674,6 +792,8 @@ pub struct Viewer {
     has_original: bool,
     original: bool,
     has_raw: bool,
+    /// A pixel picture: its true size shown, with whole pixels.
+    pixel: bool,
 }
 
 const ZOOMS: [f32; 3] = [1.0, 2.0, 4.0];
@@ -699,14 +819,18 @@ impl Viewer {
             has_original: false,
             original: false,
             has_raw: false,
+            pixel: false,
         };
         v.arrive();
         v
     }
 
-    /// The file in sight: the photo, or the photo as taken.
+    /// The file in sight: the photo, or the photo as taken (a pixel
+    /// picture's true size).
     fn shown_path(&self, photo: &Photo) -> PathBuf {
-        if self.original {
+        if self.pixel {
+            pixel_true_size(&photo.path)
+        } else if self.original {
             crate::filters::original_of(&photo.path)
         } else {
             photo.path.clone()
@@ -727,12 +851,14 @@ impl Viewer {
         self.trouble = None;
         // The last photo's decode goes: one photo decoded at a time.
         self.shown = None;
-        self.dims = dimensions(&photo.path);
+        self.pixel = is_pixel(&photo.name);
+        self.dims = dimensions(&if self.pixel { pixel_true_size(&photo.path) } else { photo.path.clone() });
         self.placeholder = read_thumb(&thumb_file(photo), photo.bytes).map(|t| (self.at, t));
         self.chrome = 2.5;
         self.deleting = false;
         self.look = crate::filters::look_of(&photo.path);
-        self.has_original = crate::filters::original_of(&photo.path).is_file();
+        // A pixel picture's original is its true size, which is what shows.
+        self.has_original = !self.pixel && crate::filters::original_of(&photo.path).is_file();
         self.has_raw = photo.path.with_extension("dng").is_file();
         self.original = false;
     }
@@ -757,7 +883,7 @@ impl Viewer {
         // A step is a fifth of what is in sight; never past where the photo's
         // edge meets the panel's.
         let (pw, ph) = self.dims.unwrap_or((4, 3));
-        let (fx, fy) = in_sight(pw, ph, self.zoom.target());
+        let (fx, fy) = in_sight_of(pw, ph, self.zoom.target(), self.pixel);
         let (hx, hy) = (fx * 0.5, fy * 0.5);
         self.pan_x.set((self.pan_x.target() + dx * fx * 0.2).clamp(hx, 1.0 - hx));
         self.pan_y.set((self.pan_y.target() + dy * fy * 0.2).clamp(hy, 1.0 - hy));
@@ -832,7 +958,10 @@ impl Screen for Viewer {
                 self.trouble = None;
                 self.chrome = 2.5;
             }
+            Key::Char('o') if self.pixel => *cx.say = Some("this is its true size, kept beside the copy to share".into()),
             Key::Char('o') => *cx.say = Some("no look: this is the original".into()),
+            // A pixel picture keeps its pixels: nothing to straighten or tone.
+            Key::Char('e') if self.pixel => *cx.say = Some("a pixel picture keeps its pixels as taken".into()),
             // The editor (1.0): its edits kept beside the photo, never in it.
             Key::Char('e') => {
                 if let Some(photo) = self.photos.get(self.at) {
@@ -878,6 +1007,10 @@ impl Screen for Viewer {
             v.push(keys("photo", &[("← →", "Last, next photo")]));
         }
         v.push(keys("zoom", &[("enter · +", "Closer"), ("-", "Further out")]));
+        if self.pixel {
+            v.push(keys("this picture", &[("i", "Details"), ("d twice", "Delete it")]));
+            return v;
+        }
         v.push(keys("this photo", &[("e", "Edit it"), ("i", "Details"), ("d twice", "Delete it")]));
         if self.has_original {
             v.push(keys("its look", &[("o", "As taken, or the look")]));
@@ -953,8 +1086,13 @@ impl Screen for Viewer {
         let mut frame = Rect::new(0.0, 0.0, W, H);
         if let Some(pic) = pic {
             let (pw, ph) = self.dims.unwrap_or((pic.w, pic.h));
-            let (dest, view) = zoomed(pw, ph, pic, self.zoom.value(), self.pan_x.value(), self.pan_y.value());
-            draw_picture(g, Rect::new(dest.x + offset, dest.y, dest.w, dest.h), pic, view, 0.0, 1.0);
+            let (dest, view) = zoomed_of(pw, ph, pic, self.zoom.value(), self.pan_x.value(), self.pan_y.value(), self.pixel);
+            let at = Rect::new(dest.x + offset, dest.y, dest.w, dest.h);
+            if self.pixel {
+                draw_picture_crisp(g, at, pic, view, 0.0, 1.0);
+            } else {
+                draw_picture(g, at, pic, view, 0.0, 1.0);
+            }
             frame = dest;
         } else if let Some(why) = &self.trouble {
             let why = g.text.fit(why, &ty.caption, W - 40.0);
@@ -993,14 +1131,21 @@ impl Screen for Viewer {
         if self.details {
             let dims = self.dims.map_or("–".into(), |(w, h)| format!("{w} × {h}"));
             let mp = self.dims.map_or(String::new(), |(w, h)| format!(" · {:.1} mp", (w * h) as f32 / 1e6));
-            let mut lines = vec![photo.name.clone(), format!("{dims}{mp}"), size_words(photo.bytes), photo.taken.format("%A %-d %B %Y, %H:%M:%S").to_string()];
+            // A pixel picture: its true size, and its copy's for sharing.
+            let size = if self.pixel {
+                let copy = dimensions(&photo.path).filter(|d| Some(*d) != self.dims).map_or(String::new(), |(w, h)| format!(" · shared at {w} × {h}"));
+                format!("{dims} pixels{copy}")
+            } else {
+                format!("{dims}{mp}")
+            };
+            let mut lines = vec![photo.name.clone(), size, size_words(photo.bytes), photo.taken.format("%A %-d %B %Y, %H:%M:%S").to_string()];
             // What it wears and what is kept beside it.
-            let edited = crate::editor::edits::has_edit(&photo.path);
+            let edited = !self.pixel && crate::editor::edits::has_edit(&photo.path);
             let kept: Vec<String> = [
                 self.look.as_ref().map(|l| format!("look: {}", l.to_lowercase())),
                 self.has_original.then(|| "o: the original".to_owned()),
                 self.has_raw.then(|| "raw kept (.dng)".to_owned()),
-                Some(if edited { "e: its edit" } else { "e: edit" }.to_owned()),
+                (!self.pixel).then(|| if edited { "e: its edit" } else { "e: edit" }.to_owned()),
             ]
             .into_iter()
             .flatten()
@@ -1029,20 +1174,49 @@ impl Screen for Viewer {
 
 /// How much of a `pw` × `ph` photo is in sight at zoom `z`, as fractions of
 /// it each way (1 when the whole of it is).
+#[cfg_attr(not(test), allow(dead_code))]
 fn in_sight(pw: usize, ph: usize, z: f32) -> (f32, f32) {
-    let s = (W / pw as f32).min(H / ph as f32) * z.max(1.0);
+    in_sight_of(pw, ph, z, false)
+}
+
+/// Panel pixels to a photo's pixel, fitted whole: for a pixel picture, the
+/// largest whole number that fits (at least one), so its pixels stay even.
+fn fit_scale(pw: usize, ph: usize, pixel: bool) -> f32 {
+    let fit = (W / pw as f32).min(H / ph as f32);
+    if pixel {
+        fit.floor().max(1.0)
+    } else {
+        fit
+    }
+}
+
+fn in_sight_of(pw: usize, ph: usize, z: f32, pixel: bool) -> (f32, f32) {
+    let s = fit_scale(pw, ph, pixel) * z.max(1.0);
     ((W / (pw as f32 * s)).min(1.0), (H / (ph as f32 * s)).min(1.0))
 }
 
 /// Where a photo of `pw` × `ph` goes on the panel at zoom `z` (1: fitted
 /// whole), centred on (`px`, `py`) (0..1 of it each way) as far as its edges
 /// allow, and which part of `pic` (its decode, any size) shows there.
+#[cfg_attr(not(test), allow(dead_code))]
 fn zoomed(pw: usize, ph: usize, pic: &Picture, z: f32, px: f32, py: f32) -> (Rect, [f32; 4]) {
-    let s = (W / pw as f32).min(H / ph as f32) * z.max(1.0);
+    zoomed_of(pw, ph, pic, z, px, py, false)
+}
+
+/// As [`zoomed`]; a pixel picture at whole panel pixels, on whole pixels.
+fn zoomed_of(pw: usize, ph: usize, pic: &Picture, z: f32, px: f32, py: f32, pixel: bool) -> (Rect, [f32; 4]) {
+    let s = fit_scale(pw, ph, pixel) * z.max(1.0);
     let (sw, sh) = (pw as f32 * s, ph as f32 * s);
     // Larger than the panel: as near the pan point as the edges allow;
     // smaller: in the middle.
-    let place = |size: f32, room: f32, at: f32| if size > room { (room * 0.5 - at * size).clamp(room - size, 0.0) } else { (room - size) * 0.5 };
+    let place = |size: f32, room: f32, at: f32| {
+        let p = if size > room { (room * 0.5 - at * size).clamp(room - size, 0.0) } else { (room - size) * 0.5 };
+        if pixel {
+            p.round()
+        } else {
+            p
+        }
+    };
     let (left, top) = (place(sw, W, px), place(sh, H, py));
     let dest = Rect::new(left.max(0.0), top.max(0.0), sw.min(W - left.max(0.0)).min(left + sw), sh.min(H - top.max(0.0)).min(top + sh));
     // Panel pixels to the decode's pixels.
