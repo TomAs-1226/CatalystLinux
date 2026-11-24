@@ -24,7 +24,9 @@
 //! 3. **Near-neutral and white.** The near-neutral estimate is where the
 //!    votes are densest (mean shift, its window narrowing), so a colourful
 //!    object far from the rest has no say; the white patch, the brightest
-//!    4 % near it, pulls it a third of the way.
+//!    4 % near it, pulls it halfway. Bright samples count more than dark
+//!    ones, and the light read is taken 12 mired cooler: grey surfaces in
+//!    real scenes lean warm (beige, wood, earth; 40 mired on the Kodak set).
 //! 4. **Faces.** With a face in the picture (the smart camera's), the light
 //!    must leave the skin between the Macbeth chart's light and dark skin
 //!    (30 mired of room); outside that, it is pulled halfway in.
