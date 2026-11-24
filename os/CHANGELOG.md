@@ -10,6 +10,21 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 1.5.1
+
+Three new camera modes, and photos that look like photos again.
+
+### Camera
+- Burst takes about ten frames at a fast shutter and keeps only the sharpest, for a robot crossing the field. s picks the shutter; Esc stops early and keeps the best so far.
+- Light trails keeps the brightest light from each frame, so moving LEDs, car lights and sparklers become streaks, built live on the screen. s sets how long; Enter or Esc finishes and keeps it.
+- Time-lapse takes a picture every few seconds (s: 2 s to a minute) and saves a video that loops in Photos, shows in the build log and plays on a phone once saved. Enter starts and stops it.
+- Daylight photos are no longer over-sharpened or gritty: the camera's own sharpening, with a light noise filter.
+- The bright-sky guard and HDR only step in for a really blown sky or a backlit scene, and more gently, so ordinary photos aren't flat or grey.
+- With a look on, Night and HDR no longer add their own shadow lift underneath it: the look alone sets the tone.
+
+### Photos
+- Time-lapses show in the phone gallery too, saved to play.
+
 ## 1.5.0
 
 ### Home

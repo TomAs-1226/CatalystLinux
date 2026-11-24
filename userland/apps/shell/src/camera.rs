@@ -102,7 +102,7 @@
 //! steps), and shown with whole pixels; the shutter keeps that very picture,
 //! as PNGs (filters/pixel.rs).
 //!
-//! Burst, light trails and the time-lapse (1.5.0, between pro and pixel;
+//! Burst, light trails and the time-lapse (1.5.1, between pro and pixel;
 //! camera/burst_mode.rs, trails.rs, lapse_mode.rs): about ten frames at a
 //! fast shutter with only the sharpest kept, for a robot crossing the
 //! field; frames laid over each other with the brightest of each kept, the
@@ -848,7 +848,7 @@ fn run_simulated(live: &Arc<Mutex<Live>>, stop: &AtomicBool, orders: &Receiver<O
                     sim_stack(live, develop, orders, path, t, &words, &mut later);
                     pending.extend(later);
                 }
-                // Light trails and a burst (1.5.0): their frames, their
+                // Light trails and a burst (1.5.1): their frames, their
                 // orders taken as they go.
                 Order::Still(path, words) if still_word(&words, "trails").is_some() => {
                     let mut later: Vec<Order> = pending.drain(..).collect();
@@ -1369,11 +1369,11 @@ enum Mode {
     Scan,
     Photo,
     Pro,
-    /// About ten frames, the sharpest kept (1.5.0, camera/burst_mode.rs).
+    /// About ten frames, the sharpest kept (1.5.1, camera/burst_mode.rs).
     Burst,
-    /// Light trails, built live (1.5.0, camera/trails.rs).
+    /// Light trails, built live (1.5.1, camera/trails.rs).
     Trails,
-    /// A frame every few seconds, kept as a video (1.5.0, camera/lapse_mode.rs).
+    /// A frame every few seconds, kept as a video (1.5.1, camera/lapse_mode.rs).
     Lapse,
     /// A toy camera's pixel pictures (1.2, camera/pixel_mode.rs).
     Pixel,
@@ -1443,7 +1443,7 @@ struct Prefs {
     night: pro::NightMode,
     hdr: pro::HdrMode,
     /// Burst's shutter (1/N s), light trails' length and the time-lapse's
-    /// interval (s), 1.5.0.
+    /// interval (s), 1.5.1.
     burst: u32,
     trails: u32,
     lapse: u32,
@@ -1671,7 +1671,7 @@ pub struct Camera {
     /// Pixel mode's stills asked for and loop being recorded.
     pixel_state: pixel_mode::State,
     /// Burst's shutter (1/N s), light trails' length and the time-lapse's
-    /// interval (s), kept; and a time-lapse being taken (1.5.0).
+    /// interval (s), kept; and a time-lapse being taken (1.5.1).
     burst_shutter: u32,
     trails_s: u32,
     lapse_every: u32,
@@ -2195,7 +2195,7 @@ impl Camera {
     /// balance, the look's table and where the photo as taken goes, the RAW;
     /// and whether detail mode merges a burst for it.
     fn still_words(&self, path: &std::path::Path, detail: crate::burst::DetailMode) -> (Vec<String>, Option<bool>, Vec<PathBuf>) {
-        // Burst and light trails (1.5.0): their own exposure and frames.
+        // Burst and light trails (1.5.1): their own exposure and frames.
         match self.mode {
             Mode::Burst => return (self.burst_words(), None, Vec::new()),
             Mode::Trails => return (self.trails_words(), None, Vec::new()),
@@ -2732,7 +2732,7 @@ impl Screen for Camera {
         if let Some(run) = &self.kit.run {
             want(run.next.saturating_duration_since(now).min(Duration::from_secs(1)).max(Duration::from_millis(50)));
         }
-        // The time-lapse: its next frame, and its seconds and dot (1.5.0);
+        // The time-lapse: its next frame, and its seconds and dot (1.5.1);
         // light trails: their seconds and meter.
         if let Some(t) = &self.lapse {
             want(t.next.saturating_duration_since(now).clamp(Duration::from_millis(50), Duration::from_millis(250)));
@@ -3056,7 +3056,7 @@ impl Screen for Camera {
                 }
             }
         }
-        // The time-lapse: its next frame, or made once stopped (1.5.0).
+        // The time-lapse: its next frame, or made once stopped (1.5.1).
         self.tick_lapse(now);
         // A photo the camera never finished: given up on at the step it
         // stopped at (each bounded: catalyst-camera's own waits are shorter),

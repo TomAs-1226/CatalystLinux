@@ -21,7 +21,7 @@
 //! number of panel pixels each (the largest that fits, then twice and four
 //! times that), and their thumbnails are sampled, not averaged.
 //!
-//! Time-lapses (the Camera's lapse mode, 1.5.0) are Motion JPEG AVIs named
+//! Time-lapses (the Camera's lapse mode, 1.5.1) are Motion JPEG AVIs named
 //! `LAPSE_…avi` (lapse.rs says why that format): their thumbnail is their
 //! first frame, with a "lapse" badge, and the viewer plays them round and
 //! round, a frame decoded at a time just ahead.

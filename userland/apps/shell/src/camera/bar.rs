@@ -20,7 +20,7 @@
 //! next key that is not the shutter. Its glass comes and goes by its
 //! refraction, its words with it; at rest nothing in it moves.
 //!
-//! Burst, light trails and the time-lapse (1.5.0) have one chip each for
+//! Burst, light trails and the time-lapse (1.5.1) have one chip each for
 //! their setting, on `s`: burst's shutter, the trails' length, the
 //! time-lapse's interval, each with its value on its face ("1/500", "30s",
 //! "5s"), then the timer (not the time-lapse's) and the grid. With eight
@@ -55,7 +55,7 @@ pub enum Chip {
     Palette,
     Dither,
     Tone,
-    /// Burst's shutter, light trails' length, the time-lapse's interval (1.5.0).
+    /// Burst's shutter, light trails' length, the time-lapse's interval (1.5.1).
     Shutter,
     Length,
     Every,
@@ -261,7 +261,7 @@ impl Camera {
         if self.lens == Lens::Main && self.mode == Mode::Pixel {
             chips.extend([Chip::Size, Chip::Palette, Chip::Dither, Chip::Tone, Chip::Timer]);
         }
-        // Burst, trails and the time-lapse (1.5.0): their setting, the
+        // Burst, trails and the time-lapse (1.5.1): their setting, the
         // timer (a time-lapse starts when asked), the grid.
         if self.lens == Lens::Main {
             match self.mode {
@@ -1055,7 +1055,7 @@ impl Camera {
         let n = words.len().max(1);
         let room = r.w - 2.0 * pad;
         // Even cells where every choice fits one; else each its own width
-        // (1.5.0: the eight modes), sliding along when more than fit.
+        // (1.5.1: the eight modes), sliding along when more than fit.
         let natural: Vec<f32> = words.iter().map(|w| g.measure(w, cap) + 14.0).collect();
         let even = room / n as f32;
         let crowded = natural.iter().any(|w| *w > even);

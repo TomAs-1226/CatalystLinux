@@ -775,7 +775,7 @@ fn main() {
     if let Some(dir) = value("--camera-night-shots") {
         return camera::night_shots(std::path::Path::new(&dir));
     }
-    // Burst, light trails and the time-lapse (1.5.0).
+    // Burst, light trails and the time-lapse (1.5.1).
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--camera-modes-shots") {
         return camera::modes_shots(std::path::Path::new(&dir));

@@ -1,4 +1,4 @@
-//! The time-lapse (1.5.0): a frame every few seconds for as long as it
+//! The time-lapse (1.5.1): a frame every few seconds for as long as it
 //! runs, kept as a video that plays round and round in Photos and goes
 //! into the build log as photos do: a robot's build session in a minute.
 //!

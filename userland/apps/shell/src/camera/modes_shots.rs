@@ -1,5 +1,5 @@
 //! Burst, light trails and the time-lapse in pictures
-//! (`--camera-modes-shots DIR`, 1.5.0): each mode at rest with its chip,
+//! (`--camera-modes-shots DIR`, 1.5.1): each mode at rest with its chip,
 //! its setting's choices, and as it is taken (the burst's ring counting,
 //! the trails building on a street at night, a time-lapse running); the
 //! eight modes' choices sliding; each mode's keys; a time-lapse in the

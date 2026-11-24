@@ -71,7 +71,7 @@ pub enum Exposing {
     /// Night's and HDR's stacks (1.4.0): merged as they come.
     Night,
     Hdr,
-    /// Light trails and a burst (1.5.0): the brightest of each frame laid
+    /// Light trails and a burst (1.5.1): the brightest of each frame laid
     /// over the last, and the sharpest of about ten kept.
     Trails,
     Burst,

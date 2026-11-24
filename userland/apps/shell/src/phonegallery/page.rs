@@ -215,6 +215,7 @@ fn item_values(look: &Look, items: &[Item], today: chrono::NaiveDate) -> Vec<ser
                 "n": i.photo.name,
                 "v": i.photo.bytes,
                 "video": i.video(),
+                "inline": i.inline(),
                 "moving": i.moving(),
                 "px": i.pixel(),
                 "day": at.date().format("%Y-%m-%d").to_string(),
@@ -625,8 +626,8 @@ function place(){slides.forEach(function(s,k){s.style.transform="translate3d("+(
 function fill(slide,i){slide.textContent="";slide.dataset.i=i;var it=items[i];if(!it)return;
  var box=make("div","box"+(it.px?" px":""));var th=new Image();th.className="th";th.alt="";th.src=thumbUrl(it);th.onerror=function(){th.remove()};box.appendChild(th);slide.appendChild(box)}
 function full(slide){var it=items[+slide.dataset.i],box=slide.firstChild;if(!it||!box||box.querySelector(".full"))return;var f;
- if(it.video){f=make("video","full");f.muted=true;f.loop=true;f.playsInline=true;f.setAttribute("playsinline","");f.setAttribute("muted","");f.preload="auto";f.poster=thumbUrl(it);f.onloadeddata=function(){f.classList.add("in");box.classList.add("loaded")};f.src=fileUrl(it)}
- else{f=new Image();f.className="full";f.alt=it.cap||"";f.decoding="async";f.onload=function(){f.classList.add("in");box.classList.add("loaded");if(slide===slides[1])neighbours()};f.src=fileUrl(it)}
+ if(it.video&&it.inline){f=make("video","full");f.muted=true;f.loop=true;f.playsInline=true;f.setAttribute("playsinline","");f.setAttribute("muted","");f.preload="auto";f.poster=thumbUrl(it);f.onloadeddata=function(){f.classList.add("in");box.classList.add("loaded")};f.src=fileUrl(it)}
+ else{f=new Image();f.className="full";f.alt=it.cap||"";f.decoding="async";f.onload=function(){f.classList.add("in");box.classList.add("loaded");if(slide===slides[1])neighbours()};f.src=it.video?thumbUrl(it):fileUrl(it)}
  box.appendChild(f)}
 function neighbours(){full(slides[0]);full(slides[2])}
 function playOnly(){slides.forEach(function(s,k){var v=s.querySelector("video");if(!v)return;if(k===1){var p=v.play();if(p&&p.catch)p.catch(function(){})}else v.pause()})}

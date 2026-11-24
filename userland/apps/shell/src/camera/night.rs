@@ -19,7 +19,7 @@
 //! - **The lock** (`e` in photo mode): the exposure read on the middle of the
 //!   picture, then held, until `e` again (or another mode).
 //!
-//! **Burst and light trails** (1.5.0, camera/burst_mode.rs, trails.rs) are
+//! **Burst and light trails** (1.5.1, camera/burst_mode.rs, trails.rs) are
 //! runs of frames told as they come too, and go through [`Stacking`]: a
 //! burst's ring counts its frames, the trails draw a meter of their own over
 //! the trails as they are made; Esc ends either, keeping what is taken.
@@ -148,7 +148,7 @@ impl Stacking {
 /// What a saved stack says: its frames ("night · 8 frames merged", or "5 of
 /// 8" where the hand moved), and the binned size where memory made it so.
 pub(super) fn saved_words((what, merged, planned): (camkit::Exposing, u32, u32), size: (u32, u32)) -> String {
-    // A burst's and the trails' own (1.5.0).
+    // A burst's and the trails' own (1.5.1).
     match what {
         camkit::Exposing::Burst => return super::burst_mode::saved_words(merged, planned),
         camkit::Exposing::Trails => return super::trails::saved_words(merged, planned),

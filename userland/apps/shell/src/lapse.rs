@@ -1,4 +1,4 @@
-//! Time-lapses (1.5.0): what the Camera's lapse mode keeps, and how Photos
+//! Time-lapses (1.5.1): what the Camera's lapse mode keeps, and how Photos
 //! plays it.
 //!
 //! **The file: Motion JPEG in an AVI** (`LAPSE_20261124_101500.avi`, in
@@ -12,7 +12,7 @@
 //! on any computer. 960 × 720 at up to 15 frames a second is inside those
 //! limits (about 12 Mbit/s).
 //!
-//! **Why not MP4.** What the image has was looked at (1.5.0): its ffmpeg
+//! **Why not MP4.** What the image has was looked at (1.5.1): its ffmpeg
 //! is built with one encoder, `pcm_s16le`, and no video encoder at all (no
 //! x264, no `h264_v4l2m2m`); the VideoCore's own H.264 encoder is there as
 //! a module (`bcm2835-codec.ko`, CONFIG_VIDEO_CODEC_BCM2835=m, loadable

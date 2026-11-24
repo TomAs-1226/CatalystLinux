@@ -1,4 +1,4 @@
-//! Light trails (1.5.0): frames one after another, the brightest each
+//! Light trails (1.5.1): frames one after another, the brightest each
 //! pixel has been kept, so a light that moves draws a line: a robot's LEDs
 //! round the field, cars' lamps, a sparkler, light painted in the air.
 //!

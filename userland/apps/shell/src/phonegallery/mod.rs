@@ -60,6 +60,13 @@ impl Item {
         self.mime.starts_with("video/")
     }
 
+    /// A video a phone's browser plays in the page. A time-lapse (Motion
+    /// JPEG in an AVI, lapse.rs) plays only once saved: the viewer shows its
+    /// first frame and the download.
+    pub fn inline(&self) -> bool {
+        matches!(self.mime, "video/mp4" | "video/webm" | "video/quicktime")
+    }
+
     /// A pixel picture (the Camera's pixel mode): shown with whole pixels.
     pub fn pixel(&self) -> bool {
         crate::photos::is_pixel(&self.photo.name)
@@ -77,6 +84,7 @@ pub fn mime_of(name: &str) -> &'static str {
         "mp4" | "m4v" => "video/mp4",
         "mov" => "video/quicktime",
         "webm" => "video/webm",
+        "avi" => "video/x-msvideo",
         _ => "application/octet-stream",
     }
 }

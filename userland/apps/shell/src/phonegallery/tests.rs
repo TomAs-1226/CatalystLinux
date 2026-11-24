@@ -158,6 +158,7 @@ fn files_have_their_type_by_extension() {
         ("TL_1.m4v", "video/mp4"),
         ("TL_1.webm", "video/webm"),
         ("TL_1.mov", "video/quicktime"),
+        ("LAPSE_1.avi", "video/x-msvideo"),
         ("x.webp", "image/webp"),
         ("notes", "application/octet-stream"),
         ("x.exe", "application/octet-stream"),
@@ -166,7 +167,11 @@ fn files_have_their_type_by_extension() {
     }
     let photo = crate::photos::Photo { path: "TL_1.mp4".into(), name: "TL_1.mp4".into(), taken: NaiveDateTime::default(), bytes: 1 };
     let video = Item { mime: mime_of("TL_1.mp4"), photo, about: Default::default() };
-    assert!(video.video() && video.moving());
+    assert!(video.video() && video.moving() && video.inline());
+    // A time-lapse: listed and served, saved to be played.
+    let photo = crate::photos::Photo { path: "LAPSE_1.avi".into(), name: "LAPSE_1.avi".into(), taken: NaiveDateTime::default(), bytes: 1 };
+    let lapse = Item { mime: mime_of("LAPSE_1.avi"), photo, about: Default::default() };
+    assert!(lapse.video() && !lapse.inline());
 }
 
 #[test]

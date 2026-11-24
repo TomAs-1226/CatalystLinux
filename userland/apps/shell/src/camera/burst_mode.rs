@@ -1,4 +1,4 @@
-//! Burst (1.5.0): a fast shutter, about ten frames, and the sharpest of
+//! Burst (1.5.1): a fast shutter, about ten frames, and the sharpest of
 //! them kept: for a robot crossing the field in a match. (Detail mode,
 //! burst.rs, is another thing: a burst merged into one photo for less
 //! noise in dim light. On the screen it is "detail", and this is "burst".)
