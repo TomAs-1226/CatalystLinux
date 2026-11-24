@@ -176,6 +176,7 @@ mod modes_shots;
 mod night;
 mod pixel_mode;
 mod trails;
+pub(crate) mod wb;
 
 use night::Stacking;
 
@@ -1677,6 +1678,12 @@ pub struct Camera {
     trails_s: u32,
     lapse_every: u32,
     lapse: Option<lapse_mode::Taking>,
+    /// The smart white balance (1.5.2, camera/wb.rs), and whether it may
+    /// steer at all (`CATALYST_SMART_WB=0` leaves the camera's own, to
+    /// compare); when its state was last written to the log.
+    smart_wb: wb::Smart,
+    smart_wb_on: bool,
+    smart_wb_said: Option<Instant>,
 }
 
 /// Settings › Camera › Smart camera: how it stands, and how fast its link
@@ -1850,6 +1857,9 @@ impl Camera {
             trails_s: prefs.trails,
             lapse_every: prefs.lapse,
             lapse: None,
+            smart_wb: wb::Smart::default(),
+            smart_wb_on: std::env::var("CATALYST_SMART_WB").map_or(true, |v| v != "0"),
+            smart_wb_said: None,
         };
         // A time-lapse left as frames (the Camera closed while one ran, the
         // battery): made into its video now, behind everything.
@@ -1940,10 +1950,54 @@ impl Camera {
         }
     }
 
-    /// The preview's controls: pro's dials where any is set by hand; else
+    /// The preview's controls: the exposure as the mode and dials have it
+    /// ([`Self::exposure_controls`]), and the smart white balance's gains
+    /// where no white balance is set by hand.
+    fn preview_controls(&self) -> pro::PreviewControls {
+        let mut c = self.exposure_controls();
+        if c.ct.is_none() && c.gains.is_none() {
+            c.gains = self.smart_wb.gains();
+        }
+        c
+    }
+
+    /// Whether the smart white balance may steer: on the main lens, not with
+    /// a white balance set by hand (pro's temperature or grey card), not for
+    /// a black-and-white look.
+    fn smart_wb_wanted(&self) -> bool {
+        self.smart_wb_on && self.lens == Lens::Main && !(self.mode == Mode::Pro && self.pro.wb != pro::Wb::Auto) && !self.look.neutral()
+    }
+
+    /// A new frame to the smart white balance (camera/wb.rs): its gains held
+    /// while the exposure lock is on, the focus check shows a crop, or the
+    /// camera is held as set; let go where it is not wanted.
+    fn feed_smart_wb(&mut self, dt: f32) {
+        if !self.smart_wb_wanted() {
+            self.smart_wb.off();
+            return;
+        }
+        let held = self.lock.on() || self.focus.is_some() || self.frozen;
+        let face = self.face;
+        {
+            let Ok(l) = self.live.lock() else { return };
+            let (w, h) = l.yuv_size;
+            let Some(m) = l.meta else { return };
+            if w == 0 || l.yuv.len() < w * h * 3 / 2 {
+                return;
+            }
+            let frame = wb::Frame { yuv: &l.yuv, w, h, gains: m.gains, ct: m.ct, lux: m.lux, face };
+            self.smart_wb.feed(&frame, dt, held);
+        }
+        if self.smart_wb_said.is_none_or(|t| t.elapsed() >= Duration::from_secs(5)) {
+            self.smart_wb_said = Some(Instant::now());
+            eprintln!("camera: white balance {}", self.smart_wb.words());
+        }
+    }
+
+    /// The preview's exposure: pro's dials where any is set by hand; else
     /// the lock's; Night's own bright preview in the dark; else the camera's
     /// own exposure, the highlights' guard on it in photo mode.
-    fn preview_controls(&self) -> pro::PreviewControls {
+    fn exposure_controls(&self) -> pro::PreviewControls {
         if self.mode == Mode::Pro && !self.pro_auto() {
             return pro::preview(Some(&self.pro), self.night_on());
         }
@@ -5819,6 +5873,48 @@ mod tests {
         press(&mut camera, Key::Up);
         run(&mut camera, 300);
         assert!(camera.face.is_some(), "the face for the exposure");
+    }
+
+    #[test]
+    fn the_smart_white_balance_steers_auto_modes_and_rests_where_set_by_hand() {
+        crate::shell::tests::sandbox();
+        let _port = crate::smartcam::sim::exclusive(false);
+        let mut camera = ready();
+        let told_gains = |c: &Camera| c.told.and_then(|t| t.gains);
+        // Photo mode: the camera's own first, then this one's gains.
+        let started = Instant::now();
+        while told_gains(&camera).is_none() && started.elapsed() < Duration::from_secs(5) {
+            run(&mut camera, 40);
+        }
+        let steered = told_gains(&camera).expect("steering in photo mode");
+        // Close to the simulated scene's light (5200 K), a touch warm.
+        let (m, _) = camera.smart_wb.place(steered);
+        assert!((4300.0..5600.0).contains(&(1e6 / m)), "{} K", 1e6 / m);
+        // The exposure lock holds them.
+        camera.toggle_lock();
+        let held = camera.smart_wb.gains();
+        assert!(held.is_some());
+        run(&mut camera, 400);
+        assert_eq!(told_gains(&camera), held);
+        camera.toggle_lock();
+        // A black-and-white look: the camera's own white balance.
+        camera.look = Look::Mono;
+        run(&mut camera, 200);
+        assert_eq!(told_gains(&camera), None);
+        camera.look = Look::Original;
+        // Pro with a temperature set by hand: that, and no gains of this one's.
+        camera.mode = Mode::Pro;
+        camera.pro.wb = pro::Wb::Kelvin(3200);
+        run(&mut camera, 200);
+        let c = camera.told.expect("told");
+        assert_eq!((c.ct, c.gains), (Some(3200), None));
+        // Pro on auto white balance steers again.
+        camera.pro.wb = pro::Wb::Auto;
+        let started = Instant::now();
+        while told_gains(&camera).is_none() && started.elapsed() < Duration::from_secs(5) {
+            run(&mut camera, 40);
+        }
+        assert!(told_gains(&camera).is_some(), "steering in pro's auto");
     }
 
     /// A camera with its first metered frames in.

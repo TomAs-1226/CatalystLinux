@@ -192,8 +192,7 @@ impl Look {
         LOOKS.iter().copied().find(|l| l.id() == id)
     }
 
-    /// Black and white, whatever comes in.
-    #[cfg(test)]
+    /// Black and white, whatever comes in (the smart white balance rests).
     pub fn neutral(self) -> bool {
         matches!(self, Look::Mono | Look::Silvertone | Look::Noir | Look::BwNatural | Look::BwHighContrast | Look::Pushed | Look::Pearl)
     }
