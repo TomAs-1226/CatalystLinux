@@ -364,6 +364,7 @@ const SHORTCUTS: &[Line] = &[
     Line::Keys("Recent apps", "ctrl tab"),
     Line::Keys("Search", "ctrl enter"),
     Line::Keys("Lock", "tab held"),
+    Line::Keys("Camera, from Home", "c held"),
     Line::Keys("Copy", "ctrl c"),
     Line::Keys("Paste", "ctrl v"),
     Line::Keys("Clipboard history", "ctrl shift h"),

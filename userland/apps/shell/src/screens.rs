@@ -1689,6 +1689,19 @@ impl Screen for Home {
         }
     }
 
+    fn tile_of(&self, app: &str) -> Option<Rect> {
+        if self.on_glance() {
+            return None;
+        }
+        let i = self.tiles.iter().position(|t| matches!(t, Tile::Builtin(b) if APPS[*b].name == app))?;
+        let rect = match self.style {
+            HomeStyle::Grid => self.rects.get(i).copied()?,
+            HomeStyle::Carousel if i == self.focus => self.middle,
+            HomeStyle::Carousel | HomeStyle::Flow => return None,
+        };
+        (rect.w > 0.0 && rect.x >= 0.0 && rect.y >= 0.0 && rect.x + rect.w <= W && rect.y + rect.h <= H).then_some(rect)
+    }
+
     fn title(&self) -> &str {
         match &self.editing {
             Some(e) if e.picker.is_some() => "Add",
@@ -1712,7 +1725,7 @@ impl Screen for Home {
             }
             None => {}
         }
-        let search = keys("also", &[("space · /", "Search"), ("e", "Edit the widgets"), ("↑ at the top", "Control centre"), ("esc", "Back to the start")]);
+        let search = keys("also", &[("c held", "Camera"), ("space · /", "Search"), ("e", "Edit the widgets"), ("↑ at the top", "Control centre"), ("esc", "Back to the start")]);
         if self.on_glance() {
             return vec![keys("glance", &[("enter", "Open the widget"), ("arrows", "Move"), ("tab", "Next widget"), ("→ at the end", "The apps")]), search];
         }

@@ -389,6 +389,11 @@ pub trait Screen {
     fn spot(&self) -> Option<Rect> {
         None
     }
+    /// Where an app's tile is on the panel, whole and in view (Home's),
+    /// for the app to grow out of when it is opened some other way.
+    fn tile_of(&self, _app: &str) -> Option<Rect> {
+        None
+    }
     /// Kept among the recent apps once left. Not a screen that takes the
     /// whole panel (setup), nor a passing one (search, the shortcut list).
     fn keep_in_recents(&self) -> bool {
@@ -858,6 +863,8 @@ pub struct Shell {
     /// The key that woke it from deep standby, and when it last came (on
     /// the shell's clock): held, its repeats are spent too.
     woke_by: Option<(Key, f32)>,
+    /// `c` held on Home, towards the Camera.
+    camera_hold: Option<CameraHold>,
     /// Matches already warned about for queueing: (match, 0 soon / 1 now).
     queue_warned: Vec<(String, u8)>,
     queue_age: f32,
@@ -965,6 +972,21 @@ const HOLD_FOR_SHORTCUTS: f32 = 5.0;
 /// A held key repeats; a gap longer than this means it was let go. (The
 /// first repeat comes 0.4 s after the press.)
 const HELD_GAP: f32 = 0.5;
+
+/// `c` held on Home (1.5.0): the Camera, as a phone's camera button is.
+/// A hold is told from taps by the shell's own repeat (platform::Repeat):
+/// the first repeat 0.4 s after the press, then one every 75 ms. The press
+/// and the first repeat move right as ever (a tap again at just 0.4 s looks
+/// the same); the second repeat, 0.475 s in, can only be a key held down,
+/// and opens the Camera, the moves taken back. `moves`: those that moved.
+#[derive(Clone, Copy)]
+struct CameraHold {
+    since: f32,
+    last: f32,
+    repeats: u8,
+    moves: u8,
+    opened: bool,
+}
 
 /// How long a key shown by Show key presses stays, the last part fading.
 const ECHO_SECONDS: f32 = 1.6;
@@ -1091,6 +1113,7 @@ impl Shell {
             lights: crate::lights::Lights::new(),
             deep: crate::deep::Deep::new(),
             woke_by: None,
+            camera_hold: None,
             queue_warned: Vec::new(),
             queue_age: 0.0,
             queue_due: None,
@@ -1652,6 +1675,40 @@ impl Shell {
                 return self.question_mark();
             }
         }
+        // c held on Home: the Camera (1.5.0, CameraHold says how a hold is
+        // told from taps). Held, the moves are taken back and the Camera grows
+        // out of its tile; repeats still coming once it is open are spent, so
+        // none reaches the Camera.
+        if key == Key::Char('c') {
+            let now = self.clock;
+            let after = crate::platform::REPEAT_AFTER.as_secs_f32();
+            let every = crate::platform::REPEAT_EVERY.as_secs_f32();
+            let held = self.camera_hold.filter(|h| match (h.opened, h.repeats) {
+                (true, _) => now - h.last <= HELD_GAP,
+                (false, 0) => (after * 0.9..=after + 0.1).contains(&(now - h.since)),
+                (false, _) => now - h.last <= every * 2.0,
+            });
+            match held {
+                Some(mut hold) if hold.opened => {
+                    hold.last = now;
+                    self.camera_hold = Some(hold);
+                    return;
+                }
+                Some(mut hold) if hold.repeats > 0 && self.on_home() => {
+                    hold.opened = true;
+                    hold.last = now;
+                    self.camera_hold = Some(hold);
+                    return self.camera_from_home(hold.moves);
+                }
+                // The first repeat: moves on below, as a tap would.
+                Some(mut hold) => {
+                    hold.repeats = hold.repeats.saturating_add(1);
+                    hold.last = now;
+                    self.camera_hold = Some(hold);
+                }
+                None => self.camera_hold = None,
+            }
+        }
         // The living wallpaper: a move sets its light drifting the same way,
         // and it settles back still. (Held still by the battery saver: each
         // drift is a run of frames.)
@@ -1670,6 +1727,9 @@ impl Shell {
         }
         // Copy and paste, into and out of the screen in front (shell/clip.rs).
         let Some(key) = self.clipboard_key(key) else { return };
+        // A c pressed on Home may become a hold (above): whether its move
+        // moved anything, to take back if it does.
+        let camera_press = key == Key::Char('c') && self.on_home();
         let (top, _) = self.stack.last_mut().expect("the home screen is always there");
         let key = if top.wants_text() { key } else { plain(key) };
         // Enter answers as it lands: what it pressed gives a little.
@@ -1678,12 +1738,39 @@ impl Shell {
         }
         let mut say = None;
         let at_rest = self.transition.is_none();
+        let spot = camera_press.then(|| top.spot());
         let nav = top.key(key, &mut Cx { robot: &mut self.robot, settings: &mut self.settings, say: &mut say, at_rest });
+        if let Some(before) = spot {
+            let moved = u8::from(top.spot() != before);
+            match &mut self.camera_hold {
+                Some(hold) if hold.repeats > 0 && !hold.opened => hold.moves += moved,
+                _ => self.camera_hold = Some(CameraHold { since: self.clock, last: self.clock, repeats: 0, moves: moved, opened: false }),
+            }
+        }
         if let Some(text) = say {
             self.say(text);
         }
         self.follow(nav);
         self.apply_settings();
+    }
+
+    /// Home itself in front, taking keys as Home (not editing its widgets,
+    /// nothing over it).
+    fn on_home(&self) -> bool {
+        self.stack.len() == 1 && !self.locked() && !self.control.is_open() && matches!(self.top_title(), "Catalyst" | "Glance")
+    }
+
+    /// The Camera, `c` held on Home: the hold's moves taken back, and the
+    /// Camera grown out of its tile (sliding in where its tile is not in view).
+    fn camera_from_home(&mut self, moves: u8) {
+        let at_rest = self.transition.is_none();
+        let (top, _) = self.stack.last_mut().expect("the home screen is always there");
+        for _ in 0..moves {
+            let mut say = None;
+            let _ = top.key(Key::Left, &mut Cx { robot: &mut self.robot, settings: &mut self.settings, say: &mut say, at_rest });
+        }
+        let from = top.tile_of("Camera");
+        self.open(Box::new(crate::camera::Camera::new()), from.map_or(Path::Slide, Path::Grow));
     }
 
     /// Go where a screen asked to.
@@ -5754,6 +5841,50 @@ pub(crate) mod tests {
         shell.key(Key::F(1));
         frames(&mut shell, 40, FRAME);
         assert_eq!(shell.sheet_open(), None, "and puts it away");
+    }
+
+    /// `c` as the handheld sends it held down for `held` seconds: the press,
+    /// then the shell's own repeats (0.4 s in, then every 75 ms).
+    fn hold_c(shell: &mut Shell, held: f32) {
+        let mut next = crate::platform::REPEAT_AFTER.as_secs_f32();
+        let every = crate::platform::REPEAT_EVERY.as_secs_f32();
+        shell.key(Key::Char('c'));
+        let mut t = 0.0;
+        while t + FRAME <= held {
+            frames(shell, 1, FRAME);
+            t += FRAME;
+            if t >= next {
+                shell.key(Key::Char('c'));
+                next += every;
+            }
+        }
+    }
+
+    #[test]
+    fn c_held_on_home_opens_the_camera_and_taps_only_move() {
+        let _port = crate::smartcam::sim::exclusive(false);
+        let mut shell = shell();
+        let start = shell.stack[0].0.spot();
+        hold_c(&mut shell, 0.8);
+        frames(&mut shell, 60, FRAME);
+        assert_eq!(shell.top_title(), "Camera");
+        assert_eq!(shell.stack.len(), 2, "the repeats after it opened reach nothing");
+        assert_eq!(shell.stack[0].0.spot(), start, "Home's tile put back where the hold began");
+        // Taps, quick or as far apart as the first repeat, only move.
+        let mut shell = self::shell();
+        for gap in [6, 24, 25, 24, 6] {
+            shell.key(Key::Char('c'));
+            frames(&mut shell, gap, FRAME);
+        }
+        frames(&mut shell, 30, FRAME);
+        assert_eq!(shell.stack.len(), 1);
+        assert_ne!(shell.stack[0].0.spot(), start, "they moved");
+        // Held in an app, c is that app's: no Camera.
+        let mut shell = self::shell();
+        shell.show(Box::new(crate::notes::Notes::new()));
+        frames(&mut shell, 30, FRAME);
+        hold_c(&mut shell, 0.8);
+        assert_ne!(shell.top_title(), "Camera");
     }
 
     #[test]
