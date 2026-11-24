@@ -39,6 +39,10 @@ pub enum Chip {
     Detail,
     Pro,
     Lens,
+    /// The automatic exposure's (1.3.1): Night, HDR and the lock.
+    Night,
+    Hdr,
+    Lock,
     /// Pixel mode's (1.2).
     Size,
     Palette,
@@ -56,6 +60,9 @@ impl Chip {
             Chip::Detail => "detail",
             Chip::Pro => "pro",
             Chip::Lens => "lens",
+            Chip::Night => "night",
+            Chip::Hdr => "hdr",
+            Chip::Lock => "lock",
             Chip::Size => "size",
             Chip::Palette => "palette",
             Chip::Dither => "dither",
@@ -73,6 +80,9 @@ impl Chip {
             Chip::Detail => "d",
             Chip::Pro => "p",
             Chip::Lens => "l",
+            Chip::Night => "n",
+            Chip::Hdr => "b",
+            Chip::Lock => "e",
             Chip::Size => "s",
             Chip::Palette => "k",
             Chip::Dither => "d",
@@ -173,6 +183,9 @@ pub struct Bar {
     pub(super) on: Animated,
     /// Pro's row, slid along to keep the item in hand in sight.
     pub(super) scroll: Animated,
+    /// The chips, slid along the same way where they are more than fit
+    /// (1.3.1: Night, HDR and the lock joined them).
+    pub(super) slide: Animated,
     placed: bool,
 }
 
@@ -189,12 +202,13 @@ impl Bar {
             at: Animated::new(0.0, role::release()).with_rest(0.002),
             on: Animated::new(0.0, role::effect()).with_rest(0.002),
             scroll: Animated::new(0.0, role::release()).with_rest(0.05),
+            slide: Animated::new(0.0, role::release()).with_rest(0.05),
             placed: false,
         }
     }
 
     pub fn tick(&mut self, dt: f32) -> bool {
-        self.shown.tick(dt) | self.at.tick(dt) | self.on.tick(dt) | self.scroll.tick(dt)
+        self.shown.tick(dt) | self.at.tick(dt) | self.on.tick(dt) | self.scroll.tick(dt) | self.slide.tick(dt)
     }
 
     /// Whether the bar holds the keys (a chip, or what one opened).
@@ -211,9 +225,17 @@ impl Camera {
     /// The chips along the bar, as the camera is now.
     pub(super) fn chips(&self) -> Vec<Chip> {
         if self.quick {
-            return vec![Chip::Timer, Chip::Grid, Chip::Detail];
+            return vec![Chip::Night, Chip::Timer, Chip::Grid, Chip::Detail];
         }
         let mut chips = vec![Chip::Mode];
+        // The automatic exposure's first, by the mode (1.3.1): Night for
+        // photo and pro, HDR and the lock for photo mode alone.
+        if self.lens == Lens::Main && self.mode == Mode::Photo {
+            chips.extend([Chip::Night, Chip::Hdr, Chip::Lock]);
+        }
+        if self.lens == Lens::Main && self.mode == Mode::Pro {
+            chips.push(Chip::Night);
+        }
         if self.lens == Lens::Main && self.mode.shoots() {
             chips.extend([Chip::Look, Chip::Timer, Chip::Grid, Chip::Detail, Chip::Pro]);
         }
@@ -298,6 +320,8 @@ impl Camera {
                 // The chips change with the lens: the keys stay on it.
                 self.bar.focus = Some(Chip::Lens);
             }
+            // The lock has no choices: Enter locks or lets go, as `e` does.
+            Chip::Lock => self.toggle_lock(),
             c if c.pixel() => self.open_pixel_picker(c),
             _ => {
                 let at = self.chosen(chip, cx.settings.detail);
@@ -415,6 +439,8 @@ impl Camera {
             Chip::Timer => camkit::TIMERS.iter().map(|t| if *t == 0 { "off".to_owned() } else { format!("{t} s") }).collect(),
             Chip::Grid => ["off", "thirds", "squares"].map(str::to_owned).to_vec(),
             Chip::Detail => ["auto", "on", "off"].map(str::to_owned).to_vec(),
+            Chip::Night => pro::NIGHT_MODES.iter().map(|m| m.words().to_owned()).collect(),
+            Chip::Hdr => ["auto", "off"].map(str::to_owned).to_vec(),
             Chip::Size => pixel::SIZES.iter().map(|s| s.words()).collect(),
             Chip::Palette => pixel::PALETTES.iter().map(|p| p.name().to_owned()).collect(),
             Chip::Dither => pixel::DITHERS.iter().map(|d| d.name().to_owned()).collect(),
@@ -442,6 +468,8 @@ impl Camera {
             Chip::Palette => pixel::PALETTES.iter().position(|p| *p == self.pixel.palette).unwrap_or(0),
             Chip::Dither => pixel::DITHERS.iter().position(|d| *d == self.pixel.dither).unwrap_or(0),
             Chip::Tone => pixel::CONTRASTS.iter().position(|c| *c == self.pixel.contrast).unwrap_or(0),
+            Chip::Night => pro::NIGHT_MODES.iter().position(|m| *m == self.night_mode).unwrap_or(0),
+            Chip::Hdr => usize::from(self.hdr_mode == pro::HdrMode::Off),
             _ => 0,
         }
     }
@@ -452,6 +480,8 @@ impl Camera {
             Chip::Timer => self.set_timer(camkit::TIMERS[at.min(camkit::TIMERS.len() - 1)]),
             Chip::Grid => self.set_grid([Grid::Off, Grid::Thirds, Grid::Square][at.min(2)]),
             Chip::Detail => self.set_detail([DetailMode::Auto, DetailMode::On, DetailMode::Off][at.min(2)], cx),
+            Chip::Night => self.set_night(pro::NIGHT_MODES[at.min(pro::NIGHT_MODES.len() - 1)]),
+            Chip::Hdr => self.set_hdr(if at == 0 { pro::HdrMode::Auto } else { pro::HdrMode::Off }),
             _ => {}
         }
         // The keys stay on the chip, which may have gone with the mode.
@@ -629,7 +659,31 @@ impl Camera {
             Chip::Tone => format!("{} · {}", pixel_mode::bright_words(self.pixel.bright), self.pixel.contrast.name()),
             Chip::Pro => Program::of(&self.pro).words().to_owned(),
             Chip::Lens => (if self.lens == Lens::Main { "this camera" } else { "the smart camera's AI view" }).to_owned(),
+            Chip::Night => self.night_words(),
+            Chip::Hdr => match (self.hdr_mode, self.hdr_shot()) {
+                (pro::HdrMode::Off, _) => "off",
+                (_, true) => "auto · on now",
+                (_, false) => "auto",
+            }
+            .to_owned(),
+            Chip::Lock => match self.lock {
+                pro::Lock::Off => "off · enter or e: lock",
+                pro::Lock::Reading(_) => "reading the middle",
+                pro::Lock::Held { .. } => "held · e: let go",
+            }
+            .to_owned(),
             _ => self.choices(chip).get(self.chosen(chip, detail)).cloned().unwrap_or_default(),
+        }
+    }
+
+    /// Whether a chip's thing is in play now (its icon filled): Night in
+    /// the dark, HDR on a backlit scene, the lock held.
+    fn chip_live(&self, chip: Chip) -> bool {
+        match chip {
+            Chip::Night => self.night_on(),
+            Chip::Hdr => self.hdr_shot(),
+            Chip::Lock => matches!(self.lock, pro::Lock::Held { .. }),
+            _ => false,
         }
     }
 
@@ -637,6 +691,9 @@ impl Camera {
     fn chip_on(&self, chip: Chip, detail: DetailMode) -> bool {
         match chip {
             Chip::Mode | Chip::Lens => true,
+            Chip::Night => self.night_mode != pro::NightMode::Off,
+            Chip::Hdr => self.hdr_mode == pro::HdrMode::Auto,
+            Chip::Lock => self.lock.on(),
             Chip::Look => self.look != Look::Original,
             Chip::Timer => self.timer > 0,
             Chip::Grid => self.kit.grid != Grid::Off,
@@ -664,6 +721,25 @@ impl Camera {
             Chip::Detail => "auto_awesome",
             Chip::Pro => "tune",
             Chip::Lens => "",
+            Chip::Night => "bedtime",
+            // Drawn in letters (draw_chips).
+            Chip::Hdr => "",
+            Chip::Lock => {
+                if self.lock.on() {
+                    "lock"
+                } else {
+                    "lock_open"
+                }
+            }
+        }
+    }
+
+    /// A chip's words beside its icon: Night's length while it is in play,
+    /// written close as a camera's dial has it ("1s", "2.5s").
+    fn chip_face_words(&self, chip: Chip) -> Option<String> {
+        match chip {
+            Chip::Night => self.night_length().map(|l| l.replace(' ', "")),
+            _ => None,
         }
     }
 
@@ -751,37 +827,76 @@ impl Camera {
         let r = Self::track(g, vf, bh, shown);
         let pad = 3.0;
         let icon = cap.size + 2.0;
-        // Each chip as wide as it needs; the room left shared out. Where
-        // even that is too wide (the large text, seven chips), the mode's
-        // arrows go first, then every key.
-        let face_of = |g: &mut Gfx, chip: Chip| match chip {
-            Chip::Lens => g.measure("AI", cap),
-            _ => icon,
-        };
-        let natural = |g: &mut Gfx, chip: Chip, badge: bool| face_of(g, chip) + if badge { 3.0 + g.measure(chip.badge(), cap) } else { 0.0 } + 10.0;
+        // Each chip as wide as it needs: its icon (the lens's words), with
+        // Night's length beside it while it is in play, and its key.
+        let words: Vec<Option<String>> = chips.iter().map(|c| self.chip_face_words(*c)).collect();
+        let faces: Vec<f32> = chips
+            .iter()
+            .zip(&words)
+            .map(|(c, w)| {
+                let base = match c {
+                    Chip::Lens => g.measure("AI", cap),
+                    // HDR in letters, as the lens's "AI" (its symbol's
+                    // letters are too small to read at the bar's size).
+                    Chip::Hdr => g.measure("HDR", cap) + 4.0,
+                    _ => icon,
+                };
+                base + w.as_ref().map_or(0.0, |w| 2.0 + g.measure(w, cap))
+            })
+            .collect();
+        // The key a little further off after words, so "1s" and "n" read apart.
+        let gaps: Vec<f32> = words.iter().map(|w| if w.is_some() { 6.0 } else { 3.0 }).collect();
+        let natural = |g: &mut Gfx, i: usize, badge: bool| faces[i] + if badge { gaps[i] + g.measure(chips[i].badge(), cap) } else { 0.0 } + 10.0;
         let room = r.w - 2.0 * pad;
         let mut badges: Vec<bool> = vec![true; chips.len()];
-        let mut widths: Vec<f32> = chips.iter().zip(&badges).map(|(c, b)| natural(g, *c, *b)).collect();
+        let mut widths: Vec<f32> = (0..chips.len()).map(|i| natural(g, i, true)).collect();
+        // Too many for the room: the mode's arrows go first (the rail shows
+        // the modes); then the row slides along under its glass, every chip
+        // keeping its key (1.3.1: with Night, HDR and the lock there are
+        // nine; until then every key went).
         if widths.iter().sum::<f32>() > room {
             if let Some(i) = chips.iter().position(|c| *c == Chip::Mode) {
                 badges[i] = false;
-                widths[i] = natural(g, Chip::Mode, false);
+                widths[i] = natural(g, i, false);
             }
         }
-        if widths.iter().sum::<f32>() > room {
-            badges.iter_mut().for_each(|b| *b = false);
-            widths = chips.iter().map(|c| natural(g, *c, false)).collect();
-        }
-        let extra = ((room - widths.iter().sum::<f32>()) / chips.len() as f32).max(0.0);
-        let mut cells = Vec::with_capacity(chips.len());
-        let mut x = r.x + pad;
+        let total: f32 = widths.iter().sum();
+        let sliding = total > room;
+        let extra = if sliding { 0.0 } else { ((room - total) / chips.len() as f32).max(0.0) };
+        let mut xs = Vec::with_capacity(chips.len());
+        let mut run = 0.0;
         for w in &widths {
-            cells.push(Rect::new(x, r.y + pad, w + extra, bh - 2.0 * pad));
-            x += w + extra;
+            xs.push(run);
+            run += w + extra;
+        }
+        // Where the row rests: its start; with the keys, as far along as
+        // keeps the chip in hand whole in sight, a chevron's room each end.
+        let focus = self.bar.focus.and_then(|f| chips.iter().position(|c| *c == f));
+        let edge = if sliding { 9.0 } else { 0.0 };
+        let view = room - 2.0 * edge;
+        let want = match (sliding, focus) {
+            (true, Some(i)) => {
+                let mut s = self.bar.slide.target();
+                s = s.min(xs[i]).max(xs[i] + widths[i] - view);
+                s.clamp(0.0, (total - view).max(0.0))
+            }
+            _ => 0.0,
+        };
+        if g.calm || self.frozen || !self.bar.placed {
+            self.bar.slide.jump(want);
+        } else if self.bar.slide.target() != want {
+            self.bar.slide.set(want);
+            g.started_moving();
+        }
+        let slide = self.bar.slide.value();
+        let start = r.x + pad + edge - slide;
+        let cells: Vec<Rect> = xs.iter().zip(&widths).map(|(x, w)| Rect::new(start + x, r.y + pad, w + extra, bh - 2.0 * pad)).collect();
+        let (inner_l, inner_r) = (r.x + pad + edge, r.right() - pad - edge);
+        if sliding {
+            g.canvas.set_clip(Rect::new(inner_l - 2.0, r.y, inner_r - inner_l + 4.0, r.h).offset(g.ox, 0.0));
         }
         // The capsule, on the chip with the keys.
         let detail = g.detail;
-        let focus = self.bar.focus.and_then(|f| chips.iter().position(|c| *c == f));
         let on = self.bar.on.value().clamp(0.0, 1.0) * shown;
         let at = self.glide(g, focus.unwrap_or(0) as f32);
         let lerp_cell = |at: f32| {
@@ -797,26 +912,54 @@ impl Camera {
         }
         for (i, chip) in chips.iter().enumerate() {
             let c = cells[i];
+            // Half out of sight past an end: fading as it goes under the chevron.
+            let seen = ((c.right().min(inner_r) - c.x.max(inner_l)) / c.w.max(1.0)).clamp(0.0, 1.0);
+            if seen <= 0.0 {
+                continue;
+            }
+            let alpha = shown * if seen < 1.0 { (seen * seen).min(1.0) * 0.6 } else { 1.0 };
             let lit = if focus == Some(i) { on } else { 0.0 };
             let set = self.chip_on(*chip, detail);
             let ink = mix(if set { t.ink } else { t.dim }, t.on_ice, lit);
             let badge_ink = mix(t.dim, t.on_ice, lit);
-            let face = match chip {
-                Chip::Lens => g.measure(if self.lens == Lens::Main { "1×" } else { "AI" }, cap),
-                _ => face_of(g, *chip),
-            };
-            let content = face + if badges[i] { 3.0 + g.measure(chip.badge(), cap) } else { 0.0 };
+            let face = faces[i];
+            let content = face + if badges[i] { gaps[i] + g.measure(chip.badge(), cap) } else { 0.0 };
             let left = c.cx() - content * 0.5;
+            // Night, HDR and the lock fill their icon while in play.
+            let filled = if matches!(chip, Chip::Night | Chip::Hdr | Chip::Lock) { self.chip_live(*chip) } else { set };
             if *chip == Chip::Lens {
-                g.text_alpha(left, c.cy(), if self.lens == Lens::Main { "1×" } else { "AI" }, cap, ink, shown);
+                g.text_alpha(left, c.cy(), if self.lens == Lens::Main { "1×" } else { "AI" }, cap, ink, alpha);
+            } else if *chip == Chip::Hdr {
+                // In play, its letters cut out of a plate of ink (as a filled
+                // icon is); else in ink, or dim when off.
+                if filled {
+                    let plate = Rect::new(left, c.cy() - cap.size * 0.5 - 1.0, face, cap.size + 2.0);
+                    g.canvas.rrect(plate.offset(g.ox, 0.0), 3.0, ink, alpha);
+                    g.text_alpha(left + 2.0, c.cy(), "HDR", cap, mix(t.ground, t.ice, lit), alpha);
+                } else {
+                    g.text_alpha(left + 2.0, c.cy(), "HDR", cap, ink, alpha);
+                }
             } else if self.chip_icon(*chip).is_empty() {
                 // Pixel mode's faces, drawn in pixels of their own.
-                self.draw_pixel_face(g, *chip, left, c.cy(), face, ink, shown);
+                self.draw_pixel_face(g, *chip, left, c.cy(), face, ink, alpha);
             } else {
-                g.icon_alpha(self.chip_icon(*chip), set, left + icon * 0.5, c.cy(), icon, ink, shown);
+                g.icon_alpha(self.chip_icon(*chip), filled, left + icon * 0.5, c.cy(), icon, ink, alpha);
+                if let Some(w) = &words[i] {
+                    g.text_alpha(left + icon + 2.0, c.cy(), w, cap, ink, alpha);
+                }
             }
             if badges[i] {
-                g.text_alpha(left + face + 3.0, c.cy(), chip.badge(), cap, badge_ink, shown);
+                g.text_alpha(left + face + gaps[i], c.cy(), chip.badge(), cap, badge_ink, alpha);
+            }
+        }
+        if sliding {
+            g.canvas.clear_clip();
+            let far = (total - view).max(0.0);
+            for (more, x, chevron) in [(slide > 0.5, r.x + pad + 4.0, "‹"), (slide < far - 0.5, r.right() - pad - 4.0, "›")] {
+                if more {
+                    let half = g.measure(chevron, cap) * 0.5;
+                    g.text_alpha(x - half, r.cy(), chevron, cap, t.dim, shown);
+                }
             }
         }
         let mut taken = bh + 6.0;
@@ -977,6 +1120,9 @@ impl Camera {
         if self.kit.run.is_some() {
             return vec![keys("intervalometer", &[("enter · esc", "Stop it")])];
         }
+        if self.stacking.as_ref().is_some_and(|s| s.live) {
+            return vec![keys("taking it", &[("hold still", "Until the ring is full"), ("esc", "Cancel: no photo")])];
+        }
         if self.kit.panel.is_some() {
             return vec![keys("intervalometer", &[("← →", "Change the value"), ("↑ ↓", "How often, how many"), ("enter", "Start"), ("esc · v", "Put it away")])];
         }
@@ -1006,7 +1152,7 @@ impl Camera {
         match self.mode {
             Mode::Scan => groups.push(keys("scan", &[("enter · space", "Open what it read"), ("esc", "Put the card away")])),
             Mode::Doc => groups.push(keys("doc", &[("enter · space", "Take the page now"), ("↓", "The pages taken")])),
-            Mode::Photo | Mode::Pro => groups.push(keys("taking photos", &[("space · enter", "Take the photo"), ("↓", "The album")])),
+            Mode::Photo | Mode::Pro => groups.push(keys("taking photos", &[("space · enter", "Take the photo"), ("esc", "Stop a night or HDR photo"), ("↓", "The album")])),
             Mode::Pixel => groups.extend(self.pixel_keys()),
         }
         groups.push(keys("the camera", &[("← →", "Scan, photo, pro, pixel, doc"), ("tab", "The controls bar")]));
@@ -1024,14 +1170,24 @@ impl Camera {
             }
         }
         if self.quick {
-            groups.push(keys("the bar's keys", &[("t", "Self-timer"), ("g", "Grid"), ("d", "Detail"), ("h", "Level")]));
+            groups.push(keys("the bar's keys", &[("n", "Night: auto, off, 1, 2, 4 s"), ("t", "Self-timer"), ("g", "Grid"), ("d", "Detail"), ("h", "Level")]));
             return groups;
+        }
+        // The automatic exposure's (1.3.1): Night in photo and pro modes,
+        // HDR and the lock in photo mode (pro's dials have b and e).
+        if self.mode == Mode::Photo {
+            groups.push(keys(
+                "exposure",
+                &[("n", "Night: auto, off, 1, 2, 4 s"), ("b", "HDR: auto, off"), ("e", "Lock the exposure on the middle"), ("e again", "Let it go")],
+            ));
+        } else {
+            groups.push(keys("exposure", &[("n", "Night: auto, off, 1, 2, 4 s")]));
         }
         groups.push(keys(
             "the bar's keys",
             &[("k", "Looks"), ("t", "Self-timer: 2, 10 s"), ("g", "Grid"), ("d", "Detail: auto, on, off"), ("p", "Pro's controls")],
         ));
-        groups.push(keys("more", &[("h", "Level"), ("o", "Aspect: 3:2, 16:9, 1:1"), ("+", "Check the focus, 1:1"), ("n", "Night")]));
+        groups.push(keys("more", &[("h", "Level"), ("o", "Aspect: 3:2, 16:9, 1:1"), ("+", "Check the focus, 1:1")]));
         if self.mode == Mode::Pro {
             groups.push(keys(
                 "pro",
@@ -1199,6 +1355,7 @@ mod tests {
         crate::shell::tests::sandbox();
         let mut camera = Camera::new();
         (camera.look, camera.timer, camera.kit.grid) = (Look::Original, 0, Grid::Off);
+        (camera.night_mode, camera.hdr_mode) = (crate::pro::NightMode::Auto, crate::pro::HdrMode::Auto);
         camera
     }
 
@@ -1206,7 +1363,7 @@ mod tests {
     fn tab_walks_the_bar_and_its_choices_set_what_they_say() {
         let _port = crate::smartcam::sim::exclusive(false);
         let (mut camera, mut s) = (camera(), Settings::default());
-        assert_eq!(camera.chips(), [Chip::Mode, Chip::Look, Chip::Timer, Chip::Grid, Chip::Detail, Chip::Pro]);
+        assert_eq!(camera.chips(), [Chip::Mode, Chip::Night, Chip::Hdr, Chip::Lock, Chip::Look, Chip::Timer, Chip::Grid, Chip::Detail, Chip::Pro]);
         let mut key = |camera: &mut Camera, k: Key| {
             press(camera, &mut s, k);
         };
@@ -1218,10 +1375,30 @@ mod tests {
         assert_eq!(camera.bar.focus, Some(Chip::Timer));
         key(&mut camera, Key::Tab);
         assert_eq!(camera.bar.focus, Some(Chip::Grid));
-        for _ in 0..4 {
+        for _ in 0..8 {
             key(&mut camera, Key::Left);
         }
         assert_eq!((camera.bar.focus, camera.mode), (Some(Chip::Mode), Mode::Photo));
+        // Night's choices: auto, off, 1 s, 2 s, 4 s.
+        key(&mut camera, Key::Right);
+        key(&mut camera, Key::Enter);
+        assert_eq!(camera.bar.picker, Some(Picker::Choice { chip: Chip::Night, at: 0 }));
+        key(&mut camera, Key::Right);
+        key(&mut camera, Key::Right);
+        key(&mut camera, Key::Enter);
+        assert_eq!(camera.night_mode, crate::pro::NightMode::Fixed(1));
+        key(&mut camera, Key::Enter);
+        key(&mut camera, Key::Left);
+        key(&mut camera, Key::Left);
+        key(&mut camera, Key::Enter);
+        assert_eq!(camera.night_mode, crate::pro::NightMode::Auto);
+        // The lock's chip locks with Enter, and lets go.
+        key(&mut camera, Key::Right);
+        key(&mut camera, Key::Right);
+        key(&mut camera, Key::Enter);
+        assert!(camera.lock.on());
+        key(&mut camera, Key::Enter);
+        assert!(!camera.lock.on());
         // The timer's choices: off, 2 s, 10 s; Enter sets the one in hand.
         key(&mut camera, Key::Right);
         key(&mut camera, Key::Right);

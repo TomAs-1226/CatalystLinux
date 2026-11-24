@@ -90,7 +90,7 @@ fn write_picture(live: &Mutex<Live>, path: PathBuf, frame: &pixel::Frame, look: 
         crate::sys::write_atomic(&path, &frame.png(scale, look)?).map_err(|e| format!("the picture cannot be kept: {e}"))
     };
     let event = match write() {
-        Ok(()) => Event::Saved { path, size: ((frame.w * scale) as u32, (frame.h * scale) as u32), detail: false, raw_skipped: false },
+        Ok(()) => Event::Saved { path, size: ((frame.w * scale) as u32, (frame.h * scale) as u32), detail: false, raw_skipped: false, stacked: None },
         Err(why) => Event::Failed(why),
     };
     live.lock().map(|mut l| l.events.push(event)).ok();
@@ -408,7 +408,7 @@ impl Camera {
                 };
                 let (w, h) = (frames[0].w * LOOP_SCALE, frames[0].h * LOOP_SCALE);
                 let event = match write() {
-                    Ok(()) => Event::Saved { path, size: (w as u32, h as u32), detail: false, raw_skipped: false },
+                    Ok(()) => Event::Saved { path, size: (w as u32, h as u32), detail: false, raw_skipped: false, stacked: None },
                     Err(why) => Event::Failed(why),
                 };
                 live.lock().map(|mut l| l.events.push(event)).ok();
@@ -861,10 +861,11 @@ impl Camera {
         self.pending += 1;
         self.pending_paths.push(path.clone());
         // The camera's own still, as photo mode's is taken (its exposure as
-        // the preview settled it; no look, crop or burst), out of the album.
+        // the preview settled it; no look, crop, burst or Night stack: one
+        // frame, soon), out of the album.
         let still = photos::dir().join(".pixel").join(format!("{}.jpg", path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()));
         std::fs::create_dir_all(photos::dir().join(".pixel")).ok();
-        let words = self.metered.map(|m| pro::still(None, &m, self.night).words()).unwrap_or_default();
+        let words = self.metered.map(|m| pro::still(None, &m, false).words()).unwrap_or_default();
         let settings = Settings { size, ..settings };
         if self.control.send(Order::Still(still.clone(), words)) {
             self.captured = false;
@@ -1356,7 +1357,7 @@ mod tests {
 /// The Camera as the shots set it: frozen, as its defaults, with `pic` in
 /// sight.
 #[cfg(not(target_arch = "aarch64"))]
-fn shot_camera() -> Camera {
+pub(super) fn shot_camera() -> Camera {
     let mut camera = Camera::new();
     camera.frozen = true;
     camera.flash.jump(0.0);
@@ -1372,7 +1373,7 @@ fn shot_camera() -> Camera {
 /// Renders a set of scenes dark and light at the three text sizes into
 /// `dir`, each alone (`name-tone-size.png`) and on a sheet of its six.
 #[cfg(not(target_arch = "aarch64"))]
-fn render(dir: &std::path::Path, scenes: &[(String, Box<dyn Fn(&mut crate::shell::Shell)>)]) {
+pub(super) fn render(dir: &std::path::Path, scenes: &[(String, Box<dyn Fn(&mut crate::shell::Shell)>)]) {
     use crate::gfx::TextSize;
     use crate::shell::Shell;
     std::fs::create_dir_all(dir).ok();

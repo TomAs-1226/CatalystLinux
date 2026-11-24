@@ -68,6 +68,9 @@ pub enum Exposing {
     Still,
     Detail,
     Bracket,
+    /// Night's and HDR's stacks (1.3.1): merged as they come.
+    Night,
+    Hdr,
 }
 
 impl Exposing {
@@ -75,9 +78,48 @@ impl Exposing {
         match word {
             "detail" => Exposing::Detail,
             "bracket" => Exposing::Bracket,
+            "night" => Exposing::Night,
+            "hdr" => Exposing::Hdr,
             _ => Exposing::Still,
         }
     }
+
+    /// A stack, whose "hold still" is the countdown ring.
+    pub fn stack(self) -> bool {
+        matches!(self, Exposing::Night | Exposing::Hdr)
+    }
+}
+
+/// A stack's frames so far, as catalyst-camera says after each (kind 8:
+/// "<taken> <planned> <merged> <ms left>").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct StackNews {
+    pub taken: u32,
+    pub planned: u32,
+    pub merged: u32,
+    pub left_ms: u64,
+}
+
+impl StackNews {
+    pub fn read(line: &str) -> Option<StackNews> {
+        let mut w = line.split_whitespace().map(|v| v.parse::<u64>().ok());
+        let (taken, planned, merged, left_ms) = (w.next()??, w.next()??, w.next()??, w.next()??);
+        (planned > 0).then_some(StackNews { taken: taken as u32, planned: planned as u32, merged: merged as u32, left_ms })
+    }
+}
+
+/// A saved photo's stack, from catalyst-camera's line ("… night 5 8 …"):
+/// what it was for, the frames merged and asked.
+pub fn read_stacked(took: &str) -> Option<(Exposing, u32, u32)> {
+    let words: Vec<&str> = took.split_whitespace().collect();
+    words.windows(3).find_map(|w| {
+        let what = match w[0] {
+            "night" => Exposing::Night,
+            "hdr" => Exposing::Hdr,
+            _ => return None,
+        };
+        Some((what, w[1].parse().ok()?, w[2].parse().ok()?))
+    })
 }
 
 /// "Hold still" is shown only for an exposure at least this long: shorter,
@@ -185,6 +227,8 @@ impl Timeline {
             Exposing::Still => "hold still",
             Exposing::Detail => "detail · hold still",
             Exposing::Bracket => "bracket · hold still",
+            Exposing::Night => "night · hold still",
+            Exposing::Hdr => "hdr · hold still",
         };
         Some((words.to_owned(), left))
     }
@@ -199,7 +243,9 @@ impl Timeline {
         let since = |m: Mark| self.at(m).map_or(Duration::ZERO, |t| now.saturating_duration_since(t));
         match self.reached() {
             Mark::Key | Mark::Request if since(Mark::Key) > Duration::from_secs(15) => Some("the camera did not start the photo"),
-            Mark::Exposing if since(Mark::Exposing) > self.exposing.map_or(Duration::ZERO, |(_, d, _)| d) + Duration::from_secs(12) => Some("the camera did not finish the photo"),
+            // A stack's own bound (still.h's stack_ms) is each frame's wait
+            // over, past what it should take: three times that, and more.
+            Mark::Exposing if since(Mark::Exposing) > self.exposing.map_or(Duration::ZERO, |(what, d, _)| if what.stack() { d * 3 } else { d }) + Duration::from_secs(12) => Some("the camera did not finish the photo"),
             Mark::Exposed if since(Mark::Exposed) > Duration::from_secs(8) => Some("the photo's picture did not come"),
             _ => None,
         }
@@ -796,12 +842,12 @@ pub struct Setup {
     pub bracket: Option<Bracket>,
     pub timer: u32,
     pub level: bool,
-    pub night: bool,
+    pub night: pro::NightMode,
 }
 
 impl Default for Setup {
     fn default() -> Self {
-        Setup { pro: Pro::default(), look: Look::Original, hue: 32.0, raw: false, zebras: true, false_colour: false, hist: HistMode::Luma, grid: Grid::Off, aspect: Aspect::Full, bracket: None, timer: 0, level: false, night: false }
+        Setup { pro: Pro::default(), look: Look::Original, hue: 32.0, raw: false, zebras: true, false_colour: false, hist: HistMode::Luma, grid: Grid::Off, aspect: Aspect::Full, bracket: None, timer: 0, level: false, night: pro::NightMode::Auto }
     }
 }
 
@@ -824,7 +870,7 @@ impl Setup {
             self.bracket.map_or("off".to_owned(), Bracket::id),
             self.timer,
             on(self.level),
-            on(self.night)
+            self.night.name()
         )
         .replace(' ', ",")
     }
@@ -846,7 +892,8 @@ impl Setup {
                 "aeb" => s.bracket = Bracket::from_id(v),
                 "timer" => s.timer = v.parse().ok().filter(|t| TIMERS.contains(t)).unwrap_or(0),
                 "level" => s.level = v == "1",
-                "night" => s.night = v == "1",
+                // Before 1.3.1 on or off (off the usual): both are auto now.
+                "night" => s.night = pro::NightMode::from_name(v).unwrap_or_default(),
                 _ => {}
             }
         }
@@ -1349,7 +1396,7 @@ mod tests {
             bracket: Some(Bracket { frames: 5, stops: 1 }),
             timer: 2,
             level: true,
-            night: true,
+            night: pro::NightMode::Fixed(2),
         };
         let line = s.to_line();
         assert!(!line.contains(' '), "{line}");

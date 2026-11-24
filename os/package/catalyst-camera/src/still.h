@@ -45,6 +45,76 @@ inline long deadline_ms(int64_t exposure_us, int frames, int patience = 1)
 	return long((4000 + 2 * frame_us(exposure_us) * std::max(1, frames) / 1000) * std::max(1, patience));
 }
 
+// ---------------------------------------------------------------- stacks ---
+//
+// Night and HDR (1.9): a run of frames at one exposure merged as they come
+// (stack.h). Each frame is waited for on its own, so a stack whose frames
+// stop coming ends with what it has, never waiting out the whole run.
+
+// The most frames a stack takes (stack.h's sums hold 63).
+const int STACK_MOST = 32;
+
+// What merging a frame takes at the most besides its exposure (ms): the
+// ISP, our copy, the alignment and the sums at the full size on the CM0's
+// three cores (my own allowance: about 0.15 s by the development PC's
+// reckoning of the A53, two and a half times over).
+const long MERGE_MS = 400;
+
+// Each frame's wait in a stack (ms): two of its frame lengths (the
+// pipeline may let one go by), and the merge of the one before.
+inline long stack_frame_ms(int64_t exposure_us)
+{
+	return long(2 * frame_us(exposure_us) / 1000) + MERGE_MS;
+}
+
+// The whole stack's bound (ms): the sensor's start, then each frame's wait.
+inline long stack_ms(int64_t exposure_us, int frames)
+{
+	return 4000 + long(std::clamp(frames, 1, STACK_MOST)) * stack_frame_ms(exposure_us);
+}
+
+// How long a stack should take (ms), for the shell's "hold still": the
+// first frame (the sensor's start and a frame), then each frame's length and
+// a little for its merge.
+inline long stack_expect_ms(int64_t exposure_us, int frames)
+{
+	return long((2 * frame_us(exposure_us) + int64_t(std::max(0, frames - 1)) * (frame_us(exposure_us) + 60000)) / 1000);
+}
+
+// Enough of a stack merged to keep it when the hand moves part way: a third
+// of the frames asked for, and two at the least.
+inline bool enough(int merged, int planned)
+{
+	return merged >= std::max(2, (planned + 2) / 3);
+}
+
+// What a stack keeps in memory at w x h (MB): the frame copied out (1.5
+// bytes a pixel), the luma's sums and weights (3) and the colour's (1.25),
+// rounded up.
+inline long stack_mb(unsigned w, unsigned h)
+{
+	return long(uint64_t(w) * h * 23 / 4 / (1024 * 1024)) + 1;
+}
+
+// The size a stack is merged at, from what memory the system has free
+// (MB, -1 unknown): the full 3280 x 2464 where its sums fit beside
+// everything else (96 MB kept for the shell and the system, as detail
+// mode's burst keeps) and a photo waiting to be written (12 MB); the
+// binned 1640 x 1232 where only that fits; else no stack at all.
+enum class StackSize { Full, Binned, None };
+
+inline StackSize stack_size(long available_mb)
+{
+	if (available_mb < 0)
+		return StackSize::Full;
+	long room = available_mb - 96 - 12;
+	if (room >= stack_mb(3280, 2464))
+		return StackSize::Full;
+	if (room >= stack_mb(1640, 1232))
+		return StackSize::Binned;
+	return StackSize::None;
+}
+
 // Whether a frame's exposure is the one asked for (a tenth either way, or
 // a fifth of a millisecond: the sensor counts in lines).
 inline bool matches(int64_t took_us, int64_t asked_us)

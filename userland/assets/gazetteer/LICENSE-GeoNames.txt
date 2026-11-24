@@ -1,0 +1,10 @@
+towns.bin is made from GeoNames' gazetteer (https://www.geonames.org/):
+cities5000.txt and admin1CodesASCII.txt from
+https://download.geonames.org/export/dump/, by tools/gazetteer/build.py,
+which keeps each town's name, country, region and position.
+
+GeoNames' data is licensed under a Creative Commons Attribution 4.0
+License: https://creativecommons.org/licenses/by/4.0/
+
+The Data is provided "as is" without warranty or any representation of
+accuracy, timeliness or completeness.

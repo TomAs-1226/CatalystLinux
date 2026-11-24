@@ -25,6 +25,7 @@
 //! catalyst-shell --mech-shots <dir>     Mech's calculators, dark and light, at each text size
 //! catalyst-shell --gamepad-shots <dir>  Gamepad on a simulated controller, dark and light, at each size
 //! catalyst-shell --editor-shots <dir>   the photo editor's panels and markup, dark and light, at each size
+//! catalyst-shell --photolog-shots <dir> captions, places, the build log and its export, dark and light, at each size
 //! catalyst-shell --scan-shots <dir>     the document scanner: finding, a page, enhanced, the pages, saved
 //!     --robot <team|ip|host>     robot to connect to (overrides the saved one)
 //!     --demo                     a scripted robot instead of a real one
@@ -136,6 +137,7 @@ static METERED: offline::meter::Metered = offline::meter::Metered;
 mod pacing;
 mod panel;
 mod passcode;
+mod photolog;
 mod photos;
 mod pit;
 mod power;
@@ -731,6 +733,11 @@ fn main() {
         tour_fixtures();
         return team::shots::shots(std::path::Path::new(&dir));
     }
+    // Photo documentation: captions, places, the build log (1.4).
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--photolog-shots") {
+        return photolog::shots::shots(std::path::Path::new(&dir));
+    }
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--camera-shots") {
         return camera::shots(std::path::Path::new(&dir));
@@ -754,6 +761,11 @@ fn main() {
     #[cfg(not(target_arch = "aarch64"))]
     if let Some(dir) = value("--camera-film-shots") {
         return camera::film_shots(std::path::Path::new(&dir));
+    }
+    // Night, HDR and the exposure lock (1.3.1).
+    #[cfg(not(target_arch = "aarch64"))]
+    if let Some(dir) = value("--camera-night-shots") {
+        return camera::night_shots(std::path::Path::new(&dir));
     }
     // The photo editor and the document scanner (1.0).
     #[cfg(not(target_arch = "aarch64"))]
@@ -948,6 +960,8 @@ fn main() {
     unitv::start();
     // Team's listener, while this handheld is in a team (team/).
     team::start();
+    // Captions and towns still waiting for photos (photolog/), if any.
+    photolog::start();
     let mut pacing = pacing::Pacing::default();
     loop {
         let moving = shell.animating();
