@@ -10,6 +10,17 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 1.5.0
+
+### Home
+- Hold c on Home to open the Camera straight away. A tap still moves right as before.
+
+### Photos
+- Photos on your phone: in Photos press p (or Share › Photos) and scan the code. It works on the same Wi-Fi or on your phone's own hotspot, with no cable and no app.
+- Your phone's browser shows the album by day, with captions, places and matches. Open a photo full screen, swipe between them, save one, or download them all (or the ones you pick) as one ZIP.
+- Sharing lasts only while that screen is open and stops ten minutes after the last look; Esc stops it at once. Nobody gets in without the code on the screen.
+- iPhone hotspots: the handheld's Wi-Fi is 2.4 GHz, so turn on Maximize Compatibility in Personal Hotspot for the handheld to see it.
+
 ## 1.4.0
 
 Night photos, HDR, sharper pixel pictures, and photos that document
