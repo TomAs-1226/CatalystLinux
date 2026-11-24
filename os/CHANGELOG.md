@@ -10,6 +10,34 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 1.1.0
+
+Photos are taken again, every control says its key, and the smart camera
+gets its own firmware, with voice commands and dictation that work without
+the internet.
+
+### Fixed
+- Photos: no photo was ever saved. The memory set aside for the camera was too small for a full 8 MP picture; it is 128 MB now, which the rest of the handheld borrows while the camera is not taking one.
+- Camera: the shell waits for the camera's last try at a photo instead of giving up just before it.
+- Camera keys that never worked now do: looks k, focus check +, timer t, zebras q, timing readout j (the bare f, x, z and c are the arrows outside typing).
+- Photos editor exports with s; Scout "do not pick" is p; Batteries charger is o; Rulebook Ask is Tab; Mech and Gamepad forget with del twice.
+
+### Keys in sight
+- ? on any screen shows that screen's keys on a sheet, then the keys that work everywhere; Fn 1 where you are typing; hold ? for every shortcut. Hint lines end "? keys", and each app says so the first time it opens.
+- Camera: a bar of controls along the viewfinder (mode, look, timer, grid, detail, pro, and lens with a smart camera), each showing its key. Tab to use it, Enter for its choices, Esc back. Space always takes the photo.
+- Camera: looks are larger, named and live; Enter keeps one, Esc goes back. Pro's controls get a row of their own.
+
+### Smart camera: Catalyst Coprocessor
+- The UnitV can run Catalyst's own firmware (installed over USB-A, once): it always starts its program, idles at about a third of the power when nothing is asked, and wakes in a few hundredths of a second.
+- Each screen asks the camera only for what it shows, at its own pace; results carry when they were taken; Settings › Camera › Smart camera shows its state, clock, memory and wake time.
+- AprilTag distances calibrated: t on the smart camera's page, a tag at half a metre and a metre.
+
+### Voice
+- Voice commands on the smart camera's NPU: hold Alt and say yes, no, up, down, left, right, on, off, stop, go or a number; each does what Settings › Voice commands says (Team's calls on one to six), and you can teach it four words of your own.
+- Anything else you say is dictated, only the words: silence is never sent. Tap Alt to dictate hands-free; it stops when you do.
+- Dictation without the internet: Settings › Offline dictation downloads Whisper (44 MB, English) and writes down what you say on the handheld itself.
+- It loads when you first dictate and gives its memory back a minute later or as soon as the screen goes off.
+
 ## 1.0.0
 
 Catalyst Linux 1.0: the handheld for an FRC team at an event. With 0.9's
