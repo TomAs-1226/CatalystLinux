@@ -10,6 +10,19 @@ A section starts `## <version>`, optionally `· <date>`. `### ` groups its
 lines; each line is a `- ` bullet, short and in plain words. Anything before
 the first section (this introduction) is not shown.
 
+## 1.2.0
+
+Your laptop's Claude Code sessions, from the handheld, anywhere you have
+internet.
+
+### Claude on the handheld
+- Claude: your laptop's Claude Code sessions from the handheld, over any internet, a phone's hotspot included. Pair once with the QR code Catalyst Companion shows (or its address and a six-digit code).
+- The sessions with their project and last activity; a conversation as Claude writes it, each tool call one line (Enter opens it); type or hold Alt to talk; Tab asks for everything or accepts edits; Ctrl-X stops Claude.
+- Every command or file outside the project waits for you: allow (y) or deny (n) on a sheet. Unanswered for five minutes, it is denied.
+- A reply finished or a request waiting shows in the island and as a live activity while you are elsewhere.
+- Everything is sealed end to end; the handheld never signs in to Claude, and the connection is held only while you need it.
+- Catalyst Companion: Claude on the handheld, a bridge in the tray, with the pairing code, what is left to set up, and Start with Windows.
+
 ## 1.1.1
 
 ### Fixed
